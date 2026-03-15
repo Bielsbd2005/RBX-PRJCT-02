@@ -1,0 +1,21 @@
+[package]
+authors = ["PepeElToro41"]
+description = "Utilities for UI Labs, a storybook-like plugin for roblox"
+exclude = [
+    "**",
+    "src/*.ts",
+]
+include = [
+    "src",
+    "src/**",
+    "default.project.json",
+    "wally.toml",
+    "wally.lock",
+    "LICENSE.md",
+    "README.md",
+]
+license = "MIT"
+name = "pepeeltoro41/ui-labs"
+realm = "shared"
+registry = "https://github.com/UpliftGames/wally-index"
+version = "2.4.2"
