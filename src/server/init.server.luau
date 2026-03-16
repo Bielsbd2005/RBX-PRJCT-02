@@ -1,13 +1,22 @@
-print("[Server] Init script starting...")
+--!strict
 --[[
-	Server Entry Point
-	Inicializa todos los módulos del servidor.
+	init.server.luau
+	Punto de entrada del servidor.
+	Inicializa los servicios en el orden correcto de dependencias:
+	  1. DataService  — debe arrancar primero para preparar los hooks de PlayerAdded
+	                    antes de que llegue cualquier jugador.
+	  2. ShopService  — recibe DataService como dependencia explícita para evitar
+	                    requires circulares.
+	  3. AdminService — recibe DataService para gestionar datos de admin.
+	                    Arrancar al final: no tiene dependencias de tiempo de inicio.
 ]]
 
+local Server = script
 
+local DataService  = require(Server.services.DataService)
+local ShopService  = require(Server.services.ShopService)
+local AdminService = require(Server.services.AdminService)
 
--- Inicializar sistema de datos
-local DataManager = require(game:GetService("ServerScriptService").Server.Systems.Data.DataManager)
-DataManager:Start()
-
-print("[Server] Todos los módulos inicializados")
+DataService:Start()
+ShopService:Start(DataService)
+AdminService:Start(DataService)

@@ -1,17 +1,26 @@
+--!strict
 --[[
-	Client Entry Point
-	Inicializa todos los módulos del cliente.
+	init.client.luau
+	Punto de entrada del cliente.
+	Inicia DataController, que solicita los datos del servidor y siembra
+	los Fusion Values para que la UI pueda observarlos de forma reactiva.
+
+	Otros controladores pueden esperar los datos así:
+	  local DataController = require(Client.controllers.DataController)
+	  DataController:WhenReady():andThen(function()
+	      -- datos disponibles; construir UI, etc.
+	  end)
+
+	AdminController se inicia de forma independiente: prueba si el jugador
+	es admin enviando un paquete al servidor. Si el servidor responde,
+	monta la consola de administración en PlayerGui automáticamente.
+	Los jugadores no-admin no cargan ningún componente de UI admin.
 ]]
 
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Client = script
 
--- Inicializar sistema de datos (cliente)
-local DataController = require(ReplicatedStorage.Shared.Systems.Data.DataController)
+local DataController  = require(Client.controllers.DataController)
+local AdminController = require(Client.controllers.AdminController)
+
 DataController:Start()
-
--- Debug: escuchar cualquier cambio de datos
-DataController:OnRawChange(function(action, pathArray, ...)
-	print("[DataController Debug]", action, table.concat(pathArray, "."), ...)
-end)
-
-print("[Client] Todos los módulos inicializados")
+AdminController:Start()

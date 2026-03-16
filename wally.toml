@@ -29,3 +29,8 @@ fusion = "elttob/fusion@0.3.0"
 
 
 ui-labs = "pepeeltoro41/ui-labs@2.4.2"
+
+# --- UTILIDADES DE TABLA INMUTABLE ---
+sift = "csqrl/sift@0.0.11"
+# Operaciones inmutables sobre tablas. Garantiza nuevas referencias en cada mutación,
+# lo que permite que ReplicaService detecte cambios y Fusion refresque la UI.
