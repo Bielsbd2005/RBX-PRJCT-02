@@ -1,0 +1,29 @@
+--!strict
+
+local ServerBootstrap = {}
+
+local _started = false
+
+function ServerBootstrap.start(serverRoot: Script): ()
+	if _started then
+		return
+	end
+
+	_started = true
+
+	local DataService = require(serverRoot.core.data.DataService)
+	local ShopService = require(serverRoot.features.shop.ShopService)
+	local SettingsService = require(serverRoot.features.settings.SettingsService)
+	local RewardsService = require(serverRoot.features.rewards.RewardsService)
+	local PrestigeService = require(serverRoot.features.prestige.PrestigeService)
+	local ClearDataCommandService = require(serverRoot.features.testing.ClearDataCommandService)
+
+	DataService:Start()
+	ShopService:Start(DataService)
+	SettingsService:Start(DataService)
+	RewardsService:Start(DataService)
+	PrestigeService:Start(DataService)
+	ClearDataCommandService:Start(DataService)
+end
+
+return ServerBootstrap

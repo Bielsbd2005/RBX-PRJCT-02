@@ -1,22 +1,11 @@
 --!strict
---[[
-	init.server.luau
-	Punto de entrada del servidor.
-	Inicializa los servicios en el orden correcto de dependencias:
-	  1. DataService  — debe arrancar primero para preparar los hooks de PlayerAdded
-	                    antes de que llegue cualquier jugador.
-	  2. ShopService  — recibe DataService como dependencia explícita para evitar
-	                    requires circulares.
-	  3. AdminService — recibe DataService para gestionar datos de admin.
-	                    Arrancar al final: no tiene dependencias de tiempo de inicio.
-]]
+-- Bootstrap único del servidor. El orden sigue siendo:
+--   1. DataService
+--   2. ShopService
+--   3. SettingsService
 
 local Server = script
 
-local DataService  = require(Server.services.DataService)
-local ShopService  = require(Server.services.ShopService)
-local AdminService = require(Server.services.AdminService)
+local ServerBootstrap = require(Server.bootstrap.ServerBootstrap)
 
-DataService:Start()
-ShopService:Start(DataService)
-AdminService:Start(DataService)
+ServerBootstrap.start(Server)

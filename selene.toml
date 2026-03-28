@@ -1,0 +1,7 @@
+std = "roblox"
+
+[lints]
+# Keep strict defaults and fail CI on actionable warnings.
+empty_if = "warn"
+if_same_then_else = "warn"
+unscoped_variables = "warn"

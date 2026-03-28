@@ -52,9 +52,10 @@ local DataTemplate = require(Shared.constants.DataTemplate) :: any
 -- ESTADO PRIVADO
 -- ────────────────────────────────────────────────────────────
 
-local _janitor: any  = Janitor.new()
-local _scope:   any  = nil   -- Fusion scope; creado en Start()
-local _replica: any  = nil   -- ReplicaService Replica; asignado al recibir datos
+local _janitor: any = nil
+local _scope: any = nil
+local _replica: any = nil
+local _started = false
 
 -- Promise que se resuelve cuando llega la primera Replica.
 -- Otros controladores pueden hacer: DataController:WhenReady():andThen(fn)
@@ -72,9 +73,11 @@ local _readyResolve:  ((any) -> ())? = nil
 local DataController = {}
 
 DataController.Stats     = nil :: any
+DataController.Prestige  = nil :: any
 DataController.Inventory = nil :: any
 DataController.Loadout   = nil :: any
 DataController.Settings  = nil :: any
+DataController.Rewards   = nil :: any
 
 -- ────────────────────────────────────────────────────────────
 -- API PÚBLICA
@@ -88,6 +91,13 @@ DataController.Settings  = nil :: any
 	  4. Registra el handler de ReplicaOfClassCreated.
 ]]
 function DataController:Start(): ()
+	if _started then
+		return
+	end
+
+	_started = true
+	_janitor = Janitor.new()
+
 	-- Crear scope de Fusion con todos los constructores disponibles
 	_scope = Fusion.scoped(Fusion)
 
@@ -98,9 +108,11 @@ function DataController:Start(): ()
 
 	-- Inicializar Values con los datos por defecto del template
 	DataController.Stats     = _scope:Value(DataTemplate.Stats)
+	DataController.Prestige  = _scope:Value(DataTemplate.Prestige)
 	DataController.Inventory = _scope:Value(DataTemplate.Inventory)
 	DataController.Loadout   = _scope:Value(DataTemplate.Loadout)
 	DataController.Settings  = _scope:Value(DataTemplate.Settings)
+	DataController.Rewards   = _scope:Value(DataTemplate.Rewards)
 
 	-- Promise que se resuelve cuando llega la Replica del servidor
 	_readyPromise = Promise.new(function(resolve: (any) -> ())
@@ -116,9 +128,11 @@ function DataController:Start(): ()
 
 		-- ── Sembrar Values con snapshot inicial ──────────
 		DataController.Stats:set(replica.Data.Stats)
+		DataController.Prestige:set(replica.Data.Prestige)
 		DataController.Inventory:set(replica.Data.Inventory)
 		DataController.Loadout:set(replica.Data.Loadout)
 		DataController.Settings:set(replica.Data.Settings)
+		DataController.Rewards:set(replica.Data.Rewards)
 
 		-- ── Suscribir listeners de cambio por sección ────
 		-- Cada listener recibe la NUEVA tabla de sección (nueva referencia
@@ -127,6 +141,12 @@ function DataController:Start(): ()
 		replica:AddCleanupTask(
 			replica:ListenToChange({ "Stats" }, function(newStats: any)
 				DataController.Stats:set(newStats)
+			end)
+		)
+
+		replica:AddCleanupTask(
+			replica:ListenToChange({ "Prestige" }, function(newPrestige: any)
+				DataController.Prestige:set(newPrestige)
 			end)
 		)
 
@@ -148,13 +168,19 @@ function DataController:Start(): ()
 			end)
 		)
 
+		replica:AddCleanupTask(
+			replica:ListenToChange({ "Rewards" }, function(newRewards: any)
+				DataController.Rewards:set(newRewards)
+			end)
+		)
+
 		-- ── Resolver la Promise de ready ─────────────────
 		if _readyResolve then
 			_readyResolve(nil)
 			_readyResolve = nil
 		end
 	end)
-	
+
 	_janitor:Add(connection, "Disconnect")
 end
 
@@ -209,8 +235,16 @@ end
 	(útil en UI-Labs o testing). Destruye el scope de Fusion y el Janitor.
 ]]
 function DataController:Destroy(): ()
+	if not _started then
+		return
+	end
+
+	_started = false
 	_janitor:Destroy()
+	_janitor = nil
+	_scope = nil
 	_replica = nil
+	_readyPromise = nil
 	_readyResolve = nil
 end
 

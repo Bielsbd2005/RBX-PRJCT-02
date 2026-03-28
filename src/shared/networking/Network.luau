@@ -6,7 +6,7 @@
 	los IDs de paquetes automáticamente vía ReplicatedValue al arrancar.
 
 	Namespaces:
-	  Network.PlayerData  — Sincronización de configuración del jugador
+	  Network.Settings    — Sincronización de configuración del jugador
 	  Network.Shop        — Acciones de tienda (compra / equip) y sus respuestas
 	  Network.Combat      — Eventos de combate en tiempo real (kill feed, etc.)
 
@@ -22,17 +22,26 @@ local Packages          = ReplicatedStorage:WaitForChild("Packages")
 local ByteNet = require(Packages.bytenet) :: any
 
 -- ────────────────────────────────────────────────────────────
--- NAMESPACE: PlayerData
--- Peticiones del cliente para actualizar sus propios Settings.
+-- NAMESPACE: Settings
+-- Peticiones tipadas del cliente para actualizar sus propios Settings.
 -- ────────────────────────────────────────────────────────────
 
-local PlayerDataNamespace = ByteNet.DefineNamespace("PlayerData", function()
+local SettingsNamespace = ByteNet.DefineNamespace("Settings", function()
 	return {
-		-- C → S: Actualiza una clave de Settings (key = nombre, value = valor serializado como string)
-		UpdateSetting = ByteNet.DefinePacket({
+		-- C → S: Actualiza un setting numérico en rango [0, 1].
+		UpdateSlider = ByteNet.DefinePacket({
 			Value = ByteNet.Struct({
 				key   = ByteNet.String,
-				value = ByteNet.String, -- serializar en cliente, deserializar en servidor
+				value = ByteNet.Float32,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- C → S: Actualiza un setting booleano.
+		UpdateToggle = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				key   = ByteNet.String,
+				value = ByteNet.Bool,
 			}),
 			ReliabilityType = "Reliable",
 		}),
@@ -51,6 +60,8 @@ local ShopNamespace = ByteNet.DefineNamespace("Shop", function()
 			Value = ByteNet.Struct({
 				itemId   = ByteNet.String,
 				category = ByteNet.String,
+				weaponCategory = ByteNet.String,
+				weaponId = ByteNet.String,
 			}),
 			ReliabilityType = "Reliable",
 		}),
@@ -60,6 +71,8 @@ local ShopNamespace = ByteNet.DefineNamespace("Shop", function()
 			Value = ByteNet.Struct({
 				category = ByteNet.String,
 				itemId   = ByteNet.String,
+				weaponCategory = ByteNet.String,
+				weaponId = ByteNet.String,
 			}),
 			ReliabilityType = "Reliable",
 		}),
@@ -95,68 +108,39 @@ local CombatNamespace = ByteNet.DefineNamespace("Combat", function()
 end)
 
 -- ────────────────────────────────────────────────────────────
--- NAMESPACE: Admin
--- Consola de administración: gestión y testeo de datos de jugadores.
--- El servidor identifica al admin por el argumento `player` nativo
--- de ByteNet — nunca por datos del payload (evita suplantación).
+-- NAMESPACE: Rewards
+-- Acciones y respuestas de recompensas sociales/códigos.
 -- ────────────────────────────────────────────────────────────
 
-local AdminNamespace = ByteNet.DefineNamespace("Admin", function()
+local RewardsNamespace = ByteNet.DefineNamespace("Rewards", function()
 	return {
-		-- C → S: Solicita la lista de jugadores en el servidor.
-		-- _placeholder existe porque ByteNet.Struct requiere al menos un campo.
-		RequestPlayerList = ByteNet.DefinePacket({
+		-- C → S: Claim de Like+Join (flujo mixto).
+		ClaimLikeJoin = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- C → S: Claim de recompensa de notificaciones.
+		ClaimNotifications = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- C → S: Canje de código.
+		RedeemCode = ByteNet.DefinePacket({
 			Value = ByteNet.Struct({
-				_placeholder = ByteNet.Bool,
+				code = ByteNet.String,
 			}),
 			ReliabilityType = "Reliable",
 		}),
 
-		-- S → C: Lista de jugadores serializada "userId|displayName;userId|displayName"
-		PlayerListSnapshot = ByteNet.DefinePacket({
-			Value = ByteNet.Struct({
-				list = ByteNet.String,
-			}),
-			ReliabilityType = "Reliable",
-		}),
-
-		-- C → S: Solicita el perfil completo de un jugador objetivo.
-		RequestProfile = ByteNet.DefinePacket({
-			Value = ByteNet.Struct({
-				targetUserId = ByteNet.String,
-			}),
-			ReliabilityType = "Reliable",
-		}),
-
-		-- S → C: Perfil serializado como JSON string.
-		ProfileSnapshot = ByteNet.DefinePacket({
-			Value = ByteNet.Struct({
-				targetUserId = ByteNet.String,
-				snapshot     = ByteNet.String, -- HttpService:JSONEncode(profile.Data)
-				success      = ByteNet.Bool,
-				message      = ByteNet.String,
-			}),
-			ReliabilityType = "Reliable",
-		}),
-
-		-- C → S: Ejecuta un comando admin sobre un jugador objetivo.
-		-- command: "SetStat" | "SetInventoryItem" | "SetLoadoutSlot" |
-		--          "SetSetting" | "GiveCash" | "GiveGems" | "ResetProfile"
-		-- payload: HttpService:JSONEncode({...}) según el comando
-		ExecuteCommand = ByteNet.DefinePacket({
-			Value = ByteNet.Struct({
-				targetUserId = ByteNet.String,
-				command      = ByteNet.String,
-				payload      = ByteNet.String,
-			}),
-			ReliabilityType = "Reliable",
-		}),
-
-		-- S → C: Resultado del comando ejecutado.
-		CommandResponse = ByteNet.DefinePacket({
+		-- S → C: Respuesta unificada.
+		Response = ByteNet.DefinePacket({
 			Value = ByteNet.Struct({
 				success = ByteNet.Bool,
 				message = ByteNet.String,
+				claimType = ByteNet.String,
+				rewardCash = ByteNet.Int32,
 			}),
 			ReliabilityType = "Reliable",
 		}),
@@ -164,12 +148,44 @@ local AdminNamespace = ByteNet.DefineNamespace("Admin", function()
 end)
 
 -- ────────────────────────────────────────────────────────────
+-- NAMESPACE: Prestige
+-- Solicitud de ascenso de prestige y respuesta del servidor.
+-- ────────────────────────────────────────────────────────────
+
+local PrestigeNamespace = ByteNet.DefineNamespace("Prestige", function()
+	return {
+		-- C → S: intento de subir de prestige.
+		Request = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- S → C: resultado de la operacion.
+		Response = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				success = ByteNet.Bool,
+				message = ByteNet.String,
+				newPrestige = ByteNet.Int32,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+	}
+end)
+
+-- ────────────────────────────────────────────────────────────
+-- NAMESPACE: Debug
+-- Herramientas de depuracion (solo Studio/dev en servidor).
+-- ────────────────────────────────────────────────────────────
+
+
+-- ────────────────────────────────────────────────────────────
 -- EXPORT
 -- ────────────────────────────────────────────────────────────
 
 return {
-	PlayerData = PlayerDataNamespace,
+	Settings   = SettingsNamespace,
 	Shop       = ShopNamespace,
 	Combat     = CombatNamespace,
-	Admin      = AdminNamespace,
+	Rewards    = RewardsNamespace,
+	Prestige   = PrestigeNamespace,
 }

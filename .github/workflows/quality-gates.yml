@@ -1,0 +1,32 @@
+name: quality-gates
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  lint-and-build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rokit
+        run: |
+          curl -sSf https://raw.githubusercontent.com/rojo-rbx/rokit/main/scripts/install.sh | bash
+          echo "$HOME/.rokit/bin" >> "$GITHUB_PATH"
+
+      - name: Install Project Toolchain
+        run: yes | rokit install
+
+      - name: Lint Luau (Selene)
+        run: selene src
+
+      - name: Validate Rojo Build
+        run: rojo build default.project.json -o /tmp/Shooter.rbxlx

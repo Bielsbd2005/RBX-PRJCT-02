@@ -10,6 +10,8 @@
 	  - No referencias a Instancias ni userdata
 ]]
 
+local LevelingConfig = require(script.Parent.LevelingConfig)
+
 -- ────────────────────────────────────────────────────────────
 -- TIPOS EXPORTADOS
 -- ────────────────────────────────────────────────────────────
@@ -26,10 +28,21 @@ export type Stats = {
 	Gems: number,
 }
 
+export type Prestige = {
+	Current: number,
+	Badges: { [string]: boolean },
+	LastPrestigeAt: number,
+}
+
 -- Cada categoría es un mapa string → bool (true = desbloqueado)
 export type Inventory = {
-	Weapons: { [string]: boolean },
+	Main: { [string]: boolean },
+	Special: { [string]: boolean },
 	WeaponSkins: { [string]: boolean },
+	WeaponSkinsByWeapon: {
+		Main: { [string]: { [string]: boolean } },
+		Special: { [string]: { [string]: boolean } },
+	},
 	KillEffects: { [string]: boolean },
 	Faces: { [string]: boolean },
 	Hats: { [string]: boolean },
@@ -37,21 +50,32 @@ export type Inventory = {
 }
 
 export type Loadout = {
-	PrimaryWeapon: string,
+	MainWeapon: string,
+	PrimaryWeapon: string?, -- Legacy slot kept for backward compatibility
+	SpecialWeapon: string,
+	MainWeaponWraps: { [string]: string },
+	SpecialWeaponWraps: { [string]: string },
 	KillEffect: string,
 	Face: string,
 	Hat: string?, -- Opcional: el jugador puede no llevar sombrero
 	Outfit: string,
+	-- Legacy: se mantiene temporalmente para migrar perfiles previos.
 	ActiveSkin: string,
 }
 
 export type Settings = {
 	MusicVolume: number,
-	SFXVolume: number,
-	CameraFOV: number,
 	CameraSensitivity: number,
-	ShowKillFeed: boolean,
-	ShowDamageNumbers: boolean,
+	Vibration: boolean,
+	AimAssist: boolean,
+}
+
+export type Rewards = {
+	LikeState: string,
+	LikePendingSessionToken: string,
+	GroupClaimed: boolean,
+	NotificationsClaimed: boolean,
+	ClaimedCodes: { [string]: boolean },
 }
 
 export type Metadata = {
@@ -63,9 +87,11 @@ export type Metadata = {
 
 export type PlayerProfile = {
 	Stats: Stats,
+	Prestige: Prestige,
 	Inventory: Inventory,
 	Loadout: Loadout,
 	Settings: Settings,
+	Rewards: Rewards,
 	Metadata: Metadata,
 }
 
@@ -77,9 +103,9 @@ export type PlayerProfile = {
 
 local DEFAULT: PlayerProfile = {
 	Stats = {
-		Level = 1,
+		Level = 0,
 		XP = 0,
-		XPToNextLevel = 100,
+		XPToNextLevel = LevelingConfig.GetXPToNextLevel(0),
 		Kills = 0,
 		Deaths = 0,
 		Wins = 0,
@@ -88,9 +114,31 @@ local DEFAULT: PlayerProfile = {
 		Gems = 0,
 	},
 
+	Prestige = {
+		Current = 0,
+		Badges = {
+			["0"] = true,
+		},
+		LastPrestigeAt = 0,
+	},
+
 	Inventory = {
-		Weapons = { Default = true },
-		WeaponSkins = { Default = true },
+		Main = { Default = true },
+		Special = { Default = true },
+		WeaponSkins = { Default = true, Skin_Red = true },
+		WeaponSkinsByWeapon = {
+			Main = {
+				Default = {
+					Default = true,
+				},
+			},
+			Special = {
+				Default = {
+					Default = true,
+					Skin_Red = true,
+				},
+			},
+		},
 		KillEffects = { Default = true },
 		Faces = { Default = true },
 		Hats = {},
@@ -98,7 +146,15 @@ local DEFAULT: PlayerProfile = {
 	},
 
 	Loadout = {
+		MainWeapon = "Default",
 		PrimaryWeapon = "Default",
+		SpecialWeapon = "Default",
+		MainWeaponWraps = {
+			Default = "Default",
+		},
+		SpecialWeaponWraps = {
+			Default = "Default",
+		},
 		KillEffect = "Default",
 		Face = "Default",
 		Hat = nil,
@@ -108,11 +164,17 @@ local DEFAULT: PlayerProfile = {
 
 	Settings = {
 		MusicVolume = 0.5,
-		SFXVolume = 1.0,
-		CameraFOV = 70,
-		CameraSensitivity = 1.0,
-		ShowKillFeed = true,
-		ShowDamageNumbers = true,
+		CameraSensitivity = 0.5,
+		Vibration = true,
+		AimAssist = true,
+	},
+
+	Rewards = {
+		LikeState = "None",
+		LikePendingSessionToken = "",
+		GroupClaimed = false,
+		NotificationsClaimed = false,
+		ClaimedCodes = {},
 	},
 
 	Metadata = {

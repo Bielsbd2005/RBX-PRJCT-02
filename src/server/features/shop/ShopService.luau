@@ -1,0 +1,388 @@
+--!strict
+--[[
+	ShopService.luau  (Server)
+	Gestiona las transacciones de la tienda usando ByteNet para comunicación
+	de baja latencia (reemplaza RemoteFunction/RemoteEvent clásicos).
+
+	Flujo de una compra (BuyItem):
+	  1. Cliente envía Network.Shop.BuyItem via ByteNet
+	  2. ShopService valida: cooldown → ítem existe → nivel suficiente → cash suficiente → no poseído
+	  3. DataService:BatchUpdate aplica la transacción atómica (cash − precio, ítem = true, auto-equip si aplica)
+	  4. Network.Shop.Response confirma al cliente
+
+	Flujo de equip (EquipItem):
+	  1. Cliente envía Network.Shop.EquipItem via ByteNet
+	  2. ShopService valida: cooldown → ítem existe → jugador lo posee
+	  3. DataService:SetValue actualiza el Loadout
+	  4. Network.Shop.Response confirma al cliente
+
+	Cache O(1):
+	  En Start(), se construye _itemCache: category → itemId → { config + category }.
+	  El lookup evita colisiones entre IDs repetidos de categorías distintas.
+]]
+
+local Players           = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Packages = ReplicatedStorage:WaitForChild("Packages")
+local Shared   = ReplicatedStorage:WaitForChild("Shared")
+
+local Sift = require(Packages.sift) :: any
+
+local Network     = require(Shared.networking.Network)
+local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
+local LockerConfig = require(Shared.constants.LockerConfig)
+
+local CATEGORY_TO_LOADOUT_SLOT = LockerConfig.CategoryToLoadoutSlot :: { [string]: string }
+local WEAPON_WRAPS_PATH_BY_CATEGORY = {
+	Main = { "Loadout", "MainWeaponWraps" },
+	Special = { "Loadout", "SpecialWeaponWraps" },
+} :: { [string]: { string } }
+
+local function _resolveWeaponCategory(value: string?): string?
+	if value == "Main" or value == "Special" then
+		return value
+	end
+
+	return nil
+end
+
+local function _resolveWeaponId(rawWeaponId: string?, fallbackWeaponId: string?): string
+	if type(rawWeaponId) == "string" and rawWeaponId ~= "" then
+		return rawWeaponId
+	end
+
+	if type(fallbackWeaponId) == "string" and fallbackWeaponId ~= "" then
+		return fallbackWeaponId
+	end
+
+	return "Default"
+end
+
+local function _getOwnedWeaponWrap(profileData: any, weaponCategory: string, weaponId: string, skinId: string): boolean
+	local wrapsByWeapon = profileData.Inventory and profileData.Inventory.WeaponSkinsByWeapon
+	if type(wrapsByWeapon) ~= "table" then
+		return false
+	end
+
+	local categoryWraps = wrapsByWeapon[weaponCategory]
+	if type(categoryWraps) ~= "table" then
+		return false
+	end
+
+	local weaponWraps = categoryWraps[weaponId]
+	if type(weaponWraps) ~= "table" then
+		return false
+	end
+
+	return weaponWraps[skinId] == true
+end
+
+-- Cooldown por acción (segundos)
+local COOLDOWN = 0.3
+
+-- ────────────────────────────────────────────────────────────
+-- ESTADO DEL MÓDULO
+-- ────────────────────────────────────────────────────────────
+
+-- Cache por categoría → itemId → config.
+local _itemCache: { [string]: { [string]: any } } = {}
+
+-- Cooldowns agrupados por jugador.
+local _cooldowns: { [number]: { [string]: number } } = {}
+
+-- DataService inyectado en Start()
+local _dataService: any = nil
+local _started = false
+
+-- ────────────────────────────────────────────────────────────
+-- HELPERS
+-- ────────────────────────────────────────────────────────────
+
+local function _checkCooldown(player: Player, action: string): boolean
+	local playerCooldowns = _cooldowns[player.UserId]
+	if not playerCooldowns then
+		playerCooldowns = {}
+		_cooldowns[player.UserId] = playerCooldowns
+	end
+
+	local last = playerCooldowns[action] or 0
+	if time() - last < COOLDOWN then
+		return false
+	end
+
+	playerCooldowns[action] = time()
+	return true
+end
+
+--[[
+	Navega profile.Data con una ruta de claves.
+	Devuelve el valor en la hoja, o nil si algún nivel es nil.
+]]
+local function _getPath(data: any, path: { string }): any
+	local pointer: any = data
+	for _, key in path do
+		if type(pointer) ~= "table" then
+			return nil
+		end
+		pointer = pointer[key]
+	end
+	return pointer
+end
+
+-- ────────────────────────────────────────────────────────────
+-- HANDLERS
+-- ────────────────────────────────────────────────────────────
+
+local function _onBuyItem(data: { itemId: string, category: string, weaponCategory: string, weaponId: string }, player: Player): ()
+	-- Validación 1: cooldown
+	if not _checkCooldown(player, "buy") then
+		Network.Shop.Response.SendTo({ success = false, message = "Demasiadas peticiones." }, player)
+		return
+	end
+
+	-- Validación 2: ítem existe en cache
+	local categoryCache = _itemCache[data.category]
+	local itemConfig = categoryCache and categoryCache[data.itemId]
+	if not itemConfig then
+		Network.Shop.Response.SendTo({ success = false, message = "Ítem no encontrado." }, player)
+		return
+	end
+
+	-- Validación 3: perfil cargado
+	local profile = _dataService:GetProfile(player)
+	if not profile then
+		Network.Shop.Response.SendTo({ success = false, message = "Perfil no disponible." }, player)
+		return
+	end
+
+	local weaponCategoryForWraps: string? = nil
+	local weaponIdForWraps: string? = nil
+
+	-- Validación 4: ítem no poseído ya
+	if data.category == "WeaponSkins" then
+		weaponCategoryForWraps = _resolveWeaponCategory(data.weaponCategory)
+		if not weaponCategoryForWraps then
+			Network.Shop.Response.SendTo({ success = false, message = "Categoría de arma inválida para skins." }, player)
+			return
+		end
+
+		local weaponSlot = CATEGORY_TO_LOADOUT_SLOT[weaponCategoryForWraps]
+		local equippedWeaponId = if weaponSlot then profile.Data.Loadout[weaponSlot] else nil
+		weaponIdForWraps = _resolveWeaponId(data.weaponId, equippedWeaponId)
+
+		if _getOwnedWeaponWrap(profile.Data, weaponCategoryForWraps, weaponIdForWraps, data.itemId) then
+			Network.Shop.Response.SendTo({ success = false, message = "Ya posees esta skin para esa arma." }, player)
+			return
+		end
+	else
+		local alreadyOwned = _getPath(profile.Data.Inventory, { data.category, data.itemId })
+		if alreadyOwned then
+			Network.Shop.Response.SendTo({ success = false, message = "Ya posees este ítem." }, player)
+			return
+		end
+	end
+
+	-- Validación 5: nivel suficiente
+	local playerLevel: number = profile.Data.Stats.Level or 1
+	if playerLevel < (itemConfig.LevelRequired or 1) then
+		Network.Shop.Response.SendTo({
+			success = false,
+			message = "Necesitas el nivel " .. tostring(itemConfig.LevelRequired) .. ".",
+		}, player)
+		return
+	end
+
+	-- Validación 6: cash suficiente
+	local currentCash: number = profile.Data.Stats.Cash or 0
+	local price: number = itemConfig.Price or 0
+	if currentCash < price then
+		Network.Shop.Response.SendTo({
+			success = false,
+			message = "Cash insuficiente. Necesitas " .. tostring(price) .. ".",
+		}, player)
+		return
+	end
+
+	-- ── Transacción atómica ──────────────────────────────────
+	-- Si la categoría es equipable, la compra actualiza también el Loadout
+	-- en la misma operación para evitar un segundo request del cliente.
+	local updates = {
+		{ path = { "Stats", "Cash" }, value = currentCash - price },
+	}
+
+	if data.category == "WeaponSkins" then
+		local resolvedWeaponCategory = weaponCategoryForWraps :: string
+		local resolvedWeaponId = weaponIdForWraps :: string
+		table.insert(updates, {
+			path = { "Inventory", "WeaponSkinsByWeapon", resolvedWeaponCategory, resolvedWeaponId, data.itemId },
+			value = true,
+		})
+
+		local wrapsRootPath = WEAPON_WRAPS_PATH_BY_CATEGORY[resolvedWeaponCategory]
+		if wrapsRootPath then
+			table.insert(updates, {
+				path = { wrapsRootPath[1], wrapsRootPath[2], resolvedWeaponId },
+				value = data.itemId,
+			})
+		end
+	else
+		table.insert(updates, { path = { "Inventory", data.category, data.itemId }, value = true })
+	end
+
+	local loadoutSlot = CATEGORY_TO_LOADOUT_SLOT[data.category]
+	if data.category == "WeaponSkins" then
+		loadoutSlot = nil
+	end
+	if loadoutSlot then
+		table.insert(updates, { path = { "Loadout", loadoutSlot }, value = data.itemId })
+	end
+
+	if data.category == "Main" or data.category == "Special" then
+		table.insert(updates, {
+			path = { "Inventory", "WeaponSkinsByWeapon", data.category, data.itemId, "Default" },
+			value = true,
+		})
+	end
+
+	local success = _dataService:BatchUpdate(player, updates)
+
+	if success then
+		Network.Shop.Response.SendTo({
+			success = true,
+			message = if data.category == "WeaponSkins"
+				then itemConfig.Name .. " comprado y equipado para el arma seleccionada."
+				else if loadoutSlot
+				then itemConfig.Name .. " comprado y equipado."
+				else itemConfig.Name .. " comprado correctamente.",
+		}, player)
+	else
+		Network.Shop.Response.SendTo({
+			success = false,
+			message = "Error interno. Inténtalo de nuevo.",
+		}, player)
+	end
+end
+
+local function _onEquipItem(data: { category: string, itemId: string, weaponCategory: string, weaponId: string }, player: Player): ()
+	-- Validación 1: cooldown
+	if not _checkCooldown(player, "equip") then
+		Network.Shop.Response.SendTo({ success = false, message = "Demasiadas peticiones." }, player)
+		return
+	end
+
+	-- Validación 2: ítem existe en cache
+	local categoryCache = _itemCache[data.category]
+	local itemConfig = categoryCache and categoryCache[data.itemId]
+	if not itemConfig then
+		Network.Shop.Response.SendTo({ success = false, message = "Ítem no encontrado." }, player)
+		return
+	end
+
+	-- Validación 3: perfil cargado
+	local profile = _dataService:GetProfile(player)
+	if not profile then
+		Network.Shop.Response.SendTo({ success = false, message = "Perfil no disponible." }, player)
+		return
+	end
+
+	local ok = false
+	if data.category == "WeaponSkins" then
+		local weaponCategory = _resolveWeaponCategory(data.weaponCategory)
+		if not weaponCategory then
+			Network.Shop.Response.SendTo({ success = false, message = "Arma objetivo inválida para wraps." }, player)
+			return
+		end
+
+		local wrapsRootPath = WEAPON_WRAPS_PATH_BY_CATEGORY[weaponCategory]
+		if not wrapsRootPath then
+			Network.Shop.Response.SendTo({ success = false, message = "Arma objetivo inválida para wraps." }, player)
+			return
+		end
+
+		local weaponSlot = CATEGORY_TO_LOADOUT_SLOT[weaponCategory]
+		if not weaponSlot then
+			Network.Shop.Response.SendTo({ success = false, message = "Slot de arma inválido." }, player)
+			return
+		end
+
+		local equippedWeaponId = profile.Data.Loadout[weaponSlot]
+		local targetWeaponId = _resolveWeaponId(data.weaponId, equippedWeaponId)
+
+		if not _getOwnedWeaponWrap(profile.Data, weaponCategory, targetWeaponId, data.itemId) then
+			Network.Shop.Response.SendTo({ success = false, message = "No posees esta skin para esa arma." }, player)
+			return
+		end
+
+		ok = _dataService:SetValue(player, { wrapsRootPath[1], wrapsRootPath[2], targetWeaponId }, data.itemId)
+	else
+		-- Validación 4: el jugador posee el ítem
+		local owned = _getPath(profile.Data.Inventory, { data.category, data.itemId })
+		if not owned then
+			Network.Shop.Response.SendTo({ success = false, message = "No posees este ítem." }, player)
+			return
+		end
+
+		-- Validación 5: categoría tiene un slot de Loadout válido
+		local loadoutSlot = CATEGORY_TO_LOADOUT_SLOT[data.category]
+		if not loadoutSlot then
+			Network.Shop.Response.SendTo({ success = false, message = "Categoría no equipable." }, player)
+			return
+		end
+
+		-- ── Actualizar Loadout ───────────────────────────────────
+		ok = _dataService:SetValue(player, { "Loadout", loadoutSlot }, data.itemId)
+	end
+
+	if ok then
+		Network.Shop.Response.SendTo({
+			success = true,
+			message = itemConfig.Name .. " equipado.",
+		}, player)
+	else
+		Network.Shop.Response.SendTo({
+			success = false,
+			message = "Error al equipar. Inténtalo de nuevo.",
+		}, player)
+	end
+end
+
+-- ────────────────────────────────────────────────────────────
+-- MÓDULO PRINCIPAL
+-- ────────────────────────────────────────────────────────────
+
+local ShopService = {}
+ShopService.__index = ShopService
+
+--[[
+	Inicia el servicio.
+	  dataService  — instancia de DataService (inyección de dependencia,
+	                 evita require circular entre servicios)
+]]
+function ShopService:Start(dataService: any): ()
+	if _started then
+		return
+	end
+
+	_started = true
+	_dataService = dataService
+
+	-- ── Construir cache O(1) ──────────────────────────────────
+	-- Itera ItemsConfig una vez y crea lookup por categoría + itemId.
+	for category, items in ItemsConfig do
+		_itemCache[category] = {}
+		for itemId, config in items do
+			_itemCache[category][itemId] = Sift.Dictionary.merge(config, { category = category })
+		end
+	end
+
+	Players.PlayerRemoving:Connect(function(player: Player)
+		_cooldowns[player.UserId] = nil
+	end)
+
+	-- ── Registrar listeners de ByteNet ────────────────────────
+	Network.Shop.BuyItem.Listen(_onBuyItem)
+	Network.Shop.EquipItem.Listen(_onEquipItem)
+end
+
+return ShopService

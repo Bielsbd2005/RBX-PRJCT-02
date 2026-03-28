@@ -7,7 +7,7 @@
 	Estructura:
 	  ItemsConfig[category][itemId] = ItemConfig
 
-	Categorías válidas: "Weapons", "WeaponSkins", "KillEffects",
+	Categorías válidas: "Main", "Special", "WeaponSkins", "KillEffects",
 	                    "Faces", "Hats", "Outfits"
 ]]
 
@@ -20,12 +20,19 @@ export type ItemConfig = {
 	Price: number,          -- Precio en Cash
 	LevelRequired: number,  -- Nivel mínimo para comprar
 	Rarity: string,         -- "Common" | "Uncommon" | "Rare" | "Epic" | "Legendary"
+	Image: string?,         -- Thumbnail para UI (rbxassetid://...)
+	CanPurchase: boolean?,  -- Flag para habilitar compra desde UI
+	TextureID: string?,
+	BaseColor: Color3?,
+	Animated: boolean?,
+	StudsPerTile: number?,
 }
 
 export type ItemCategory = { [string]: ItemConfig }
 
 export type ItemsConfigType = {
-	Weapons: ItemCategory,
+	Main: ItemCategory,
+	Special: ItemCategory,
 	WeaponSkins: ItemCategory,
 	KillEffects: ItemCategory,
 	Faces: ItemCategory,
@@ -37,44 +44,97 @@ export type ItemsConfigType = {
 -- DATOS
 -- ────────────────────────────────────────────────────────────
 
+local function asset(assetId: number): string
+	return "rbxassetid://" .. tostring(assetId)
+end
+
 local ItemsConfig: ItemsConfigType = {
 
-	Weapons = {
-		Default   = { Name = "Default Weapon",  Price = 0,    LevelRequired = 1,  Rarity = "Common"    },
-		Weapon2   = { Name = "Weapon 2",         Price = 500,  LevelRequired = 5,  Rarity = "Uncommon"  },
-		Weapon3   = { Name = "Weapon 3",         Price = 1000, LevelRequired = 10, Rarity = "Rare"      },
-		Weapon4   = { Name = "Weapon 4",         Price = 2000, LevelRequired = 15, Rarity = "Epic"      },
-		Weapon5   = { Name = "Weapon 5",         Price = 3500, LevelRequired = 20, Rarity = "Epic"      },
-		Weapon6   = { Name = "Weapon 6",         Price = 5000, LevelRequired = 25, Rarity = "Legendary" },
+	Main = {
+		Default   = { Name = "Default",  		 Price = 0,    LevelRequired = 1,  Rarity = "Common",    CanPurchase = false },
+		Weapon2   = { Name = "Weapon1",         Price = 500,  LevelRequired = 5,  Rarity = "Uncommon",  CanPurchase = false },
+		Weapon3   = { Name = "Weapon2",         Price = 1000, LevelRequired = 10, Rarity = "Rare",      CanPurchase = false },
+	},
+
+	Special = {
+		Default   = { Name = "Default",  		 Price = 0,    LevelRequired = 1,  Rarity = "Common",    CanPurchase = false },
+		Weapon4   = { Name = "Weapon1",         Price = 2000, LevelRequired = 15, Rarity = "Epic",      CanPurchase = false },
+		Weapon5   = { Name = "Weapon2",         Price = 3500, LevelRequired = 20, Rarity = "Epic",      CanPurchase = false },
 	},
 
 	WeaponSkins = {
-		Default   = { Name = "Default Skin",    Price = 0,    LevelRequired = 1,  Rarity = "Common"    },
-		Skin_Red  = { Name = "Red Skin",        Price = 300,  LevelRequired = 1,  Rarity = "Common"    },
-		Skin_Blue = { Name = "Blue Skin",       Price = 300,  LevelRequired = 1,  Rarity = "Common"    },
-		Skin_Gold = { Name = "Gold Skin",       Price = 2500, LevelRequired = 15, Rarity = "Legendary" },
+		Default   = {
+			Name = "Default",
+			Price = 0,
+			LevelRequired = 1,
+			Rarity = "Common",
+			CanPurchase = false,
+			BaseColor = Color3.fromRGB(255, 255, 255),
+			Animated = false,
+			StudsPerTile = 3,
+		},
+		Skin_Red  = {
+			Name = "SK_0020",
+			Price = 300,
+			LevelRequired = 1,
+			Rarity = "Epic",
+			CanPurchase = false,
+			TextureID = asset(86966645142772),
+			Animated = true,
+			StudsPerTile = 3,
+		},
+		Skin_Blue = {
+			Name = "Blue Skin",
+			Price = 300,
+			LevelRequired = 1,
+			Rarity = "Common",
+			CanPurchase = false,
+			BaseColor = Color3.fromRGB(57, 110, 207),
+			Animated = false,
+			StudsPerTile = 3,
+		},
+		Skin_Gold = {
+			Name = "Gold Skin",
+			Price = 2500,
+			LevelRequired = 15,
+			Rarity = "Legendary",
+			CanPurchase = false,
+			BaseColor = Color3.fromRGB(214, 170, 55),
+			Animated = false,
+			StudsPerTile = 3,
+		},
 	},
 
 	KillEffects = {
-		Default = { Name = "Default Kill",   Price = 0,    LevelRequired = 1,  Rarity = "Common" },
-		Gravity = { Name = "Gravity Kill",   Price = 1500, LevelRequired = 10, Rarity = "Rare"   },
+		Default = { Name = "Default Kill",   Price = 0,    LevelRequired = 1,  Rarity = "Common", Image = "rbxassetid://130437553674754", CanPurchase = false },
+		Gravity = { Name = "Gravity Kill",   Price = 1500, LevelRequired = 10, Rarity = "Rare",   Image = "rbxassetid://130437553674754", CanPurchase = false },
 	},
 
 	Faces = {
-		Default = { Name = "Default Face",   Price = 0,   LevelRequired = 1,  Rarity = "Common"   },
-		Face1   = { Name = "Happy Face",     Price = 200, LevelRequired = 1,  Rarity = "Common"   },
-		Face2   = { Name = "Cool Face",      Price = 500, LevelRequired = 5,  Rarity = "Uncommon" },
+		Face1   = { Name = "Default Face",   Price = 1,  LevelRequired = 0, Rarity = "Rare",   Image = "rbxassetid://79175047578893",  CanPurchase = false },
+		Face2   = { Name = "Face2",          Price = 2,  LevelRequired = 0, Rarity = "Rare",   Image = "rbxassetid://18571318923",    CanPurchase = false },
+		Face3   = { Name = "Face3",          Price = 3,  LevelRequired = 0, Rarity = "Rare",   Image = "rbxassetid://97580829209799", CanPurchase = false },
+		Face4   = { Name = "Face4",          Price = 4,  LevelRequired = 1, Rarity = "Rare",   Image = "rbxassetid://94789972115859", CanPurchase = false },
+		Face5   = { Name = "Face5",          Price = 5,  LevelRequired = 2, Rarity = "Rare",   Image = "rbxassetid://17285554126",    CanPurchase = false },
+		Face6   = { Name = "Face6",          Price = 6,  LevelRequired = 3, Rarity = "Rare",   Image = "rbxassetid://70391209868621", CanPurchase = false },
+		Face7   = { Name = "Face7",          Price = 8,  LevelRequired = 5, Rarity = "Rare",   Image = "rbxassetid://18626918162",    CanPurchase = false },
+		Face8   = { Name = "Face8",          Price = 8,  LevelRequired = 4, Rarity = "Common", Image = "rbxassetid://17373537487",    CanPurchase = false },
+		Face9   = { Name = "Face9",          Price = 9,  LevelRequired = 1, Rarity = "Rare",   Image = "rbxassetid://118980363558612", CanPurchase = false },
+		Face10  = { Name = "Face10",         Price = 10, LevelRequired = 1, Rarity = "Rare",   Image = "rbxassetid://18870092964",    CanPurchase = false },
+		Face11  = { Name = "Face11",         Price = 11, LevelRequired = 1, Rarity = "Rare",   Image = "rbxassetid://101878427779141", CanPurchase = false },
+		Face12  = { Name = "Face12",         Price = 12, LevelRequired = 1, Rarity = "Rare",   Image = "rbxassetid://112166980943980", CanPurchase = false },
+
 	},
 
 	Hats = {
-		Hat1 = { Name = "Cap",          Price = 400,  LevelRequired = 3,  Rarity = "Common"    },
-		Hat2 = { Name = "Top Hat",      Price = 1200, LevelRequired = 10, Rarity = "Rare"      },
-		Hat3 = { Name = "Crown",        Price = 4000, LevelRequired = 20, Rarity = "Legendary" },
+		Hat1 = { Name = "Hat1",          Price = 400,  LevelRequired = 3,  Rarity = "Common",    Image = "rbxassetid://97016006374032", CanPurchase = false },
+		Hat2 = { Name = "Hat2",      Price = 1200, LevelRequired = 10, Rarity = "Rare",      Image = "rbxassetid://94019428436806", CanPurchase = false },
+		Hat3 = { Name = "Hat3",        Price = 4000, LevelRequired = 20, Rarity = "Legendary", Image = "rbxassetid://131331207733432", CanPurchase = false },
 	},
 
 	Outfits = {
-		Default = { Name = "Default Outfit", Price = 0,    LevelRequired = 1,  Rarity = "Common"   },
-		Outfit1 = { Name = "Battle Suit",    Price = 800,  LevelRequired = 8,  Rarity = "Uncommon" },
+		Default = { Name = "Default Outfit", Price = 0,    LevelRequired = 1,  Rarity = "Common",   CanPurchase = false },
+		Outfit1 = { Name = "Battle Suit",    Price = 800,  LevelRequired = 8,  Rarity = "Uncommon", CanPurchase = false },
 	},
 }
 
