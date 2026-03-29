@@ -1,13 +1,12 @@
 --!strict
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 
 local Packages = ReplicatedStorage:WaitForChild("Packages")
-local wrapPreviewTemplate = ReplicatedStorage:WaitForChild("Wrap")
 
 local Janitor = require(Packages.janitor) :: any
+local WeaponSkinWrapPreviewer = require(script.Parent.Previewers.WeaponSkinWrapPreviewer)
 
 export type LockerCatalogItem = {
 	Id: string,
@@ -23,6 +22,9 @@ export type LockerCatalogItem = {
 	BaseColor: Color3?,
 	Animated: boolean?,
 	StudsPerTile: number?,
+	PreviewWeaponCategory: string?,
+	PreviewWeaponKey: string?,
+	PreviewWeaponName: string?,
 }
 
 type ItemGridCardRefs = {
@@ -81,8 +83,6 @@ export type LockerGrid = {
 	_tweenGridButtonScale: (self: LockerGrid, button: GuiButton, targetScale: number, tweenInfo: TweenInfo) -> (),
 	_bindCatalogButtonHover: (self: LockerGrid, button: GuiButton) -> (),
 	_clearCardViewportPreview: (self: LockerGrid, card: GuiObject) -> (),
-	_getWrapPreviewPrimaryPart: (self: LockerGrid, previewInstance: Instance) -> BasePart?,
-	_applyWrapAppearanceToPrimaryPart: (self: LockerGrid, previewPrimaryPart: BasePart, item: LockerCatalogItem, previewJanitor: any) -> (),
 	_applyWeaponSkinViewportPreview: (self: LockerGrid, card: GuiObject, item: LockerCatalogItem) -> boolean,
 	_applyCatalogItemToCard: (self: LockerGrid, card: GuiObject, item: LockerCatalogItem, layoutOrder: number) -> (),
 	_resetTransientState: (self: LockerGrid, notifySelection: boolean) -> (),
@@ -95,74 +95,8 @@ local GRID_BUTTON_HOVER_SCALE = 1.04
 local GRID_BUTTON_CLICK_SCALE = 0.96
 local STROKE_DEFAULT = Color3.fromRGB(38, 38, 38)
 local STROKE_WHITE = Color3.fromRGB(255, 255, 255)
-local DEFAULT_VIEWPORT_ROTATION = Vector3.new(12, -18, 0)
-local DEFAULT_VIEWPORT_FOV = 64
-local DEFAULT_VIEWPORT_DISTANCE = 6
-local DEFAULT_WRAP_STUDS_PER_TILE = 3
-local WRAP_TEXTURE_SCROLL_SPEED_U = 1
-local WRAP_TEXTURE_SCROLL_SPEED_V = 0
 local POPULATE_SYNC_ITEM_COUNT = 12
 local POPULATE_ASYNC_BATCH_SIZE = 8
-local WRAP_TEXTURE_NAMES = {
-	ScrollTexture_Back = true,
-	ScrollTexture_Bottom = true,
-	ScrollTexture_Left = true,
-	ScrollTexture_Right = true,
-} :: { [string]: boolean }
-
-local _activeAnimatedWrapTextures = {} :: { [Texture]: boolean }
-local _activeAnimatedWrapConnection: RBXScriptConnection? = nil
-
-local function stopActiveAnimatedWrapLoopIfIdle(): ()
-	if next(_activeAnimatedWrapTextures) ~= nil then
-		return
-	end
-
-	if _activeAnimatedWrapConnection then
-		_activeAnimatedWrapConnection:Disconnect()
-		_activeAnimatedWrapConnection = nil
-	end
-end
-
-local function ensureActiveAnimatedWrapLoop(): ()
-	if _activeAnimatedWrapConnection then
-		return
-	end
-
-	_activeAnimatedWrapConnection = RunService.Heartbeat:Connect(function(dt)
-		for texture in _activeAnimatedWrapTextures do
-			if texture.Parent == nil then
-				_activeAnimatedWrapTextures[texture] = nil
-			else
-				local tileU = if texture.StudsPerTileU ~= 0 then texture.StudsPerTileU else 1
-				local tileV = if texture.StudsPerTileV ~= 0 then texture.StudsPerTileV else 1
-				texture.OffsetStudsU = (texture.OffsetStudsU + WRAP_TEXTURE_SCROLL_SPEED_U * dt) % tileU
-				texture.OffsetStudsV = (texture.OffsetStudsV + WRAP_TEXTURE_SCROLL_SPEED_V * dt) % tileV
-			end
-		end
-
-		stopActiveAnimatedWrapLoopIfIdle()
-	end)
-end
-
-local function registerAnimatedWrapTextures(previewJanitor: any, textures: { Texture }): ()
-	if #textures <= 0 then
-		return
-	end
-
-	for _, texture in textures do
-		_activeAnimatedWrapTextures[texture] = true
-	end
-
-	ensureActiveAnimatedWrapLoop()
-
-	previewJanitor:Add(function()
-		for _, texture in textures do
-			_activeAnimatedWrapTextures[texture] = nil
-		end
-		stopActiveAnimatedWrapLoopIfIdle()
-	end, true)
-end
 
 local LockerGrid = {}
 LockerGrid.__index = LockerGrid
@@ -260,58 +194,6 @@ function LockerGrid:_clearCardViewportPreview(card: GuiObject)
 	viewportNode.Visible = false
 end
 
-function LockerGrid:_getWrapPreviewPrimaryPart(previewInstance: Instance): BasePart?
-	if previewInstance:IsA("Model") then
-		local primaryPart = previewInstance.PrimaryPart
-		if primaryPart then
-			return primaryPart
-		end
-
-		local mainPart = previewInstance:FindFirstChild("Main", true)
-		if mainPart and mainPart:IsA("BasePart") then
-			return mainPart
-		end
-
-		return previewInstance:FindFirstChildWhichIsA("BasePart", true)
-	end
-
-	if previewInstance:IsA("BasePart") then
-		return previewInstance
-	end
-
-	return nil
-end
-
-function LockerGrid:_applyWrapAppearanceToPrimaryPart(previewPrimaryPart: BasePart, item: LockerCatalogItem, previewJanitor: any)
-	local textureId = if type(item.TextureID) == "string" and item.TextureID ~= "" then item.TextureID else nil
-	local baseColor = item.BaseColor
-	local animated = item.Animated == true
-	local studsPerTile = math.max(0.01, tonumber(item.StudsPerTile) or DEFAULT_WRAP_STUDS_PER_TILE)
-	local scrollingTextures = {}
-
-	if not textureId and typeof(baseColor) == "Color3" then
-		previewPrimaryPart.Color = baseColor
-	end
-
-	for _, child in previewPrimaryPart:GetChildren() do
-		if child:IsA("Texture") and WRAP_TEXTURE_NAMES[child.Name] then
-			if textureId then
-				child.Texture = textureId
-				child.Transparency = 0
-				child.StudsPerTileU = studsPerTile
-				child.StudsPerTileV = studsPerTile
-				table.insert(scrollingTextures, child)
-			else
-				child:Destroy()
-			end
-		end
-	end
-
-	if textureId and animated and #scrollingTextures > 0 then
-		registerAnimatedWrapTextures(previewJanitor, scrollingTextures)
-	end
-end
-
 function LockerGrid:_applyWeaponSkinViewportPreview(card: GuiObject, item: LockerCatalogItem): boolean
 	local refs = self:_getGridCardRefs(card)
 	local viewportNode = refs.viewportNode
@@ -327,65 +209,7 @@ function LockerGrid:_applyWeaponSkinViewportPreview(card: GuiObject, item: Locke
 		self._cardPreviewJanitors[card] = previewJanitor
 	end
 
-	local worldModel = Instance.new("WorldModel")
-	worldModel.Parent = viewportNode
-	previewJanitor:Add(worldModel, "Destroy")
-
-	local clonedWrap = wrapPreviewTemplate:Clone()
-	clonedWrap.Parent = worldModel
-	previewJanitor:Add(clonedWrap, "Destroy")
-
-	for _, descendant in clonedWrap:GetDescendants() do
-		if descendant:IsA("BasePart") then
-			descendant.Anchored = true
-		end
-	end
-
-	local previewPrimaryPart = self:_getWrapPreviewPrimaryPart(clonedWrap)
-	if not previewPrimaryPart then
-		return false
-	end
-
-	self:_applyWrapAppearanceToPrimaryPart(previewPrimaryPart, item, previewJanitor)
-
-	local boundingCFrame: CFrame
-	if clonedWrap:IsA("Model") then
-		boundingCFrame = clonedWrap:GetBoundingBox()
-	elseif clonedWrap:IsA("BasePart") then
-		boundingCFrame = clonedWrap.CFrame
-	else
-		return false
-	end
-
-	local rotationCFrame = CFrame.Angles(
-		math.rad(DEFAULT_VIEWPORT_ROTATION.X),
-		math.rad(DEFAULT_VIEWPORT_ROTATION.Y),
-		math.rad(DEFAULT_VIEWPORT_ROTATION.Z)
-	)
-
-	if clonedWrap:IsA("Model") then
-		clonedWrap:PivotTo(boundingCFrame * rotationCFrame)
-		boundingCFrame = clonedWrap:GetBoundingBox()
-	else
-		clonedWrap.CFrame = boundingCFrame * rotationCFrame
-		boundingCFrame = clonedWrap.CFrame
-	end
-
-	viewportNode.Ambient = Color3.fromRGB(255, 255, 255)
-	viewportNode.LightColor = Color3.fromRGB(255, 255, 255)
-	viewportNode.LightDirection = Vector3.new(1, -2, 2)
-
-	local camera = Instance.new("Camera")
-	camera.FieldOfView = DEFAULT_VIEWPORT_FOV
-	camera.Parent = viewportNode
-	previewJanitor:Add(camera, "Destroy")
-	viewportNode.CurrentCamera = camera
-
-	local focusCFrame = previewPrimaryPart.CFrame
-	local cameraPosition = (focusCFrame * CFrame.new(0, 0, DEFAULT_VIEWPORT_DISTANCE)).Position
-	camera.CFrame = CFrame.lookAt(cameraPosition, focusCFrame.Position)
-	viewportNode.Visible = true
-	return true
+	return WeaponSkinWrapPreviewer.Render(viewportNode, item, previewJanitor)
 end
 
 function LockerGrid:_acquireGridCard(): GuiObject
@@ -812,7 +636,6 @@ function LockerGrid:Destroy()
 	table.clear(self._hoveredGridButtons)
 	table.clear(self._gridCardByButton)
 	table.clear(self._gridButtonByItemId)
-	stopActiveAnimatedWrapLoopIfIdle()
 end
 
 return LockerGrid

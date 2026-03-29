@@ -78,6 +78,13 @@ type LockerCatalogItem = {
 	Rarity: string,
 	Image: string,
 	CanPurchase: boolean,
+	TextureID: string?,
+	BaseColor: Color3?,
+	Animated: boolean?,
+	StudsPerTile: number?,
+	PreviewWeaponCategory: string?,
+	PreviewWeaponKey: string?,
+	PreviewWeaponName: string?,
 }
 
 type PendingShopAction = {
@@ -1046,10 +1053,24 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		if categoryKey == "Arsenal" and navKey == "Wraps" then
 			local loadout = Fusion.peek(DataController.Loadout) :: LoadoutData
 			local targetWeaponId = getResolvedWrapsTargetWeaponId(loadout)
+			local targetWeaponCategory = wrapsTargetWeaponCategory
+			local targetCategoryConfig = ItemsConfig[targetWeaponCategory]
+			local targetWeaponDefinition = if type(targetCategoryConfig) == "table"
+				then targetCategoryConfig[targetWeaponId]
+				else nil
+			local targetWeaponName = if type(targetWeaponDefinition) == "table"
+				and type(targetWeaponDefinition.Name) == "string"
+				and targetWeaponDefinition.Name ~= ""
+				then targetWeaponDefinition.Name
+				else targetWeaponId
 			local ownedWrapItems = {} :: { LockerCatalogItem }
 			for _, item in items do
 				if isWrapOwnedForWeapon(wrapsTargetWeaponCategory, targetWeaponId, item.ItemKey) then
-					table.insert(ownedWrapItems, item)
+					local wrapItem = table.clone(item)
+					wrapItem.PreviewWeaponCategory = targetWeaponCategory
+					wrapItem.PreviewWeaponKey = targetWeaponId
+					wrapItem.PreviewWeaponName = targetWeaponName
+					table.insert(ownedWrapItems, wrapItem)
 				end
 			end
 

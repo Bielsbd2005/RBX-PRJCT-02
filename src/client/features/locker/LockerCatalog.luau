@@ -16,6 +16,9 @@ export type LockerCatalogItem = {
 	BaseColor: Color3?,
 	Animated: boolean?,
 	StudsPerTile: number?,
+	PreviewWeaponCategory: string?,
+	PreviewWeaponKey: string?,
+	PreviewWeaponName: string?,
 }
 
 type CatalogCacheEntry = {
