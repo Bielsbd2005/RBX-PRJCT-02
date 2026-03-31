@@ -40,6 +40,8 @@ type ItemGridCardRefs = {
 	lockedLevelNode: TextLabel?,
 	lockedTemplate: GuiObject?,
 	lockedParent: Instance?,
+	buttonStroke: UIStroke?,
+	buttonStrokeCached: boolean?,
 }
 
 type LockerGridCallbacks = {
@@ -68,12 +70,13 @@ export type LockerGrid = {
 	_hoveredGridButtons: { [GuiButton]: boolean },
 	_gridCardByButton: { [GuiButton]: GuiObject },
 	_gridButtonByItemId: { [string]: GuiButton },
+	_cachedLevel: number,
 	_janitor: any,
 	_populateJanitor: any,
 	Destroy: (self: LockerGrid) -> (),
 	Clear: (self: LockerGrid) -> (),
 	Populate: (self: LockerGrid, items: { LockerCatalogItem }, selectedItemId: string?) -> (),
-	RefreshVisibleState: (self: LockerGrid) -> (),
+	RefreshVisibleState: (self: LockerGrid, notifySelection: boolean?) -> (),
 	GetSelectedItem: (self: LockerGrid) -> LockerCatalogItem?,
 	_getButtonStroke: (self: LockerGrid, button: GuiButton) -> UIStroke?,
 	_getGridCardRefs: (self: LockerGrid, card: GuiObject) -> ItemGridCardRefs,
@@ -94,10 +97,12 @@ local GRID_BUTTON_CLICK_TWEEN_INFO = TweenInfo.new(0.07, Enum.EasingStyle.Quad, 
 local GRID_BUTTON_DEFAULT_SCALE = 1
 local GRID_BUTTON_HOVER_SCALE = 1.04
 local GRID_BUTTON_CLICK_SCALE = 0.96
+local GRID_ITEM_DEFAULT_COLOR = Color3.fromRGB(255, 255, 255)
+local GRID_ITEM_LOCKED_WEAPON_COLOR = Color3.fromRGB(0, 0, 0)
 local STROKE_DEFAULT = Color3.fromRGB(38, 38, 38)
 local STROKE_WHITE = Color3.fromRGB(255, 255, 255)
-local POPULATE_SYNC_ITEM_COUNT = 12
-local POPULATE_ASYNC_BATCH_SIZE = 8
+local POPULATE_SYNC_ITEM_COUNT = 24
+local POPULATE_ASYNC_BATCH_SIZE = 16
 local DEFAULT_WEAPON_SKIN_KEY = "Default"
 
 local LockerGrid = {}
@@ -126,6 +131,7 @@ function LockerGrid.new(
 	self._hoveredGridButtons = {}
 	self._gridCardByButton = {}
 	self._gridButtonByItemId = {}
+	self._cachedLevel = 0
 	self._janitor = Janitor.new()
 	self._populateJanitor = Janitor.new()
 	self._janitor:Add(self._populateJanitor, "Destroy")
@@ -133,12 +139,21 @@ function LockerGrid.new(
 end
 
 function LockerGrid:_getButtonStroke(button: GuiButton): UIStroke?
-	local stroke = button:FindFirstChildOfClass("UIStroke")
-	if stroke and stroke:IsA("UIStroke") then
-		return stroke
+	local card = self._gridCardByButton[button]
+	if card then
+		local refs = self._cachedGridCardRefs[card]
+		if refs then
+			if refs.buttonStrokeCached then
+				return refs.buttonStroke
+			end
+			local stroke = button:FindFirstChildOfClass("UIStroke")
+			refs.buttonStroke = if stroke and stroke:IsA("UIStroke") then stroke else nil
+			refs.buttonStrokeCached = true
+			return refs.buttonStroke
+		end
 	end
-
-	return nil
+	local stroke = button:FindFirstChildOfClass("UIStroke")
+	return if stroke and stroke:IsA("UIStroke") then stroke else nil
 end
 
 function LockerGrid:_getGridCardRefs(card: GuiObject): ItemGridCardRefs
@@ -247,9 +262,14 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 
 	local owned = self._callbacks.isItemOwned(item)
 	local equipped = self._callbacks.isItemEquipped(item)
-	local currentLevel = self._callbacks.getCurrentLevel()
+	local currentLevel = self._cachedLevel
 	local isLevelLocked = not owned and currentLevel < item.LevelRequired
 	local isSelectedButton = button == self._selectedCatalogButton
+	local shouldBlackoutWeaponImage = shouldUseFullSizeWeaponImage(item) and not owned
+
+	if refs.itemNode then
+		refs.itemNode.ImageColor3 = if shouldBlackoutWeaponImage then GRID_ITEM_LOCKED_WEAPON_COLOR else GRID_ITEM_DEFAULT_COLOR
+	end
 
 	if isLevelLocked then
 		if refs.lockedNode == nil or refs.lockedNode.Parent == nil then
@@ -273,10 +293,8 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 			refs.lockedLevelNode.Text = "Lvl. " .. tostring(item.LevelRequired)
 		end
 	else
-		if refs.lockedNode then
-			refs.lockedNode:Destroy()
-			refs.lockedNode = nil
-			refs.lockedLevelNode = nil
+		if refs.lockedNode and refs.lockedNode.Parent then
+			refs.lockedNode.Visible = false
 		end
 	end
 
@@ -400,10 +418,14 @@ function LockerGrid:_applyCatalogItemToCard(card: GuiObject, item: LockerCatalog
 	card.Visible = true
 
 	local refs = self:_getGridCardRefs(card)
-	self:_clearCardViewportPreview(card)
+	local needsViewport = shouldUseWeaponSkinViewportPreview(item)
 	local usesViewportPreview = false
-	if shouldUseWeaponSkinViewportPreview(item) then
+
+	if needsViewport then
+		self:_clearCardViewportPreview(card)
 		usesViewportPreview = self:_applyWeaponSkinViewportPreview(card, item)
+	elseif self._cardPreviewJanitors[card] then
+		self:_clearCardViewportPreview(card)
 	end
 
 	if refs.viewportNode then
@@ -415,6 +437,7 @@ function LockerGrid:_applyCatalogItemToCard(card: GuiObject, item: LockerCatalog
 		refs.itemNode.Image = item.Image
 		if shouldUseFullSizeWeaponImage(item) then
 			refs.itemNode.Size = UDim2.fromScale(1, 1)
+			refs.itemNode.ImageColor3 = if self._callbacks.isItemOwned(item) then GRID_ITEM_DEFAULT_COLOR else GRID_ITEM_LOCKED_WEAPON_COLOR
 		elseif refs.itemNodeDefaultSize then
 			refs.itemNode.Size = refs.itemNodeDefaultSize
 		end
@@ -509,6 +532,7 @@ end
 
 function LockerGrid:Populate(items: { LockerCatalogItem }, selectedItemId: string?)
 	self:_resetTransientState(false)
+	self._cachedLevel = self._callbacks.getCurrentLevel()
 	local generation = self._populateGeneration
 	local totalItems = #items
 	local syncItemCount = math.min(totalItems, POPULATE_SYNC_ITEM_COUNT)
@@ -627,7 +651,8 @@ function LockerGrid:Populate(items: { LockerCatalogItem }, selectedItemId: strin
 	end)
 end
 
-function LockerGrid:RefreshVisibleState()
+function LockerGrid:RefreshVisibleState(notifySelection: boolean?)
+	self._cachedLevel = self._callbacks.getCurrentLevel()
 	for _, card in self._activeGridCards do
 		if card.Visible then
 			local refs = self:_getGridCardRefs(card)
@@ -639,7 +664,9 @@ function LockerGrid:RefreshVisibleState()
 	end
 
 	self._selectedCatalogItem = if self._selectedCatalogButton then self._gridButtonItems[self._selectedCatalogButton] else nil
-	self._callbacks.onSelectionChanged(self._selectedCatalogItem)
+	if notifySelection ~= false then
+		self._callbacks.onSelectionChanged(self._selectedCatalogItem)
+	end
 end
 
 function LockerGrid:GetSelectedItem(): LockerCatalogItem?

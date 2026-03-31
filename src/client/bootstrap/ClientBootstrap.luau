@@ -47,6 +47,7 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 	local DataController = require(clientRoot.core.data.DataController)
 	local MenuController = require(clientRoot.core.ui.MenuController)
 	local FusionFeature = require(clientRoot.features.fusion)
+	local StoreFeature = require(clientRoot.features.store)
 	local SettingsFeature = require(clientRoot.features.settings)
 	local RewardsFeature = require(clientRoot.features.rewards)
 	local PrestigeFeature = require(clientRoot.features.prestige)
@@ -66,6 +67,7 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 
 	local deferredFeatures = {
 		{ label = "fusion", start = FusionFeature.start },
+		{ label = "store", start = StoreFeature.start },
 		{ label = "settings", start = SettingsFeature.start },
 		{ label = "rewards", start = RewardsFeature.start },
 		{ label = "prestige", start = PrestigeFeature.start },

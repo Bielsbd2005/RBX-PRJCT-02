@@ -65,7 +65,7 @@ local ItemsConfig: ItemsConfigType = {
 
 	Main = {
 		Default   = { Name = "Default",  		 Price = 0,    LevelRequired = 1,  Rarity = "Common",    Image = asset(WEAPON_IMAGE_IDS.Main.Default), CanPurchase = false },
-		Weapon2   = { Name = "Weapon1",         Price = 500,  LevelRequired = 5,  Rarity = "Uncommon",  Image = asset(WEAPON_IMAGE_IDS.Main.Weapon2), CanPurchase = false },
+		Weapon2   = { Name = "Weapon1",         Price = 3,  LevelRequired = 0,  Rarity = "Uncommon",  Image = asset(WEAPON_IMAGE_IDS.Main.Weapon2), CanPurchase = false },
 		Weapon3   = { Name = "Weapon2",         Price = 1000, LevelRequired = 10, Rarity = "Rare",      Image = asset(WEAPON_IMAGE_IDS.Main.Weapon3), CanPurchase = false },
 	},
 
