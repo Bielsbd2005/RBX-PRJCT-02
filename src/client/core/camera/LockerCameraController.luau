@@ -5,6 +5,8 @@ local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
 local Lighting = game:GetService("Lighting")
 
+local MouseParallax = require(script.Parent.MouseParallax)
+
 local APPROACH_TWEEN_INFO = TweenInfo.new(0.45, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
 local DOF_APPLY_TWEEN_INFO = TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local DOF_RESET_TWEEN_INFO = TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
@@ -28,6 +30,10 @@ export type LockerCameraController = {
 	_dofTween: Tween?,
 	_fovTween: Tween?,
 	_dofFadeOutConnection: RBXScriptConnection?,
+	_cameraApproachCompletedConnection: RBXScriptConnection?,
+	_mouseParallax: any,
+	_parallaxBaseCFrame: CFrame,
+	setTargetPartName: (self: LockerCameraController, targetPartName: string, refreshIfApplied: boolean?) -> (),
 	apply: (self: LockerCameraController) -> (),
 	restore: (self: LockerCameraController) -> (),
 	Destroy: (self: LockerCameraController) -> (),
@@ -79,14 +85,28 @@ function LockerCameraController.new(targetPartName: string?): LockerCameraContro
 	self._dofTween = nil
 	self._fovTween = nil
 	self._dofFadeOutConnection = nil
+	self._cameraApproachCompletedConnection = nil
+	self._parallaxBaseCFrame = self._targetPart.CFrame
+	self._mouseParallax = MouseParallax.new(self._camera, function(): CFrame
+		return self._parallaxBaseCFrame
+	end)
 
 	return self
+end
+
+function LockerCameraController:_setParallaxBaseCFrame(baseCFrame: CFrame)
+	self._parallaxBaseCFrame = baseCFrame
 end
 
 function LockerCameraController:_cancelActiveTweens()
 	if self._cameraApproachTween then
 		self._cameraApproachTween:Cancel()
 		self._cameraApproachTween = nil
+	end
+
+	if self._cameraApproachCompletedConnection then
+		self._cameraApproachCompletedConnection:Disconnect()
+		self._cameraApproachCompletedConnection = nil
 	end
 
 	if self._dofTween then
@@ -106,16 +126,44 @@ function LockerCameraController:_cancelActiveTweens()
 end
 
 function LockerCameraController:_playEntryTweenSequence(targetCFrame: CFrame)
+	self:_setParallaxBaseCFrame(targetCFrame)
 	self._camera.CFrame = targetCFrame * TRANSITION_OFFSET
 	self._cameraApproachTween = TweenService:Create(self._camera, APPROACH_TWEEN_INFO, {
 		CFrame = targetCFrame,
 	})
+	self._cameraApproachCompletedConnection = self._cameraApproachTween.Completed:Connect(function(playbackState)
+		if self._cameraApproachCompletedConnection then
+			self._cameraApproachCompletedConnection:Disconnect()
+			self._cameraApproachCompletedConnection = nil
+		end
+
+		if playbackState ~= Enum.PlaybackState.Completed then
+			return
+		end
+
+		self:_setParallaxBaseCFrame(targetCFrame)
+		self._mouseParallax:start()
+	end)
 
 	self._cameraApproachTween:Play()
 end
 
+function LockerCameraController:setTargetPartName(targetPartName: string, refreshIfApplied: boolean?)
+	local nextTargetPart = resolveTargetPart(targetPartName)
+	if self._targetPart == nextTargetPart then
+		return
+	end
+
+	self._targetPart = nextTargetPart
+
+	if refreshIfApplied ~= false and self._isApplied then
+		self:apply()
+	end
+end
+
 function LockerCameraController:apply()
 	self:_cancelActiveTweens()
+	self._mouseParallax:stop(true)
 
 	local targetCFrame = self._targetPart.CFrame
 	local finalFov = self._savedFieldOfView or self._camera.FieldOfView
@@ -165,6 +213,7 @@ function LockerCameraController:restore()
 	end
 
 	self:_cancelActiveTweens()
+	self._mouseParallax:stop(true)
 
 	self._dofTween = TweenService:Create(self._dof, DOF_RESET_TWEEN_INFO, {
 		FarIntensity = 0,
@@ -209,6 +258,7 @@ end
 
 function LockerCameraController:Destroy()
 	self:_cancelActiveTweens()
+	self._mouseParallax:Destroy()
 
 	self:restore()
 end

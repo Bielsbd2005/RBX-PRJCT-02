@@ -49,6 +49,31 @@ local function makeCatalogCacheKey(categoryKey: LockerCategoryKey, navKey: strin
 	return tostring(categoryKey) .. ":" .. tostring(navKey)
 end
 
+local function normalizeImageId(imageValue: any, fallback: string): string
+	if type(imageValue) == "string" then
+		if imageValue == "" then
+			return fallback
+		end
+
+		if string.find(imageValue, "rbxassetid://", 1, true) == 1 then
+			return imageValue
+		end
+
+		local numericFromString = tonumber(imageValue)
+		if numericFromString then
+			return "rbxassetid://" .. tostring(math.floor(numericFromString))
+		end
+
+		return imageValue
+	end
+
+	if type(imageValue) == "number" then
+		return "rbxassetid://" .. tostring(math.floor(imageValue))
+	end
+
+	return fallback
+end
+
 function LockerCatalog.new(
 	itemsConfig: any,
 	itemsConfigByNav: { [LockerCategoryKey]: { [string]: string } },
@@ -99,7 +124,7 @@ function LockerCatalog:_getTemplateItems(categoryKey: LockerCategoryKey, navKey:
 				Price = tonumber(definition.Price) or 0,
 				LevelRequired = math.max(0, tonumber(definition.LevelRequired) or 0),
 				Rarity = tostring(definition.Rarity or "Common"),
-				Image = tostring(definition.Image or self._defaultThumbnail),
+				Image = normalizeImageId(definition.Image, self._defaultThumbnail),
 				CanPurchase = definition.CanPurchase == true,
 				TextureID = if type(definition.TextureID) == "string" then definition.TextureID else nil,
 				BaseColor = if typeof(definition.BaseColor) == "Color3" then definition.BaseColor else nil,

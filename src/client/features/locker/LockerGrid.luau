@@ -30,6 +30,7 @@ export type LockerCatalogItem = {
 type ItemGridCardRefs = {
 	button: GuiButton?,
 	itemNode: GuiObject?,
+	itemNodeDefaultSize: UDim2?,
 	viewportNode: ViewportFrame?,
 	priceNode: TextLabel?,
 	currencyNode: GuiObject?,
@@ -97,6 +98,7 @@ local STROKE_DEFAULT = Color3.fromRGB(38, 38, 38)
 local STROKE_WHITE = Color3.fromRGB(255, 255, 255)
 local POPULATE_SYNC_ITEM_COUNT = 12
 local POPULATE_ASYNC_BATCH_SIZE = 8
+local DEFAULT_WEAPON_SKIN_KEY = "Default"
 
 local LockerGrid = {}
 LockerGrid.__index = LockerGrid
@@ -148,6 +150,7 @@ function LockerGrid:_getGridCardRefs(card: GuiObject): ItemGridCardRefs
 	local buttonNode = card:FindFirstChild("Button")
 	local button = if buttonNode and buttonNode:IsA("GuiButton") then buttonNode else nil
 	local itemNode = if button then button:FindFirstChild("Item", true) else nil
+	local resolvedItemNode = if itemNode and (itemNode:IsA("ImageLabel") or itemNode:IsA("ImageButton")) then itemNode else nil
 	local viewportNode = if button then button:FindFirstChildWhichIsA("ViewportFrame", true) else nil
 	local priceNode = if button then button:FindFirstChild("Price", true) else nil
 	local currencyNode = if button then button:FindFirstChild("Currency", true) else nil
@@ -159,7 +162,8 @@ function LockerGrid:_getGridCardRefs(card: GuiObject): ItemGridCardRefs
 
 	local refs = {
 		button = button,
-		itemNode = if itemNode and (itemNode:IsA("ImageLabel") or itemNode:IsA("ImageButton")) then itemNode else nil,
+		itemNode = resolvedItemNode,
+		itemNodeDefaultSize = if resolvedItemNode then resolvedItemNode.Size else nil,
 		viewportNode = if viewportNode and viewportNode:IsA("ViewportFrame") then viewportNode else nil,
 		priceNode = if priceNode and priceNode:IsA("TextLabel") then priceNode else nil,
 		currencyNode = if currencyNode and currencyNode:IsA("GuiObject") then currencyNode else nil,
@@ -210,6 +214,14 @@ function LockerGrid:_applyWeaponSkinViewportPreview(card: GuiObject, item: Locke
 	end
 
 	return WeaponSkinWrapPreviewer.Render(viewportNode, item, previewJanitor)
+end
+
+local function shouldUseWeaponSkinViewportPreview(item: LockerCatalogItem): boolean
+	return item.Category == "WeaponSkins" and item.ItemKey ~= DEFAULT_WEAPON_SKIN_KEY
+end
+
+local function shouldUseFullSizeWeaponImage(item: LockerCatalogItem): boolean
+	return item.Category == "Main" or item.Category == "Special"
 end
 
 function LockerGrid:_acquireGridCard(): GuiObject
@@ -389,7 +401,10 @@ function LockerGrid:_applyCatalogItemToCard(card: GuiObject, item: LockerCatalog
 
 	local refs = self:_getGridCardRefs(card)
 	self:_clearCardViewportPreview(card)
-	local usesViewportPreview = item.Category == "WeaponSkins" and self:_applyWeaponSkinViewportPreview(card, item)
+	local usesViewportPreview = false
+	if shouldUseWeaponSkinViewportPreview(item) then
+		usesViewportPreview = self:_applyWeaponSkinViewportPreview(card, item)
+	end
 
 	if refs.viewportNode then
 		refs.viewportNode.Visible = usesViewportPreview
@@ -398,6 +413,11 @@ function LockerGrid:_applyCatalogItemToCard(card: GuiObject, item: LockerCatalog
 	if refs.itemNode and (refs.itemNode:IsA("ImageLabel") or refs.itemNode:IsA("ImageButton")) then
 		refs.itemNode.Visible = not usesViewportPreview
 		refs.itemNode.Image = item.Image
+		if shouldUseFullSizeWeaponImage(item) then
+			refs.itemNode.Size = UDim2.fromScale(1, 1)
+		elseif refs.itemNodeDefaultSize then
+			refs.itemNode.Size = refs.itemNodeDefaultSize
+		end
 	end
 
 	if refs.priceNode then
@@ -442,9 +462,13 @@ function LockerGrid:_applyCatalogItemToCard(card: GuiObject, item: LockerCatalog
 			return
 		end
 
+		local selectedItem = self._gridButtonItems[button]
+		if self._selectedCatalogButton == button and not (selectedItem and selectedItem.Category == "KillEffects") then
+			return
+		end
+
 		self:_setSelectedButton(button)
 
-		local selectedItem = self._gridButtonItems[button]
 		if selectedItem and self._callbacks.isItemOwned(selectedItem) then
 			self._callbacks.onOwnedItemActivated(selectedItem)
 		end

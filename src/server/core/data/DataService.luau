@@ -245,6 +245,24 @@ local function _loadPlayer(player: Player): ()
 				inventory.Special.Default = true
 			end
 
+			local function sanitizeEquippedWeaponId(categoryInventory: { [string]: boolean }, weaponId: any): string
+				if type(weaponId) == "string" and weaponId ~= "" and categoryInventory[weaponId] == true then
+					return weaponId
+				end
+
+				if categoryInventory.Default == true then
+					return "Default"
+				end
+
+				for candidateId, owned in categoryInventory do
+					if owned == true then
+						return tostring(candidateId)
+					end
+				end
+
+				return "Default"
+			end
+
 			if type(inventory.WeaponSkins) ~= "table" then
 				inventory.WeaponSkins = { Default = true }
 			end
@@ -315,9 +333,8 @@ local function _loadPlayer(player: Player): ()
 				loadout.MainWeapon = loadout.PrimaryWeapon
 			end
 
-			if type(loadout.SpecialWeapon) ~= "string" or loadout.SpecialWeapon == "" then
-				loadout.SpecialWeapon = "Default"
-			end
+			loadout.MainWeapon = sanitizeEquippedWeaponId(inventory.Main :: { [string]: boolean }, loadout.MainWeapon)
+			loadout.SpecialWeapon = sanitizeEquippedWeaponId(inventory.Special :: { [string]: boolean }, loadout.SpecialWeapon)
 
 			if type(loadout.MainWeaponWraps) ~= "table" then
 				loadout.MainWeaponWraps = {}

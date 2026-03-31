@@ -23,6 +23,7 @@ local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
 local LockerConfig = require(Shared.constants.LockerConfig)
 local Network = require(Shared.networking.Network)
 local DataController = require(Client.core.data.DataController)
+local KillEffectsRegistry = require(Shared.locker.killEffects.KillEffectsRegistry)
 
 local LockerFeature = {}
 
@@ -41,6 +42,12 @@ local LOCKER_PREVIEW_IDLE_ANIMATION_ID = "rbxassetid://115197033304718"
 local DEFAULT_WRAP_STUDS_PER_TILE = 3
 local WEAPON_WRAP_TEXTURE_SCROLL_SPEED_U = 1
 local WEAPON_WRAP_TEXTURE_SCROLL_SPEED_V = 0
+local SELECTED_WEAPON_RISE_TWEEN_INFO = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local SELECTED_WEAPON_RISE_HEIGHT = 0.28
+local SELECTED_WEAPON_BOB_AMPLITUDE = 0.2
+local SELECTED_WEAPON_BOB_SPEED = 0.3
+local SELECTED_WEAPON_SWITCH_DOWN_TWEEN_INFO = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+local SELECTED_WEAPON_SWITCH_DOWN_STUDS = 4
 
 local WEAPON_WRAP_TEXTURE_FACE_BY_NAME = {
 	ScrollTexture_Back = Enum.NormalId.Back,
@@ -122,6 +129,18 @@ local WEAPON_CATEGORIES = {
 	Special = true,
 } :: { [string]: boolean }
 
+local CAMERA_TARGET_BY_MAIN_CATEGORY = {
+	Style = "clothing",
+	Arsenal = "weapons",
+	Effects = "weapons",
+} :: { [LockerCategoryKey]: string }
+local KILL_EFFECTS_NAV_KEY = "KillEffects"
+local KILL_EFFECTS_CAMERA_TARGET = "killEffects"
+local KILL_EFFECTS_DUMMY_NAME = "LockerKillEffectsDummy"
+local KILL_EFFECTS_DUMMY_RESTORE_DELAY = 1.25
+local KILL_EFFECTS_PREVIEW_COOLDOWN = 1
+local MAIN_CATEGORY_SWITCH_COOLDOWN = 0.2
+
 function LockerFeature.start(menuController: any, options: { autoOpen: boolean? }?): any
 	local janitor = Janitor.new()
 	local fusionScope = Fusion.scoped(Fusion)
@@ -137,9 +156,14 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local sharedTemplates = Shared:WaitForChild("templates")
 	local characterTemplate = sharedTemplates:WaitForChild("CharacterTemplate")
 	local lockerFolder = Workspace:WaitForChild("Locker")
+	local lockerWeaponsFolder = lockerFolder:WaitForChild("weapons")
 	local characterSpawn = lockerFolder:WaitForChild("CharacterSpawn")
 	local mainWeaponSpawn = lockerFolder:WaitForChild("MainSpawn")
 	local specialWeaponSpawn = lockerFolder:WaitForChild("SpecialSpawn")
+	local dummySpawn = lockerFolder:WaitForChild("DummySpawn") :: LockerPreviewSpawnTarget
+	local killEffectsDummyTemplate = ReplicatedStorage:WaitForChild("Dummy")
+	local mainIndicator = lockerWeaponsFolder:FindFirstChild("MainIndicator")
+	local specialIndicator = lockerWeaponsFolder:FindFirstChild("SpecialIndicator")
 
 	local lockerBtn = menuGui.BottomContainer.Footer:WaitForChild("locker") :: GuiButton
 	local lockerGui = playerGui:WaitForChild("LockerGui") :: ScreenGui
@@ -185,7 +209,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local levelContainer = lockerGui:WaitForChild("LevelContainer")
 	local levelValueNode = levelContainer:WaitForChild("Value")
 	local levelValueLabel = if levelValueNode:IsA("TextLabel") then levelValueNode else nil
-	local cameraController = LockerCameraController.new("locker")
+	local cameraController = LockerCameraController.new("weapons")
 	janitor:Add(cameraController, "Destroy")
 	lockerGui.Enabled = false
 
@@ -202,7 +226,10 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local selectedMainCategory: LockerCategoryKey? = nil
 	local selectedCatalogItem: LockerCatalogItem? = nil
 	local wrapsTargetWeaponCategory: WeaponCategory = "Main"
-	local wrapsTargetWeaponId: string = "Default"
+	local wrapsTargetWeaponIdByCategory = {
+		Main = "",
+		Special = "",
+	} :: { [WeaponCategory]: string }
 	local pendingShopAction: PendingShopAction? = nil
 	local activeActionFrameTween: Tween? = nil
 	local activePurchaseButtonScaleTween: Tween? = nil
@@ -216,12 +243,19 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	} :: { [WeaponCategory]: { [string]: { [string]: boolean } } }
 	local equippedLookup = {} :: { [string]: string }
 	local selectedNavKey: string? = nil
+	local isOpen = false
+	local activeKillEffectsDummy: Model? = nil
+	local killEffectsRestoreToken = 0
+	local nextAllowedKillEffectPreviewAt = 0
+	local skipNextKillEffectSelectionPreview = false
+	local nextAllowedMainCategorySwitchAt = 0
 	local sharedLockerAssets = Shared:WaitForChild("locker")
 	local sharedWeaponAssets = sharedLockerAssets:WaitForChild("weapons")
 	local actionFrameVisiblePosition = actionFrame.Position
 	local actionFrameHiddenPosition = UDim2.new(actionFrameVisiblePosition.X.Scale, actionFrameVisiblePosition.X.Offset, 1.15, actionFrameVisiblePosition.Y.Offset)
 	local catalog: any = nil
 	local grid: any = nil
+	local updateWeaponCategoryIndicators: () -> ()
 
 	actionFrame.Visible = false
 	actionFrame.Position = actionFrameHiddenPosition
@@ -390,12 +424,129 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			end
 		end, true)
 	end
+
+	local function getResolvedKillEffectId(): string
+		local equippedKillEffect = equippedLookup.KillEffects
+		if type(equippedKillEffect) == "string" and equippedKillEffect ~= "" then
+			return equippedKillEffect
+		end
+
+		local loadout = Fusion.peek(DataController.Loadout) :: LoadoutData
+		local loadoutKillEffect = loadout.KillEffect
+		if type(loadoutKillEffect) == "string" and loadoutKillEffect ~= "" then
+			return loadoutKillEffect
+		end
+
+		return "Default"
+	end
+
+	local killEffectsDummyTemplateModel = if killEffectsDummyTemplate:IsA("Model")
+			and killEffectsDummyTemplate:FindFirstChildWhichIsA("Humanoid", true)
+		then killEffectsDummyTemplate
+		else if characterTemplate:IsA("Model") and characterTemplate:FindFirstChildWhichIsA("Humanoid", true)
+			then characterTemplate
+			else nil
+
+	local function replaceKillEffectsDummy(): Model?
+		if activeKillEffectsDummy and activeKillEffectsDummy.Parent then
+			activeKillEffectsDummy:Destroy()
+		end
+
+		activeKillEffectsDummy = nil
+
+		if not killEffectsDummyTemplateModel then
+			return nil
+		end
+
+		local clonedDummy = killEffectsDummyTemplateModel:Clone()
+		clonedDummy.Name = KILL_EFFECTS_DUMMY_NAME
+		clonedDummy.Parent = dummySpawn :: Instance
+		placePreviewCharacter(clonedDummy, dummySpawn)
+		playPreviewIdleAnimation(clonedDummy)
+		activeKillEffectsDummy = clonedDummy
+		return clonedDummy
+	end
+
+	local function destroyKillEffectsDummy()
+		killEffectsRestoreToken += 1
+		nextAllowedKillEffectPreviewAt = 0
+
+		if activeKillEffectsDummy and activeKillEffectsDummy.Parent then
+			activeKillEffectsDummy:Destroy()
+		end
+
+		activeKillEffectsDummy = nil
+	end
+
+	local function previewKillEffect(effectId: string?)
+		if not isOpen or selectedMainCategory ~= "Effects" or selectedNavKey ~= KILL_EFFECTS_NAV_KEY then
+			return
+		end
+
+		local now = os.clock()
+		if now < nextAllowedKillEffectPreviewAt then
+			return
+		end
+		nextAllowedKillEffectPreviewAt = now + KILL_EFFECTS_PREVIEW_COOLDOWN
+
+		local dummy = replaceKillEffectsDummy()
+		if not dummy then
+			return
+		end
+
+		local resolvedEffectId = if type(effectId) == "string" and effectId ~= "" then effectId else getResolvedKillEffectId()
+		if not KillEffectsRegistry.apply(resolvedEffectId, dummy) then
+			return
+		end
+
+		killEffectsRestoreToken += 1
+		local restoreToken = killEffectsRestoreToken
+		task.delay(KILL_EFFECTS_DUMMY_RESTORE_DELAY, function()
+			if restoreToken ~= killEffectsRestoreToken then
+				return
+			end
+
+			if not isOpen or selectedMainCategory ~= "Effects" or selectedNavKey ~= KILL_EFFECTS_NAV_KEY then
+				return
+			end
+
+			replaceKillEffectsDummy()
+		end)
+	end
+
+	local function updateKillEffectsPreviewState(categoryKey: LockerCategoryKey, navKey: string)
+		if categoryKey == "Effects" and navKey == KILL_EFFECTS_NAV_KEY then
+			cameraController:setTargetPartName(KILL_EFFECTS_CAMERA_TARGET)
+			if isOpen then
+				if selectedCatalogItem and selectedCatalogItem.Category == "KillEffects" then
+					previewKillEffect(selectedCatalogItem.ItemKey)
+				else
+					replaceKillEffectsDummy()
+				end
+			else
+				destroyKillEffectsDummy()
+			end
+			return
+		end
+
+		destroyKillEffectsDummy()
+		cameraController:setTargetPartName(CAMERA_TARGET_BY_MAIN_CATEGORY[categoryKey])
+	end
+
+	janitor:Add(destroyKillEffectsDummy, true)
+
 	local activeWeaponPreviewByCategory = {} :: { [string]: Instance }
 	local activeWeaponPreviewItemIdByCategory = {} :: { [string]: string }
 	local activeWeaponWrapAnimationByCategory = {} :: { [string]: RBXScriptConnection }
+	local activeWeaponMotionTweenByCategory = {} :: { [string]: Tween }
+	local activeWeaponMotionConnectionByCategory = {} :: { [string]: RBXScriptConnection }
+	local activeWeaponSelectionTransitionTokenByCategory = {} :: { [string]: number }
+	local weaponPreviewBasePivotByCategory = {} :: { [string]: CFrame }
 	local applySelectedWeaponPreview: (LockerCatalogItem?) -> ()
 	local restoreEquippedWeaponPreviewForCategory: (string) -> ()
 	local restoreEquippedWeaponPreviews: () -> ()
+	local stopWeaponSelectionMotion: (string, boolean?) -> ()
+	local startWeaponSelectionMotion: (WeaponCategory, number?) -> ()
 
 	janitor:Add(function()
 		if activeActionFrameTween then
@@ -465,13 +616,31 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end
 	end
 
-	local function getResolvedWrapsTargetWeaponId(loadout: LoadoutData?): string
-		if wrapsTargetWeaponId ~= "" then
-			return wrapsTargetWeaponId
+	local function getStoredWrapsTargetWeaponId(weaponCategory: WeaponCategory): string?
+		local storedWeaponId = wrapsTargetWeaponIdByCategory[weaponCategory]
+		if type(storedWeaponId) == "string" and storedWeaponId ~= "" then
+			return storedWeaponId
+		end
+
+		return nil
+	end
+
+	local function setStoredWrapsTargetWeaponId(weaponCategory: WeaponCategory, weaponId: string?): ()
+		if type(weaponId) == "string" and weaponId ~= "" then
+			wrapsTargetWeaponIdByCategory[weaponCategory] = weaponId
+		else
+			wrapsTargetWeaponIdByCategory[weaponCategory] = ""
+		end
+	end
+
+	local function getResolvedWeaponIdForCategory(weaponCategory: WeaponCategory, loadout: LoadoutData?): string
+		local storedWeaponId = getStoredWrapsTargetWeaponId(weaponCategory)
+		if storedWeaponId then
+			return storedWeaponId
 		end
 
 		if loadout then
-			local weaponSlot = CATEGORY_TO_LOADOUT_SLOT[wrapsTargetWeaponCategory]
+			local weaponSlot = CATEGORY_TO_LOADOUT_SLOT[weaponCategory]
 			local weaponKey = if weaponSlot then loadout[weaponSlot] else nil
 			if type(weaponKey) == "string" and weaponKey ~= "" then
 				return weaponKey
@@ -479,6 +648,10 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end
 
 		return "Default"
+	end
+
+	local function getResolvedWrapsTargetWeaponId(loadout: LoadoutData?): string
+		return getResolvedWeaponIdForCategory(wrapsTargetWeaponCategory, loadout)
 	end
 
 	local function isWrapOwnedForWeapon(weaponCategory: WeaponCategory, weaponId: string, skinId: string): boolean
@@ -507,6 +680,35 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end
 
 		equippedLookup = nextLookup
+	end
+
+	local function getEquippedItemByCategory(category: string): string?
+		local equippedItem = equippedLookup[category]
+		if type(equippedItem) == "string" and equippedItem ~= "" then
+			return equippedItem
+		end
+
+		local loadout = Fusion.peek(DataController.Loadout) :: LoadoutData
+		local slot = CATEGORY_TO_LOADOUT_SLOT[category]
+		if not slot then
+			return nil
+		end
+
+		local loadoutItem = loadout[slot]
+		if type(loadoutItem) == "string" and loadoutItem ~= "" then
+			return loadoutItem
+		end
+
+		return nil
+	end
+
+	local function getEquippedWeaponByCategory(category: WeaponCategory): string
+		local equippedWeapon = getEquippedItemByCategory(category)
+		if type(equippedWeapon) == "string" and equippedWeapon ~= "" then
+			return equippedWeapon
+		end
+
+		return "Default"
 	end
 
 	local function resolveWeaponWrap(loadout: LoadoutData, weaponCategory: WeaponCategory, weaponKey: string?): string
@@ -538,6 +740,24 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		return category == "Main" or category == "Special"
 	end
 
+	updateWeaponCategoryIndicators = function()
+		if not (mainIndicator and mainIndicator:IsA("BasePart") and specialIndicator and specialIndicator:IsA("BasePart")) then
+			return
+		end
+
+		local activeWeaponCategory: WeaponCategory? = nil
+		if selectedMainCategory == "Arsenal" then
+			if selectedNavKey == "Main" or selectedNavKey == "Special" then
+				activeWeaponCategory = selectedNavKey :: WeaponCategory
+			elseif selectedNavKey == "Wraps" then
+				activeWeaponCategory = wrapsTargetWeaponCategory
+			end
+		end
+
+		mainIndicator.LocalTransparencyModifier = if activeWeaponCategory == "Main" then 0 else 1
+		specialIndicator.LocalTransparencyModifier = if activeWeaponCategory == "Special" then 0 else 1
+	end
+
 	local function getWeaponSpawnForCategory(category: string): LockerPreviewSpawnTarget?
 		if category == "Main" then
 			return mainWeaponSpawn
@@ -549,6 +769,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	local function destroyWeaponPreviewForCategory(category: string)
+		stopWeaponSelectionMotion(category, false)
+
 		local wrapAnimationConnection = activeWeaponWrapAnimationByCategory[category]
 		if wrapAnimationConnection then
 			wrapAnimationConnection:Disconnect()
@@ -562,6 +784,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 		activeWeaponPreviewByCategory[category] = nil
 		activeWeaponPreviewItemIdByCategory[category] = nil
+		weaponPreviewBasePivotByCategory[category] = nil
 	end
 
 	local function destroyAllWeaponPreviews()
@@ -570,6 +793,117 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	janitor:Add(destroyAllWeaponPreviews, true)
+
+	local function getWeaponPreviewPivot(previewInstance: Instance): CFrame?
+		if previewInstance:IsA("Model") then
+			return previewInstance:GetPivot()
+		end
+
+		if previewInstance:IsA("BasePart") then
+			return previewInstance.CFrame
+		end
+
+		return nil
+	end
+
+	local function setWeaponPreviewPivot(previewInstance: Instance, pivot: CFrame)
+		if previewInstance:IsA("Model") then
+			previewInstance:PivotTo(pivot)
+		elseif previewInstance:IsA("BasePart") then
+			previewInstance.CFrame = pivot
+		end
+	end
+
+	stopWeaponSelectionMotion = function(category: string, restoreToBase: boolean?)
+		local motionConnection = activeWeaponMotionConnectionByCategory[category]
+		if motionConnection then
+			motionConnection:Disconnect()
+			activeWeaponMotionConnectionByCategory[category] = nil
+		end
+
+		local motionTween = activeWeaponMotionTweenByCategory[category]
+		if motionTween then
+			motionTween:Cancel()
+			activeWeaponMotionTweenByCategory[category] = nil
+		end
+
+		if restoreToBase ~= false then
+			local activePreview = activeWeaponPreviewByCategory[category]
+			local basePivot = weaponPreviewBasePivotByCategory[category]
+			if activePreview and activePreview.Parent and basePivot then
+				setWeaponPreviewPivot(activePreview, basePivot)
+			end
+		end
+	end
+
+	startWeaponSelectionMotion = function(category: WeaponCategory, startOffsetY: number?)
+		stopWeaponSelectionMotion(category, true)
+
+		local activePreview = activeWeaponPreviewByCategory[category]
+		local basePivot = weaponPreviewBasePivotByCategory[category]
+		if not activePreview or not activePreview.Parent or not basePivot then
+			return
+		end
+
+		local initialOffsetY = if type(startOffsetY) == "number" then startOffsetY else 0
+		local startPivot = basePivot * CFrame.new(0, initialOffsetY, 0)
+		local liftPivot = basePivot * CFrame.new(0, SELECTED_WEAPON_RISE_HEIGHT, 0)
+		local cframeValue = Instance.new("CFrameValue")
+		cframeValue.Value = startPivot
+		local valueChangedConnection: RBXScriptConnection? = nil
+
+		valueChangedConnection = cframeValue:GetPropertyChangedSignal("Value"):Connect(function()
+			if not activePreview.Parent then
+				if valueChangedConnection then
+					valueChangedConnection:Disconnect()
+					valueChangedConnection = nil
+				end
+				return
+			end
+
+			setWeaponPreviewPivot(activePreview, cframeValue.Value)
+		end)
+
+		local riseTween = TweenService:Create(cframeValue, SELECTED_WEAPON_RISE_TWEEN_INFO, {
+			Value = liftPivot,
+		})
+		activeWeaponMotionTweenByCategory[category] = riseTween
+
+		riseTween.Completed:Connect(function(playbackState)
+			if activeWeaponMotionTweenByCategory[category] == riseTween then
+				activeWeaponMotionTweenByCategory[category] = nil
+			end
+
+			if valueChangedConnection then
+				valueChangedConnection:Disconnect()
+				valueChangedConnection = nil
+			end
+
+			cframeValue:Destroy()
+
+			if playbackState ~= Enum.PlaybackState.Completed then
+				return
+			end
+
+			if not activePreview.Parent then
+				return
+			end
+
+			local elapsed = 0
+			activeWeaponMotionConnectionByCategory[category] = RunService.Heartbeat:Connect(function(dt)
+				if not activePreview.Parent then
+					stopWeaponSelectionMotion(category, false)
+					return
+				end
+
+				elapsed += dt
+				local bobY = SELECTED_WEAPON_RISE_HEIGHT + math.sin(elapsed * SELECTED_WEAPON_BOB_SPEED * math.pi * 2) * SELECTED_WEAPON_BOB_AMPLITUDE
+				setWeaponPreviewPivot(activePreview, basePivot * CFrame.new(0, bobY, 0))
+			end)
+		end)
+
+		riseTween:Play()
+	end
 
 	local function positionWeaponPreview(previewInstance: Instance, spawnTarget: LockerPreviewSpawnTarget)
 		local spawnPivot = getSpawnPivot(spawnTarget)
@@ -690,15 +1024,23 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			or categoryFolder:FindFirstChild("Default")
 	end
 
+	local function getWeaponPreviewStateId(category: WeaponCategory, itemKey: string?, previewId: string): string
+		local resolvedWeaponKey = if type(itemKey) == "string" and itemKey ~= "" then itemKey else "Default"
+		local loadout = Fusion.peek(DataController.Loadout) :: LoadoutData
+		local resolvedWrapId = resolveWeaponWrap(loadout, category, resolvedWeaponKey)
+		return previewId .. "::" .. resolvedWrapId
+	end
+
 	local function applyWeaponPreviewForCategory(category: string, itemKey: string?, itemName: string?, previewId: string)
 		if not isWeaponCategory(category) then
 			return
 		end
 
+		local previewCategory = category :: WeaponCategory
 		local resolvedWeaponKey = if type(itemKey) == "string" and itemKey ~= "" then itemKey else "Default"
 		local loadout = Fusion.peek(DataController.Loadout) :: LoadoutData
-		local resolvedWrapId = resolveWeaponWrap(loadout, category :: WeaponCategory, resolvedWeaponKey)
-		local previewStateId = previewId .. "::" .. resolvedWrapId
+		local resolvedWrapId = resolveWeaponWrap(loadout, previewCategory, resolvedWeaponKey)
+		local previewStateId = getWeaponPreviewStateId(previewCategory, itemKey, previewId)
 
 		local spawnTarget = getWeaponSpawnForCategory(category)
 		if not spawnTarget then
@@ -724,7 +1066,11 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		clonedWeapon.Name = category .. "WeaponPreview"
 		clonedWeapon.Parent = spawnTarget :: Instance
 		positionWeaponPreview(clonedWeapon, spawnTarget)
-		applyWrapToWeaponPreview(clonedWeapon, category :: WeaponCategory, resolvedWrapId)
+		local basePivot = getWeaponPreviewPivot(clonedWeapon)
+		if basePivot then
+			weaponPreviewBasePivotByCategory[category] = basePivot
+		end
+		applyWrapToWeaponPreview(clonedWeapon, previewCategory, resolvedWrapId)
 
 		activeWeaponPreviewByCategory[category] = clonedWeapon
 		activeWeaponPreviewItemIdByCategory[category] = previewStateId
@@ -735,7 +1081,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			return
 		end
 
-		local equippedItemKey = equippedLookup[category]
+		local equippedItemKey = getEquippedItemByCategory(category)
 		if type(equippedItemKey) ~= "string" or equippedItemKey == "" then
 			equippedItemKey = "Default"
 		end
@@ -748,6 +1094,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	restoreEquippedWeaponPreviews = function()
+		stopWeaponSelectionMotion("Main", true)
+		stopWeaponSelectionMotion("Special", true)
 		restoreEquippedWeaponPreviewForCategory("Main")
 		restoreEquippedWeaponPreviewForCategory("Special")
 	end
@@ -758,7 +1106,96 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			return
 		end
 
-		applyWeaponPreviewForCategory(item.Category, item.ItemKey, item.Name, item.Id)
+		local selectedCategory = item.Category :: WeaponCategory
+		if selectedCategory == "Main" then
+			stopWeaponSelectionMotion("Special", true)
+		else
+			stopWeaponSelectionMotion("Main", true)
+		end
+
+		local desiredPreviewStateId = getWeaponPreviewStateId(selectedCategory, item.ItemKey, item.Id)
+		local activePreviewStateId = activeWeaponPreviewItemIdByCategory[selectedCategory]
+		local currentPreview = activeWeaponPreviewByCategory[selectedCategory]
+		if currentPreview
+			and currentPreview.Parent
+			and activePreviewStateId == desiredPreviewStateId
+		then
+			if not activeWeaponMotionConnectionByCategory[selectedCategory]
+				and not activeWeaponMotionTweenByCategory[selectedCategory]
+			then
+				startWeaponSelectionMotion(selectedCategory)
+			end
+			return
+		end
+
+		local nextTransitionToken = (activeWeaponSelectionTransitionTokenByCategory[selectedCategory] or 0) + 1
+		activeWeaponSelectionTransitionTokenByCategory[selectedCategory] = nextTransitionToken
+
+		local currentBasePivot = weaponPreviewBasePivotByCategory[selectedCategory]
+		if not currentPreview or not currentPreview.Parent or not currentBasePivot then
+			applyWeaponPreviewForCategory(item.Category, item.ItemKey, item.Name, item.Id)
+			startWeaponSelectionMotion(selectedCategory)
+			return
+		end
+
+		stopWeaponSelectionMotion(selectedCategory, false)
+
+		local downPivot = currentBasePivot * CFrame.new(0, -SELECTED_WEAPON_SWITCH_DOWN_STUDS, 0)
+		local startPivot = getWeaponPreviewPivot(currentPreview) or currentBasePivot
+		local cframeValue = Instance.new("CFrameValue")
+		cframeValue.Value = startPivot
+		local valueChangedConnection: RBXScriptConnection? = nil
+
+		valueChangedConnection = cframeValue:GetPropertyChangedSignal("Value"):Connect(function()
+			if not currentPreview.Parent then
+				if valueChangedConnection then
+					valueChangedConnection:Disconnect()
+					valueChangedConnection = nil
+				end
+				return
+			end
+
+			setWeaponPreviewPivot(currentPreview, cframeValue.Value)
+		end)
+
+		local downTween = TweenService:Create(cframeValue, SELECTED_WEAPON_SWITCH_DOWN_TWEEN_INFO, {
+			Value = downPivot,
+		})
+		activeWeaponMotionTweenByCategory[selectedCategory] = downTween
+
+		downTween.Completed:Connect(function(playbackState)
+			if activeWeaponMotionTweenByCategory[selectedCategory] == downTween then
+				activeWeaponMotionTweenByCategory[selectedCategory] = nil
+			end
+
+			if valueChangedConnection then
+				valueChangedConnection:Disconnect()
+				valueChangedConnection = nil
+			end
+
+			cframeValue:Destroy()
+
+			if playbackState ~= Enum.PlaybackState.Completed then
+				return
+			end
+
+			if activeWeaponSelectionTransitionTokenByCategory[selectedCategory] ~= nextTransitionToken then
+				return
+			end
+
+			applyWeaponPreviewForCategory(item.Category, item.ItemKey, item.Name, item.Id)
+
+			local nextPreview = activeWeaponPreviewByCategory[selectedCategory]
+			local nextBasePivot = weaponPreviewBasePivotByCategory[selectedCategory]
+			if nextPreview and nextPreview.Parent and nextBasePivot then
+				setWeaponPreviewPivot(nextPreview, nextBasePivot * CFrame.new(0, -SELECTED_WEAPON_SWITCH_DOWN_STUDS, 0))
+				startWeaponSelectionMotion(selectedCategory, -SELECTED_WEAPON_SWITCH_DOWN_STUDS)
+			else
+				startWeaponSelectionMotion(selectedCategory)
+			end
+		end)
+
+		downTween:Play()
 	end
 	local function clearNavButtons()
 		navItemsJanitor:Cleanup()
@@ -820,6 +1257,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 	local function setSelectedMainCategory(categoryKey: LockerCategoryKey)
 		selectedMainCategory = categoryKey
+		updateWeaponCategoryIndicators()
 
 		for key, button in mainCategoryButtons do
 			local stroke = getButtonStroke(button)
@@ -971,7 +1409,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			return false
 		end
 
-		return equippedLookup[item.Category] == item.ItemKey
+		local equippedItem = getEquippedItemByCategory(item.Category)
+		return equippedItem == item.ItemKey
 	end
 
 	catalog = LockerCatalog.new(ItemsConfig, ITEMS_CONFIG_BY_NAV, DEFAULT_NAV_THUMBNAIL, getRarityRank, isItemOwned)
@@ -992,12 +1431,24 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		onSelectionChanged = function(item: LockerCatalogItem?)
 			selectedCatalogItem = item
 			if item and isWeaponCategory(item.Category) then
-				wrapsTargetWeaponCategory = item.Category :: WeaponCategory
-				wrapsTargetWeaponId = item.ItemKey
+				local selectedWeaponCategory = item.Category :: WeaponCategory
+				wrapsTargetWeaponCategory = selectedWeaponCategory
+				setStoredWrapsTargetWeaponId(selectedWeaponCategory, item.ItemKey)
+				updateWeaponCategoryIndicators()
 			end
 			applySelectedFacePreview(item)
 			applySelectedHatPreview(item)
 			applySelectedWeaponPreview(item)
+			if item and item.Category == "KillEffects" then
+				if skipNextKillEffectSelectionPreview then
+					skipNextKillEffectSelectionPreview = false
+					replaceKillEffectsDummy()
+				else
+					previewKillEffect(item.ItemKey)
+				end
+			elseif selectedMainCategory == "Effects" and selectedNavKey == KILL_EFFECTS_NAV_KEY then
+					replaceKillEffectsDummy()
+			end
 			updateActionFrameForSelected()
 		end,
 		onOwnedItemActivated = function(item: LockerCatalogItem)
@@ -1026,7 +1477,12 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	populateMainContentForNavItem = function(categoryKey: LockerCategoryKey, navKey: string, selectedItemId: string?)
 		local previousNavKey = selectedNavKey
 		selectedNavKey = navKey
-		if categoryKey ~= "Arsenal" or (previousNavKey ~= nil and previousNavKey ~= navKey) then
+		updateWeaponCategoryIndicators()
+		skipNextKillEffectSelectionPreview = categoryKey == "Effects"
+			and navKey == KILL_EFFECTS_NAV_KEY
+			and previousNavKey ~= navKey
+		updateKillEffectsPreviewState(categoryKey, navKey)
+		if categoryKey ~= "Arsenal" or previousNavKey ~= navKey then
 			restoreEquippedWeaponPreviews()
 		end
 		local preferredSelectedItemId = selectedItemId
@@ -1040,6 +1496,15 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			if type(equippedFace) == "string" and equippedFace ~= "" then
 				preferredSelectedItemId = "Faces." .. equippedFace
 			end
+		end
+
+		if preferredSelectedItemId == nil and categoryKey == "Arsenal" and isWeaponCategory(navKey) then
+			local weaponCategory = navKey :: WeaponCategory
+			local equippedWeapon = getEquippedWeaponByCategory(weaponCategory)
+			wrapsTargetWeaponCategory = weaponCategory
+			setStoredWrapsTargetWeaponId(weaponCategory, equippedWeapon)
+			updateWeaponCategoryIndicators()
+			preferredSelectedItemId = navKey .. "." .. equippedWeapon
 		end
 
 		if preferredSelectedItemId == nil and categoryKey == "Arsenal" and navKey == "Wraps" then
@@ -1161,11 +1626,32 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	local function selectItem(selectedKey: LockerCategoryKey)
+		if selectedMainCategory == selectedKey and selectedNavKey ~= nil then
+			return
+		end
+
 		setSelectedMainCategory(selectedKey)
+		cameraController:setTargetPartName(CAMERA_TARGET_BY_MAIN_CATEGORY[selectedKey])
 		if selectedKey ~= "Arsenal" then
 			restoreEquippedWeaponPreviews()
 		end
 		populateNavButtons(selectedKey)
+	end
+
+	local function handleMainCategoryButtonClick(selectedKey: LockerCategoryKey)
+		if selectedMainCategory == selectedKey and selectedNavKey ~= nil then
+			return
+		end
+
+		local now = os.clock()
+		if now < nextAllowedMainCategorySwitchAt then
+			return
+		end
+
+		nextAllowedMainCategorySwitchAt = now + MAIN_CATEGORY_SWITCH_COOLDOWN
+		clearItemGrid()
+		hideActionFrame()
+		selectItem(selectedKey)
 	end
 
 	local function updateStatsUiFromData()
@@ -1302,8 +1788,10 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 				return
 			end
 
-			wrapsTargetWeaponCategory = item.Category :: WeaponCategory
-			wrapsTargetWeaponId = item.ItemKey
+			local selectedWeaponCategory = item.Category :: WeaponCategory
+			wrapsTargetWeaponCategory = selectedWeaponCategory
+			setStoredWrapsTargetWeaponId(selectedWeaponCategory, item.ItemKey)
+			updateWeaponCategoryIndicators()
 
 			populateMainContentForNavItem("Arsenal", "Wraps", nil)
 		end), "Disconnect")
@@ -1350,11 +1838,16 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			applyEquippedHatPreview()
 			restoreEquippedWeaponPreviews()
 			applySelectedWeaponPreview(selectedCatalogItem)
+			if selectedMainCategory == "Effects" and selectedNavKey == KILL_EFFECTS_NAV_KEY then
+				if selectedCatalogItem and selectedCatalogItem.Category == "KillEffects" then
+					previewKillEffect(selectedCatalogItem.ItemKey)
+				else
+					replaceKillEffectsDummy()
+				end
+			end
 			refreshGridSelectionState()
 		end), true)
 	end)
-
-	local isOpen = false
 
 	local function setMenuVisibleInstant(visible: boolean)
 		menuGui.Enabled = visible
@@ -1368,6 +1861,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		isOpen = true
 		applyEquippedFacePreview()
 		applyEquippedHatPreview()
+		restoreEquippedWeaponPreviews()
 		selectItem("Arsenal")
 		hideActionFrame()
 		cameraController:apply()
@@ -1382,6 +1876,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 		isOpen = false
 		hideActionFrame()
+		destroyKillEffectsDummy()
 		restoreEquippedWeaponPreviews()
 		lockerGui.Enabled = false
 		cameraController:restore()
@@ -1391,24 +1886,19 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	janitor:Add(lockerBtn.MouseButton1Click:Connect(openLockerGui), "Disconnect")
 	janitor:Add(closeBtn.MouseButton1Click:Connect(closeLockerGui), "Disconnect")
 	janitor:Add(styleBtn.MouseButton1Click:Connect(function()
-		clearItemGrid()
-		hideActionFrame()
-		selectItem("Style")
+		handleMainCategoryButtonClick("Style")
 	end), "Disconnect")
 	janitor:Add(arsenalBtn.MouseButton1Click:Connect(function()
-		clearItemGrid()
-		hideActionFrame()
-		selectItem("Arsenal")
+		handleMainCategoryButtonClick("Arsenal")
 	end), "Disconnect")
 	janitor:Add(effectsBtn.MouseButton1Click:Connect(function()
-		clearItemGrid()
-		hideActionFrame()
-		selectItem("Effects")
+		handleMainCategoryButtonClick("Effects")
 	end), "Disconnect")
 
 	janitor:Add(lockerGui:GetPropertyChangedSignal("Enabled"):Connect(function()
 		if lockerGui.Enabled == false and isOpen then
 			isOpen = false
+			destroyKillEffectsDummy()
 			restoreEquippedWeaponPreviews()
 			cameraController:restore()
 			setMenuVisibleInstant(true)
@@ -1416,6 +1906,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end), "Disconnect")
 
 	janitor:Add(function()
+		destroyKillEffectsDummy()
 		if isOpen then
 			cameraController:restore()
 			setMenuVisibleInstant(true)

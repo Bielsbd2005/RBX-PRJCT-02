@@ -48,18 +48,31 @@ local function asset(assetId: number): string
 	return "rbxassetid://" .. tostring(assetId)
 end
 
+local WEAPON_IMAGE_IDS = {
+	Main = {
+		Default = 136728627576131,
+		Weapon2 = 122930463834964,
+		Weapon3 = 114523558287606,
+	},
+	Special = {
+		Default = 94351975111962,
+		Weapon4 = 94351975111962,
+		Weapon5 = 94351975111962,
+	},
+}
+
 local ItemsConfig: ItemsConfigType = {
 
 	Main = {
-		Default   = { Name = "Default",  		 Price = 0,    LevelRequired = 1,  Rarity = "Common",    CanPurchase = false },
-		Weapon2   = { Name = "Weapon1",         Price = 500,  LevelRequired = 5,  Rarity = "Uncommon",  CanPurchase = false },
-		Weapon3   = { Name = "Weapon2",         Price = 1000, LevelRequired = 10, Rarity = "Rare",      CanPurchase = false },
+		Default   = { Name = "Default",  		 Price = 0,    LevelRequired = 1,  Rarity = "Common",    Image = asset(WEAPON_IMAGE_IDS.Main.Default), CanPurchase = false },
+		Weapon2   = { Name = "Weapon1",         Price = 500,  LevelRequired = 5,  Rarity = "Uncommon",  Image = asset(WEAPON_IMAGE_IDS.Main.Weapon2), CanPurchase = false },
+		Weapon3   = { Name = "Weapon2",         Price = 1000, LevelRequired = 10, Rarity = "Rare",      Image = asset(WEAPON_IMAGE_IDS.Main.Weapon3), CanPurchase = false },
 	},
 
 	Special = {
-		Default   = { Name = "Default",  		 Price = 0,    LevelRequired = 1,  Rarity = "Common",    CanPurchase = false },
-		Weapon4   = { Name = "Weapon1",         Price = 2000, LevelRequired = 15, Rarity = "Epic",      CanPurchase = false },
-		Weapon5   = { Name = "Weapon2",         Price = 3500, LevelRequired = 20, Rarity = "Epic",      CanPurchase = false },
+		Default   = { Name = "Default",  		 Price = 0,    LevelRequired = 1,  Rarity = "Common",    Image = asset(WEAPON_IMAGE_IDS.Special.Default), CanPurchase = false },
+		Weapon4   = { Name = "Weapon1",         Price = 2000, LevelRequired = 15, Rarity = "Epic",      Image = asset(WEAPON_IMAGE_IDS.Special.Weapon4), CanPurchase = false },
+		Weapon5   = { Name = "Weapon2",         Price = 3500, LevelRequired = 20, Rarity = "Epic",      Image = asset(WEAPON_IMAGE_IDS.Special.Weapon5), CanPurchase = false },
 	},
 
 	WeaponSkins = {
@@ -68,6 +81,7 @@ local ItemsConfig: ItemsConfigType = {
 			Price = 0,
 			LevelRequired = 1,
 			Rarity = "Common",
+			Image = asset(109044845487335),
 			CanPurchase = false,
 			BaseColor = Color3.fromRGB(255, 255, 255),
 			Animated = false,

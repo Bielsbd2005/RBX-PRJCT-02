@@ -1,6 +1,7 @@
 --!strict
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
 
 local Packages = ReplicatedStorage:WaitForChild("Packages")
 
@@ -51,6 +52,14 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 	local PrestigeFeature = require(clientRoot.features.prestige)
 
 	DataController:Start()
+
+	local camera = Workspace.CurrentCamera
+	local camerasFolder = Workspace:WaitForChild("Cameras")
+	local lobbyPart = camerasFolder:WaitForChild("lobby")
+	if camera and lobbyPart:IsA("BasePart") then
+		camera.CameraType = Enum.CameraType.Scriptable
+		camera.CFrame = lobbyPart.CFrame
+	end
 
 	local menuController = MenuController.new()
 	_janitor:Add(menuController, "Destroy")
