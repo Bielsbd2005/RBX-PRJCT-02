@@ -300,6 +300,22 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		table.clear(tweenMap)
 	end
 
+	local function disconnectFromMap(map: { [any]: RBXScriptConnection }, key: any)
+		local conn = map[key]
+		if conn then
+			conn:Disconnect()
+			map[key] = nil
+		end
+	end
+
+	local function cancelTweenFromMap(map: { [any]: Tween }, key: any)
+		local tw = map[key]
+		if tw then
+			tw:Cancel()
+			map[key] = nil
+		end
+	end
+
 	local function getSpawnPivot(spawnTarget: LockerPreviewSpawnTarget): CFrame
 		if spawnTarget:IsA("BasePart") then
 			return spawnTarget.CFrame
@@ -622,7 +638,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	local function setStoredWrapsTargetWeaponId(weaponCategory: WeaponCategory, weaponId: string?)
-		wrapsTargetWeaponIdByCategory[weaponCategory] = if type(weaponId) == "string" and weaponId ~= "" then weaponId else ""
+		wrapsTargetWeaponIdByCategory[weaponCategory] = getOptionalString(weaponId) or ""
 	end
 
 	local function getResolvedWeaponIdForCategory(weaponCategory: WeaponCategory, loadout: LoadoutData?): string
@@ -633,8 +649,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 		if loadout then
 			local weaponSlot = CATEGORY_TO_LOADOUT_SLOT[weaponCategory]
-			local weaponKey = if weaponSlot then loadout[weaponSlot] else nil
-			if type(weaponKey) == "string" and weaponKey ~= "" then
+			local weaponKey = if weaponSlot then getOptionalString(loadout[weaponSlot]) else nil
+			if weaponKey then
 				return weaponKey
 			end
 		end
@@ -701,28 +717,23 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	local function resolveWeaponWrap(loadout: LoadoutData, weaponCategory: WeaponCategory, weaponKey: string?): string
-		local normalizedWeaponKey = if type(weaponKey) == "string" and weaponKey ~= "" then weaponKey else "Default"
+		local normalizedWeaponKey = getOptionalString(weaponKey) or "Default"
 		local wrapsTableKey = if weaponCategory == "Main" then "MainWeaponWraps" else "SpecialWeaponWraps"
 		local wrapsTableAny = loadout[wrapsTableKey]
 		if type(wrapsTableAny) == "table" then
 			local wrapsTable = wrapsTableAny :: { [string]: string }
-			local byWeapon = wrapsTable[normalizedWeaponKey]
-			if type(byWeapon) == "string" and byWeapon ~= "" then
-				return byWeapon
+			local resolvedByWeapon = getOptionalString(wrapsTable[normalizedWeaponKey])
+			if resolvedByWeapon then
+				return resolvedByWeapon
 			end
 
-			local defaultWrap = wrapsTable.Default
-			if type(defaultWrap) == "string" and defaultWrap ~= "" then
-				return defaultWrap
+			local resolvedDefault = getOptionalString(wrapsTable.Default)
+			if resolvedDefault then
+				return resolvedDefault
 			end
 		end
 
-		local legacyActiveSkin = loadout.ActiveSkin
-		if type(legacyActiveSkin) == "string" and legacyActiveSkin ~= "" then
-			return legacyActiveSkin
-		end
-
-		return "Default"
+		return getOptionalString(loadout.ActiveSkin) or "Default"
 	end
 
 	local function isWeaponCategory(category: string): boolean
@@ -759,12 +770,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 	local function destroyWeaponPreviewForCategory(category: string)
 		stopWeaponSelectionMotion(category, false)
-
-		local wrapAnimationConnection = activeWeaponWrapAnimationByCategory[category]
-		if wrapAnimationConnection then
-			wrapAnimationConnection:Disconnect()
-			activeWeaponWrapAnimationByCategory[category] = nil
-		end
+		disconnectFromMap(activeWeaponWrapAnimationByCategory, category)
 
 		local activePreview = activeWeaponPreviewByCategory[category]
 		if activePreview and activePreview.Parent then
@@ -803,17 +809,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	stopWeaponSelectionMotion = function(category: string, restoreToBase: boolean?)
-		local motionConnection = activeWeaponMotionConnectionByCategory[category]
-		if motionConnection then
-			motionConnection:Disconnect()
-			activeWeaponMotionConnectionByCategory[category] = nil
-		end
-
-		local motionTween = activeWeaponMotionTweenByCategory[category]
-		if motionTween then
-			motionTween:Cancel()
-			activeWeaponMotionTweenByCategory[category] = nil
-		end
+		disconnectFromMap(activeWeaponMotionConnectionByCategory, category)
+		cancelTweenFromMap(activeWeaponMotionTweenByCategory, category)
 
 		if restoreToBase ~= false then
 			local activePreview = activeWeaponPreviewByCategory[category]
@@ -927,15 +924,22 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end
 
 		local categoryLookup = ownedLookup[category]
-		return not (categoryLookup and categoryLookup[itemKey] == true)
+		if categoryLookup and categoryLookup[itemKey] == true then
+			return false
+		end
+
+		local categoryConfig = ItemsConfig[category]
+		local definition = if type(categoryConfig) == "table" then categoryConfig[itemKey] else nil
+		local levelRequired = if type(definition) == "table" then tonumber(definition.LevelRequired) else nil
+		if levelRequired and getCurrentLevel() < levelRequired then
+			return true
+		end
+
+		return false
 	end
 
 	local function applyLockedWeaponPreviewAppearance(previewInstance: Instance, weaponCategory: WeaponCategory)
-		local previousAnimationConnection = activeWeaponWrapAnimationByCategory[weaponCategory]
-		if previousAnimationConnection then
-			previousAnimationConnection:Disconnect()
-			activeWeaponWrapAnimationByCategory[weaponCategory] = nil
-		end
+		disconnectFromMap(activeWeaponWrapAnimationByCategory, weaponCategory)
 
 		for _, descendant in previewInstance:GetDescendants() do
 			if descendant:IsA("MeshPart") then
@@ -954,24 +958,19 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			return
 		end
 
-		local previousAnimationConnection = activeWeaponWrapAnimationByCategory[weaponCategory]
-		if previousAnimationConnection then
-			previousAnimationConnection:Disconnect()
-			activeWeaponWrapAnimationByCategory[weaponCategory] = nil
-		end
+		disconnectFromMap(activeWeaponWrapAnimationByCategory, weaponCategory)
 
 		local wrapsConfig = ItemsConfig.WeaponSkins
 		local wrapDefinition = if type(wrapsConfig) == "table" then wrapsConfig[wrapId] else nil
-		local textureId = if type(wrapDefinition) == "table" and type(wrapDefinition.TextureID) == "string" and wrapDefinition.TextureID ~= ""
-			then wrapDefinition.TextureID
-			else nil
-		local baseColor = if type(wrapDefinition) == "table" and typeof(wrapDefinition.BaseColor) == "Color3"
+		local validDef = type(wrapDefinition) == "table"
+		local textureId = if validDef then getOptionalString(wrapDefinition.TextureID) else nil
+		local baseColor = if validDef and typeof(wrapDefinition.BaseColor) == "Color3"
 			then wrapDefinition.BaseColor
 			else nil
-		local studsPerTile = if type(wrapDefinition) == "table"
+		local studsPerTile = if validDef
 			then math.max(0.01, tonumber(wrapDefinition.StudsPerTile) or DEFAULT_WRAP_STUDS_PER_TILE)
 			else DEFAULT_WRAP_STUDS_PER_TILE
-		local animated = type(wrapDefinition) == "table" and wrapDefinition.Animated == true
+		local animated = validDef and wrapDefinition.Animated == true
 		local animatedTextures = {} :: { Texture }
 
 		for _, child in primaryPart:GetChildren() do
@@ -1040,14 +1039,14 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		if locked then
 			return previewId .. "::locked"
 		end
-		local resolvedWeaponKey = if type(itemKey) == "string" and itemKey ~= "" then itemKey else "Default"
+		local resolvedWeaponKey = getOptionalString(itemKey) or "Default"
 		local loadout = getCurrentLoadout()
 		local resolvedWrapId = resolveWeaponWrap(loadout, category, resolvedWeaponKey)
 		return previewId .. "::" .. resolvedWrapId .. "::unlocked"
 	end
 
 	local function getOrCreateLockedWeaponTemplate(category: string, itemKey: string?, itemName: string?): Instance?
-		local resolvedKey = if type(itemKey) == "string" and itemKey ~= "" then itemKey else "Default"
+		local resolvedKey = getOptionalString(itemKey) or "Default"
 		local cacheKey = category .. "::" .. resolvedKey
 		local cached = lockedWeaponTemplateCache[cacheKey]
 		if cached then
@@ -1111,7 +1110,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			weaponPreviewBasePivotByCategory[category] = basePivot
 		end
 		if not previewLocked then
-			local resolvedWeaponKey = if type(itemKey) == "string" and itemKey ~= "" then itemKey else "Default"
+			local resolvedWeaponKey = getOptionalString(itemKey) or "Default"
 			local loadout = getCurrentLoadout()
 			local resolvedWrapId = resolveWeaponWrap(loadout, previewCategory, resolvedWeaponKey)
 			applyWrapToWeaponPreview(clonedWeapon, previewCategory, resolvedWrapId)
@@ -1126,10 +1125,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			return
 		end
 
-		local equippedItemKey = getEquippedItemByCategory(category)
-		if type(equippedItemKey) ~= "string" or equippedItemKey == "" then
-			equippedItemKey = "Default"
-		end
+		local equippedItemKey = getEquippedItemByCategory(category) or "Default"
 
 		local categoryConfig = ItemsConfig[category]
 		local definition = if type(categoryConfig) == "table" then categoryConfig[equippedItemKey] else nil
@@ -1313,13 +1309,13 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end
 	end
 
-	local function bindMainCategoryHover(button: GuiButton, categoryKey: LockerCategoryKey)
+	local function bindStrokeHover(button: GuiButton, parentJanitor: any, isSelected: () -> boolean)
 		if not canUseHoverAnimations then
 			return
 		end
 
-		janitor:Add(button.MouseEnter:Connect(function()
-			if selectedMainCategory ~= categoryKey then
+		parentJanitor:Add(button.MouseEnter:Connect(function()
+			if not isSelected() then
 				local stroke = getButtonStroke(button)
 				if stroke then
 					stroke.Color = STROKE_WHITE
@@ -1327,8 +1323,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			end
 		end), "Disconnect")
 
-		janitor:Add(button.MouseLeave:Connect(function()
-			if selectedMainCategory ~= categoryKey then
+		parentJanitor:Add(button.MouseLeave:Connect(function()
+			if not isSelected() then
 				local stroke = getButtonStroke(button)
 				if stroke then
 					stroke.Color = STROKE_DEFAULT
@@ -1646,25 +1642,9 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 				stroke.Color = STROKE_DEFAULT
 			end
 
-			if canUseHoverAnimations then
-				navItemsJanitor:Add(navButton.MouseEnter:Connect(function()
-					if navButton ~= selectedNavButton then
-						local buttonStroke = getButtonStroke(navButton)
-						if buttonStroke then
-							buttonStroke.Color = STROKE_WHITE
-						end
-					end
-				end), "Disconnect")
-
-				navItemsJanitor:Add(navButton.MouseLeave:Connect(function()
-					if navButton ~= selectedNavButton then
-						local buttonStroke = getButtonStroke(navButton)
-						if buttonStroke then
-							buttonStroke.Color = STROKE_DEFAULT
-						end
-					end
-				end), "Disconnect")
-			end
+			bindStrokeHover(navButton, navItemsJanitor, function()
+				return navButton == selectedNavButton
+			end)
 
 			navItemsJanitor:Add(navButton.Activated:Connect(function()
 				setSelectedNavButton(navButton)
@@ -1726,7 +1706,9 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	for categoryKey, button in mainCategoryButtons do
-		bindMainCategoryHover(button, categoryKey)
+		bindStrokeHover(button, janitor, function()
+			return selectedMainCategory == categoryKey
+		end)
 	end
 
 	navTemplate.Visible = false

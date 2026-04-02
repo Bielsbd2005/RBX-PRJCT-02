@@ -265,7 +265,7 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 	local currentLevel = self._cachedLevel
 	local isLevelLocked = not owned and currentLevel < item.LevelRequired
 	local isSelectedButton = button == self._selectedCatalogButton
-	local shouldBlackoutWeaponImage = shouldUseFullSizeWeaponImage(item) and not owned
+	local shouldBlackoutWeaponImage = shouldUseFullSizeWeaponImage(item) and isLevelLocked
 
 	if refs.itemNode then
 		refs.itemNode.ImageColor3 = if shouldBlackoutWeaponImage then GRID_ITEM_LOCKED_WEAPON_COLOR else GRID_ITEM_DEFAULT_COLOR
@@ -437,7 +437,7 @@ function LockerGrid:_applyCatalogItemToCard(card: GuiObject, item: LockerCatalog
 		refs.itemNode.Image = item.Image
 		if shouldUseFullSizeWeaponImage(item) then
 			refs.itemNode.Size = UDim2.fromScale(1, 1)
-			refs.itemNode.ImageColor3 = if self._callbacks.isItemOwned(item) then GRID_ITEM_DEFAULT_COLOR else GRID_ITEM_LOCKED_WEAPON_COLOR
+			refs.itemNode.ImageColor3 = if self._cachedLevel >= item.LevelRequired then GRID_ITEM_DEFAULT_COLOR else GRID_ITEM_LOCKED_WEAPON_COLOR
 		elseif refs.itemNodeDefaultSize then
 			refs.itemNode.Size = refs.itemNodeDefaultSize
 		end
