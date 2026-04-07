@@ -130,8 +130,8 @@ local function updateTopHud(hudRefs: HudRefs, stats: StatsData): ()
 		hudRefs.xpLabel.Text = string.format("%d / %d", stats.XP, stats.XPToNextLevel)
 	end
 
-	setText(hudRefs.actualLabel, tostring(stats.Level))
-	setText(hudRefs.nextLabel, tostring(stats.Level + 1))
+	setText(hudRefs.actualLabel, "Lvl " .. tostring(stats.Level))
+	setText(hudRefs.nextLabel, "Lvl " .. tostring(stats.Level + 1))
 end
 
 function MenuController.new(): MenuController
