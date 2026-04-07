@@ -12,17 +12,11 @@ local Fusion = require(Packages.fusion) :: any
 local MenuAnimator = require(script.Parent.animators.MenuAnimator)
 local MenuHover = require(script.Parent.MenuHover)
 local DataController = require(script.Parent.Parent.data.DataController)
-local PrestigeConfig = require(Shared.constants.PrestigeConfig)
-
 type StatsData = {
 	Level: number,
 	XP: number,
 	XPToNextLevel: number,
 	Cash: number,
-}
-
-type PrestigeData = {
-	Current: number,
 }
 
 type HudRefs = {
@@ -31,7 +25,6 @@ type HudRefs = {
 	xpLabel: TextLabel?,
 	actualLabel: TextLabel?,
 	nextLabel: TextLabel?,
-	menuPrestige: GuiObject?,
 }
 
 export type MenuController = {
@@ -86,7 +79,6 @@ local function resolveHudRefs(menuGui: ScreenGui): HudRefs
 			xpLabel = nil,
 			actualLabel = nil,
 			nextLabel = nil,
-			menuPrestige = nil,
 		}
 	end
 
@@ -102,7 +94,6 @@ local function resolveHudRefs(menuGui: ScreenGui): HudRefs
 			xpLabel = nil,
 			actualLabel = nil,
 			nextLabel = nil,
-			menuPrestige = upper:FindFirstChild("Prestige") :: GuiObject?,
 		}
 	end
 
@@ -117,21 +108,11 @@ local function resolveHudRefs(menuGui: ScreenGui): HudRefs
 		xpLabel = xpLabel,
 		actualLabel = findTextLabel(xpNode, { "Actual", "Current", "NivelActual" }),
 		nextLabel = findTextLabel(xpNode, { "Proximo", "Próximo", "Next", "Siguiente" }),
-		menuPrestige = upper:FindFirstChild("Prestige") :: GuiObject?,
 	}
 end
 
-local function canShowMenuPrestige(stats: StatsData, prestige: PrestigeData): boolean
-	local nextDefinition = PrestigeConfig.GetNextDefinition(prestige.Current)
-	if not nextDefinition then
-		return false
-	end
-
-	return stats.Level >= nextDefinition.UnlockLevel
-end
-
-local function updateTopHud(hudRefs: HudRefs, stats: StatsData, prestige: PrestigeData): ()
-	if not hudRefs.cashValue and not hudRefs.xpFill and not hudRefs.xpLabel and not hudRefs.actualLabel and not hudRefs.nextLabel and not hudRefs.menuPrestige then
+local function updateTopHud(hudRefs: HudRefs, stats: StatsData): ()
+	if not hudRefs.cashValue and not hudRefs.xpFill and not hudRefs.xpLabel and not hudRefs.actualLabel and not hudRefs.nextLabel then
 		return
 	end
 
@@ -151,10 +132,6 @@ local function updateTopHud(hudRefs: HudRefs, stats: StatsData, prestige: Presti
 
 	setText(hudRefs.actualLabel, tostring(stats.Level))
 	setText(hudRefs.nextLabel, tostring(stats.Level + 1))
-
-	if hudRefs.menuPrestige then
-		hudRefs.menuPrestige.Visible = canShowMenuPrestige(stats, prestige)
-	end
 end
 
 function MenuController.new(): MenuController
@@ -180,15 +157,11 @@ function MenuController.new(): MenuController
 	DataController:WhenReady():andThen(function()
 		local function updateHudFromState()
 			local stats = Fusion.peek(DataController.Stats) :: StatsData
-			local prestige = Fusion.peek(DataController.Prestige) :: PrestigeData
-			updateTopHud(self._hudRefs, stats, prestige)
+			updateTopHud(self._hudRefs, stats)
 		end
 
 		local statsObserver = self._fusionScope:Observer(DataController.Stats)
 		self._janitor:Add(statsObserver:onBind(updateHudFromState), true)
-
-		local prestigeObserver = self._fusionScope:Observer(DataController.Prestige)
-		self._janitor:Add(prestigeObserver:onBind(updateHudFromState), true)
 	end)
 
 	return self

@@ -50,7 +50,6 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 	local StoreFeature = require(clientRoot.features.store)
 	local SettingsFeature = require(clientRoot.features.settings)
 	local RewardsFeature = require(clientRoot.features.rewards)
-	local PrestigeFeature = require(clientRoot.features.prestige)
 	local CasesFeature = require(clientRoot.features.cases)
 
 	DataController:Start()
@@ -71,7 +70,6 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 		{ label = "store", start = StoreFeature.start },
 		{ label = "settings", start = SettingsFeature.start },
 		{ label = "rewards", start = RewardsFeature.start },
-		{ label = "prestige", start = PrestigeFeature.start },
 		{ label = "cases", start = CasesFeature.start },
 	} :: { DeferredFeatureEntry }
 

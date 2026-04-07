@@ -148,31 +148,6 @@ local RewardsNamespace = ByteNet.DefineNamespace("Rewards", function()
 end)
 
 -- ────────────────────────────────────────────────────────────
--- NAMESPACE: Prestige
--- Solicitud de ascenso de prestige y respuesta del servidor.
--- ────────────────────────────────────────────────────────────
-
-local PrestigeNamespace = ByteNet.DefineNamespace("Prestige", function()
-	return {
-		-- C → S: intento de subir de prestige.
-		Request = ByteNet.DefinePacket({
-			Value = ByteNet.Struct({}),
-			ReliabilityType = "Reliable",
-		}),
-
-		-- S → C: resultado de la operacion.
-		Response = ByteNet.DefinePacket({
-			Value = ByteNet.Struct({
-				success = ByteNet.Bool,
-				message = ByteNet.String,
-				newPrestige = ByteNet.Int32,
-			}),
-			ReliabilityType = "Reliable",
-		}),
-	}
-end)
-
--- ────────────────────────────────────────────────────────────
 -- NAMESPACE: Debug
 -- Herramientas de depuracion (solo Studio/dev en servidor).
 -- ────────────────────────────────────────────────────────────
@@ -187,5 +162,4 @@ return {
 	Shop       = ShopNamespace,
 	Combat     = CombatNamespace,
 	Rewards    = RewardsNamespace,
-	Prestige   = PrestigeNamespace,
 }

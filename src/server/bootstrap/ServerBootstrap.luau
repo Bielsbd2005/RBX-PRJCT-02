@@ -16,7 +16,6 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	local StoreService = require(serverRoot.features.store.StoreService)
 	local SettingsService = require(serverRoot.features.settings.SettingsService)
 	local RewardsService = require(serverRoot.features.rewards.RewardsService)
-	local PrestigeService = require(serverRoot.features.prestige.PrestigeService)
 	local ClearDataCommandService = require(serverRoot.features.testing.ClearDataCommandService)
 
 	DataService:Start()
@@ -24,7 +23,6 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	StoreService:Start(DataService)
 	SettingsService:Start(DataService)
 	RewardsService:Start(DataService)
-	PrestigeService:Start(DataService)
 	ClearDataCommandService:Start(DataService)
 end
 

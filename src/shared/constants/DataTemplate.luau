@@ -28,12 +28,6 @@ export type Stats = {
 	Gems: number,
 }
 
-export type Prestige = {
-	Current: number,
-	Badges: { [string]: boolean },
-	LastPrestigeAt: number,
-}
-
 -- Cada categoría es un mapa string → bool (true = desbloqueado)
 export type Inventory = {
 	Main: { [string]: boolean },
@@ -87,7 +81,6 @@ export type Metadata = {
 
 export type PlayerProfile = {
 	Stats: Stats,
-	Prestige: Prestige,
 	Inventory: Inventory,
 	Loadout: Loadout,
 	Settings: Settings,
@@ -112,14 +105,6 @@ local DEFAULT: PlayerProfile = {
 		Losses = 0,
 		Cash = 500,
 		Gems = 0,
-	},
-
-	Prestige = {
-		Current = 0,
-		Badges = {
-			["0"] = true,
-		},
-		LastPrestigeAt = 0,
 	},
 
 	Inventory = {

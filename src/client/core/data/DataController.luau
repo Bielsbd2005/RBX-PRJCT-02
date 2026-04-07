@@ -73,7 +73,6 @@ local _readyResolve:  ((any) -> ())? = nil
 local DataController = {}
 
 DataController.Stats     = nil :: any
-DataController.Prestige  = nil :: any
 DataController.Inventory = nil :: any
 DataController.Loadout   = nil :: any
 DataController.Settings  = nil :: any
@@ -108,7 +107,6 @@ function DataController:Start(): ()
 
 	-- Inicializar Values con los datos por defecto del template
 	DataController.Stats     = _scope:Value(DataTemplate.Stats)
-	DataController.Prestige  = _scope:Value(DataTemplate.Prestige)
 	DataController.Inventory = _scope:Value(DataTemplate.Inventory)
 	DataController.Loadout   = _scope:Value(DataTemplate.Loadout)
 	DataController.Settings  = _scope:Value(DataTemplate.Settings)
@@ -128,7 +126,6 @@ function DataController:Start(): ()
 
 		-- ── Sembrar Values con snapshot inicial ──────────
 		DataController.Stats:set(replica.Data.Stats)
-		DataController.Prestige:set(replica.Data.Prestige)
 		DataController.Inventory:set(replica.Data.Inventory)
 		DataController.Loadout:set(replica.Data.Loadout)
 		DataController.Settings:set(replica.Data.Settings)
@@ -141,12 +138,6 @@ function DataController:Start(): ()
 		replica:AddCleanupTask(
 			replica:ListenToChange({ "Stats" }, function(newStats: any)
 				DataController.Stats:set(newStats)
-			end)
-		)
-
-		replica:AddCleanupTask(
-			replica:ListenToChange({ "Prestige" }, function(newPrestige: any)
-				DataController.Prestige:set(newPrestige)
 			end)
 		)
 
