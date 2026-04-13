@@ -11,6 +11,7 @@ local APPROACH_TWEEN_INFO = TweenInfo.new(0.45, Enum.EasingStyle.Sine, Enum.Easi
 local DOF_APPLY_TWEEN_INFO = TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local DOF_RESET_TWEEN_INFO = TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local FOV_APPLY_TWEEN_INFO = TweenInfo.new(0.55, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local WRAP_ZOOM_TWEEN_INFO = TweenInfo.new(0.85, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
 local TRANSITION_OFFSET = CFrame.new(0, -2.25, 1.5)
 local DEFAULT_FOCUS_DISTANCE = 16.66
 local TARGET_DOF_FAR_INTENSITY = 0.55
@@ -34,6 +35,8 @@ export type LockerCameraController = {
 	_mouseParallax: any,
 	_parallaxBaseCFrame: CFrame,
 	setTargetPartName: (self: LockerCameraController, targetPartName: string, refreshIfApplied: boolean?) -> (),
+	zoomOnPosition: (self: LockerCameraController, targetPosition: Vector3) -> (),
+	unzoom: (self: LockerCameraController) -> (),
 	apply: (self: LockerCameraController) -> (),
 	restore: (self: LockerCameraController) -> (),
 	Destroy: (self: LockerCameraController) -> (),
@@ -150,6 +153,10 @@ end
 
 function LockerCameraController:setTargetPartName(targetPartName: string, refreshIfApplied: boolean?)
 	local nextTargetPart = resolveTargetPart(targetPartName)
+	self:setTargetPart(nextTargetPart, refreshIfApplied)
+end
+
+function LockerCameraController:setTargetPart(nextTargetPart: BasePart, refreshIfApplied: boolean?)
 	if self._targetPart == nextTargetPart then
 		return
 	end
@@ -159,6 +166,66 @@ function LockerCameraController:setTargetPartName(targetPartName: string, refres
 	if refreshIfApplied ~= false and self._isApplied then
 		self:apply()
 	end
+end
+
+function LockerCameraController:zoomOnPosition(targetPosition: Vector3)
+	if not self._isApplied then return end
+
+	local currentBase = self._targetPart.CFrame
+	local lookCFrame = CFrame.lookAt(currentBase.Position, targetPosition)
+	local distance = (currentBase.Position - targetPosition).Magnitude
+	local zoomCFrame = lookCFrame + lookCFrame.LookVector * (distance * 0.3)
+	zoomCFrame = zoomCFrame + lookCFrame.RightVector * 2
+
+	self:_cancelActiveTweens()
+	self:_setParallaxBaseCFrame(zoomCFrame)
+	self._mouseParallax:stop(true)
+
+	self._cameraApproachTween = TweenService:Create(self._camera, WRAP_ZOOM_TWEEN_INFO, {
+		CFrame = zoomCFrame
+	})
+
+	local finalFov = self._savedFieldOfView or self._camera.FieldOfView
+	self._fovTween = TweenService:Create(self._camera, WRAP_ZOOM_TWEEN_INFO, {
+		FieldOfView = math.clamp(finalFov - 6, 20, 90)
+	})
+
+	self._cameraApproachTween:Play()
+	self._fovTween:Play()
+end
+
+function LockerCameraController:unzoom()
+	if not self._isApplied then return end
+
+	self:_cancelActiveTweens()
+
+	local targetCFrame = self._targetPart.CFrame
+
+	self._cameraApproachTween = TweenService:Create(self._camera, WRAP_ZOOM_TWEEN_INFO, {
+		CFrame = targetCFrame
+	})
+
+	self._cameraApproachCompletedConnection = self._cameraApproachTween.Completed:Connect(function(playbackState)
+		if self._cameraApproachCompletedConnection then
+			self._cameraApproachCompletedConnection:Disconnect()
+			self._cameraApproachCompletedConnection = nil
+		end
+
+		if playbackState ~= Enum.PlaybackState.Completed then
+			return
+		end
+
+		self:_setParallaxBaseCFrame(targetCFrame)
+		self._mouseParallax:start()
+	end)
+
+	local finalFov = self._savedFieldOfView or 70
+	self._fovTween = TweenService:Create(self._camera, WRAP_ZOOM_TWEEN_INFO, {
+		FieldOfView = finalFov
+	})
+
+	self._cameraApproachTween:Play()
+	self._fovTween:Play()
 end
 
 function LockerCameraController:apply()

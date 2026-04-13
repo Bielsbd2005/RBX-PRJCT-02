@@ -106,11 +106,10 @@ function RewardsFeature.start(menuController: any): any
 	local mainFrame = container:WaitForChild("MainFrame") :: Frame
 	local closeBtn = mainFrame:WaitForChild("CloseBtn") :: GuiButton
 	local contentBackground = mainFrame:WaitForChild("ContentBackground") :: Frame
-	local rewardsList = contentBackground:WaitForChild("RewardsList") :: Frame
 
-	local likeJoinClaimBtn = rewardsList:WaitForChild("Like&Join"):WaitForChild("Claim") :: ImageButton
-	local notificationsClaimBtn = rewardsList:WaitForChild("Notifications"):WaitForChild("Claim") :: ImageButton
-	local claimCodesNode = rewardsList:WaitForChild("ClaimCodes") :: Frame
+	local likeJoinClaimBtn = contentBackground:WaitForChild("Like&Join"):WaitForChild("Claim") :: ImageButton
+	local notificationsClaimBtn = contentBackground:WaitForChild("Notifications"):WaitForChild("Claim") :: ImageButton
+	local claimCodesNode = contentBackground:WaitForChild("ClaimCodes") :: Frame
 	local claimCodeBtn = claimCodesNode:WaitForChild("Claim") :: ImageButton
 	local codeTextBox = claimCodesNode:WaitForChild("TextBox") :: TextBox
 

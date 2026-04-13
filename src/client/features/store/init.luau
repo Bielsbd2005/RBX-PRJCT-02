@@ -57,7 +57,7 @@ local function findFooterButton(menuGui: ScreenGui, buttonName: string): GuiButt
 	return nil
 end
 
-local function findCloseButton(root: Instance): GuiButton?
+local function _findCloseButton(root: Instance): GuiButton?
 	for _, closeButtonName in CLOSE_BUTTON_NAMES do
 		local candidate = root:FindFirstChild(closeButtonName, true)
 		if candidate and candidate:IsA("GuiButton") then
@@ -91,12 +91,26 @@ function StoreFeature.start(menuController: any): any
 		return janitor
 	end
 
-	local main = storeGui:WaitForChild("Main")
-	local footer = storeGui:WaitForChild("Footer")
 	local container = findContainer(storeGui)
-	local closeButton = footer:WaitForChild("CloseBtn") :: GuiButton
-	local cashContainer = (main :: Instance):WaitForChild("Container"):WaitForChild("Cash")
-	local animator = if container then GuiAnimator.new(storeGui, container) else nil
+	if not container then
+		warn("[StoreFeature] No se pudo encontrar el Container en", storeGui:GetFullName())
+		return janitor
+	end
+
+	local nav = container:WaitForChild("Nav")
+	local closeButton = _findCloseButton(container)
+	if not closeButton then
+		warn("[StoreFeature] No se encontro boton de cerrar en Store")
+		return janitor
+	end
+	
+	local cashContainer = container:FindFirstChild("Cash", true)
+	if not cashContainer then
+		warn("[StoreFeature] No se encontro el contenedor Cash")
+		return janitor
+	end
+
+	local animator = GuiAnimator.new(storeGui, container)
 	local activeFovTween: Tween? = nil
 	local savedFov: number? = nil
 	local isOpen = false
@@ -162,6 +176,89 @@ function StoreFeature.start(menuController: any): any
 
 	bindCashButtons()
 
+	local navFrames = {}
+	local navButtons = {}
+	local activeNavTab = nil
+	local defaultStrokeColors = {}
+
+	local SELECTED_COLOR = Color3.fromRGB(249, 217, 93)
+	local UNSELECTED_COLOR = Color3.fromRGB(35, 54, 99)
+	local HOVER_STROKE_COLOR = Color3.fromRGB(255, 255, 255)
+	local NAV_TWEEN_INFO = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+	local function updateNavTabsVisuals()
+		for name, btn in navButtons do
+			local isSelected = (activeNavTab == name)
+			
+			local targetScale = if isSelected then 1.15 else 1.0
+			local targetColor = if isSelected then SELECTED_COLOR else UNSELECTED_COLOR
+			
+			local scaleNode = btn:FindFirstChildOfClass("UIScale")
+			if not scaleNode then
+				scaleNode = Instance.new("UIScale")
+				scaleNode.Name = "NavScale"
+				scaleNode.Parent = btn
+			end
+			
+			TweenService:Create(scaleNode, NAV_TWEEN_INFO, { Scale = targetScale }):Play()
+			
+			if btn:IsA("ImageButton") or btn:IsA("ImageLabel") then
+				TweenService:Create(btn, NAV_TWEEN_INFO, { ImageColor3 = targetColor }):Play()
+			end
+		end
+	end
+
+	for _, child in nav:GetChildren() do
+		if child:IsA("GuiButton") and child.Name ~= "CloseBtn" and child.Name ~= "Close" then
+			local btn = child :: GuiButton
+			local targetFrame = container:FindFirstChild(btn.Name)
+			
+			if targetFrame and targetFrame:IsA("GuiObject") then
+				navFrames[btn.Name] = targetFrame
+				navButtons[btn.Name] = btn
+
+				local stroke = btn:FindFirstChildOfClass("UIStroke")
+				if stroke then
+					defaultStrokeColors[btn] = stroke.Color
+					
+					janitor:Add(btn.MouseEnter:Connect(function()
+						if canUseHoverAnimations then
+							TweenService:Create(stroke, NAV_TWEEN_INFO, { Color = HOVER_STROKE_COLOR }):Play()
+						end
+					end), "Disconnect")
+					
+					janitor:Add(btn.MouseLeave:Connect(function()
+						TweenService:Create(stroke, NAV_TWEEN_INFO, { Color = defaultStrokeColors[btn] }):Play()
+					end), "Disconnect")
+				end
+
+				janitor:Add(btn.Activated:Connect(function()
+					if activeNavTab == btn.Name then return end
+					activeNavTab = btn.Name
+					
+					for name, frame in navFrames do
+						frame.Visible = (name == btn.Name)
+					end
+					
+					updateNavTabsVisuals()
+				end), "Disconnect")
+			end
+		end
+	end
+
+	local hasSetDefault = false
+	for name, frame in navFrames do
+		if name == "Cash" or (not hasSetDefault and not navFrames["Cash"]) then
+			frame.Visible = true
+			activeNavTab = name
+			hasSetDefault = true
+		else
+			frame.Visible = false
+		end
+	end
+	
+	updateNavTabsVisuals()
+
 	local function setMenuVisible(visible: boolean)
 		if visible then
 			menuController:show()
@@ -181,23 +278,25 @@ function StoreFeature.start(menuController: any): any
 			activeFovTween = nil
 		end
 
-		activeFovTween = TweenService:Create(camera, tweenInfo, {
+		local tween = TweenService:Create(camera, tweenInfo, {
 			FieldOfView = targetFov,
 		})
-		activeFovTween.Completed:Connect(function()
-			if activeFovTween then
+		activeFovTween = tween
+		tween.Completed:Connect(function()
+			if activeFovTween == tween then
 				activeFovTween = nil
 			end
 		end)
-		activeFovTween:Play()
+		tween:Play()
 	end
 
 	local function restoreFov()
-		if savedFov == nil then
+		local fov = savedFov
+		if fov == nil then
 			return
 		end
 
-		tweenCameraFov(savedFov, FOV_CLOSE_TWEEN_INFO)
+		tweenCameraFov(fov, FOV_CLOSE_TWEEN_INFO)
 		savedFov = nil
 	end
 
@@ -207,9 +306,10 @@ function StoreFeature.start(menuController: any): any
 		end
 
 		local camera = Workspace.CurrentCamera
-		if camera and savedFov == nil then
-			savedFov = camera.FieldOfView
-			tweenCameraFov(math.min(savedFov + FOV_EXPAND_DELTA, FOV_MAX), FOV_OPEN_TWEEN_INFO)
+		local fov = if camera then camera.FieldOfView else nil
+		if camera and fov and savedFov == nil then
+			savedFov = fov
+			tweenCameraFov(math.min(fov + FOV_EXPAND_DELTA, FOV_MAX), FOV_OPEN_TWEEN_INFO)
 		end
 
 		isOpen = true
