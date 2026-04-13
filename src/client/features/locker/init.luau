@@ -174,6 +174,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local arsenalBtn = nav1:WaitForChild("Arsenal") :: GuiButton
 	local effectsBtn = nav1:WaitForChild("Effects") :: GuiButton
 	local mainFrame = root:WaitForChild("MainFrame")
+	local wrapsTitle = root:WaitForChild("WrapsTitle") :: TextLabel
 	local itemGrid = mainFrame:WaitForChild("ItemGrid")
 	local itemGridTemplate = itemGrid:WaitForChild("Template") :: GuiObject
 	local actionFrame = root:WaitForChild("ActionFrame") :: GuiObject
@@ -255,7 +256,24 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local grid: any = nil
 	local updateWeaponCategoryIndicators: () -> ()
 
+	local isWrapsMode = false
+
+	local function setWrapsMode(enabled: boolean)
+		isWrapsMode = enabled
+		if levelContainer then levelContainer.Visible = not enabled end
+		if cashFrame then cashFrame.Visible = not enabled end
+		if nav then nav.Visible = not enabled end
+		if wrapsTitle then wrapsTitle.Visible = enabled end
+
+		for _, child in nav1:GetChildren() do
+			if child.Name ~= "CloseBtn" and child:IsA("GuiObject") then
+				child.Visible = not enabled
+			end
+		end
+	end
+
 	actionFrame.Visible = false
+	if wrapsTitle then wrapsTitle.Visible = false end
 	actionFrame.Position = actionFrameHiddenPosition
 
 	local function getOptionalString(value: any): string?
@@ -1265,35 +1283,30 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		return nil
 	end
 
-	local function tweenNavButtonSize(button: GuiButton, targetSize: UDim2)
-		local currentTween = activeNavSizeTweens[button]
-		if currentTween then
-			currentTween:Cancel()
-			activeNavSizeTweens[button] = nil
+	local function tweenNavButtonVisuals(button: GuiButton, isSelected: boolean)
+		local targetScale = if isSelected then 1.15 else 1.0
+		local targetColor = if isSelected then Color3.fromRGB(249, 217, 93) else Color3.fromRGB(35, 54, 99)
+
+		if button:IsA("ImageButton") or button:IsA("ImageLabel") then
+			TweenService:Create(button, SIZE_TWEEN_INFO, { ImageColor3 = targetColor }):Play()
 		end
 
-		local tween = TweenService:Create(button, SIZE_TWEEN_INFO, {
-			Size = targetSize,
-		})
-		activeNavSizeTweens[button] = tween
-		tween.Completed:Connect(function()
-			if activeNavSizeTweens[button] == tween then
-				activeNavSizeTweens[button] = nil
-			end
-		end)
-		tween:Play()
+		local scaleNode = button:FindFirstChildOfClass("UIScale")
+		if not scaleNode then
+			scaleNode = Instance.new("UIScale")
+			scaleNode.Name = "NavScale"
+			scaleNode.Parent = button
+		end
+
+		TweenService:Create(scaleNode, SIZE_TWEEN_INFO, { Scale = targetScale }):Play()
 	end
 
 	local function setSelectedNavButton(selectedButton: GuiButton)
 		selectedNavButton = selectedButton
 
 		for _, button in navButtons do
-			tweenNavButtonSize(button, if button == selectedButton then SELECTED_NAV_ITEM_SIZE else defaultNavItemSize)
-
-			local stroke = getButtonStroke(button)
-			if stroke then
-				stroke.Color = if button == selectedButton then STROKE_WHITE else STROKE_DEFAULT
-			end
+			local isSelected = (button == selectedButton)
+			tweenNavButtonVisuals(button, isSelected)
 		end
 	end
 
@@ -1302,10 +1315,22 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		updateWeaponCategoryIndicators()
 
 		for key, button in mainCategoryButtons do
-			local stroke = getButtonStroke(button)
-			if stroke then
-				stroke.Color = if key == categoryKey then STROKE_WHITE else STROKE_DEFAULT
+			local isSelected = (key == categoryKey)
+			local targetScale = if isSelected then 1.15 else 1.0
+			local targetColor = if isSelected then Color3.fromRGB(249, 217, 93) else Color3.fromRGB(35, 54, 99)
+
+			local scaleNode = button:FindFirstChildOfClass("UIScale")
+			if not scaleNode then
+				scaleNode = Instance.new("UIScale")
+				scaleNode.Name = "NavScale"
+				scaleNode.Parent = button
 			end
+
+			if button:IsA("ImageButton") or button:IsA("ImageLabel") then
+				TweenService:Create(button, SIZE_TWEEN_INFO, { ImageColor3 = targetColor }):Play()
+			end
+
+			TweenService:Create(scaleNode, SIZE_TWEEN_INFO, { Scale = targetScale }):Play()
 		end
 	end
 
@@ -1315,20 +1340,16 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end
 
 		parentJanitor:Add(button.MouseEnter:Connect(function()
-			if not isSelected() then
-				local stroke = getButtonStroke(button)
-				if stroke then
-					stroke.Color = STROKE_WHITE
-				end
+			local stroke = getButtonStroke(button)
+			if stroke then
+				stroke.Color = STROKE_WHITE
 			end
 		end), "Disconnect")
 
 		parentJanitor:Add(button.MouseLeave:Connect(function()
-			if not isSelected() then
-				local stroke = getButtonStroke(button)
-				if stroke then
-					stroke.Color = STROKE_DEFAULT
-				end
+			local stroke = getButtonStroke(button)
+			if stroke then
+				stroke.Color = STROKE_DEFAULT
 			end
 		end), "Disconnect")
 	end
@@ -1559,7 +1580,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	populateMainContentForNavItem = function(categoryKey: LockerCategoryKey, navKey: string, selectedItemId: string?)
-		local previousNavKey = selectedNavKey
+		local previousNavKey = selectedNavKeyœ
 		selectedNavKey = navKey
 		updateWeaponCategoryIndicators()
 		skipNextKillEffectSelectionPreview = categoryKey == "Effects"
@@ -1831,6 +1852,12 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			setStoredWrapsTargetWeaponId(selectedWeaponCategory, item.ItemKey)
 			updateWeaponCategoryIndicators()
 
+			setWrapsMode(true)
+			local spawnPart = if selectedWeaponCategory == "Main" then mainWeaponSpawn else specialWeaponSpawn
+			if spawnPart and spawnPart:IsA("BasePart") then
+				cameraController:zoomOnPosition(spawnPart.Position)
+			end
+
 			populateMainContentForNavItem("Arsenal", "Wraps", nil)
 		end), "Disconnect")
 	end
@@ -1937,11 +1964,30 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		selectedCatalogItem = nil
 		hideActionFrame()
 		restoreLockerSceneState()
+		setWrapsMode(false)
 		lockerGui.Enabled = false
 	end
 
 	janitor:Add(lockerBtn.MouseButton1Click:Connect(openLockerGui), "Disconnect")
-	janitor:Add(closeBtn.MouseButton1Click:Connect(closeLockerGui), "Disconnect")
+	janitor:Add(closeBtn.MouseButton1Click:Connect(function()
+		if isWrapsMode then
+			setWrapsMode(false)
+			local previousNavKey = wrapsTargetWeaponCategory or "Main"
+
+			cameraController:unzoom()
+
+			for _, button in navButtons do
+				if button.Name == previousNavKey then
+					setSelectedNavButton(button)
+					break
+				end
+			end
+
+			populateMainContentForNavItem("Arsenal", previousNavKey, nil)
+		else
+			closeLockerGui()
+		end
+	end), "Disconnect")
 	for categoryKey, button in mainCategoryButtons do
 		janitor:Add(button.MouseButton1Click:Connect(function()
 			handleMainCategoryButtonClick(categoryKey)
