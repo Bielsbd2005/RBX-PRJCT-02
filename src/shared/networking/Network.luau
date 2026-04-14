@@ -148,6 +148,52 @@ local RewardsNamespace = ByteNet.DefineNamespace("Rewards", function()
 end)
 
 -- ────────────────────────────────────────────────────────────
+-- NAMESPACE: Cases
+-- Acciones de cajas (compra, lucky boost, summon).
+-- ────────────────────────────────────────────────────────────
+
+local CasesNamespace = ByteNet.DefineNamespace("Cases", function()
+	return {
+		-- C → S: Comprar apertura de caja (single o multi)
+		Summon = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				caseId = ByteNet.String,
+				multi  = ByteNet.Bool,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- C → S: Comprar lucky boost (Robux, procesado via MarketplaceService)
+		BuyLucky = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- S → C: Respuesta genérica (compra, error, etc.)
+		Response = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				success = ByteNet.Bool,
+				message = ByteNet.String,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- S → C: Resultado de un summon (para futura animación de unboxing)
+		SummonResult = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				caseId    = ByteNet.String,
+				skinId    = ByteNet.String,
+				weaponCategory = ByteNet.String,
+				weaponId  = ByteNet.String,
+				isPity    = ByteNet.Bool,
+				newPity   = ByteNet.Int32,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+	}
+end)
+
+-- ────────────────────────────────────────────────────────────
 -- NAMESPACE: Debug
 -- Herramientas de depuracion (solo Studio/dev en servidor).
 -- ────────────────────────────────────────────────────────────
@@ -162,4 +208,5 @@ return {
 	Shop       = ShopNamespace,
 	Combat     = CombatNamespace,
 	Rewards    = RewardsNamespace,
+	Cases      = CasesNamespace,
 }

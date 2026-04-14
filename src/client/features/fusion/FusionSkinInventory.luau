@@ -24,7 +24,7 @@ type SlotMap = { [string]: FusionSkinItem? }
 type AmountMap = { [string]: number }
 type InventorySnapshot = {
 	WeaponSkinsByWeapon: {
-		[string]: { [string]: { [string]: boolean } },
+		[string]: { [string]: { [string]: number | boolean } },
 	}?,
 }
 
@@ -113,9 +113,14 @@ function FusionSkinInventory:BuildFromInventory(inventory: InventorySnapshot?): 
 		local wrapsByWeapon = inventory.WeaponSkinsByWeapon
 		for _, wrapsByWeaponId in wrapsByWeapon do
 			for _, ownedSkins in wrapsByWeaponId do
-				for skinKey, isOwned in ownedSkins do
-					if isOwned == true and self._itemsByKey[skinKey] then
-						ownedAmounts[skinKey] = (ownedAmounts[skinKey] or 0) + 1
+				for skinKey, ownedValue in ownedSkins do
+					local ownedAmount = if ownedValue == true
+						then 1
+						else if type(ownedValue) == "number" and ownedValue > 0
+						then math.max(1, math.floor(ownedValue))
+						else 0
+					if ownedAmount > 0 and self._itemsByKey[skinKey] then
+						ownedAmounts[skinKey] = (ownedAmounts[skinKey] or 0) + ownedAmount
 					end
 				end
 			end

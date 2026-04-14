@@ -32,6 +32,7 @@ type ItemGridCardRefs = {
 	itemNode: GuiObject?,
 	itemNodeDefaultSize: UDim2?,
 	viewportNode: ViewportFrame?,
+	amountNode: TextLabel?,
 	priceNode: TextLabel?,
 	currencyNode: GuiObject?,
 	ownedNode: TextLabel?,
@@ -47,6 +48,7 @@ type ItemGridCardRefs = {
 type LockerGridCallbacks = {
 	canInteract: (() -> boolean)?,
 	isItemOwned: (LockerCatalogItem) -> boolean,
+	getItemAmount: ((LockerCatalogItem) -> number)?,
 	isItemEquipped: (LockerCatalogItem) -> boolean,
 	getCurrentLevel: () -> number,
 	onSelectionChanged: (LockerCatalogItem?) -> (),
@@ -167,6 +169,7 @@ function LockerGrid:_getGridCardRefs(card: GuiObject): ItemGridCardRefs
 	local itemNode = if button then button:FindFirstChild("Item", true) else nil
 	local resolvedItemNode = if itemNode and (itemNode:IsA("ImageLabel") or itemNode:IsA("ImageButton")) then itemNode else nil
 	local viewportNode = if button then button:FindFirstChildWhichIsA("ViewportFrame", true) else nil
+	local amountNode = if button then button:FindFirstChild("Amount", true) else nil
 	local priceNode = if button then button:FindFirstChild("Price", true) else nil
 	local currencyNode = if button then button:FindFirstChild("Currency", true) else nil
 	local ownedNode = if button then button:FindFirstChild("Owned", true) else nil
@@ -180,6 +183,7 @@ function LockerGrid:_getGridCardRefs(card: GuiObject): ItemGridCardRefs
 		itemNode = resolvedItemNode,
 		itemNodeDefaultSize = if resolvedItemNode then resolvedItemNode.Size else nil,
 		viewportNode = if viewportNode and viewportNode:IsA("ViewportFrame") then viewportNode else nil,
+		amountNode = if amountNode and amountNode:IsA("TextLabel") then amountNode else nil,
 		priceNode = if priceNode and priceNode:IsA("TextLabel") then priceNode else nil,
 		currencyNode = if currencyNode and currencyNode:IsA("GuiObject") then currencyNode else nil,
 		ownedNode = if ownedNode and ownedNode:IsA("TextLabel") then ownedNode else nil,
@@ -261,6 +265,7 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 	end
 
 	local owned = self._callbacks.isItemOwned(item)
+	local itemAmount = if self._callbacks.getItemAmount then self._callbacks.getItemAmount(item) else if owned then 1 else 0
 	local equipped = self._callbacks.isItemEquipped(item)
 	local currentLevel = self._cachedLevel
 	local isLevelLocked = not owned and currentLevel < item.LevelRequired
@@ -308,6 +313,13 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 
 	if refs.ownedNode then
 		refs.ownedNode.Visible = owned and not equipped
+	end
+
+	if refs.amountNode then
+		refs.amountNode.Visible = itemAmount > 1
+		if itemAmount > 1 then
+			refs.amountNode.Text = "x" .. tostring(itemAmount)
+		end
 	end
 
 	if refs.equippedNode then
@@ -454,6 +466,11 @@ function LockerGrid:_applyCatalogItemToCard(card: GuiObject, item: LockerCatalog
 
 	if refs.ownedNode then
 		refs.ownedNode.Visible = false
+	end
+
+	if refs.amountNode then
+		refs.amountNode.Visible = false
+		refs.amountNode.Text = ""
 	end
 
 	if refs.equippedNode then

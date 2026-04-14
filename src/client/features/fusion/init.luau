@@ -60,7 +60,7 @@ type TemplateRefs = {
 
 type InventoryData = {
 	WeaponSkinsByWeapon: {
-		[string]: { [string]: { [string]: boolean } },
+		[string]: { [string]: { [string]: number | boolean } },
 	}?,
 }
 

@@ -108,8 +108,8 @@ type StatsData = {
 type InventoryData = {
 	[string]: { [string]: boolean },
 	WeaponSkinsByWeapon: {
-		Main: { [string]: { [string]: boolean } },
-		Special: { [string]: { [string]: boolean } },
+		Main: { [string]: { [string]: number | boolean } },
+		Special: { [string]: { [string]: number | boolean } },
 	}?,
 }
 
@@ -238,7 +238,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local ownedWrapsByWeaponLookup = {
 		Main = {},
 		Special = {},
-	} :: { [WeaponCategory]: { [string]: { [string]: boolean } } }
+	} :: { [WeaponCategory]: { [string]: { [string]: number } } }
 	local equippedLookup = {} :: { [string]: string }
 	local selectedNavKey: string? = nil
 	local isOpen = false
@@ -611,21 +611,23 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		local nextWrapsByWeapon = {
 			Main = {},
 			Special = {},
-		} :: { [WeaponCategory]: { [string]: { [string]: boolean } } }
+		} :: { [WeaponCategory]: { [string]: { [string]: number } } }
 
 		for category, items in inventory do
 			if category == "WeaponSkinsByWeapon" then
 				local wrapsByWeapon = items :: any
 				for weaponCategory, weaponEntriesAny in wrapsByWeapon do
 					if weaponCategory == "Main" or weaponCategory == "Special" then
-						local weaponEntries = weaponEntriesAny :: { [string]: { [string]: boolean } }
+						local weaponEntries = weaponEntriesAny :: { [string]: { [string]: number | boolean } }
 						local categoryWrapLookup = nextWrapsByWeapon[weaponCategory :: WeaponCategory]
 						for weaponId, ownedSkinsAny in weaponEntries do
 							if type(ownedSkinsAny) == "table" then
-								local skinLookup = {} :: { [string]: boolean }
+								local skinLookup = {} :: { [string]: number }
 								for skinId, skinOwned in ownedSkinsAny do
 									if skinOwned == true then
-										skinLookup[skinId] = true
+										skinLookup[skinId] = 1
+									elseif type(skinOwned) == "number" and skinOwned > 0 then
+										skinLookup[skinId] = math.max(1, math.floor(skinOwned))
 									end
 								end
 								categoryWrapLookup[weaponId] = skinLookup
@@ -688,18 +690,24 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		return wrapsTargetWeaponCategory, getResolvedWrapsTargetWeaponId(getCurrentLoadout())
 	end
 
+	local getWrapAmountForWeapon: (weaponCategory: WeaponCategory, weaponId: string, skinId: string) -> number
+
 	local function isWrapOwnedForWeapon(weaponCategory: WeaponCategory, weaponId: string, skinId: string): boolean
+		return getWrapAmountForWeapon(weaponCategory, weaponId, skinId) > 0
+	end
+
+	function getWrapAmountForWeapon(weaponCategory: WeaponCategory, weaponId: string, skinId: string): number
 		local categoryLookup = ownedWrapsByWeaponLookup[weaponCategory]
 		if not categoryLookup then
-			return false
+			return 0
 		end
 
 		local weaponLookup = categoryLookup[weaponId]
 		if not weaponLookup then
-			return false
+			return 0
 		end
 
-		return weaponLookup[skinId] == true
+		return weaponLookup[skinId] or 0
 	end
 
 	local function rebuildEquippedLookup()
@@ -1478,6 +1486,14 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			return pendingShopAction == nil
 		end,
 		isItemOwned = isItemOwned,
+		getItemAmount = function(item: LockerCatalogItem): number
+			if item.Category ~= "WeaponSkins" then
+				return if isItemOwned(item) then 1 else 0
+			end
+
+			local targetWeaponId = getResolvedWrapsTargetWeaponId(getCurrentLoadout())
+			return getWrapAmountForWeapon(wrapsTargetWeaponCategory, targetWeaponId, item.ItemKey)
+		end,
 		isItemEquipped = isItemEquipped,
 		getCurrentLevel = getCurrentLevel,
 		onSelectionChanged = function(item: LockerCatalogItem?)
@@ -1580,7 +1596,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	populateMainContentForNavItem = function(categoryKey: LockerCategoryKey, navKey: string, selectedItemId: string?)
-		local previousNavKey = selectedNavKeyœ
+		local previousNavKey = selectedNavKey
 		selectedNavKey = navKey
 		updateWeaponCategoryIndicators()
 		skipNextKillEffectSelectionPreview = categoryKey == "Effects"

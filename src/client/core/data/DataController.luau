@@ -77,6 +77,7 @@ DataController.Inventory = nil :: any
 DataController.Loadout   = nil :: any
 DataController.Settings  = nil :: any
 DataController.Rewards   = nil :: any
+DataController.Cases     = nil :: any
 
 -- ────────────────────────────────────────────────────────────
 -- API PÚBLICA
@@ -111,6 +112,7 @@ function DataController:Start(): ()
 	DataController.Loadout   = _scope:Value(DataTemplate.Loadout)
 	DataController.Settings  = _scope:Value(DataTemplate.Settings)
 	DataController.Rewards   = _scope:Value(DataTemplate.Rewards)
+	DataController.Cases     = _scope:Value(DataTemplate.Cases)
 
 	-- Promise que se resuelve cuando llega la Replica del servidor
 	_readyPromise = Promise.new(function(resolve: (any) -> ())
@@ -130,6 +132,7 @@ function DataController:Start(): ()
 		DataController.Loadout:set(replica.Data.Loadout)
 		DataController.Settings:set(replica.Data.Settings)
 		DataController.Rewards:set(replica.Data.Rewards)
+		DataController.Cases:set(replica.Data.Cases)
 
 		-- ── Suscribir listeners de cambio por sección ────
 		-- Cada listener recibe la NUEVA tabla de sección (nueva referencia
@@ -162,6 +165,12 @@ function DataController:Start(): ()
 		replica:AddCleanupTask(
 			replica:ListenToChange({ "Rewards" }, function(newRewards: any)
 				DataController.Rewards:set(newRewards)
+			end)
+		)
+
+		replica:AddCleanupTask(
+			replica:ListenToChange({ "Cases" }, function(newCases: any)
+				DataController.Cases:set(newCases)
 			end)
 		)
 

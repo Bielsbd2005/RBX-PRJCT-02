@@ -1,0 +1,412 @@
+--!strict
+--[[
+	CasesService.luau  (Server)
+	Gestiona la apertura de cajas, el sistema de pity y el lucky boost.
+
+	Flujo de summon:
+	  1. Cliente envía Network.Cases.Summon { caseId, multi }
+	  2. Validar: cooldown → case existe → cash suficiente
+	  3. Determinar si lucky está activo (LuckyExpiresAt > os.time())
+	  4. Elegir skin con weighted random (pesos lucky o normales)
+	  5. Applicar pity: si contador >= threshold → forzar pity drop y resetear
+	  6. DataService:BatchUpdate: cash - precio, skin al inventario, pity counter
+	  7. Enviar Network.Cases.SummonResult al cliente
+
+	Lucky Boost:
+	  Se procesa via MarketplaceService.PromptProductPurchaseFinished.
+	  Al confirmar, se setea Cases.LuckyExpiresAt = os.time() + duración.
+]]
+
+local Players = game:GetService("Players")
+local MarketplaceService = game:GetService("MarketplaceService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+
+local Network = require(Shared.networking.Network)
+local CasesConfig = require(Shared.constants.CasesConfig)
+local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
+local StoreProducts = require(Shared.constants.StoreProducts)
+
+local STORE_PRODUCTS_BY_ID = StoreProducts.ProductsByProductId :: { [number]: { CashAmount: number } }
+
+local COOLDOWN = 0.5
+type WeaponCategory = "Main" | "Special"
+type OwnedWeaponEntry = {
+	category: WeaponCategory,
+	weaponId: string,
+}
+
+local function getOwnedWeaponWrapCount(profileData: any, weaponCategory: string, weaponId: string, skinId: string): number
+	local inventory = profileData.Inventory
+	if type(inventory) ~= "table" then
+		return 0
+	end
+
+	local wrapsByWeapon = inventory.WeaponSkinsByWeapon
+	if type(wrapsByWeapon) ~= "table" then
+		return 0
+	end
+
+	local categoryWraps = wrapsByWeapon[weaponCategory]
+	if type(categoryWraps) ~= "table" then
+		return 0
+	end
+
+	local weaponWraps = categoryWraps[weaponId]
+	if type(weaponWraps) ~= "table" then
+		return 0
+	end
+
+	local ownedValue = weaponWraps[skinId]
+	if ownedValue == true then
+		return 1
+	end
+
+	if type(ownedValue) == "number" and ownedValue > 0 then
+		return math.max(1, math.floor(ownedValue))
+	end
+
+	return 0
+end
+
+-- ────────────────────────────────────────────────────────────
+-- ESTADO
+-- ────────────────────────────────────────────────────────────
+
+local _dataService: any = nil
+local _started = false
+local _cooldowns: { [number]: { [string]: number } } = {}
+
+local CasesService = {}
+
+-- ────────────────────────────────────────────────────────────
+-- HELPERS
+-- ────────────────────────────────────────────────────────────
+
+local function checkCooldown(player: Player, action: string): boolean
+	local playerCooldowns = _cooldowns[player.UserId]
+	if not playerCooldowns then
+		playerCooldowns = {}
+		_cooldowns[player.UserId] = playerCooldowns
+	end
+
+	local last = playerCooldowns[action] or 0
+	if time() - last < COOLDOWN then
+		return false
+	end
+
+	playerCooldowns[action] = time()
+	return true
+end
+
+local function isLuckyActive(profile: any): boolean
+	local casesData = profile.Data.Cases
+	if not casesData or type(casesData.LuckyExpiresAt) ~= "number" then
+		return false
+	end
+	return casesData.LuckyExpiresAt > os.time()
+end
+
+local function weightedRandomPick(drops: { CasesConfig.CaseDrop }, useLucky: boolean): CasesConfig.CaseDrop
+	local totalWeight = 0
+	for _, drop in drops do
+		totalWeight += if useLucky then drop.LuckyWeight else drop.Weight
+	end
+
+	local roll = math.random() * totalWeight
+	local cumulative = 0
+	for _, drop in drops do
+		cumulative += if useLucky then drop.LuckyWeight else drop.Weight
+		if roll <= cumulative then
+			return drop
+		end
+	end
+
+	-- Fallback: último drop
+	return drops[#drops]
+end
+
+local function collectOwnedWeapons(profileData: any): { OwnedWeaponEntry }
+	local ownedWeapons = {} :: { OwnedWeaponEntry }
+	local inventory = profileData.Inventory
+	if type(inventory) ~= "table" then
+		return {
+			{ category = "Main", weaponId = "Default" },
+		}
+	end
+
+	for _, categoryName in { "Main", "Special" } do
+		local categoryInventory = inventory[categoryName]
+		if type(categoryInventory) == "table" then
+			for weaponId, isOwned in categoryInventory do
+				if isOwned == true and type(weaponId) == "string" and weaponId ~= "" then
+					table.insert(ownedWeapons, {
+						category = categoryName :: WeaponCategory,
+						weaponId = weaponId,
+					})
+				end
+			end
+		end
+	end
+
+	if #ownedWeapons == 0 then
+		table.insert(ownedWeapons, { category = "Main", weaponId = "Default" })
+	end
+
+	return ownedWeapons
+end
+
+local function pickRandomOwnedWeapon(ownedWeapons: { OwnedWeaponEntry }): OwnedWeaponEntry
+	local idx = math.random(1, math.max(1, #ownedWeapons))
+	return ownedWeapons[idx]
+end
+
+-- ────────────────────────────────────────────────────────────
+-- SUMMON HANDLER
+-- ────────────────────────────────────────────────────────────
+
+local function processSingleSummon(player: Player, caseId: string, caseDef: CasesConfig.CaseDefinition, profile: any): (string, boolean, number)
+	local useLucky = isLuckyActive(profile)
+
+	-- Leer pity counter actual
+	local casesData = profile.Data.Cases or {}
+	local pityCounters = if type(casesData.PityCounters) == "table" then casesData.PityCounters else {}
+	local currentPity = if type(pityCounters[caseId]) == "number" then pityCounters[caseId] else 0
+
+	local isPity = false
+	local chosenSkinId: string
+
+	-- Pity check: si la siguiente tirada (currentPity + 1) alcanza el threshold
+	if (currentPity + 1) >= caseDef.PityThreshold then
+		chosenSkinId = caseDef.PityDropSkinId
+		isPity = true
+		currentPity = 0
+	else
+		local chosenDrop = weightedRandomPick(caseDef.Drops, useLucky)
+		chosenSkinId = chosenDrop.SkinId
+		currentPity = currentPity + 1
+	end
+
+	return chosenSkinId, isPity, currentPity
+end
+
+local function onSummon(data: { caseId: string, multi: boolean }, player: Player): ()
+	if not checkCooldown(player, "summon") then
+		Network.Cases.Response.SendTo({ success = false, message = "Demasiadas peticiones." }, player)
+		return
+	end
+
+	local caseId = data.caseId
+	local caseDef = CasesConfig.Cases[caseId]
+	if not caseDef then
+		Network.Cases.Response.SendTo({ success = false, message = "Case no encontrado." }, player)
+		return
+	end
+
+	local profile = _dataService:GetProfile(player)
+	if not profile then
+		Network.Cases.Response.SendTo({ success = false, message = "Perfil no disponible." }, player)
+		return
+	end
+
+	local count = if data.multi then CasesConfig.MultiCount else 1
+	local totalPrice = if data.multi then caseDef.PriceMulti else caseDef.Price
+
+	-- Validar cash
+	local currentCash: number = profile.Data.Stats.Cash or 0
+	if currentCash < totalPrice then
+		Network.Cases.Response.SendTo({
+			success = false,
+			message = "Cash insuficiente. Necesitas " .. tostring(totalPrice) .. ".",
+		}, player)
+		return
+	end
+
+	-- Procesar cada tirada
+	local results = {} :: { { skinId: string, weaponCategory: WeaponCategory, weaponId: string, isPity: boolean, newPity: number } }
+
+	-- Usamos el profile actual para todas las tiradas en secuencia
+	-- El pity se acumula dentro del batch
+	local runningPity: number
+	do
+		local casesData = profile.Data.Cases or {}
+		local pityCounters = if type(casesData.PityCounters) == "table" then casesData.PityCounters else {}
+		runningPity = if type(pityCounters[caseId]) == "number" then pityCounters[caseId] else 0
+	end
+
+	local useLucky = isLuckyActive(profile)
+	local ownedWeapons = collectOwnedWeapons(profile.Data)
+	local wrapsWonByWeapon = {} :: { [WeaponCategory]: { [string]: { [string]: number } } }
+
+	for _ = 1, count do
+		local isPity = false
+		local chosenSkinId: string
+
+		if (runningPity + 1) >= caseDef.PityThreshold then
+			chosenSkinId = caseDef.PityDropSkinId
+			isPity = true
+			runningPity = 0
+		else
+			local chosenDrop = weightedRandomPick(caseDef.Drops, useLucky)
+			chosenSkinId = chosenDrop.SkinId
+			runningPity = runningPity + 1
+		end
+
+		local targetWeapon = pickRandomOwnedWeapon(ownedWeapons)
+		local categoryLookup = wrapsWonByWeapon[targetWeapon.category]
+		if not categoryLookup then
+			categoryLookup = {}
+			wrapsWonByWeapon[targetWeapon.category] = categoryLookup
+		end
+
+		local weaponLookup = categoryLookup[targetWeapon.weaponId]
+		if not weaponLookup then
+			weaponLookup = {}
+			categoryLookup[targetWeapon.weaponId] = weaponLookup
+		end
+
+		weaponLookup[chosenSkinId] = (weaponLookup[chosenSkinId] or 0) + 1
+
+		table.insert(results, {
+			skinId = chosenSkinId,
+			weaponCategory = targetWeapon.category,
+			weaponId = targetWeapon.weaponId,
+			isPity = isPity,
+			newPity = runningPity,
+		})
+	end
+
+	-- Construir batch de updates
+	local updates = {
+		{ path = { "Stats", "Cash" }, value = currentCash - totalPrice },
+		{ path = { "Cases", "PityCounters", caseId }, value = runningPity },
+	}
+
+	-- Agregar skins al inventario por arma (WeaponSkinsByWeapon)
+	for weaponCategory, weaponsLookup in wrapsWonByWeapon do
+		for weaponId, skinsLookup in weaponsLookup do
+			for skinId, amountWon in skinsLookup do
+				if ItemsConfig.WeaponSkins and ItemsConfig.WeaponSkins[skinId] then
+					local existingAmount = getOwnedWeaponWrapCount(profile.Data, weaponCategory, weaponId, skinId)
+					table.insert(updates, {
+						path = { "Inventory", "WeaponSkinsByWeapon", weaponCategory, weaponId, skinId },
+						value = existingAmount + amountWon,
+					})
+				end
+			end
+		end
+	end
+
+	local success = _dataService:BatchUpdate(player, updates)
+
+	if not success then
+		Network.Cases.Response.SendTo({ success = false, message = "Error al guardar datos." }, player)
+		return
+	end
+
+	Network.Cases.Response.SendTo({ success = true, message = "OK" }, player)
+
+	-- Enviar cada resultado individualmente (para futura animación secuencial)
+	for _, result in results do
+		Network.Cases.SummonResult.SendTo({
+			caseId = caseId,
+			skinId = result.skinId,
+			weaponCategory = result.weaponCategory,
+			weaponId = result.weaponId,
+			isPity = result.isPity,
+			newPity = result.newPity,
+		}, player)
+	end
+end
+
+-- ────────────────────────────────────────────────────────────
+-- LUCKY BOOST (DevProduct)
+-- ────────────────────────────────────────────────────────────
+
+local function onLuckyProductPurchased(receiptInfo: any): Enum.ProductPurchaseDecision
+	local productId = receiptInfo.ProductId
+	local luckyProductId = CasesConfig.LuckyBoost.ProductId
+
+	if productId ~= luckyProductId or luckyProductId <= 0 then
+		return Enum.ProductPurchaseDecision.NotProcessedYet
+	end
+
+	local playerId = receiptInfo.PlayerId
+	local player = Players:GetPlayerByUserId(playerId)
+	if not player then
+		return Enum.ProductPurchaseDecision.NotProcessedYet
+	end
+
+	local profile = _dataService:GetProfile(player)
+	if not profile then
+		return Enum.ProductPurchaseDecision.NotProcessedYet
+	end
+
+	local durationSeconds = CasesConfig.LuckyBoost.DurationMinutes * 60
+	local currentExpiry: number = 0
+	local casesData = profile.Data.Cases
+	if casesData and type(casesData.LuckyExpiresAt) == "number" then
+		currentExpiry = casesData.LuckyExpiresAt
+	end
+
+	-- Si ya tiene lucky activo, sumar tiempo
+	local baseTime = math.max(os.time(), currentExpiry)
+	local newExpiry = baseTime + durationSeconds
+
+	local success = _dataService:SetValue(player, { "Cases", "LuckyExpiresAt" }, newExpiry)
+	if not success then
+		return Enum.ProductPurchaseDecision.NotProcessedYet
+	end
+
+	Network.Cases.Response.SendTo({ success = true, message = "Lucky boost activado!" }, player)
+
+	return Enum.ProductPurchaseDecision.PurchaseGranted
+end
+
+-- ────────────────────────────────────────────────────────────
+-- LIFECYCLE
+-- ────────────────────────────────────────────────────────────
+
+function CasesService:Start(dataService: any): ()
+	if _started then return end
+	_started = true
+	_dataService = dataService
+
+	-- Listeners de red
+	Network.Cases.Summon.Listen(function(data: any, player: Player)
+		onSummon(data, player)
+	end)
+
+	-- ProcessReceipt centralizado: maneja lucky boost y delega productos de tienda
+	MarketplaceService.ProcessReceipt = function(receiptInfo: any): Enum.ProductPurchaseDecision
+		-- Lucky boost
+		if receiptInfo.ProductId == CasesConfig.LuckyBoost.ProductId and CasesConfig.LuckyBoost.ProductId > 0 then
+			return onLuckyProductPurchased(receiptInfo)
+		end
+
+		-- Store cash products
+		local storeProduct = STORE_PRODUCTS_BY_ID[receiptInfo.ProductId]
+		if storeProduct then
+			local buyer = Players:GetPlayerByUserId(receiptInfo.PlayerId)
+			if not buyer or not _dataService then
+				return Enum.ProductPurchaseDecision.NotProcessedYet
+			end
+			local ok = _dataService:Increment(buyer, { "Stats", "Cash" }, storeProduct.CashAmount)
+			if ok then
+				return Enum.ProductPurchaseDecision.PurchaseGranted
+			end
+			return Enum.ProductPurchaseDecision.NotProcessedYet
+		end
+
+		warn("[CasesService] Unknown ProductId:", receiptInfo.ProductId)
+		return Enum.ProductPurchaseDecision.NotProcessedYet
+	end
+
+	-- Limpiar cooldowns al salir
+	Players.PlayerRemoving:Connect(function(player: Player)
+		_cooldowns[player.UserId] = nil
+	end)
+end
+
+return CasesService

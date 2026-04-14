@@ -34,8 +34,8 @@ export type Inventory = {
 	Special: { [string]: boolean },
 	WeaponSkins: { [string]: boolean },
 	WeaponSkinsByWeapon: {
-		Main: { [string]: { [string]: boolean } },
-		Special: { [string]: { [string]: boolean } },
+		Main: { [string]: { [string]: number | boolean } },
+		Special: { [string]: { [string]: number | boolean } },
 	},
 	KillEffects: { [string]: boolean },
 	Faces: { [string]: boolean },
@@ -64,6 +64,11 @@ export type Settings = {
 	AimAssist: boolean,
 }
 
+export type CasesData = {
+	PityCounters: { [string]: number },   -- caseId → tiradas sin pity drop
+	LuckyExpiresAt: number,                -- os.time() cuando expira el lucky boost (0 = inactivo)
+}
+
 export type Rewards = {
 	LikeState: string,
 	LikePendingSessionToken: string,
@@ -85,6 +90,7 @@ export type PlayerProfile = {
 	Loadout: Loadout,
 	Settings: Settings,
 	Rewards: Rewards,
+	Cases: CasesData,
 	Metadata: Metadata,
 }
 
@@ -160,6 +166,11 @@ local DEFAULT: PlayerProfile = {
 		GroupClaimed = false,
 		NotificationsClaimed = false,
 		ClaimedCodes = {},
+	},
+
+	Cases = {
+		PityCounters = {},
+		LuckyExpiresAt = 0,
 	},
 
 	Metadata = {

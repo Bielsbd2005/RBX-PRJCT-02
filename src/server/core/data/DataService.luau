@@ -306,8 +306,35 @@ local function _loadPlayer(player: Player): ()
 
 				if createdWeaponOwnership then
 					for skinId, owned in legacyOwnedSkins do
-						if owned == true and weaponOwnership[skinId] ~= true then
-							weaponOwnership[skinId] = true
+						local existingOwned = weaponOwnership[skinId]
+						local existingCount = if existingOwned == true
+							then 1
+							else if type(existingOwned) == "number" and existingOwned > 0
+							then math.max(1, math.floor(existingOwned))
+							else 0
+						if owned == true and existingCount <= 0 then
+							weaponOwnership[skinId] = 1
+						end
+					end
+				end
+			end
+
+			for _, categoryKey in { "Main", "Special" } do
+				local categoryOwnership = wrapsOwnership[categoryKey]
+				if type(categoryOwnership) == "table" then
+					for _, weaponOwnership in categoryOwnership do
+						if type(weaponOwnership) == "table" then
+							for skinId, ownedValue in weaponOwnership do
+								if ownedValue == true then
+									weaponOwnership[skinId] = 1
+								elseif type(ownedValue) == "number" then
+									if ownedValue <= 0 then
+										weaponOwnership[skinId] = nil
+									else
+										weaponOwnership[skinId] = math.max(1, math.floor(ownedValue))
+									end
+								end
+							end
 						end
 					end
 				end

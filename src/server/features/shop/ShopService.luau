@@ -75,7 +75,12 @@ local function _getOwnedWeaponWrap(profileData: any, weaponCategory: string, wea
 		return false
 	end
 
-	return weaponWraps[skinId] == true
+	local ownedValue = weaponWraps[skinId]
+	if ownedValue == true then
+		return true
+	end
+
+	return type(ownedValue) == "number" and ownedValue > 0
 end
 
 -- Cooldown por acción (segundos)

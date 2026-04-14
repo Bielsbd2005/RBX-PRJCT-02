@@ -46,7 +46,13 @@ function StoreService:Start(dataService: any): ()
 
 	_started = true
 	_dataService = dataService
-	MarketplaceService.ProcessReceipt = processReceipt
+
+	-- ProcessReceipt se registra en CasesService para manejar
+	-- tanto los productos de la tienda como el lucky boost.
+end
+
+function StoreService:ProcessReceipt(receiptInfo: ReceiptInfo): Enum.ProductPurchaseDecision?
+	return processReceipt(receiptInfo)
 end
 
 return StoreService

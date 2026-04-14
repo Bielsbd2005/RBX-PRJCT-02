@@ -23,6 +23,7 @@ export type LockerCameraController = {
 	_targetPart: BasePart,
 	_dof: DepthOfFieldEffect,
 	_isApplied: boolean,
+	_useMouseParallax: boolean,
 	_savedCameraType: Enum.CameraType?,
 	_savedCameraSubject: Instance?,
 	_savedCFrame: CFrame?,
@@ -71,7 +72,7 @@ local function resolveDepthOfField(): DepthOfFieldEffect
 	return dof
 end
 
-function LockerCameraController.new(targetPartName: string?): LockerCameraController
+function LockerCameraController.new(targetPartName: string?, useMouseParallax: boolean?): LockerCameraController
 	local camera = Workspace.CurrentCamera
 	assert(camera ~= nil, "CurrentCamera is not available")
 
@@ -80,6 +81,7 @@ function LockerCameraController.new(targetPartName: string?): LockerCameraContro
 	self._targetPart = resolveTargetPart(targetPartName or "locker")
 	self._dof = resolveDepthOfField()
 	self._isApplied = false
+	self._useMouseParallax = if useMouseParallax ~= nil then useMouseParallax else true
 	self._savedCameraType = nil
 	self._savedCameraSubject = nil
 	self._savedCFrame = nil
@@ -145,7 +147,9 @@ function LockerCameraController:_playEntryTweenSequence(targetCFrame: CFrame)
 		end
 
 		self:_setParallaxBaseCFrame(targetCFrame)
-		self._mouseParallax:start()
+		if self._useMouseParallax then
+			self._mouseParallax:start()
+		end
 	end)
 
 	self._cameraApproachTween:Play()
