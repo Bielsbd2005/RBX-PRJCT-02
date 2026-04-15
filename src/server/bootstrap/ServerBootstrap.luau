@@ -1,5 +1,7 @@
 --!strict
 
+local StarterGui = game:GetService("StarterGui")
+
 local ServerBootstrap = {}
 
 local _started = false
@@ -10,6 +12,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	end
 
 	_started = true
+	StarterGui.ResetPlayerGuiOnSpawn = false
 
 	local DataService = require(serverRoot.core.data.DataService)
 	local ShopService = require(serverRoot.features.shop.ShopService)
@@ -17,6 +20,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	local SettingsService = require(serverRoot.features.settings.SettingsService)
 	local RewardsService = require(serverRoot.features.rewards.RewardsService)
 	local CasesService = require(serverRoot.features.cases.CasesService)
+	local MatchService = require(serverRoot.features.match.MatchService)
 	local ClearDataCommandService = require(serverRoot.features.testing.ClearDataCommandService)
 
 	DataService:Start()
@@ -25,6 +29,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	SettingsService:Start(DataService)
 	RewardsService:Start(DataService)
 	CasesService:Start(DataService)
+	MatchService:Start()
 	ClearDataCommandService:Start(DataService)
 end
 

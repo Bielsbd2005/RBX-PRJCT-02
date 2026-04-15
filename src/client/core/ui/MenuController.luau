@@ -2,6 +2,7 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local StarterGui = game:GetService("StarterGui")
 
 local Packages = ReplicatedStorage:WaitForChild("Packages")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
@@ -138,6 +139,12 @@ function MenuController.new(): MenuController
 	local player = Players.LocalPlayer
 	local playerGui = player:WaitForChild("PlayerGui")
 	local menuGui = playerGui:WaitForChild("Menu") :: ScreenGui
+	menuGui.ResetOnSpawn = false
+
+	local starterMenu = StarterGui:FindFirstChild("Menu")
+	if starterMenu and starterMenu:IsA("ScreenGui") then
+		starterMenu.ResetOnSpawn = false
+	end
 
 	local self = setmetatable({}, MenuController) :: any
 

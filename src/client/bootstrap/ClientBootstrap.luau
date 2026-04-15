@@ -1,6 +1,7 @@
 --!strict
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local StarterGui = game:GetService("StarterGui")
 local Workspace = game:GetService("Workspace")
 
 local Packages = ReplicatedStorage:WaitForChild("Packages")
@@ -44,6 +45,9 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 	_started = true
 	_janitor = Janitor.new()
 
+	-- Evita recreacion de ScreenGuis en respawn (rompe bindings de botones si cambia la instancia).
+	StarterGui.ResetPlayerGuiOnSpawn = false
+
 	local DataController = require(clientRoot.core.data.DataController)
 	local MenuController = require(clientRoot.core.ui.MenuController)
 	local FusionFeature = require(clientRoot.features.fusion)
@@ -52,6 +56,7 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 	local RewardsFeature = require(clientRoot.features.rewards)
 	local CasesFeature = require(clientRoot.features.cases)
 	local PlayTimeRewardsFeature = require(clientRoot.features.playtimerewards)
+	local MatchFeature = require(clientRoot.features.match)
 
 	DataController:Start()
 
@@ -73,6 +78,7 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 		{ label = "rewards", start = RewardsFeature.start },
 		{ label = "cases", start = CasesFeature.start },
 		{ label = "playtimerewards", start = PlayTimeRewardsFeature.start },
+		{ label = "match", start = MatchFeature.start },
 	} :: { DeferredFeatureEntry }
 
 	for _, feature in deferredFeatures do

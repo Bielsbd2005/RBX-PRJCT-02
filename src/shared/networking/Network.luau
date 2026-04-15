@@ -194,6 +194,142 @@ local CasesNamespace = ByteNet.DefineNamespace("Cases", function()
 end)
 
 -- ────────────────────────────────────────────────────────────
+-- NAMESPACE: Match
+-- Flujo de votacion de mapa.
+-- ────────────────────────────────────────────────────────────
+
+local MatchNamespace = ByteNet.DefineNamespace("Match", function()
+	return {
+		-- S → C: Inicio de votacion con 3 opciones fijas.
+		StartVote = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				optionAName = ByteNet.String,
+				optionAImage = ByteNet.String,
+				optionBName = ByteNet.String,
+				optionBImage = ByteNet.String,
+				optionCName = ByteNet.String,
+				optionCImage = ByteNet.String,
+				optionAMode = ByteNet.String,
+				optionBMode = ByteNet.String,
+				optionCMode = ByteNet.String,
+				duration = ByteNet.Int32,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- S → C: Estado de carga de mapa y disponibilidad de Play.
+		MapLoadState = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				isLoading = ByteNet.Bool,
+				playEnabled = ByteNet.Bool,
+				mapName = ByteNet.String,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- C → S: Solicitud para entrar a la partida (desde menu Play).
+		RequestJoinMatch = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- S → C: Confirmacion de spawn completo; permite quitar fade.
+		JoinMatchSpawned = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- S → C: Estado de TeamDeathmatch (kills y tiempo restante).
+		RoundState = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				scoreA = ByteNet.Int32,
+				scoreB = ByteNet.Int32,
+				timeLeft = ByteNet.Int32,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- S → C: Resultado final de la ronda.
+		RoundEnded = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				winnerTeam = ByteNet.String,
+				scoreA = ByteNet.Int32,
+				scoreB = ByteNet.Int32,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- S → C: Mostrar death screen con cooldown de respawn.
+		DeathScreenShow = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				respawnCooldown = ByteNet.Int32,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- S → C: Ocultar death screen.
+		DeathScreenHide = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- C → S: Respawn manual desde death screen.
+		RequestRespawn = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- C → S: Volver al menu desde death screen.
+		RequestReturnToMenu = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- S → C: Confirmacion de vuelta al menu.
+		ReturnToMenuDone = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- C → S: Voto del jugador (puede cambiar durante la ventana activa).
+		CastVote = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				mapName = ByteNet.String,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- C → S: Solicita re-sync del estado de votacion activo.
+		RequestVoteSync = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- S → C: Snapshot de votos y tiempo restante.
+		VoteState = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				optionAName = ByteNet.String,
+				optionAVotes = ByteNet.Int32,
+				optionBName = ByteNet.String,
+				optionBVotes = ByteNet.Int32,
+				optionCName = ByteNet.String,
+				optionCVotes = ByteNet.Int32,
+				timeLeft = ByteNet.Int32,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- S → C: Fin de votacion con mapa ganador.
+		EndVote = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				winnerMapName = ByteNet.String,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+	}
+end)
+
+-- ────────────────────────────────────────────────────────────
 -- NAMESPACE: Debug
 -- Herramientas de depuracion (solo Studio/dev en servidor).
 -- ────────────────────────────────────────────────────────────
@@ -209,4 +345,5 @@ return {
 	Combat     = CombatNamespace,
 	Rewards    = RewardsNamespace,
 	Cases      = CasesNamespace,
+	Match      = MatchNamespace,
 }
