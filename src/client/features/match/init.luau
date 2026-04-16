@@ -467,8 +467,9 @@ function MatchFeature.start(menuController: any): any
 	local camera = workspace.CurrentCamera
 	local localUserId = Players.LocalPlayer.UserId
 	local localMatchKills = 0
-	local playerKillsByUserId = {} :: { [number]: number }
+	local playerKillsByUserId  = {} :: { [number]: number }
 	local playerStreakByUserId = {} :: { [number]: number }
+	local playerDeathsByUserId = {} :: { [number]: number }
 	local rowUserIdByIndex = {} :: { [number]: number? }
 	local streakAnimationRunning = true
 
@@ -573,8 +574,10 @@ function MatchFeature.start(menuController: any): any
 		setLocalMatchKills(0)
 		table.clear(playerKillsByUserId)
 		table.clear(playerStreakByUserId)
+		table.clear(playerDeathsByUserId)
 		playerStreakByUserId[localUserId] = 0
-		playerKillsByUserId[localUserId] = 0
+		playerKillsByUserId[localUserId]  = 0
+		playerDeathsByUserId[localUserId] = 0
 		updatePlayerRows()
 	end
 
@@ -661,6 +664,139 @@ function MatchFeature.start(menuController: any): any
 				lateMenu.Enabled = true
 			end
 		end)
+	end
+
+	local function clearWeaponsSystemGui()
+		for _, node in playerGui:GetChildren() do
+			if not node:IsA("ScreenGui") then
+				continue
+			end
+
+			local isWeaponsGui = node.Name == "WeaponsSystemGui"
+				or node.Name == "WeaponGUI"
+				or node.Name == "WeaponGui"
+
+			if not isWeaponsGui then
+				local scalingElements = node:FindFirstChild("ScalingElements")
+				local hasCrosshair = node:FindFirstChild("Crosshair", true) ~= nil
+				isWeaponsGui = scalingElements ~= nil and hasCrosshair
+			end
+
+			if isWeaponsGui then
+				node.Enabled = false
+			end
+		end
+	end
+
+	local cachedWeaponsSystemModule = nil :: any
+	local attemptedWeaponsSystemResolve = false
+
+	local function getWeaponsSystemModule(): any
+		if attemptedWeaponsSystemResolve then
+			return cachedWeaponsSystemModule
+		end
+		attemptedWeaponsSystemResolve = true
+
+		local weaponsSystemFolder = ReplicatedStorage:FindFirstChild("WeaponsSystem")
+		if not weaponsSystemFolder then
+			return nil
+		end
+
+		local weaponsSystemModule = weaponsSystemFolder:FindFirstChild("WeaponsSystem")
+		if not weaponsSystemModule or not weaponsSystemModule:IsA("ModuleScript") then
+			return nil
+		end
+
+		local ok, moduleOrError = pcall(function()
+			return require(weaponsSystemModule)
+		end)
+		if ok then
+			cachedWeaponsSystemModule = moduleOrError
+			return cachedWeaponsSystemModule
+		end
+
+		warn("[MatchFeature] No se pudo cargar WeaponsSystem module: " .. tostring(moduleOrError))
+		return nil
+	end
+
+	local function deactivateWeaponsRuntimeState()
+		local weaponsSystem = getWeaponsSystemModule()
+		if not weaponsSystem then
+			return
+		end
+
+		weaponsSystem.currentWeapon = nil
+
+		if weaponsSystem.gui and weaponsSystem.gui.setEnabled then
+			weaponsSystem.gui:setEnabled(false)
+		end
+
+		if weaponsSystem.camera then
+			if weaponsSystem.camera.setEnabled then
+				weaponsSystem.camera:setEnabled(false)
+			end
+			weaponsSystem.camera.rotateCharacterWithCamera = false
+			if weaponsSystem.camera.resetZoomFactor then
+				weaponsSystem.camera:resetZoomFactor()
+			end
+			if weaponsSystem.camera.setHasScope then
+				weaponsSystem.camera:setHasScope(false)
+			end
+		end
+	end
+
+	local function clearLocalWeaponsAndUi()
+		local localPlayer = Players.LocalPlayer
+		local character = localPlayer.Character
+		if character then
+			local humanoid = character:FindFirstChildOfClass("Humanoid")
+			if humanoid then
+				humanoid:UnequipTools()
+				-- Evita que quede pegada la pose de arma (hold/reload/aim) al cerrar ronda.
+				for _, track in humanoid:GetPlayingAnimationTracks() do
+					local priority = track.Priority
+					if priority == Enum.AnimationPriority.Action
+						or priority == Enum.AnimationPriority.Action2
+						or priority == Enum.AnimationPriority.Action3
+						or priority == Enum.AnimationPriority.Action4
+					then
+						track:Stop(0)
+					end
+				end
+			end
+		end
+
+		deactivateWeaponsRuntimeState()
+
+		local backpack = localPlayer:FindFirstChildOfClass("Backpack")
+		if backpack then
+			for _, tool in backpack:GetChildren() do
+				if tool:IsA("Tool") then
+					tool:Destroy()
+				end
+			end
+		end
+
+		if character then
+			for _, tool in character:GetChildren() do
+				if tool:IsA("Tool") then
+					tool:Destroy()
+				end
+			end
+		end
+
+		clearWeaponsSystemGui()
+	end
+
+	local function clearLocalWeaponsAndUiWithRetries()
+		clearLocalWeaponsAndUi()
+		for _, delaySec in { 0.05, 0.2, 0.5 } do
+			task.delay(delaySec, function()
+				if pendingRoundEndReturn or not isInMatch then
+					clearLocalWeaponsAndUi()
+				end
+			end)
+		end
 	end
 
 	if matchHudGui and matchHudGui:IsA("ScreenGui") then
@@ -785,6 +921,9 @@ function MatchFeature.start(menuController: any): any
 	end), "Disconnect")
 
 	janitor:Add(Players.LocalPlayer.CharacterAdded:Connect(function()
+		if pendingRoundEndReturn then
+			clearLocalWeaponsAndUiWithRetries()
+		end
 		if not isInMatch then
 			return
 		end
@@ -854,6 +993,7 @@ function MatchFeature.start(menuController: any): any
 		killerName: string,
 		weaponName: string,
 	})
+		playerDeathsByUserId[localUserId] = (playerDeathsByUserId[localUserId] or 0) + 1
 		if not deathView then
 			return
 		end
@@ -890,18 +1030,33 @@ function MatchFeature.start(menuController: any): any
 		if activeEndResultsView then
 			activeEndResultsView:hide()
 		end
+		if endResultsGui then
+			-- Evita solape visual: ocultar ResultsScreen antes de volver a mostrar Menu.
+			endResultsGui.Enabled = false
+		end
 		if deathScreenGui and deathScreenGui:IsA("ScreenGui") then
 			deathScreenGui.Enabled = false
 		end
 		if matchHudGui and matchHudGui:IsA("ScreenGui") then
 			matchHudGui.Enabled = false
 		end
+		clearLocalWeaponsAndUiWithRetries()
 
 		if shouldShowMenu then
 			forceShowMenu()
 		end
 		_setLobbyCamera()
-		_tweenFade(fadeRefs.frame, 1, FADE_OUT_TWEEN)
+		-- Reaplicar en diferido por si algún sistema pisa la cámara al volver al menú.
+		task.delay(0.2, function()
+			if not isInMatch and not joinRequestInFlight then
+				_setLobbyCamera()
+			end
+		end)
+		task.delay(0.6, function()
+			if not isInMatch and not joinRequestInFlight then
+				_setLobbyCamera()
+			end
+		end)
 		Network.Match.RequestVoteSync.Send({})
 	end), true)
 
@@ -923,17 +1078,61 @@ function MatchFeature.start(menuController: any): any
 			deathView:hide()
 		end
 
+		clearLocalWeaponsAndUiWithRetries()
+
+		-- Determinar equipo del jugador local
+		local localPlayerTeam = Players.LocalPlayer.Team
+		local localTeam = ""
+		if localPlayerTeam then
+			if localPlayerTeam.Name == GameConfig.Teams.A.Name then
+				localTeam = "A"
+			elseif localPlayerTeam.Name == GameConfig.Teams.B.Name then
+				localTeam = "B"
+			end
+		end
+
+		-- Construir lista de jugadores con stats de la partida
+		local playerEntries = {}
+		for _, player in Players:GetPlayers() do
+			local playerSide = ""
+			if player.Team then
+				if player.Team.Name == GameConfig.Teams.A.Name then
+					playerSide = "A"
+				elseif player.Team.Name == GameConfig.Teams.B.Name then
+					playerSide = "B"
+				end
+			end
+			if playerSide == "" then continue end
+
+			local level = 0
+			local leaderstats = player:FindFirstChild("leaderstats")
+			if leaderstats then
+				local levelNode = leaderstats:FindFirstChild("Level")
+				if levelNode and (levelNode:IsA("IntValue") or levelNode:IsA("NumberValue")) then
+					level = (levelNode :: IntValue).Value
+				end
+			end
+
+			table.insert(playerEntries, {
+				userId  = player.UserId,
+				name    = player.Name,
+				team    = playerSide :: "A" | "B",
+				kills   = playerKillsByUserId[player.UserId] or 0,
+				deaths  = playerDeathsByUserId[player.UserId] or 0,
+				level   = level,
+			})
+		end
+
 		local activeEndResultsView = ensureEndResultsView()
 		if activeEndResultsView then
 			activeEndResultsView:show({
-				winnerTeam = data.winnerTeam,
-				scoreA = data.scoreA,
-				scoreB = data.scoreB,
-				duration = GameConfig.EndResultsDuration,
-				modeLabelText = "Resultados finales",
-			}, function()
-				_tweenFade(fadeRefs.frame, 0, FADE_IN_TWEEN)
-			end)
+				winnerTeam  = data.winnerTeam,
+				localTeam   = localTeam,
+				scoreA      = data.scoreA,
+				scoreB      = data.scoreB,
+				duration    = GameConfig.EndResultsDuration,
+				players     = playerEntries,
+			})
 		elseif endResultsGui then
 			endResultsGui.Enabled = false
 			warn("[MatchFeature] RoundEnded recibido pero no se resolvio EndResults GUI.")

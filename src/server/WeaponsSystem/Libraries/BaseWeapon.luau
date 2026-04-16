@@ -506,6 +506,10 @@ function BaseWeapon:onRenderStepped(dt)
 	if not self.equipped then
 		return
 	end
+	if not self.instance or not self.instance.Parent then
+		self:stopAnimations()
+		return
+	end
 
 	local isSprinting = false
 	if self.weaponsSystem and self.weaponsSystem.camera then
@@ -659,16 +663,24 @@ function BaseWeapon:getAnimationController()
 	self:setAnimationController(nil)
 
 	if self.instanceIsTool then
+		if not self.instance or not self.instance.Parent then
+			return nil
+		end
+
 		local humanoid = nil
+		local owner = self.instance.Parent
 		if IsServer then
-			humanoid = self.instance.Parent:FindFirstChildOfClass("Humanoid")
+			humanoid = owner:FindFirstChildOfClass("Humanoid")
 		else
 			-- Client: wait for humanoid with reasonable timeout
-			humanoid = self.instance.Parent:WaitForChild("Humanoid", 5)
+			humanoid = owner:FindFirstChildOfClass("Humanoid")
+			if not humanoid and owner.Parent then
+				humanoid = owner:WaitForChild("Humanoid", 5)
+			end
 		end
 		local animController = nil
 		if not humanoid then
-			animController = self.instance.Parent:FindFirstChildOfClass("AnimationController")
+			animController = owner:FindFirstChildOfClass("AnimationController")
 		end
 
 		self:setAnimationController(humanoid or animController)

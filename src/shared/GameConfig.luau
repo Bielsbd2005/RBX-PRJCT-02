@@ -38,7 +38,7 @@ local GameConfig: GameConfigType = {
 	EndResultsDuration = 10,
 	RespawnCooldown = 3,
 	MinPlayersToStart = 1,
-	MaxRoundDuration = 60,
+	MaxRoundDuration = 5,
 	WinScoreLimit = 30,
 
 	Teams = {
