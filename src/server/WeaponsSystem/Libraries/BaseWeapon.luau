@@ -1,11 +1,16 @@
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
 
 local IsServer = RunService:IsServer()
 
 local WeaponsSystemFolder = script.Parent.Parent
 local AnimationsFolder = WeaponsSystemFolder:WaitForChild("Assets"):WaitForChild("Animations")
 local AutoAimSystem = require(script.Parent:WaitForChild("AutoAimSystem"))
+
+local function _isTouchPrimaryInput(): boolean
+	return UserInputService.TouchEnabled and not UserInputService.MouseEnabled
+end
 
 local localRandom = Random.new()
 
@@ -594,9 +599,14 @@ function BaseWeapon:onStepped(dt)
 
 		local deltaPitch = desiredPitch - currentPitch
 
-		-- If the crosshair is already on the enemy (e.g., arm, leg), we apply a weaker pull
-		-- to let the player freely target specific body parts while still slightly drifting to center.
-		local pullStrength = isAimingAtEnemy and (1.5 * dt) or (4.5 * dt)
+		-- AutoShoot solo en movil; en PC dejamos un aim assist mucho mas sutil.
+		local isTouchInput = _isTouchPrimaryInput()
+		local pullStrength: number
+		if isTouchInput then
+			pullStrength = isAimingAtEnemy and (1.5 * dt) or (4.5 * dt)
+		else
+			pullStrength = isAimingAtEnemy and (0.2 * dt) or (0.6 * dt)
+		end
 
 		self.weaponsSystem.camera.yaw = currentYaw + deltaYaw * pullStrength
 		self.weaponsSystem.camera.pitch = math.clamp(
@@ -611,6 +621,7 @@ function BaseWeapon:onStepped(dt)
 	local fireRate = self:getConfigValue("FireRate", 0)
 	local cooldown = fireRate > 0 and (60 / fireRate) or AutoAimSystem.FIRE_COOLDOWN
 	if (now - self.lastFireTime) < cooldown then return end
+	if not _isTouchPrimaryInput() then return end
 
 	-- Determine weapon muzzle origin matching BulletWeapon's self.tipAttach precisely
 	local weaponOrigin = cameraOrigin

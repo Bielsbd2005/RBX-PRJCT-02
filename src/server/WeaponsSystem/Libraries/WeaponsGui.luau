@@ -210,6 +210,7 @@ function WeaponsGui.new(weaponsSystem)
 
 	self.scopeEnabled = false
 	self.isZoomed = false
+	self._uiReady = false
 
 	self._lastWeaponInstance = nil
 	self._isShotgun = false
@@ -350,6 +351,12 @@ function WeaponsGui.new(weaponsSystem)
 
 		self.gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
 		self.gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function() self:onScreenSizeChanged() end)
+		workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function() self:onScreenSizeChanged() end)
+		self.gui:GetPropertyChangedSignal("Enabled"):Connect(function()
+			if self.gui.Enabled then
+				self:onScreenSizeChanged()
+			end
+		end)
 		self:onScreenSizeChanged()
 
 		-- Reload progress is rendered directly from WeaponsSystemGui Progress frame.
@@ -396,6 +403,23 @@ getJumpButton = function()
 end
 
 function WeaponsGui:onScreenSizeChanged()
+	if not self.scalingElementsFolder or not self.crosshairFrame then
+		self._uiReady = false
+		return
+	end
+
+	local camera = workspace.CurrentCamera
+	if not camera then
+		self._uiReady = false
+		return
+	end
+
+	local viewportSize = camera.ViewportSize
+	if viewportSize.X <= 0 or viewportSize.Y <= 0 then
+		self._uiReady = false
+		return
+	end
+
 	if self.smallTouchscreen and self.largeTouchscreen then
 		if UserInputService.TouchEnabled then
 			local isSmallScreen
@@ -412,11 +436,17 @@ function WeaponsGui:onScreenSizeChanged()
 			self.largeTouchscreen.Visible = false
 		end
 	end
-	local viewportSize = workspace.CurrentCamera.ViewportSize
 	for _, child in pairs(self.scalingElementsFolder:GetChildren()) do
 		self:updateScale(child, viewportSize)
 	end
-	self.crosshairNormalSize = self.crosshairFrame.AbsoluteSize
+
+	local crosshairAbsoluteSize = self.crosshairFrame.AbsoluteSize
+	if crosshairAbsoluteSize.X <= 0 or crosshairAbsoluteSize.Y <= 0 then
+		self._uiReady = false
+		return
+	end
+
+	self.crosshairNormalSize = crosshairAbsoluteSize
 	self.crosshairBottom.Size = UDim2.new(0, self.origCrosshairScales[self.crosshairBottom].X * self.crosshairNormalSize.X, 0, self.origCrosshairScales[self.crosshairBottom].Y * self.crosshairNormalSize.Y)
 	self.crosshairLeft.Size = UDim2.new(0, self.origCrosshairScales[self.crosshairLeft].X * self.crosshairNormalSize.X, 0, self.origCrosshairScales[self.crosshairLeft].Y * self.crosshairNormalSize.Y)
 	self.crosshairRight.Size = UDim2.new(0, self.origCrosshairScales[self.crosshairRight].X * self.crosshairNormalSize.X, 0, self.origCrosshairScales[self.crosshairRight].Y * self.crosshairNormalSize.Y)
@@ -424,6 +454,8 @@ function WeaponsGui:onScreenSizeChanged()
 	if self.crosshairShotgunFrame then
 		self:_layoutShotgunCrosshairCorners()
 	end
+
+	self._uiReady = true
 end
 
 function WeaponsGui:getWeightedScaleAmount(originalScaleAmount, newScreenDim, referenceScreenDim)
@@ -453,6 +485,16 @@ function WeaponsGui:setEnabled(enabled)
 	if self.enabled == enabled then return end
 	self.enabled = enabled
 	if self.enabled then
+		if self.gui then
+			self.gui.Enabled = true
+		end
+		task.defer(function()
+			self:onScreenSizeChanged()
+		end)
+		task.delay(0.1, function()
+			self:onScreenSizeChanged()
+		end)
+
 		self.connections.renderStepped = RunService.RenderStepped:Connect(function(dt) self:onRenderStepped(dt) end)
 		self.connections.inputBegan = UserInputService.InputBegan:Connect(function(input,gp)
 			if input.UserInputType == Enum.UserInputType.MouseButton2 then
@@ -718,6 +760,10 @@ function WeaponsGui:OnHitOtherPlayer(damage, humanoidHit)
 end
 
 function WeaponsGui:onRenderStepped(dt)
+	if not self._uiReady then
+		self:onScreenSizeChanged()
+		return
+	end
 	if not self.enabled or not self.gui then return end
 	self:_hideDefaultJumpButton()
 	self:_applyCrosshairByWeapon()

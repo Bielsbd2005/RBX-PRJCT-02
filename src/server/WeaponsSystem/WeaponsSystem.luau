@@ -396,7 +396,6 @@ function WeaponsSystem.setWeaponEquipped(weapon, equipped)
 	end
 
 	local lastWeapon = WeaponsSystem.currentWeapon
-	local hasWeapon = false
 	local weaponChanged = false
 
 	if lastWeapon == weapon then
@@ -430,7 +429,8 @@ function WeaponsSystem.setWeaponEquipped(weapon, equipped)
 	end
 
 	if WeaponsSystem.gui then
-		WeaponsSystem.gui:setEnabled(hasWeapon)
+		local weaponIsActive = WeaponsSystem.currentWeapon ~= nil
+		WeaponsSystem.gui:setEnabled(weaponIsActive)
 
 		if WeaponsSystem.currentWeapon then
 			WeaponsSystem.gui:setCrosshairWeaponScale(WeaponsSystem.currentWeapon:getConfigValue("CrosshairScale", 1))
