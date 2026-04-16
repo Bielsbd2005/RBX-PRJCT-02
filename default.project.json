@@ -15,6 +15,11 @@
         "$path": "src/server"
       }
     },
+    "ServerStorage": {
+      "WeaponTools": {
+        "$path": "src/serverStorage/WeaponTools"
+      }
+    },
 
     "StarterPlayer": {
       "StarterPlayerScripts": {

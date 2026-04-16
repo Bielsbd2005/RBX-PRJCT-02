@@ -29,7 +29,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	SettingsService:Start(DataService)
 	RewardsService:Start(DataService)
 	CasesService:Start(DataService)
-	MatchService:Start()
+	MatchService:Start(DataService)
 	ClearDataCommandService:Start(DataService)
 end
 

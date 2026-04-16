@@ -50,29 +50,25 @@ end
 
 local WEAPON_IMAGE_IDS = {
 	Main = {
-		Default = 136728627576131,
-		Weapon2 = 122930463834964,
-		Weapon3 = 114523558287606,
+		AR = 136728627576131,
+		Sniper = 122930463834964,
+		Groza = 114523558287606,
 	},
 	Special = {
 		Default = 94351975111962,
-		Weapon4 = 94351975111962,
-		Weapon5 = 94351975111962,
 	},
 }
 
 local ItemsConfig: ItemsConfigType = {
 
 	Main = {
-		Default   = { Name = "Default",  		 Price = 0,    LevelRequired = 1,  Rarity = "Common",    Image = asset(WEAPON_IMAGE_IDS.Main.Default), CanPurchase = false },
-		Weapon2   = { Name = "Weapon1",         Price = 3,  LevelRequired = 0,  Rarity = "Uncommon",  Image = asset(WEAPON_IMAGE_IDS.Main.Weapon2), CanPurchase = false },
-		Weapon3   = { Name = "Weapon2",         Price = 1000, LevelRequired = 10, Rarity = "Rare",      Image = asset(WEAPON_IMAGE_IDS.Main.Weapon3), CanPurchase = false },
+		AR       = { Name = "AR",  		 Price = 0,    LevelRequired = 0,  Rarity = "Common",    Image = asset(WEAPON_IMAGE_IDS.Main.AR), CanPurchase = false },
+		Sniper   = { Name = "Sniper",         Price = 2,  LevelRequired = 0,  Rarity = "Uncommon",  Image = asset(WEAPON_IMAGE_IDS.Main.Sniper), CanPurchase = false },
+		Groza   = { Name = "Groza",         Price = 1000, LevelRequired = 0, Rarity = "Rare",      Image = asset(WEAPON_IMAGE_IDS.Main.Groza), CanPurchase = false },
 	},
 
 	Special = {
-		Default   = { Name = "Default",  		 Price = 0,    LevelRequired = 1,  Rarity = "Common",    Image = asset(WEAPON_IMAGE_IDS.Special.Default), CanPurchase = false },
-		Weapon4   = { Name = "Weapon1",         Price = 2000, LevelRequired = 15, Rarity = "Epic",      Image = asset(WEAPON_IMAGE_IDS.Special.Weapon4), CanPurchase = false },
-		Weapon5   = { Name = "Weapon2",         Price = 3500, LevelRequired = 20, Rarity = "Epic",      Image = asset(WEAPON_IMAGE_IDS.Special.Weapon5), CanPurchase = false },
+		Shotgun   = { Name = "Shotgun",  		 Price = 0,    LevelRequired = 0,  Rarity = "Common",    Image = asset(WEAPON_IMAGE_IDS.Special.Default), CanPurchase = false },
 	},
 
 	WeaponSkins = {

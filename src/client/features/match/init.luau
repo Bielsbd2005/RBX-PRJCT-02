@@ -3,6 +3,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
+local ContentProvider = game:GetService("ContentProvider")
 
 local Client = script.Parent.Parent
 local Packages = ReplicatedStorage:WaitForChild("Packages")
@@ -14,6 +15,7 @@ local Network = require(Shared.networking.Network)
 
 local DeathScreenView = require(Client.features.match.DeathScreenView)
 local EndResultsView = require(Client.features.match.EndResultsView)
+local KillCamController = require(Client.features.match.KillCamController)
 local MapVoteView = require(Client.features.match.MapVoteView)
 
 local MatchFeature = {}
@@ -22,6 +24,12 @@ local LOCAL_VOTE_COOLDOWN = 0.12
 local FADE_IN_TWEEN = TweenInfo.new(0.28, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local FADE_OUT_TWEEN = TweenInfo.new(0.28, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 local JOIN_CONFIRM_TIMEOUT = 8
+local STREAK_ANIMATION_FPS = 5
+local STREAK_ANIMATION_FRAMES = {
+	"rbxassetid://133335961818532",
+	"rbxassetid://88381693098755",
+	"rbxassetid://100516583629199",
+}
 
 type FadeRefs = {
 	screenGui: ScreenGui,
@@ -32,11 +40,56 @@ type HudRefs = {
 	scoreA: TextLabel?,
 	scoreB: TextLabel?,
 	timer: TextLabel?,
+	localKills: TextLabel?,
+	playerRows: { HudPlayerRowRefs },
 }
 
-local function _findTextLabelByName(root: Instance, targetName: string): TextLabel?
+type HudPlayerRowRefs = {
+	root: GuiObject,
+	profile: ImageLabel?,
+	streak: GuiObject?,
+	streakValue: TextLabel?,
+	totalKillsValue: TextLabel?,
+	streakAnimatedImage: ImageLabel?,
+}
+
+local function _findChildGuiObject(parent: Instance?, childName: string): GuiObject?
+	if not parent then
+		return nil
+	end
+
+	local node = parent:FindFirstChild(childName)
+	if node and node:IsA("GuiObject") then
+		return node
+	end
+
+	return nil
+end
+
+local function _findChildTextLabel(parent: Instance?, childName: string): TextLabel?
+	if not parent then
+		return nil
+	end
+
+	local node = parent:FindFirstChild(childName)
+	if node and node:IsA("TextLabel") then
+		return node
+	end
+
+	return nil
+end
+
+local function _findFirstImageLabel(root: Instance?): ImageLabel?
+	if not root then
+		return nil
+	end
+
+	if root:IsA("ImageLabel") then
+		return root
+	end
+
 	for _, node in root:GetDescendants() do
-		if node:IsA("TextLabel") and string.lower(node.Name) == string.lower(targetName) then
+		if node:IsA("ImageLabel") then
 			return node
 		end
 	end
@@ -44,15 +97,85 @@ local function _findTextLabelByName(root: Instance, targetName: string): TextLab
 	return nil
 end
 
-local function _resolveHudRefs(matchHudGui: ScreenGui?): HudRefs
-	if not matchHudGui then
-		return { scoreA = nil, scoreB = nil, timer = nil }
+local function _collectHudPlayerRows(matchHudGui: ScreenGui): { HudPlayerRowRefs }
+	local playersContainer = _findChildGuiObject(matchHudGui, "Players")
+	if not playersContainer then
+		return {}
 	end
 
+	local indexedRows = {} :: { { index: number, row: HudPlayerRowRefs } }
+	for _, child in playersContainer:GetChildren() do
+		if not child:IsA("GuiObject") then
+			continue
+		end
+
+		local index = tonumber(child.Name)
+		if not index then
+			continue
+		end
+
+		local profileNode = child:FindFirstChild("Profile")
+		local streakNode = child:FindFirstChild("Streak")
+		local streakGui = if streakNode and streakNode:IsA("GuiObject") then streakNode else nil
+		local streakValueNode = if streakGui then (streakGui:FindFirstChild("Kills") or streakGui:FindFirstChild("Value")) else nil
+		local streakValue = if streakValueNode and streakValueNode:IsA("TextLabel") then streakValueNode else nil
+		local totalKillsNode = child:FindFirstChild("Kills")
+		local totalKillsValueNode = if totalKillsNode and totalKillsNode:IsA("TextLabel")
+			then totalKillsNode
+			elseif totalKillsNode and totalKillsNode:IsA("GuiObject")
+				then (totalKillsNode:FindFirstChild("Value") or totalKillsNode:FindFirstChild("Kills"))
+				else nil
+		local totalKillsValue = if totalKillsValueNode and totalKillsValueNode:IsA("TextLabel") then totalKillsValueNode else nil
+		local streakAnimatedImage = _findFirstImageLabel(streakGui)
+
+		table.insert(indexedRows, {
+			index = index,
+			row = {
+				root = child,
+				profile = if profileNode and profileNode:IsA("ImageLabel") then profileNode else nil,
+				streak = streakGui,
+				streakValue = streakValue,
+				totalKillsValue = totalKillsValue,
+				streakAnimatedImage = streakAnimatedImage,
+			},
+		})
+	end
+
+	table.sort(indexedRows, function(a, b)
+		return a.index < b.index
+	end)
+
+	local rows = {} :: { HudPlayerRowRefs }
+	for _, entry in indexedRows do
+		table.insert(rows, entry.row)
+	end
+
+	return rows
+end
+
+local function _resolveHudRefs(matchHudGui: ScreenGui?): HudRefs
+	if not matchHudGui then
+		return {
+			scoreA = nil,
+			scoreB = nil,
+			timer = nil,
+			localKills = nil,
+			playerRows = {},
+		}
+	end
+
+	local statusNode = _findChildGuiObject(matchHudGui, "Status")
+	local scoreANode = _findChildGuiObject(statusNode, "ScoreA")
+	local scoreBNode = _findChildGuiObject(statusNode, "ScoreB")
+	local timerNode = _findChildGuiObject(statusNode, "Timer")
+	local streakNode = _findChildGuiObject(matchHudGui, "Streak")
+
 	return {
-		scoreA = _findTextLabelByName(matchHudGui, "ScoreA"),
-		scoreB = _findTextLabelByName(matchHudGui, "ScoreB"),
-		timer = _findTextLabelByName(matchHudGui, "Timer"),
+		scoreA = _findChildTextLabel(scoreANode, "Value"),
+		scoreB = _findChildTextLabel(scoreBNode, "Value"),
+		timer = _findChildTextLabel(timerNode, "Value"),
+		localKills = _findChildTextLabel(streakNode, "Kills"),
+		playerRows = _collectHudPlayerRows(matchHudGui),
 	}
 end
 
@@ -65,6 +188,12 @@ local function _setHudState(hudRefs: HudRefs, scoreA: number, scoreB: number, ti
 	end
 	if hudRefs.timer then
 		hudRefs.timer.Text = tostring(math.max(0, timeLeft))
+	end
+end
+
+local function _setHudLocalKills(hudRefs: HudRefs, kills: number)
+	if hudRefs.localKills then
+		hudRefs.localKills.Text = tostring(math.max(0, kills))
 	end
 end
 
@@ -301,6 +430,8 @@ function MatchFeature.start(menuController: any): any
 	janitor:Add(view, "Destroy")
 
 	local deathView = if deathScreenGui and deathScreenGui:IsA("ScreenGui") then DeathScreenView.new(deathScreenGui) else nil
+	local killCam = KillCamController.new(playerGui)
+	janitor:Add(killCam, "Destroy")
 	if deathView then
 		janitor:Add(deathView, "Destroy")
 	end
@@ -334,6 +465,151 @@ function MatchFeature.start(menuController: any): any
 	local joinRequestInFlight = false
 	local returnMenuInFlight = false
 	local camera = workspace.CurrentCamera
+	local localUserId = Players.LocalPlayer.UserId
+	local localMatchKills = 0
+	local playerKillsByUserId = {} :: { [number]: number }
+	local playerStreakByUserId = {} :: { [number]: number }
+	local rowUserIdByIndex = {} :: { [number]: number? }
+	local streakAnimationRunning = true
+
+	local function preloadStreakImages()
+		for _, id in STREAK_ANIMATION_FRAMES do
+			local tempImage = Instance.new("ImageLabel")
+			tempImage.Image = id
+			ContentProvider:PreloadAsync({ tempImage })
+			tempImage:Destroy()
+		end
+	end
+
+	local function setRowStats(rowRef: HudPlayerRowRefs, streakValue: number, totalKills: number)
+		if not rowRef.streak then
+			if rowRef.totalKillsValue then
+				rowRef.totalKillsValue.Text = tostring(math.max(0, totalKills))
+			end
+			return
+		end
+
+		local isVisible = streakValue > 0
+		rowRef.streak.Visible = isVisible
+		if rowRef.streakValue then
+			rowRef.streakValue.Text = tostring(math.max(0, streakValue))
+		end
+		if rowRef.totalKillsValue then
+			rowRef.totalKillsValue.Text = tostring(math.max(0, totalKills))
+		end
+	end
+
+	local function updatePlayerRows()
+		if #hudRefs.playerRows == 0 then
+			return
+		end
+
+		local players = Players:GetPlayers()
+		table.sort(players, function(a, b)
+			local killsA = playerKillsByUserId[a.UserId] or 0
+			local killsB = playerKillsByUserId[b.UserId] or 0
+			if killsA ~= killsB then
+				return killsA > killsB
+			end
+
+			local streakA = playerStreakByUserId[a.UserId] or 0
+			local streakB = playerStreakByUserId[b.UserId] or 0
+			if streakA ~= streakB then
+				return streakA > streakB
+			end
+
+			if a.Name ~= b.Name then
+				return a.Name < b.Name
+			end
+
+			return a.UserId < b.UserId
+		end)
+
+		for index, rowRef in ipairs(hudRefs.playerRows) do
+			local player = players[index]
+			rowRef.root.Visible = player ~= nil
+			if not player then
+				rowUserIdByIndex[index] = nil
+				if rowRef.profile then
+					rowRef.profile.Image = ""
+				end
+				setRowStats(rowRef, 0, 0)
+				continue
+			end
+
+			rowUserIdByIndex[index] = player.UserId
+			if rowRef.profile then
+				local expectedUserId = player.UserId
+				local rowIndex = index
+				local profileRef = rowRef.profile
+				task.spawn(function()
+					local ok, content = pcall(function()
+						return Players:GetUserThumbnailAsync(expectedUserId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size100x100)
+					end)
+					if not ok or not streakAnimationRunning then
+						return
+					end
+					if rowUserIdByIndex[rowIndex] ~= expectedUserId then
+						return
+					end
+					profileRef.Image = content
+				end)
+			end
+
+			setRowStats(
+				rowRef,
+				playerStreakByUserId[player.UserId] or 0,
+				playerKillsByUserId[player.UserId] or 0
+			)
+		end
+	end
+
+	local function setLocalMatchKills(value: number)
+		localMatchKills = math.max(0, value)
+		_setHudLocalKills(hudRefs, localMatchKills)
+	end
+
+	local function resetAllStreakState()
+		setLocalMatchKills(0)
+		table.clear(playerKillsByUserId)
+		table.clear(playerStreakByUserId)
+		playerStreakByUserId[localUserId] = 0
+		playerKillsByUserId[localUserId] = 0
+		updatePlayerRows()
+	end
+
+	local function applyPlayerStreakState(userId: number, kills: number, streak: number)
+		playerKillsByUserId[userId] = math.max(0, kills)
+		playerStreakByUserId[userId] = math.max(0, streak)
+		if userId == localUserId then
+			setLocalMatchKills(playerKillsByUserId[userId])
+		end
+		updatePlayerRows()
+	end
+
+	task.spawn(preloadStreakImages)
+	for _, rowRef in hudRefs.playerRows do
+		setRowStats(rowRef, 0, 0)
+		if rowRef.streakAnimatedImage then
+			local animatedImage = rowRef.streakAnimatedImage
+			local streakRef = rowRef.streak
+			task.spawn(function()
+				local frameIndex = 1
+				while streakAnimationRunning do
+					if streakRef and streakRef.Visible then
+						animatedImage.Image = STREAK_ANIMATION_FRAMES[frameIndex]
+						frameIndex += 1
+						if frameIndex > #STREAK_ANIMATION_FRAMES then
+							frameIndex = 1
+						end
+					end
+					task.wait(1 / STREAK_ANIMATION_FPS)
+				end
+			end)
+		end
+	end
+	updatePlayerRows()
+	resetAllStreakState()
 
 	local function getCurrentMenuGui(): ScreenGui?
 		local current = playerGui:FindFirstChild("Menu")
@@ -440,6 +716,20 @@ function MatchFeature.start(menuController: any): any
 		Network.Match.CastVote.Send({ mapName = mapName })
 	end)
 
+	janitor:Add(function()
+		streakAnimationRunning = false
+	end, true)
+
+	janitor:Add(Players.PlayerAdded:Connect(function()
+		updatePlayerRows()
+	end), "Disconnect")
+
+	janitor:Add(Players.PlayerRemoving:Connect(function(player)
+		playerKillsByUserId[player.UserId] = nil
+		playerStreakByUserId[player.UserId] = nil
+		updatePlayerRows()
+	end), "Disconnect")
+
 	janitor:Add(playButton.MouseButton1Click:Connect(function()
 		if not playEnabled or joinRequestInFlight then
 			return
@@ -505,6 +795,8 @@ function MatchFeature.start(menuController: any): any
 		joinRequestInFlight = false
 		isInMatch = true
 		pendingRoundEndReturn = false
+		killCam:stop()
+		resetAllStreakState()
 		menuController:hide()
 		enforceMenuHiddenIfNeeded()
 		if deathView then
@@ -544,14 +836,37 @@ function MatchFeature.start(menuController: any): any
 		_setHudState(hudRefs, data.scoreA, data.scoreB, data.timeLeft)
 	end), true)
 
-	janitor:Add(Network.Match.DeathScreenShow.Listen(function(data: { respawnCooldown: number })
+	janitor:Add(Network.Match.PlayerStreakState.Listen(function(data: {
+		userId: string,
+		kills: number,
+		streak: number,
+	})
+		local userId = tonumber(data.userId)
+		if not userId then
+			return
+		end
+		applyPlayerStreakState(userId, data.kills, data.streak)
+	end), true)
+
+	janitor:Add(Network.Match.DeathScreenShow.Listen(function(data: {
+		respawnCooldown: number,
+		killerUserId: string,
+		killerName: string,
+		weaponName: string,
+	})
 		if not deathView then
 			return
 		end
+		killCam:start({
+			killerUserId = data.killerUserId,
+			killerName = data.killerName,
+			weaponName = data.weaponName,
+		})
 		deathView:show(data.respawnCooldown)
 	end), true)
 
 	janitor:Add(Network.Match.DeathScreenHide.Listen(function(_: {})
+		killCam:stop()
 		if deathView then
 			deathView:hide()
 		end
@@ -565,6 +880,8 @@ function MatchFeature.start(menuController: any): any
 		joinRequestInFlight = false
 		isInMatch = false
 		pendingRoundEndReturn = false
+		killCam:stop()
+		resetAllStreakState()
 
 		if deathView then
 			deathView:hide()
@@ -596,6 +913,8 @@ function MatchFeature.start(menuController: any): any
 		isInMatch = false
 		joinRequestInFlight = false
 		pendingRoundEndReturn = true
+		killCam:stop()
+		resetAllStreakState()
 		setPlayEnabled(false)
 		if matchHudGui and matchHudGui:IsA("ScreenGui") then
 			matchHudGui.Enabled = false
@@ -708,6 +1027,7 @@ function MatchFeature.start(menuController: any): any
 		if deathView then
 			deathView:hide()
 		end
+		killCam:stop()
 		if mapVoteNode:IsA("GuiObject") then
 			mapVoteNode.Visible = false
 		end

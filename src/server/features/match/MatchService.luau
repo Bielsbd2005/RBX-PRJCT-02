@@ -60,14 +60,19 @@ local _deathConnectionsByUserId: { [number]: RBXScriptConnection } = {}
 local _characterConnectionsByUserId: { [number]: RBXScriptConnection } = {}
 local _deathAtByUserId: { [number]: number } = {}
 local _respawnDebounceByUserId: { [number]: boolean } = {}
+local _matchKillsByUserId: { [number]: number } = {}
+local _killStreakByUserId: { [number]: number } = {}
 
 local _teamA: Team? = nil
 local _teamB: Team? = nil
 local _finishRoundAndScheduleRestart: any = nil
 local _AIService: any = nil
+local _dataService: any = nil
 
 local VOTE_CHANGE_COOLDOWN = 0.15
 local DEFAULT_PLACEHOLDER_IMAGE = "rbxasset://textures/ui/GuiImagePlaceholder.png"
+local WEAPON_TOOLS_ROOT_NAME = "WeaponTools"
+local MATCH_LOADOUT_TOOL_ATTRIBUTE = "MatchLoadoutTool"
 
 local function _log(message: string)
 	print("[MatchService] " .. message)
@@ -133,6 +138,70 @@ local function _sendRoundStateToPlayer(player: Player)
 	if not ok then
 		_log(string.format("Failed RoundState snapshot to %s: %s", player.Name, tostring(err)))
 	end
+end
+
+local function _sendPlayerStreakToAll(userId: number)
+	Network.Match.PlayerStreakState.SendToAll({
+		userId = tostring(userId),
+		kills = _matchKillsByUserId[userId] or 0,
+		streak = _killStreakByUserId[userId] or 0,
+	})
+end
+
+local function _sendPlayerStreakToPlayer(player: Player, userId: number)
+	local ok, err = pcall(function()
+		Network.Match.PlayerStreakState.SendTo({
+			userId = tostring(userId),
+			kills = _matchKillsByUserId[userId] or 0,
+			streak = _killStreakByUserId[userId] or 0,
+		}, player)
+	end)
+
+	if not ok then
+		_log(string.format("Failed PlayerStreakState snapshot to %s for user %d: %s", player.Name, userId, tostring(err)))
+	end
+end
+
+local function _sendAllPlayerStreaksToPlayer(player: Player)
+	for _, otherPlayer in Players:GetPlayers() do
+		_sendPlayerStreakToPlayer(player, otherPlayer.UserId)
+	end
+end
+
+local function _resetAllPlayerStreakState()
+	table.clear(_matchKillsByUserId)
+	table.clear(_killStreakByUserId)
+
+	for _, player in Players:GetPlayers() do
+		_matchKillsByUserId[player.UserId] = 0
+		_killStreakByUserId[player.UserId] = 0
+		_sendPlayerStreakToAll(player.UserId)
+	end
+end
+
+local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?)
+	_killStreakByUserId[deadPlayer.UserId] = 0
+	if _matchKillsByUserId[deadPlayer.UserId] == nil then
+		_matchKillsByUserId[deadPlayer.UserId] = 0
+	end
+	_sendPlayerStreakToAll(deadPlayer.UserId)
+
+	if not attackerUserId or attackerUserId == deadPlayer.UserId then
+		return
+	end
+
+	local attacker = Players:GetPlayerByUserId(attackerUserId)
+	if not attacker then
+		return
+	end
+
+	if _isInMenuByUserId[attackerUserId] then
+		return
+	end
+
+	_matchKillsByUserId[attackerUserId] = (_matchKillsByUserId[attackerUserId] or 0) + 1
+	_killStreakByUserId[attackerUserId] = (_killStreakByUserId[attackerUserId] or 0) + 1
+	_sendPlayerStreakToAll(attackerUserId)
 end
 
 local function _ensureTeams()
@@ -254,6 +323,18 @@ local function _registerDeathListener(player: Player, character: Model)
 
 		_deathAtByUserId[player.UserId] = time()
 		_respawnDebounceByUserId[player.UserId] = nil
+		local attackerUserIdAttr = humanoid:GetAttribute("LastAttackerUserId")
+		local attackerAtAttr = humanoid:GetAttribute("LastAttackerAt")
+		local attackerWeaponNameAttr = humanoid:GetAttribute("LastAttackerWeaponName")
+		local attackerUserId = if type(attackerUserIdAttr) == "number" then attackerUserIdAttr else nil
+		local attackerAt = if type(attackerAtAttr) == "number" then attackerAtAttr else 0
+		local attackerWeaponName = if type(attackerWeaponNameAttr) == "string" then attackerWeaponNameAttr else ""
+		if attackerAt > 0 and math.abs(time() - attackerAt) > 4 then
+			attackerUserId = nil
+		end
+		local attackerPlayer = if attackerUserId then Players:GetPlayerByUserId(attackerUserId) else nil
+		local killerName = if attackerPlayer then attackerPlayer.Name else ""
+		_registerKillEvent(player, attackerUserId)
 
 		if deadSide == "A" then
 			_roundScoreB += 1
@@ -274,6 +355,9 @@ local function _registerDeathListener(player: Player, character: Model)
 		if player.Parent == Players then
 			Network.Match.DeathScreenShow.SendTo({
 				respawnCooldown = GameConfig.RespawnCooldown,
+				killerUserId = if attackerUserId then tostring(attackerUserId) else "",
+				killerName = killerName,
+				weaponName = attackerWeaponName,
 			}, player)
 		end
 	end)
@@ -281,18 +365,136 @@ end
 
 local function _teleportCharacterToSpawn(player: Player, spawnPoint: BasePart)
 	if player.Parent ~= Players then
-		return
+		return nil
 	end
 
 	player:LoadCharacter()
 	local character = player.Character or player.CharacterAdded:Wait()
 	if player.Parent ~= Players then
-		return
+		return nil
 	end
 
 	local root = character:FindFirstChild("HumanoidRootPart") :: BasePart?
 	if root then
 		root.CFrame = spawnPoint.CFrame + Vector3.new(0, 4, 0)
+	end
+
+	return character
+end
+
+local function _getWeaponToolsRoot(): Folder?
+	local root = ServerStorage:FindFirstChild(WEAPON_TOOLS_ROOT_NAME)
+	if root and root:IsA("Folder") then
+		return root
+	end
+
+	if root ~= nil then
+		warn(string.format("[MatchService] ServerStorage.%s existe pero no es Folder.", WEAPON_TOOLS_ROOT_NAME))
+	end
+
+	return nil
+end
+
+local function _findLoadoutToolTemplate(loadoutCategory: "Main" | "Special", weaponId: string): Tool?
+	if weaponId == "" then
+		return nil
+	end
+
+	local root = _getWeaponToolsRoot()
+	if not root then
+		return nil
+	end
+
+	local byCategory = root:FindFirstChild(loadoutCategory)
+	if byCategory then
+		local direct = byCategory:FindFirstChild(weaponId)
+		if direct and direct:IsA("Tool") then
+			return direct
+		end
+	end
+
+	local fallback = root:FindFirstChild(weaponId)
+	if fallback and fallback:IsA("Tool") then
+		return fallback
+	end
+
+	return nil
+end
+
+local function _clearMatchLoadoutTools(player: Player)
+	local containers = {
+		player:FindFirstChild("Backpack"),
+		player:FindFirstChild("StarterGear"),
+		player.Character,
+	}
+
+	for _, container in containers do
+		if not container then
+			continue
+		end
+		for _, child in container:GetChildren() do
+			if child:IsA("Tool") and child:GetAttribute(MATCH_LOADOUT_TOOL_ATTRIBUTE) == true then
+				child:Destroy()
+			end
+		end
+	end
+end
+
+local function _grantMatchLoadoutTools(player: Player): (boolean, boolean)
+	local profile = if _dataService then _dataService:GetProfile(player) else nil
+	if not profile or not profile.Data or not profile.Data.Loadout then
+		return false, true
+	end
+
+	local loadout = profile.Data.Loadout
+	local mainWeaponId = if type(loadout.MainWeapon) == "string" and loadout.MainWeapon ~= "" then loadout.MainWeapon else "Default"
+	local specialWeaponId = if type(loadout.SpecialWeapon) == "string" and loadout.SpecialWeapon ~= "" then loadout.SpecialWeapon else "Default"
+
+	local backpackNode = player:FindFirstChild("Backpack") or player:WaitForChild("Backpack", 1)
+	local backpack = if backpackNode and backpackNode:IsA("Backpack") then backpackNode else nil
+	if not backpack then
+		return false, true
+	end
+
+	_clearMatchLoadoutTools(player)
+
+	local function cloneIntoInventory(loadoutCategory: "Main" | "Special", weaponId: string): boolean
+		local template = _findLoadoutToolTemplate(loadoutCategory, weaponId)
+		if not template then
+			warn(string.format("[MatchService] Tool no encontrada para %s/%s en ServerStorage.%s.", loadoutCategory, weaponId, WEAPON_TOOLS_ROOT_NAME))
+			return false
+		end
+
+		local backpackClone = template:Clone()
+		backpackClone:SetAttribute(MATCH_LOADOUT_TOOL_ATTRIBUTE, true)
+		backpackClone.Parent = backpack
+		return true
+	end
+
+	local mainOk = cloneIntoInventory("Main", mainWeaponId)
+	local specialOk = cloneIntoInventory("Special", specialWeaponId)
+	if not mainOk or not specialOk then
+		return false, false
+	end
+
+	return true, false
+end
+
+local function _grantMatchLoadoutToolsWithRetry(player: Player, timeoutSec: number)
+	local endAt = time() + math.max(0.5, timeoutSec)
+	while player.Parent == Players do
+		local success, retryable = _grantMatchLoadoutTools(player)
+		if success then
+			return
+		end
+		if not retryable then
+			return
+		end
+		if time() >= endAt then
+			warn(string.format("[MatchService] Timeout entregando tools de loadout a %s (perfil/backpack no listos).", player.Name))
+			return
+		end
+		task.wait(0.2)
 	end
 end
 
@@ -332,7 +534,14 @@ local function _spawnPlayerOnAssignedTeam(player: Player): boolean
 	end
 
 	local chosenSpawn = spawnPoints[math.random(1, #spawnPoints)]
-	_teleportCharacterToSpawn(player, chosenSpawn)
+	local spawnedCharacter = _teleportCharacterToSpawn(player, chosenSpawn)
+	if not spawnedCharacter then
+		return false
+	end
+
+	task.spawn(function()
+		_grantMatchLoadoutToolsWithRetry(player, 8)
+	end)
 	return true
 end
 
@@ -578,6 +787,8 @@ local function _endRoundAndRestartVoting(reason: string)
 	table.clear(_deathAtByUserId)
 	table.clear(_respawnDebounceByUserId)
 	table.clear(_roundEndEligibleByUserId)
+	table.clear(_matchKillsByUserId)
+	table.clear(_killStreakByUserId)
 
 	_hasCompletedInitialVote = false
 	_setPhase("Idle", "round cleaned; starting next vote")
@@ -681,6 +892,7 @@ local function _startMapLoadFlow(winnerMapName: string)
 	_roundScoreA = 0
 	_roundScoreB = 0
 	_roundEndAt = time() + GameConfig.MaxRoundDuration
+	_resetAllPlayerStreakState()
 	table.clear(_teamByUserId)
 	table.clear(_isInMenuByUserId)
 	table.clear(_pendingSpawnByUserId)
@@ -727,6 +939,7 @@ local function _onRequestVoteSync(_: {}, player: Player)
 	_sendActiveVoteToPlayer(player)
 	_sendMapLoadStateToPlayer(player)
 	_sendRoundStateToPlayer(player)
+	_sendAllPlayerStreaksToPlayer(player)
 end
 
 local function _disconnectVoteForPlayer(userId: number)
@@ -971,6 +1184,14 @@ local function _bindCharacterTracking(player: Player)
 
 	_characterConnectionsByUserId[player.UserId] = player.CharacterAdded:Connect(function(character)
 		_registerDeathListener(player, character)
+		if _isRoundActive and not _isInMenuByUserId[player.UserId] then
+			task.defer(function()
+				if player.Parent ~= Players then
+					return
+				end
+				_grantMatchLoadoutToolsWithRetry(player, 12)
+			end)
+		end
 	end)
 
 	if player.Character then
@@ -992,6 +1213,13 @@ local function _onRequestJoinMatch(_: {}, player: Player)
 	_joinDebounceByUserId[player.UserId] = true
 	_pendingSpawnByUserId[player.UserId] = true
 	_isInMenuByUserId[player.UserId] = false
+	if _matchKillsByUserId[player.UserId] == nil then
+		_matchKillsByUserId[player.UserId] = 0
+	end
+	if _killStreakByUserId[player.UserId] == nil then
+		_killStreakByUserId[player.UserId] = 0
+	end
+	_sendPlayerStreakToAll(player.UserId)
 
 	task.defer(function()
 		if player.Parent ~= Players then
@@ -1060,6 +1288,11 @@ local function _onRequestReturnToMenu(_: {}, player: Player)
 	_isInMenuByUserId[player.UserId] = true
 	_respawnDebounceByUserId[player.UserId] = nil
 	_pendingSpawnByUserId[player.UserId] = nil
+	_killStreakByUserId[player.UserId] = 0
+	if _matchKillsByUserId[player.UserId] == nil then
+		_matchKillsByUserId[player.UserId] = 0
+	end
+	_sendPlayerStreakToAll(player.UserId)
 
 	local lobbySpawn = _findLobbySpawn()
 	if lobbySpawn then
@@ -1076,11 +1309,13 @@ local function _onRequestReturnToMenu(_: {}, player: Player)
 	end
 end
 
-function MatchService:Start(): ()
+function MatchService:Start(dataService: any): ()
 	if _started then
 		_log("Start ignored: service already started.")
 		return
 	end
+
+	_dataService = dataService
 
 	_started = true
 	_ensureTeams()
@@ -1107,6 +1342,9 @@ function MatchService:Start(): ()
 		_log(string.format("Player added. Connected players=%d.", #Players:GetPlayers()))
 		_isInMenuByUserId[player.UserId] = true
 		_deathAtByUserId[player.UserId] = 0
+		_matchKillsByUserId[player.UserId] = 0
+		_killStreakByUserId[player.UserId] = 0
+		_sendPlayerStreakToAll(player.UserId)
 		_bindCharacterTracking(player)
 		_startVoteIfPossible()
 
@@ -1115,6 +1353,7 @@ function MatchService:Start(): ()
 				_sendActiveVoteToPlayer(player)
 				_sendMapLoadStateToPlayer(player)
 				_sendRoundStateToPlayer(player)
+				_sendAllPlayerStreaksToPlayer(player)
 			end
 		end)
 	end)
@@ -1124,6 +1363,8 @@ function MatchService:Start(): ()
 		_isInMenuByUserId[player.UserId] = nil
 		_deathAtByUserId[player.UserId] = nil
 		_respawnDebounceByUserId[player.UserId] = nil
+		_matchKillsByUserId[player.UserId] = nil
+		_killStreakByUserId[player.UserId] = nil
 		_log(string.format("Player removing: %s (%d).", player.Name, player.UserId))
 		_disconnectVoteForPlayer(player.UserId)
 		_joinDebounceByUserId[player.UserId] = nil
@@ -1151,6 +1392,8 @@ function MatchService:Start(): ()
 	for _, player in Players:GetPlayers() do
 		_isInMenuByUserId[player.UserId] = true
 		_deathAtByUserId[player.UserId] = 0
+		_matchKillsByUserId[player.UserId] = 0
+		_killStreakByUserId[player.UserId] = 0
 		_bindCharacterTracking(player)
 	end
 

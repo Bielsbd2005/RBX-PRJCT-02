@@ -249,6 +249,16 @@ local MatchNamespace = ByteNet.DefineNamespace("Match", function()
 			ReliabilityType = "Reliable",
 		}),
 
+		-- S → C: Estado global de kills y racha por jugador en la partida actual.
+		PlayerStreakState = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				userId = ByteNet.String,
+				kills = ByteNet.Int32,
+				streak = ByteNet.Int32,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+
 		-- S → C: Resultado final de la ronda.
 		RoundEnded = ByteNet.DefinePacket({
 			Value = ByteNet.Struct({
@@ -263,6 +273,9 @@ local MatchNamespace = ByteNet.DefineNamespace("Match", function()
 		DeathScreenShow = ByteNet.DefinePacket({
 			Value = ByteNet.Struct({
 				respawnCooldown = ByteNet.Int32,
+				killerUserId = ByteNet.String,
+				killerName = ByteNet.String,
+				weaponName = ByteNet.String,
 			}),
 			ReliabilityType = "Reliable",
 		}),

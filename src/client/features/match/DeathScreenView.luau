@@ -8,8 +8,6 @@ DeathScreenView.__index = DeathScreenView
 local STYLE = {
 	showTween = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
 	hideTween = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
-	visibleTransparency = 0,
-	hiddenTransparency = 1,
 }
 
 type Refs = {
@@ -59,10 +57,11 @@ function DeathScreenView.new(gui: ScreenGui): any
 	self._countdownToken = 0
 	self._onRespawn = nil :: (() -> ())?
 	self._onMenu = nil :: (() -> ())?
+	self._baseTransparency = refs.container.BackgroundTransparency
 
 	refs.root.Enabled = false
 	refs.root.ResetOnSpawn = false
-	refs.container.BackgroundTransparency = STYLE.hiddenTransparency
+	refs.container.BackgroundTransparency = self._baseTransparency
 
 	return self
 end
@@ -92,9 +91,9 @@ function DeathScreenView:show(respawnCooldown: number)
 	self._countdownToken += 1
 	local token = self._countdownToken
 	self._refs.root.Enabled = true
-	self._refs.container.BackgroundTransparency = STYLE.hiddenTransparency
+	self._refs.container.BackgroundTransparency = self._baseTransparency
 	TweenService:Create(self._refs.container, STYLE.showTween, {
-		BackgroundTransparency = STYLE.visibleTransparency,
+		BackgroundTransparency = self._baseTransparency,
 	}):Play()
 
 	_setButtonEnabled(self._refs.menuButton, true)
@@ -125,7 +124,7 @@ function DeathScreenView:hide()
 	end
 
 	local tween = TweenService:Create(self._refs.container, STYLE.hideTween, {
-		BackgroundTransparency = STYLE.hiddenTransparency,
+		BackgroundTransparency = self._baseTransparency,
 	})
 	tween:Play()
 	task.delay(STYLE.hideTween.Time, function()

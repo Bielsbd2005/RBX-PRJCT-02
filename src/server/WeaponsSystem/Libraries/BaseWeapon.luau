@@ -42,8 +42,6 @@ function BaseWeapon.new(weaponsSystem, instance)
 	self.configValues = {}
 	self.trackedConfigurations = {}
 
-	self.ammoInWeaponValue = nil
-
 	self.reloading = false
 	self.canReload = true
 
@@ -53,15 +51,7 @@ function BaseWeapon.new(weaponsSystem, instance)
 	end)
 
 	if IsServer then
-		self.isReloadingValue = self.instance:FindFirstChild("IsReloading")
-		if not self.isReloadingValue then
-			self.isReloadingValue = Instance.new("BoolValue")
-			self.isReloadingValue.Name = "IsReloading"
-			self.isReloadingValue.Value = false
-			self.isReloadingValue.Parent = self.instance
-		end
-	else
-		self.isReloadingValue = self.instance:WaitForChild("IsReloading")
+		self.instance:SetAttribute("IsReloading", false)
 	end
 
 	return self
@@ -82,19 +72,11 @@ function BaseWeapon:doInitialSetup()
 		self:onChildAdded(child)
 	end
 
-	-- Initialize self.ammoInWeaponValue
+	-- CurrentAmmo attribute must be created by user on the Tool (number type)
 	if selfClass.CanBeReloaded then
-		if IsServer then
-			self.ammoInWeaponValue = self.instance:FindFirstChild("CurrentAmmo")
-			if not self.ammoInWeaponValue then
-				self.ammoInWeaponValue = Instance.new("IntValue")
-				self.ammoInWeaponValue.Name = "CurrentAmmo"
-				self.ammoInWeaponValue.Value = 0
-				self.ammoInWeaponValue.Parent = self.instance
-			end
-			self.ammoInWeaponValue.Value = self:getConfigValue("AmmoCapacity", 30)
-		else
-			self.ammoInWeaponValue = self.instance:WaitForChild("CurrentAmmo")
+		local currentAmmo = self.instance:GetAttribute("CurrentAmmo")
+		if currentAmmo == nil then
+			warn(string.format("[BaseWeapon] Missing CurrentAmmo attribute on %s. Create it as a number attribute in Studio.", self.instance:GetFullName()))
 		end
 	end
 
@@ -677,7 +659,13 @@ function BaseWeapon:getAnimationController()
 	self:setAnimationController(nil)
 
 	if self.instanceIsTool then
-		local humanoid = IsServer and self.instance.Parent:FindFirstChildOfClass("Humanoid") or self.instance.Parent:WaitForChild("Humanoid", math.huge)
+		local humanoid = nil
+		if IsServer then
+			humanoid = self.instance.Parent:FindFirstChildOfClass("Humanoid")
+		else
+			-- Client: wait for humanoid with reasonable timeout
+			humanoid = self.instance.Parent:WaitForChild("Humanoid", 5)
+		end
 		local animController = nil
 		if not humanoid then
 			animController = self.instance.Parent:FindFirstChildOfClass("AnimationController")
@@ -754,9 +742,7 @@ function BaseWeapon:onReloaded(player, fromNetwork)
 	end
 
 	self.reloading = true
-	if self.isReloadingValue then
-		self.isReloadingValue.Value = true
-	end
+	self.instance:SetAttribute("IsReloading", true)
 
 	self.canReload = false
 
@@ -781,6 +767,14 @@ function BaseWeapon:onReloaded(player, fromNetwork)
 	local reloadTime = self:getConfigValue("ReloadTime", 2)
 	local startTime = tick()
 
+	-- Trigger reload progress bar animation on client
+	if not IsServer and self.weaponsSystem.gui then
+		print("[BaseWeapon] Calling playReloadProgressAnimation with reloadTime:", reloadTime, "on weapon:", self.instance:GetFullName())
+		self.weaponsSystem.gui:playReloadProgressAnimation(reloadTime)
+	else
+		print("[BaseWeapon] Not calling animation - IsServer:", IsServer, "gui exists:", self.weaponsSystem.gui ~= nil)
+	end
+
 	if self.connections.reload ~= nil then -- this prevents an endless ammo bug
 		return
 	end
@@ -798,10 +792,8 @@ function BaseWeapon:onReloaded(player, fromNetwork)
 			return
 		end
 
-		-- Add ammo to weapon
-		if self.ammoInWeaponValue then
-			self.ammoInWeaponValue.Value = self:getConfigValue("AmmoCapacity", 30)
-		end
+			-- Add ammo to weapon
+		self.instance:SetAttribute("CurrentAmmo", self:getConfigValue("AmmoCapacity", 30))
 
 		if self.connections.reload then
 			self.connections.reload:Disconnect()
@@ -809,10 +801,7 @@ function BaseWeapon:onReloaded(player, fromNetwork)
 		end
 
 		self.reloading = false
-
-		if self.isReloadingValue then
-			self.isReloadingValue.Value = false
-		end
+		self.instance:SetAttribute("IsReloading", false)
 
 		self.canReload = false
 	end)
@@ -833,10 +822,7 @@ function BaseWeapon:cancelReload(player, fromNetwork)
 	end
 
 	self.reloading = false
-
-	if self.isReloadingValue then
-		self.isReloadingValue.Value = false
-	end
+	self.instance:SetAttribute("IsReloading", false)
 
 	self.canReload = true
 
@@ -852,21 +838,15 @@ function BaseWeapon:cancelReload(player, fromNetwork)
 end
 
 function BaseWeapon:getAmmoInWeapon()
-	if self.ammoInWeaponValue then
-		return self.ammoInWeaponValue.Value
-	end
-	return 0
+	return self.instance:GetAttribute("CurrentAmmo") or 0
 end
 
 function BaseWeapon:useAmmo(amount)
-	if self.ammoInWeaponValue then
-		local ammoUsed = math.min(amount, self.ammoInWeaponValue.Value)
-		self.ammoInWeaponValue.Value = self.ammoInWeaponValue.Value - ammoUsed
-		self.canReload = true
-		return ammoUsed
-	else
-		return 0
-	end
+	local currentAmmo = self.instance:GetAttribute("CurrentAmmo") or 0
+	local ammoUsed = math.min(amount, currentAmmo)
+	self.instance:SetAttribute("CurrentAmmo", currentAmmo - ammoUsed)
+	self.canReload = true
+	return ammoUsed
 end
 
 function BaseWeapon:renderCharge()

@@ -1,3 +1,15 @@
+
+local function _isDescendantOfStarterGear(instance: Instance): boolean
+	local current: Instance? = instance
+	while current do
+		if current:IsA("StarterGear") then
+			return true
+		end
+		current = current.Parent
+	end
+
+	return false
+end
 local CollectionService = game:GetService("CollectionService")
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
@@ -8,6 +20,8 @@ local IsServer = RunService:IsServer()
 -- Dependencies
 local WeaponData = script.Parent:WaitForChild("WeaponData")
 local WeaponsSystemFolder = script.Parent
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Network = require(Shared.networking.Network)
 local WeaponTypes = WeaponsSystemFolder:WaitForChild("WeaponTypes")
 local Libraries = WeaponsSystemFolder:WaitForChild("Libraries")
 local ShoulderCamera = require(Libraries:WaitForChild("ShoulderCamera"))
@@ -207,6 +221,8 @@ function WeaponsSystem.onCharacterAdded(character)
 		WeaponsSystem.gui:setEnabled(false)
 	end
 	if WeaponsSystem.camera then
+		WeaponsSystem.camera:setEnabled(false)
+		WeaponsSystem.camera.rotateCharacterWithCamera = false
 		WeaponsSystem.camera:resetZoomFactor()
 		WeaponsSystem.camera:setHasScope(false)
 	end
@@ -225,8 +241,15 @@ function WeaponsSystem.onCharacterAdded(character)
 	end)
 
 	WeaponsSystem.connections.died = humanoid.Died:Connect(function()
+		WeaponsSystem.currentWeapon = nil
 		if WeaponsSystem.gui then
 			WeaponsSystem.gui:setEnabled(false)
+		end
+		if WeaponsSystem.camera then
+			WeaponsSystem.camera:setEnabled(false)
+			WeaponsSystem.camera.rotateCharacterWithCamera = false
+			WeaponsSystem.camera:resetZoomFactor()
+			WeaponsSystem.camera:setHasScope(false)
 		end
 	end)
 end
@@ -256,36 +279,18 @@ function WeaponsSystem.shutdown()
 	WeaponsSystem.connections = {}
 end
 
-function WeaponsSystem.getWeaponTypeFromTags(instance)
-	for _, tag in pairs(CollectionService:GetTags(instance)) do
-		local weaponTypeFound = WEAPON_TYPES_LOOKUP[tag]
-		if weaponTypeFound then
-			return weaponTypeFound
-		end
-	end
-
-	return nil
-end
-
 function WeaponsSystem.createWeaponForInstance(weaponInstance)
 	coroutine.wrap(function()
-		local weaponType = WeaponsSystem.getWeaponTypeFromTags(weaponInstance)
+		local weaponTypeAttribute = weaponInstance:GetAttribute("WeaponType")
+		if type(weaponTypeAttribute) ~= "string" or weaponTypeAttribute == "" then
+			warn(string.format("Missing Tool attribute WeaponType on %s.", weaponInstance:GetFullName()))
+			return
+		end
+
+		local weaponType = WEAPON_TYPES_LOOKUP[weaponTypeAttribute]
 		if not weaponType then
-			local weaponTypeObj = weaponInstance:WaitForChild("WeaponType")
-
-			if weaponTypeObj and weaponTypeObj:IsA("StringValue") then
-				local weaponTypeName = weaponTypeObj.Value
-				local weaponTypeFound = WEAPON_TYPES_LOOKUP[weaponTypeName]
-				if not weaponTypeFound then
-					warn(string.format("Cannot find the weapon type \"%s\" for the instance %s!", weaponTypeName, weaponInstance:GetFullName()))
-					return
-				end
-
-				weaponType = weaponTypeFound
-			else
-				warn("Could not find a WeaponType tag or StringValue for the instance ", weaponInstance:GetFullName())
-				return
-			end
+			warn(string.format("Cannot find the weapon type \"%s\" for the instance %s!", weaponTypeAttribute, weaponInstance:GetFullName()))
+			return
 		end
 
 		-- Since we might have yielded while trying to get the WeaponType, we need to make sure not to continue
@@ -316,6 +321,15 @@ end
 -- and (IsServer or weaponInstance:IsDescendantOf(Players.LocalPlayer))
 
 function WeaponsSystem.onWeaponAdded(weaponInstance)
+	if not weaponInstance:IsA("Tool") then
+		return
+	end
+
+	-- StarterGear tools are templates for respawn and should not be initialized as active weapons.
+	if _isDescendantOfStarterGear(weaponInstance) then
+		return
+	end
+
 	local weapon = WeaponsSystem.getWeaponForInstance(weaponInstance)
 	if not weapon then
 		WeaponsSystem.createWeaponForInstance(weaponInstance)
@@ -402,6 +416,10 @@ function WeaponsSystem.setWeaponEquipped(weapon, equipped)
 	end
 
 	if WeaponsSystem.camera then
+		local weaponIsActive = WeaponsSystem.currentWeapon ~= nil
+		WeaponsSystem.camera:setEnabled(weaponIsActive)
+		WeaponsSystem.camera.rotateCharacterWithCamera = weaponIsActive
+
 		WeaponsSystem.camera:resetZoomFactor()
 		WeaponsSystem.camera:setHasScope(false)
 
@@ -482,9 +500,22 @@ local function _defaultDamageCallback(system, target, amount, damageType, dealer
 	local isLethal = target.Health <= finalDamage
 
 	if dealer and dealer.Character then
+		if dealerPlayer then
+			target:SetAttribute("LastAttackerUserId", dealerPlayer.UserId)
+			target:SetAttribute("LastAttackerAt", time())
+			target:SetAttribute("LastAttackerWeaponName", weaponName)
+		end
+
 		target:TakeDamage(finalDamage)
 
 		if target.Health <= 0 and dealerPlayer then
+			if targetPlayer then
+				Network.Match.PlayerStreakState.SendToAll({
+					userId = tostring(targetPlayer.UserId),
+					kills = 0,
+					streak = 0,
+				})
+			end
 			local eliminatedEvent = WeaponsSystem.remoteEvents["PlayerEliminated"]
 			if eliminatedEvent then
 				local victimName = targetPlayer and targetPlayer.Name or "Unknown"

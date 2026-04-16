@@ -19,6 +19,18 @@ local INACTIVE_BUTTON_COLOR = Color3.fromRGB(0, 0, 0)
 local ACTIVE_BUTTON_TRANSPARENCY = 0
 local INACTIVE_BUTTON_TRANSPARENCY = 0.5
 
+local RELOAD_PROGRESS_STYLE = {
+	FlipProgress = false,
+	ImageId = "3587367081",
+	ImageColor = Color3.new(255, 255, 255),
+	ImageTrans = 0,
+	MissingPartType = "TransAndColor", -- "Color" | "Trans" | "TransAndColor"
+	ColorOfPercentPart = Color3.fromRGB(255, 255, 255),
+	ColorOfMissingPart = Color3.fromRGB(0, 0, 0),
+	TransOfPercentPart = 0,
+	TransOfMissingPart = 0.25,
+}
+
 local WeaponsGui = {}
 WeaponsGui.__index = WeaponsGui
 local getJumpButton
@@ -215,6 +227,11 @@ function WeaponsGui.new(weaponsSystem)
 	self.killContainerFadeTween = nil
 	self.killContainerAlphaDriver = nil
 	self.killContainerAlphaConn = nil
+	self.ammoDisplayNode = nil
+	self.ammoDisplayLabel = nil
+	self._lastAmmoDisplayText = nil
+
+	self.combatHUD = nil
 
 	self.crosshairShotgunFrame = nil
 	self.crosshairShotgunTopLeft = nil
@@ -274,6 +291,17 @@ function WeaponsGui.new(weaponsSystem)
 		self.scopeFrame = self.gui:WaitForChild("Scope")
 		local scopeImage = self.scopeFrame:WaitForChild("ScopeImage")
 
+		self.ammoDisplayNode = self.gui:FindFirstChild("Ammo", true)
+		if self.ammoDisplayNode and not (
+			self.ammoDisplayNode:IsA("TextLabel")
+			or self.ammoDisplayNode:IsA("TextButton")
+			or self.ammoDisplayNode:IsA("TextBox")
+		) then
+			self.ammoDisplayLabel = self.ammoDisplayNode:FindFirstChildWhichIsA("TextLabel", true)
+		else
+			self.ammoDisplayLabel = self.ammoDisplayNode
+		end
+
 		self.smallTouchscreen = self.gui:WaitForChild("SmallTouchscreen")
 		self.largeTouchscreen = self.gui:WaitForChild("LargeTouchscreen")
 
@@ -323,6 +351,8 @@ function WeaponsGui.new(weaponsSystem)
 		self.gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
 		self.gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function() self:onScreenSizeChanged() end)
 		self:onScreenSizeChanged()
+
+		-- Reload progress is rendered directly from WeaponsSystemGui Progress frame.
 
 		WeaponData.OnClientEvent:Connect(function(cmd, otherPlayerPosition)
 			if cmd == "HitByOtherPlayer" then
@@ -439,9 +469,18 @@ function WeaponsGui:setEnabled(enabled)
 	else
 		self:setZoomed(false)
 		self:hideKillContainer(true)
+		self:_stopReloadProgressAnimation(true)
 		self:_stopTouchFire()
 		self:_setReloadButtonsPressed(false)
 		self:_setJumpButtonsPressed(false)
+		self._lastAmmoDisplayText = nil
+		self:_updateAmmoDisplay()
+
+		-- Cleanup CombatHUD
+		if self.combatHUD then
+			self.combatHUD:hide()
+		end
+
 		for _, v in pairs(self.connections) do
 			v:Disconnect()
 		end
@@ -521,15 +560,21 @@ end
 
 function WeaponsGui:setCrosshairEnabled(crosshairEnabled)
 	self.crosshairEnabled = crosshairEnabled
-	if self.crosshairFrame then
-		self.crosshairFrame.Visible = self.crosshairEnabled and not self._isShotgun
-	end
-	if self.crosshairShotgunFrame then
-		self.crosshairShotgunFrame.Visible = self.crosshairEnabled and self._isShotgun
-	end
+	self:_refreshCrosshairVisibility()
 	if self.hitMarker then
 		self.hitMarker.ImageTransparency = 1
 		self.hitMarker.Visible = self.crosshairEnabled
+	end
+end
+
+function WeaponsGui:_refreshCrosshairVisibility()
+	local shouldShow = self.crosshairEnabled and not self._isReloadProgressAnimating
+
+	if self.crosshairFrame then
+		self.crosshairFrame.Visible = shouldShow and not self._isShotgun
+	end
+	if self.crosshairShotgunFrame then
+		self.crosshairShotgunFrame.Visible = shouldShow and self._isShotgun
 	end
 end
 
@@ -595,10 +640,7 @@ end
 
 function WeaponsGui:_setCrosshairVariant(isShotgun)
 	self._isShotgun = isShotgun and true or false
-	if self.crosshairShotgunFrame then
-		self.crosshairFrame.Visible = self.crosshairEnabled and not self._isShotgun
-		self.crosshairShotgunFrame.Visible = self.crosshairEnabled and self._isShotgun
-	end
+	self:_refreshCrosshairVisibility()
 	if self._isShotgun then
 		self.crosshairWeaponScale = 1
 		self.crosshairSpreadTarget = self.isZoomed and self.crosshairSpreadAim or self.crosshairSpreadBase
@@ -679,6 +721,7 @@ function WeaponsGui:onRenderStepped(dt)
 	if not self.enabled or not self.gui then return end
 	self:_hideDefaultJumpButton()
 	self:_applyCrosshairByWeapon()
+	self:_updateAmmoDisplay()
 	if self._isShotgun then
 		if os.clock() >= (self._kickCooldownEnd or 0) then
 			local want = self.isZoomed and self.crosshairSpreadAim or self.crosshairSpreadBase
@@ -695,6 +738,41 @@ function WeaponsGui:onRenderStepped(dt)
 			local crosshairSize = self.crosshairNormalSize * self.crosshairScale * self.crosshairWeaponScale
 			self.crosshairFrame.Size = UDim2.new(0, crosshairSize.X, 0, crosshairSize.Y)
 		end
+	end
+end
+
+function WeaponsGui:_updateAmmoDisplay()
+	local weapon = self.weaponsSystem.currentWeapon
+	local ammoText = ""
+
+	if weapon and weapon.instance then
+		local currentAmmo = weapon.instance:GetAttribute("CurrentAmmo")
+		if type(currentAmmo) == "number" then
+			ammoText = tostring(math.max(0, math.floor(currentAmmo + 0.5)))
+		end
+	end
+
+	if self._lastAmmoDisplayText == ammoText then
+		return
+	end
+	self._lastAmmoDisplayText = ammoText
+
+	local textNode = self.ammoDisplayLabel
+	if textNode and (
+		textNode:IsA("TextLabel")
+		or textNode:IsA("TextButton")
+		or textNode:IsA("TextBox")
+	) then
+		textNode.Text = ammoText
+		return
+	end
+
+	if self.ammoDisplayNode and self.ammoDisplayNode:IsA("StringValue") then
+		self.ammoDisplayNode.Value = ammoText
+	elseif self.ammoDisplayNode and self.ammoDisplayNode:IsA("IntValue") then
+		self.ammoDisplayNode.Value = tonumber(ammoText) or 0
+	elseif self.ammoDisplayNode and self.ammoDisplayNode:IsA("NumberValue") then
+		self.ammoDisplayNode.Value = tonumber(ammoText) or 0
 	end
 end
 
@@ -765,6 +843,218 @@ function WeaponsGui:onTouchJumpButton(inputObj, inputState)
 			self._activeJumpInput = nil
 		end
 		self:_setJumpButtonsPressed(false)
+	end
+end
+
+function WeaponsGui:onWeaponEquipped(weapon)
+	self:_stopReloadProgressAnimation(true)
+	return
+end
+
+function WeaponsGui:onWeaponUnequipped()
+	self:_stopReloadProgressAnimation(true)
+	return
+end
+
+function WeaponsGui:onWeaponReloadStarted(weapon, reloadTime)
+	self:playReloadProgressAnimation(reloadTime)
+end
+
+function WeaponsGui:_getReloadProgressFrame()
+	if self.scalingElementsFolder then
+		local fromScaling = self.scalingElementsFolder:FindFirstChild("Progress")
+		if fromScaling then
+			return fromScaling
+		end
+	end
+
+	return self.gui:FindFirstChild("Progress")
+end
+
+function WeaponsGui:_setReloadProgressVisible(isVisible)
+	local progressFrame = self:_getReloadProgressFrame()
+	if progressFrame and progressFrame:IsA("GuiObject") then
+		progressFrame.Visible = isVisible
+	end
+end
+
+function WeaponsGui:_stopReloadProgressAnimation(hideProgress)
+	self._reloadProgressRunId = (self._reloadProgressRunId or 0) + 1
+
+	if self._reloadProgressTween then
+		self._reloadProgressTween:Cancel()
+		self._reloadProgressTween = nil
+	end
+
+	if self._reloadProgressConnection then
+		self._reloadProgressConnection:Disconnect()
+		self._reloadProgressConnection = nil
+	end
+
+	self._isReloadProgressAnimating = false
+	self:_refreshCrosshairVisibility()
+
+	if hideProgress ~= false then
+		self:_setReloadProgressVisible(false)
+	end
+end
+
+function WeaponsGui:playReloadProgressAnimation(reloadTime)
+	self._isReloadProgressAnimating = true
+	self:_refreshCrosshairVisibility()
+	self:_setReloadProgressVisible(true)
+
+	self._reloadProgressRunId = (self._reloadProgressRunId or 0) + 1
+	local runId = self._reloadProgressRunId
+
+	local progressFrame = self:_getReloadProgressFrame()
+	if not progressFrame then
+		warn("[WeaponsGui] Progress frame not found for reload animation.")
+		self._isReloadProgressAnimating = false
+		self:_refreshCrosshairVisibility()
+		return
+	end
+
+	local progressValue = progressFrame:FindFirstChild("ProgressValue")
+	if not progressValue then
+		progressValue = Instance.new("NumberValue")
+		progressValue.Name = "ProgressValue"
+		progressValue.Value = 0
+		progressValue.Parent = progressFrame
+	end
+
+	if self._reloadProgressTween or self._reloadProgressConnection then
+		self:_stopReloadProgressAnimation(false)
+	end
+
+	progressValue.Value = 0
+	self:_updateReloadProgressBar(0)
+
+	local tweenInfo = TweenInfo.new(math.max(0.01, tonumber(reloadTime) or 0.01), Enum.EasingStyle.Linear, Enum.EasingDirection.InOut)
+	self._reloadProgressTween = TweenService:Create(progressValue, tweenInfo, { Value = 100 })
+
+	self._reloadProgressConnection = progressValue.Changed:Connect(function(value)
+		if runId ~= self._reloadProgressRunId then
+			return
+		end
+		self:_updateReloadProgressBar(value)
+	end)
+
+	self._reloadProgressTween:Play()
+
+	local activeTween = self._reloadProgressTween
+	activeTween.Completed:Connect(function()
+		if runId ~= self._reloadProgressRunId then
+			return
+		end
+
+		if self._reloadProgressConnection then
+			self._reloadProgressConnection:Disconnect()
+			self._reloadProgressConnection = nil
+		end
+		self._reloadProgressTween = nil
+		self._isReloadProgressAnimating = false
+		self:_refreshCrosshairVisibility()
+		self:_updateReloadProgressBar(0)
+		self:_setReloadProgressVisible(false)
+		progressValue.Value = 0
+	end)
+end
+
+function WeaponsGui:_updateReloadProgressBar(progressPercent)
+	local progressFrame = self:_getReloadProgressFrame()
+	if not progressFrame then
+		return
+	end
+
+	local frame1 = progressFrame:FindFirstChild("Frame1")
+	local frame2 = progressFrame:FindFirstChild("Frame2")
+	if not frame1 or not frame2 then
+		return
+	end
+
+	local frame1ImageLabel = frame1:FindFirstChildOfClass("ImageLabel") or frame1
+	local frame2ImageLabel = frame2:FindFirstChildOfClass("ImageLabel") or frame2
+	if not frame1ImageLabel:IsA("ImageLabel") and not frame1ImageLabel:IsA("ImageButton") then
+		return
+	end
+	if not frame2ImageLabel:IsA("ImageLabel") and not frame2ImageLabel:IsA("ImageButton") then
+		return
+	end
+
+	local g1 = frame1ImageLabel:FindFirstChildOfClass("UIGradient")
+	local g2 = frame2ImageLabel:FindFirstChildOfClass("UIGradient")
+	if not g1 or not g2 then
+		return
+	end
+
+	local style = RELOAD_PROGRESS_STYLE
+	local percentNumber = math.clamp(progressPercent * 3.6, 0, 360)
+
+	g1.Rotation = (style.FlipProgress == false)
+		and math.clamp(percentNumber, 180, 360)
+		or 180 - math.clamp(percentNumber, 0, 180)
+	g2.Rotation = (style.FlipProgress == false)
+		and math.clamp(percentNumber, 0, 180)
+		or 180 - math.clamp(percentNumber, 180, 360)
+
+	frame1ImageLabel.ImageColor3 = style.ImageColor
+	frame2ImageLabel.ImageColor3 = style.ImageColor
+	frame1ImageLabel.ImageTransparency = style.ImageTrans
+	frame2ImageLabel.ImageTransparency = style.ImageTrans
+	frame1ImageLabel.Image = "rbxassetid://" .. style.ImageId
+	frame2ImageLabel.Image = "rbxassetid://" .. style.ImageId
+
+	if style.MissingPartType == "Color" then
+		g1.Color = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, style.ColorOfPercentPart),
+			ColorSequenceKeypoint.new(0.5, style.ColorOfPercentPart),
+			ColorSequenceKeypoint.new(0.501, style.ColorOfMissingPart),
+			ColorSequenceKeypoint.new(1, style.ColorOfMissingPart),
+		})
+		g2.Color = g1.Color
+		g1.Transparency = NumberSequence.new(0)
+		g2.Transparency = NumberSequence.new(0)
+	elseif style.MissingPartType == "Trans" then
+		local transSeq = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, style.TransOfPercentPart),
+			NumberSequenceKeypoint.new(0.5, style.TransOfPercentPart),
+			NumberSequenceKeypoint.new(0.501, style.TransOfMissingPart),
+			NumberSequenceKeypoint.new(1, style.TransOfMissingPart),
+		})
+		g1.Transparency = transSeq
+		g2.Transparency = transSeq
+		g1.Color = ColorSequence.new(Color3.new(1, 1, 1))
+		g2.Color = ColorSequence.new(Color3.new(1, 1, 1))
+	elseif style.MissingPartType == "TransAndColor" then
+		local transSeq = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, style.TransOfPercentPart),
+			NumberSequenceKeypoint.new(0.5, style.TransOfPercentPart),
+			NumberSequenceKeypoint.new(0.501, style.TransOfMissingPart),
+			NumberSequenceKeypoint.new(1, style.TransOfMissingPart),
+		})
+		local colorSeq = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, style.ColorOfPercentPart),
+			ColorSequenceKeypoint.new(0.5, style.ColorOfPercentPart),
+			ColorSequenceKeypoint.new(0.501, style.ColorOfMissingPart),
+			ColorSequenceKeypoint.new(1, style.ColorOfMissingPart),
+		})
+		g1.Transparency = transSeq
+		g2.Transparency = transSeq
+		g1.Color = colorSeq
+		g2.Color = colorSeq
+	else
+		warn("Unknown MissingPartType. Only Trans, Color, TransAndColor are allowed. Falling back to Trans.")
+		local fallbackSeq = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, style.TransOfPercentPart),
+			NumberSequenceKeypoint.new(0.5, style.TransOfPercentPart),
+			NumberSequenceKeypoint.new(0.501, style.TransOfMissingPart),
+			NumberSequenceKeypoint.new(1, style.TransOfMissingPart),
+		})
+		g1.Transparency = fallbackSeq
+		g2.Transparency = fallbackSeq
+		g1.Color = ColorSequence.new(Color3.new(1, 1, 1))
+		g2.Color = ColorSequence.new(Color3.new(1, 1, 1))
 	end
 end
 
