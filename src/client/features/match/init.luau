@@ -10,9 +10,11 @@ local Packages = ReplicatedStorage:WaitForChild("Packages")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 
 local Janitor = require(Packages.janitor) :: any
+local Fusion = require(Packages.fusion)
 local GameConfig = require(Shared.GameConfig)
 local Network = require(Shared.networking.Network)
 
+local DataController = require(Client.core.data.DataController)
 local DeathScreenView = require(Client.features.match.DeathScreenView)
 local EndResultsView = require(Client.features.match.EndResultsView)
 local KillCamController = require(Client.features.match.KillCamController)
@@ -41,6 +43,9 @@ type HudRefs = {
 	scoreB: TextLabel?,
 	timer: TextLabel?,
 	localKills: TextLabel?,
+	cashValue: TextLabel?,
+	levelValue: TextLabel?,
+	levelBarFill: GuiObject?,
 	playerRows: { HudPlayerRowRefs },
 }
 
@@ -168,6 +173,8 @@ local function _resolveHudRefs(matchHudGui: ScreenGui?): HudRefs
 	local scoreANode = _findChildGuiObject(statusNode, "ScoreA")
 	local scoreBNode = _findChildGuiObject(statusNode, "ScoreB")
 	local timerNode = _findChildGuiObject(statusNode, "Timer")
+	local cashNode = _findChildGuiObject(statusNode, "Cash")
+	local levelNode = _findChildGuiObject(statusNode, "Level")
 	local streakNode = _findChildGuiObject(matchHudGui, "Streak")
 
 	return {
@@ -175,6 +182,9 @@ local function _resolveHudRefs(matchHudGui: ScreenGui?): HudRefs
 		scoreB = _findChildTextLabel(scoreBNode, "Value"),
 		timer = _findChildTextLabel(timerNode, "Value"),
 		localKills = _findChildTextLabel(streakNode, "Kills"),
+		cashValue = _findChildTextLabel(cashNode, "Value"),
+		levelValue = _findChildTextLabel(levelNode, "Value"),
+		levelBarFill = if levelNode then _findChildGuiObject(levelNode, "Fill") else nil,
 		playerRows = _collectHudPlayerRows(matchHudGui),
 	}
 end
@@ -188,6 +198,25 @@ local function _setHudState(hudRefs: HudRefs, scoreA: number, scoreB: number, ti
 	end
 	if hudRefs.timer then
 		hudRefs.timer.Text = tostring(math.max(0, timeLeft))
+	end
+end
+
+local function _updatePlayerCashLevel(hudRefs: HudRefs, stats: any)
+	if hudRefs.cashValue then
+		local cash = if stats and type(stats.Cash) == "number" then stats.Cash else 0
+		hudRefs.cashValue.Text = tostring(math.max(0, cash))
+	end
+
+	if hudRefs.levelValue then
+		local level = if stats and type(stats.Level) == "number" then stats.Level else 0
+		hudRefs.levelValue.Text = string.format("LVL %d", level)
+	end
+
+	if hudRefs.levelBarFill then
+		local currentXP = if stats and type(stats.XP) == "number" then stats.XP else 0
+		local xpToNext = if stats and type(stats.XPToNextLevel) == "number" then stats.XPToNextLevel else 1
+		local fillRatio = math.min(1, math.max(0, currentXP / xpToNext))
+		hudRefs.levelBarFill.Size = UDim2.new(fillRatio, 0, 1, 0)
 	end
 end
 
@@ -382,12 +411,37 @@ local function _setLobbyCamera()
 	local lobbyPart = if camerasFolder then camerasFolder:FindFirstChild("lobby") else nil
 	if lobbyPart and lobbyPart:IsA("BasePart") then
 		camera.CameraType = Enum.CameraType.Scriptable
+		camera.CameraSubject = nil
 		camera.CFrame = lobbyPart.CFrame
 	end
 end
 
+local function _setGameplayCamera(character: Model?)
+	local currentCamera = workspace.CurrentCamera
+	if not currentCamera then
+		return
+	end
+
+	local targetCharacter = character
+	if not targetCharacter then
+		targetCharacter = Players.LocalPlayer.Character
+	end
+	if not targetCharacter then
+		return
+	end
+
+	local humanoid = targetCharacter:FindFirstChildOfClass("Humanoid")
+	if not humanoid then
+		return
+	end
+
+	currentCamera.CameraType = Enum.CameraType.Custom
+	currentCamera.CameraSubject = humanoid
+end
+
 function MatchFeature.start(menuController: any): any
 	local janitor = Janitor.new()
+	local fusionScope = Fusion.scoped(Fusion)
 
 	local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui") :: PlayerGui
 	local menuGui = menuController:getGui()
@@ -464,7 +518,6 @@ function MatchFeature.start(menuController: any): any
 	local playEnabled = false
 	local joinRequestInFlight = false
 	local returnMenuInFlight = false
-	local camera = workspace.CurrentCamera
 	local localUserId = Players.LocalPlayer.UserId
 	local localMatchKills = 0
 	local playerKillsByUserId  = {} :: { [number]: number }
@@ -725,6 +778,11 @@ function MatchFeature.start(menuController: any): any
 			return
 		end
 
+		if weaponsSystem.resetClientRuntimeState then
+			weaponsSystem.resetClientRuntimeState()
+			return
+		end
+
 		weaponsSystem.currentWeapon = nil
 
 		if weaponsSystem.gui and weaponsSystem.gui.setEnabled then
@@ -920,13 +978,16 @@ function MatchFeature.start(menuController: any): any
 		end
 	end), "Disconnect")
 
-	janitor:Add(Players.LocalPlayer.CharacterAdded:Connect(function()
+	janitor:Add(Players.LocalPlayer.CharacterAdded:Connect(function(character)
 		if pendingRoundEndReturn then
 			clearLocalWeaponsAndUiWithRetries()
 		end
 		if not isInMatch then
 			return
 		end
+		task.defer(function()
+			_setGameplayCamera(character)
+		end)
 		enforceMenuHiddenIfNeeded()
 	end), "Disconnect")
 
@@ -950,19 +1011,11 @@ function MatchFeature.start(menuController: any): any
 			matchHudGui.Enabled = true
 		end
 		task.defer(function()
-			local currentCamera = camera or workspace.CurrentCamera
-			if not currentCamera then
-				return
-			end
 			local character = Players.LocalPlayer.Character
 			if not character then
 				character = Players.LocalPlayer.CharacterAdded:Wait()
 			end
-			local humanoid = character:FindFirstChildOfClass("Humanoid")
-			currentCamera.CameraType = Enum.CameraType.Custom
-			if humanoid then
-				currentCamera.CameraSubject = humanoid
-			end
+			_setGameplayCamera(character)
 		end)
 		_tweenFade(fadeRefs.frame, 1, FADE_OUT_TWEEN)
 	end), true)
@@ -1058,6 +1111,7 @@ function MatchFeature.start(menuController: any): any
 			end
 		end)
 		Network.Match.RequestVoteSync.Send({})
+		_tweenFade(fadeRefs.frame, 1, FADE_OUT_TWEEN)
 	end), true)
 
 	janitor:Add(Network.Match.RoundEnded.Listen(function(data: {
@@ -1214,6 +1268,18 @@ function MatchFeature.start(menuController: any): any
 		_log("MapVote UI hidden (vote ended).")
 	end), true)
 
+	DataController:WhenReady():andThen(function()
+		local function updateCashAndLevel()
+			local stats = Fusion.peek(DataController.Stats) :: any
+			_updatePlayerCashLevel(hudRefs, stats)
+		end
+
+		local statsObserver = fusionScope:Observer(DataController.Stats)
+		janitor:Add(statsObserver:onBind(updateCashAndLevel), true)
+
+		updateCashAndLevel()
+	end)
+
 	janitor:Add(function()
 		isVoting = false
 		isInMatch = false
@@ -1242,6 +1308,7 @@ function MatchFeature.start(menuController: any): any
 			voteScreenGui.Enabled = voteScreenWasEnabled
 		end
 		voteScreenTemporarilyEnabled = false
+		Fusion.doCleanup(fusionScope)
 	end, true)
 
 	Network.Match.RequestVoteSync.Send({})

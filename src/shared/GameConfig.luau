@@ -25,6 +25,9 @@ export type GameConfigType = {
 	EndResultsDuration: number,
 	RespawnCooldown: number,
 	MinPlayersToStart: number,
+	RealPlayerCapPerServer: number,
+	TeamSizeTarget: number,
+	TotalParticipantsTarget: number,
 	MaxRoundDuration: number,
 	WinScoreLimit: number,
 	Teams: TeamsDefinition,
@@ -38,7 +41,10 @@ local GameConfig: GameConfigType = {
 	EndResultsDuration = 10,
 	RespawnCooldown = 3,
 	MinPlayersToStart = 1,
-	MaxRoundDuration = 20,
+	RealPlayerCapPerServer = 6,
+	TeamSizeTarget = 6,
+	TotalParticipantsTarget = 12,
+	MaxRoundDuration = 100,
 	WinScoreLimit = 30,
 
 	Teams = {

@@ -48,27 +48,16 @@ local function asset(assetId: number): string
 	return "rbxassetid://" .. tostring(assetId)
 end
 
-local WEAPON_IMAGE_IDS = {
-	Main = {
-		AR = 136728627576131,
-		Sniper = 122930463834964,
-		Groza = 114523558287606,
-	},
-	Special = {
-		Default = 94351975111962,
-	},
-}
-
 local ItemsConfig: ItemsConfigType = {
 
 	Main = {
-		AR       = { Name = "AR",  		 Price = 0,    LevelRequired = 0,  Rarity = "Common",    Image = asset(WEAPON_IMAGE_IDS.Main.AR), CanPurchase = false },
-		Sniper   = { Name = "Sniper",         Price = 2,  LevelRequired = 0,  Rarity = "Uncommon",  Image = asset(WEAPON_IMAGE_IDS.Main.Sniper), CanPurchase = false },
-		Groza   = { Name = "Groza",         Price = 1000, LevelRequired = 0, Rarity = "Rare",      Image = asset(WEAPON_IMAGE_IDS.Main.Groza), CanPurchase = false },
+		AR       = { Name = "AR",  		 Price = 0,    LevelRequired = 0,  Rarity = "Common",    Image = asset(136728627576131), CanPurchase = false },
+		Sniper   = { Name = "Sniper",         Price = 2,  LevelRequired = 0,  Rarity = "Uncommon",  Image = asset(122930463834964), CanPurchase = false },
+		Groza   = { Name = "Groza",         Price = 1000, LevelRequired = 0, Rarity = "Rare",      Image = asset(114523558287606), CanPurchase = false },
 	},
 
 	Special = {
-		Shotgun   = { Name = "Shotgun",  		 Price = 0,    LevelRequired = 0,  Rarity = "Common",    Image = asset(WEAPON_IMAGE_IDS.Special.Default), CanPurchase = false },
+		Shotgun   = { Name = "Shotgun",  		 Price = 0,    LevelRequired = 0,  Rarity = "Common",    Image = asset(94351975111962), CanPurchase = false },
 	},
 
 	WeaponSkins = {

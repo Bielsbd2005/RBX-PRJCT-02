@@ -266,10 +266,11 @@ function BaseWeapon:onEquippedChanged()
 		self.weaponsSystem.setWeaponEquipped(self, self.equipped)
 		if self.equipped then
 			if self.player == Players.LocalPlayer then
-				RunService:BindToRenderStep(self.instance:GetFullName(), Enum.RenderPriority.Input.Value, function(dt)
+				local renderStepName = self.activeRenderStepName or ("WeaponRenderStep_" .. tostring(self))
+				RunService:BindToRenderStep(renderStepName, Enum.RenderPriority.Input.Value, function(dt)
 					self:onRenderStepped(dt)
 				end)
-				self.activeRenderStepName = self.instance:GetFullName()
+				self.activeRenderStepName = renderStepName
 			end
 			self.connections.localStepped = RunService.Heartbeat:Connect(function(dt)
 				self:onStepped(dt)
@@ -792,10 +793,10 @@ function BaseWeapon:onReloaded(player, fromNetwork)
 
 	-- Trigger reload progress bar animation on client
 	if not IsServer and self.weaponsSystem.gui then
-		print("[BaseWeapon] Calling playReloadProgressAnimation with reloadTime:", reloadTime, "on weapon:", self.instance:GetFullName())
+		--print("[BaseWeapon] Calling playReloadProgressAnimation with reloadTime:", reloadTime, "on weapon:", self.instance:GetFullName())
 		self.weaponsSystem.gui:playReloadProgressAnimation(reloadTime)
 	else
-		print("[BaseWeapon] Not calling animation - IsServer:", IsServer, "gui exists:", self.weaponsSystem.gui ~= nil)
+		--print("[BaseWeapon] Not calling animation - IsServer:", IsServer, "gui exists:", self.weaponsSystem.gui ~= nil)
 	end
 
 	if self.connections.reload ~= nil then -- this prevents an endless ammo bug
@@ -857,6 +858,10 @@ function BaseWeapon:cancelReload(player, fromNetwork)
 		self.curReloadSound:Stop()
 		self.curReloadSound:Destroy()
 		self.curReloadSound = nil
+	end
+
+	if not IsServer and self.weaponsSystem.gui and self.weaponsSystem.gui.stopReloadProgressAnimation then
+		self.weaponsSystem.gui:stopReloadProgressAnimation()
 	end
 end
 

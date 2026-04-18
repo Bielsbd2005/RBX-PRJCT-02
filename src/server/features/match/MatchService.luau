@@ -12,8 +12,6 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local GameConfig = require(Shared:WaitForChild("GameConfig"))
 local Network = require(Shared.networking.Network)
 
-local BOTS_PER_TEAM = 3
-
 type MapDefinition = {
 	Name: string,
 	Modes: { string },
@@ -68,6 +66,7 @@ local _teamB: Team? = nil
 local _finishRoundAndScheduleRestart: any = nil
 local _AIService: any = nil
 local _dataService: any = nil
+local _tieBreakToA = false
 
 local VOTE_CHANGE_COOLDOWN = 0.15
 local DEFAULT_PLACEHOLDER_IMAGE = "rbxasset://textures/ui/GuiImagePlaceholder.png"
@@ -228,7 +227,7 @@ local function _ensureTeams()
 	_teamB = getOrCreateTeam(GameConfig.Teams.B.Name, GameConfig.Teams.B.Color)
 end
 
-local function _countAssignments(): (number, number)
+local function _countActiveRealAssignments(): (number, number)
 	local connectedByUserId = {} :: { [number]: true }
 	for _, player in Players:GetPlayers() do
 		connectedByUserId[player.UserId] = true
@@ -237,7 +236,9 @@ local function _countAssignments(): (number, number)
 	local a = 0
 	local b = 0
 	for userId, side in _teamByUserId do
-		if connectedByUserId[userId] then
+		local isConnected = connectedByUserId[userId] == true
+		local isActiveOrPending = (_isInMenuByUserId[userId] == false) or (_pendingSpawnByUserId[userId] == true)
+		if isConnected and isActiveOrPending then
 			if side == "A" then
 				a += 1
 			else
@@ -249,24 +250,54 @@ local function _countAssignments(): (number, number)
 	return a, b
 end
 
+local function _pickTeamByScoreTieBreak(): "A" | "B"
+	if _roundScoreA < _roundScoreB then
+		return "A"
+	end
+
+	if _roundScoreB < _roundScoreA then
+		return "B"
+	end
+
+	_tieBreakToA = not _tieBreakToA
+	return if _tieBreakToA then "A" else "B"
+end
+
 local function _pickBalancedTeam(userId: number): "A" | "B"
 	local assigned = _teamByUserId[userId]
 	if assigned then
 		return assigned
 	end
 
-	local countA, countB = _countAssignments()
+	local countA, countB = _countActiveRealAssignments()
 	local selected: "A" | "B"
 	if countA < countB then
 		selected = "A"
 	elseif countB < countA then
 		selected = "B"
 	else
-		selected = if math.random() < 0.5 then "A" else "B"
+		selected = _pickTeamByScoreTieBreak()
 	end
 
 	_teamByUserId[userId] = selected
 	return selected
+end
+
+local function _rebalanceBotsForCurrentRound(reason: string)
+	if not _isRoundActive or not _AIService then
+		return
+	end
+
+	local realA, realB = _countActiveRealAssignments()
+	local targetA = math.max(0, GameConfig.TeamSizeTarget - realA)
+	local targetB = math.max(0, GameConfig.TeamSizeTarget - realB)
+
+	local ok, err = pcall(function()
+		_AIService:SetBotTargets(targetA, targetB)
+	end)
+	if not ok then
+		warn(string.format("[MatchService] Failed to rebalance bots (%s): %s", reason, tostring(err)))
+	end
 end
 
 local function _collectSpawnPointsForTeam(activeMapRoot: Instance, side: "A" | "B"): { BasePart }
@@ -440,10 +471,10 @@ local function _clearMatchLoadoutTools(player: Player)
 	end
 end
 
-local function _grantMatchLoadoutTools(player: Player): (boolean, boolean)
+local function _grantMatchLoadoutTools(player: Player): (boolean, boolean, string?)
 	local profile = if _dataService then _dataService:GetProfile(player) else nil
 	if not profile or not profile.Data or not profile.Data.Loadout then
-		return false, true
+		return false, true, nil
 	end
 
 	local loadout = profile.Data.Loadout
@@ -453,7 +484,7 @@ local function _grantMatchLoadoutTools(player: Player): (boolean, boolean)
 	local backpackNode = player:FindFirstChild("Backpack") or player:WaitForChild("Backpack", 1)
 	local backpack = if backpackNode and backpackNode:IsA("Backpack") then backpackNode else nil
 	if not backpack then
-		return false, true
+		return false, true, nil
 	end
 
 	_clearMatchLoadoutTools(player)
@@ -474,17 +505,64 @@ local function _grantMatchLoadoutTools(player: Player): (boolean, boolean)
 	local mainOk = cloneIntoInventory("Main", mainWeaponId)
 	local specialOk = cloneIntoInventory("Special", specialWeaponId)
 	if not mainOk or not specialOk then
-		return false, false
+		return false, false, nil
 	end
 
-	return true, false
+	return true, false, mainWeaponId
+end
+
+local function _equipMainLoadoutTool(player: Player, mainWeaponId: string): boolean
+	if player.Parent ~= Players then
+		return false
+	end
+
+	local character = player.Character
+	if not character then
+		return false
+	end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then
+		return false
+	end
+
+	local tool = character:FindFirstChild(mainWeaponId)
+	if not tool or not tool:IsA("Tool") then
+		local backpack = player:FindFirstChildOfClass("Backpack")
+		if backpack then
+			local backpackTool = backpack:FindFirstChild(mainWeaponId)
+			if backpackTool and backpackTool:IsA("Tool") then
+				tool = backpackTool
+			end
+		end
+	end
+
+	if not tool or not tool:IsA("Tool") then
+		return false
+	end
+
+	if tool:GetAttribute(MATCH_LOADOUT_TOOL_ATTRIBUTE) ~= true then
+		return false
+	end
+
+	humanoid:EquipTool(tool)
+	return true
 end
 
 local function _grantMatchLoadoutToolsWithRetry(player: Player, timeoutSec: number)
 	local endAt = time() + math.max(0.5, timeoutSec)
 	while player.Parent == Players do
-		local success, retryable = _grantMatchLoadoutTools(player)
+		local success, retryable, mainWeaponId = _grantMatchLoadoutTools(player)
 		if success then
+			if type(mainWeaponId) == "string" and mainWeaponId ~= "" then
+				local equipDeadline = time() + 2
+				while time() < equipDeadline and player.Parent == Players do
+					if _equipMainLoadoutTool(player, mainWeaponId) then
+						break
+					end
+					task.wait(0.1)
+				end
+			end
 			return
 		end
 		if not retryable then
@@ -908,26 +986,40 @@ local function _startMapLoadFlow(winnerMapName: string)
 
 	-- Spawnear bots de IA en ambos equipos
 	if _AIService then
-		_AIService:OnRoundStart(BOTS_PER_TEAM, function(botTeam: string, _botName: string)
-			if not _isRoundActive then
-				return
-			end
+		local spawnPointsA = _collectSpawnPointsForTeam(_activeMapModel :: Instance, "A")
+		local spawnPointsB = _collectSpawnPointsForTeam(_activeMapModel :: Instance, "B")
+		local ok, err = pcall(function()
+			_AIService:OnRoundStart({
+				spawnPointsA = spawnPointsA,
+				spawnPointsB = spawnPointsB,
+				onBotDied = function(botTeam: string, _botName: string)
+					if not _isRoundActive then
+						return
+					end
 
-			-- Sumar score al equipo contrario (igual que cuando muere un jugador)
-			if botTeam == "A" then
-				_roundScoreB += 1
-			else
-				_roundScoreA += 1
-			end
+					-- Sumar score al equipo contrario (igual que cuando muere un jugador)
+					if botTeam == "A" then
+						_roundScoreB += 1
+					else
+						_roundScoreA += 1
+					end
 
-			_broadcastRoundState()
+					_broadcastRoundState()
+					_rebalanceBotsForCurrentRound("bot death")
 
-			if _roundScoreA >= GameConfig.WinScoreLimit then
-				_finishRoundAndScheduleRestart("win score limit reached", "A")
-			elseif _roundScoreB >= GameConfig.WinScoreLimit then
-				_finishRoundAndScheduleRestart("win score limit reached", "B")
-			end
+					if _roundScoreA >= GameConfig.WinScoreLimit then
+						_finishRoundAndScheduleRestart("win score limit reached", "A")
+					elseif _roundScoreB >= GameConfig.WinScoreLimit then
+						_finishRoundAndScheduleRestart("win score limit reached", "B")
+					end
+				end,
+			})
 		end)
+		if not ok then
+			warn("[MatchService] Failed to start AI round: " .. tostring(err))
+		else
+			_rebalanceBotsForCurrentRound("round start")
+		end
 	end
 
 	_roundId += 1
@@ -1184,14 +1276,6 @@ local function _bindCharacterTracking(player: Player)
 
 	_characterConnectionsByUserId[player.UserId] = player.CharacterAdded:Connect(function(character)
 		_registerDeathListener(player, character)
-		if _isRoundActive and not _isInMenuByUserId[player.UserId] then
-			task.defer(function()
-				if player.Parent ~= Players then
-					return
-				end
-				_grantMatchLoadoutToolsWithRetry(player, 12)
-			end)
-		end
 	end)
 
 	if player.Character then
@@ -1210,9 +1294,11 @@ local function _onRequestJoinMatch(_: {}, player: Player)
 		return
 	end
 
+	_pickBalancedTeam(player.UserId)
 	_joinDebounceByUserId[player.UserId] = true
 	_pendingSpawnByUserId[player.UserId] = true
 	_isInMenuByUserId[player.UserId] = false
+	_rebalanceBotsForCurrentRound("join request")
 	if _matchKillsByUserId[player.UserId] == nil then
 		_matchKillsByUserId[player.UserId] = 0
 	end
@@ -1228,19 +1314,22 @@ local function _onRequestJoinMatch(_: {}, player: Player)
 			return
 		end
 
-		_pickBalancedTeam(player.UserId)
 		local team = if _teamByUserId[player.UserId] == "A" then _teamA else _teamB
 		if not team then
 			warn("[MatchService] Teams no inicializados.")
+			_isInMenuByUserId[player.UserId] = true
 			_pendingSpawnByUserId[player.UserId] = nil
 			_joinDebounceByUserId[player.UserId] = nil
+			_rebalanceBotsForCurrentRound("join aborted missing team")
 			return
 		end
 
 		if not _spawnPlayerOnAssignedTeam(player) then
 			warn("[MatchService] No fue posible spawnear al jugador en su equipo.")
+			_isInMenuByUserId[player.UserId] = true
 			_pendingSpawnByUserId[player.UserId] = nil
 			_joinDebounceByUserId[player.UserId] = nil
+			_rebalanceBotsForCurrentRound("join spawn failed")
 			return
 		end
 
@@ -1289,6 +1378,7 @@ local function _onRequestReturnToMenu(_: {}, player: Player)
 	_respawnDebounceByUserId[player.UserId] = nil
 	_pendingSpawnByUserId[player.UserId] = nil
 	_killStreakByUserId[player.UserId] = 0
+	_rebalanceBotsForCurrentRound("return to menu")
 	if _matchKillsByUserId[player.UserId] == nil then
 		_matchKillsByUserId[player.UserId] = 0
 	end
@@ -1359,6 +1449,8 @@ function MatchService:Start(dataService: any): ()
 	end)
 
 	Players.PlayerRemoving:Connect(function(player)
+		local wasActiveReal = _isInMenuByUserId[player.UserId] == false
+		local wasPendingSpawn = _pendingSpawnByUserId[player.UserId] == true
 		_voteCooldownsByUserId[player.UserId] = nil
 		_isInMenuByUserId[player.UserId] = nil
 		_deathAtByUserId[player.UserId] = nil
@@ -1377,9 +1469,14 @@ function MatchService:Start(dataService: any): ()
 		end
 
 		if _pendingSpawnByUserId[player.UserId] then
-			_teamByUserId[player.UserId] = nil
 			_pendingSpawnByUserId[player.UserId] = nil
 			_log(string.format("Released team assignment for %s (left before spawn).", player.Name))
+		end
+
+		_teamByUserId[player.UserId] = nil
+
+		if _isRoundActive and (wasActiveReal or wasPendingSpawn) then
+			_rebalanceBotsForCurrentRound("player leaving")
 		end
 	end)
 

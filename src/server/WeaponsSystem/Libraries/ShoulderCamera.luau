@@ -163,9 +163,9 @@ function ShoulderCamera.new(weaponsSystem)
 	self.rotateCharacterWithCamera = true
 	self.gamepadSensitivityModifier = Vector2.new(0.85, 0.65)
 	-- Walk speeds
-	self.zoomWalkSpeed = 8
-	self.normalWalkSpeed = 16
-	self.sprintingWalkSpeed = 24
+	self.zoomWalkSpeed = 10
+	self.normalWalkSpeed = 22
+	self.sprintingWalkSpeed = 32
 	self.sprintFOV = 82 -- Field of view when sprinting
 	self.sprintCrosshairScale = 1.5 -- Crosshair scale when sprinting
 	self.killFOVKick = 3.5
@@ -287,6 +287,9 @@ function ShoulderCamera:setEnabled(enabled)
 
 		self:onCurrentCharacterChanged(LocalPlayer.Character)
 		self:onCurrentCameraChanged(workspace.CurrentCamera)
+		if not self.currentCamera then
+			return
+		end
 
 		-- Make transition to shouldercamera smooth by facing in same direction as previous camera
 		local cameraLook = self.currentCamera.CFrame.lookVector
@@ -325,8 +328,20 @@ function ShoulderCamera:setEnabled(enabled)
 
 		if self.currentCamera then
 			self.currentCamera.CameraType = Enum.CameraType.Custom
+			if self.currentHumanoid then
+				self.currentCamera.CameraSubject = self.currentHumanoid
+			end
 			UserInputService.MouseBehavior = Enum.MouseBehavior.Default
 			UserInputService.MouseIconEnabled = true
+		end
+
+		if self.curOcclusionTween then
+			self.curOcclusionTween:Cancel()
+			self.curOcclusionTween = nil
+		end
+		if self.occlusionTweenObject then
+			self.occlusionTweenObject:Destroy()
+			self.occlusionTweenObject = nil
 		end
 
 
@@ -362,6 +377,8 @@ function ShoulderCamera:setEnabled(enabled)
 			conn:Disconnect()
 		end
 		self.eventConnections = {}
+		self.raycastIgnoreList[2] = nil
+		self.currentCamera = nil
 
 	end
 end
@@ -792,10 +809,6 @@ function ShoulderCamera:onCurrentCharacterChanged(character)
 end
 
 function ShoulderCamera:onCurrentCameraChanged(camera)
-	if self.currentCamera == camera then
-		return
-	end
-
 	self.currentCamera = camera
 
 	if self.currentCamera then

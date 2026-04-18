@@ -3,8 +3,11 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local ContentProvider = game:GetService("ContentProvider")
 local TweenService = game:GetService("TweenService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local LocalPlayer = Players.LocalPlayer
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local ItemsConfig = require(Shared.constants.ItemsConfig)
 
 local WeaponsSystemFolder = script.Parent.Parent
 local WeaponData = WeaponsSystemFolder:WaitForChild("WeaponData")
@@ -18,6 +21,8 @@ local ACTIVE_BUTTON_COLOR = Color3.fromRGB(0, 170, 255)
 local INACTIVE_BUTTON_COLOR = Color3.fromRGB(0, 0, 0)
 local ACTIVE_BUTTON_TRANSPARENCY = 0
 local INACTIVE_BUTTON_TRANSPARENCY = 0.5
+local HOTBAR_SELECTED_SCALE = 1.25
+local HOTBAR_DEFAULT_SCALE = 1
 
 local RELOAD_PROGRESS_STYLE = {
 	FlipProgress = false,
@@ -34,6 +39,20 @@ local RELOAD_PROGRESS_STYLE = {
 local WeaponsGui = {}
 WeaponsGui.__index = WeaponsGui
 local getJumpButton
+
+local function isHotbarImageNode(node)
+	return node and (node:IsA("ImageLabel") or node:IsA("ImageButton"))
+end
+
+local function getCategoryByToolName(toolName)
+	if ItemsConfig.Main[toolName] ~= nil then
+		return "Main"
+	end
+	if ItemsConfig.Special[toolName] ~= nil then
+		return "Special"
+	end
+	return nil
+end
 
 local function setGuiTransparencyRecursive(guiObject, alpha)
 	if guiObject:IsA("ImageLabel") or guiObject:IsA("ImageButton") then
@@ -119,6 +138,231 @@ function WeaponsGui:_setJumpButtonsVisible(isVisible)
 	local visible = UserInputService.TouchEnabled and isVisible
 	if self.smallJumpButton then self.smallJumpButton.Visible = visible end
 	if self.largeJumpButton then self.largeJumpButton.Visible = visible end
+end
+
+function WeaponsGui:_disconnectHotbarConns()
+	for _, conn in ipairs(self._hotbarConns) do
+		conn:Disconnect()
+	end
+	table.clear(self._hotbarConns)
+end
+
+function WeaponsGui:_captureHotbarSlot(hotbarRoot, itemName)
+	if not hotbarRoot then
+		return nil
+	end
+
+	local itemsFolder = hotbarRoot:FindFirstChild("Items")
+	if not itemsFolder then
+		return nil
+	end
+
+	local itemFrame = itemsFolder:FindFirstChild(itemName)
+	if not itemFrame or not itemFrame:IsA("GuiObject") then
+		return nil
+	end
+
+	local imageNode = itemFrame:FindFirstChild("Image")
+	if not isHotbarImageNode(imageNode) then
+		imageNode = itemFrame:FindFirstChildWhichIsA("ImageButton") or itemFrame:FindFirstChildWhichIsA("ImageLabel")
+	end
+
+	return {
+		frame = itemFrame,
+		image = imageNode,
+		baseSize = itemFrame.Size,
+	}
+end
+
+function WeaponsGui:_setSlotScale(slotNode, scale)
+	if not slotNode or not slotNode.frame then
+		return
+	end
+
+	local baseSize = slotNode.baseSize
+	if not baseSize then
+		return
+	end
+
+	slotNode.frame.Size = UDim2.new(
+		baseSize.X.Scale * scale,
+		math.floor(baseSize.X.Offset * scale + 0.5),
+		baseSize.Y.Scale * scale,
+		math.floor(baseSize.Y.Offset * scale + 0.5)
+	)
+end
+
+function WeaponsGui:_getWeaponImageByTool(tool, category)
+	if not tool then
+		return ""
+	end
+
+	if category == "Main" then
+		local config = ItemsConfig.Main[tool.Name]
+		return if config and type(config.Image) == "string" then config.Image else ""
+	end
+
+	if category == "Special" then
+		local config = ItemsConfig.Special[tool.Name]
+		return if config and type(config.Image) == "string" then config.Image else ""
+	end
+
+	return ""
+end
+
+function WeaponsGui:_setSlotImage(slotNode, image)
+	local imageNode = slotNode and slotNode.image
+	if not isHotbarImageNode(imageNode) then
+		return
+	end
+
+	imageNode.Image = image
+	imageNode.ImageTransparency = if image == "" then 1 else 0
+end
+
+function WeaponsGui:_findMainSpecialTools()
+	local mainTool = nil
+	local specialTool = nil
+
+	local character = LocalPlayer.Character
+	local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+	local containers = { character, backpack }
+
+	for _, container in ipairs(containers) do
+		if not container then
+			continue
+		end
+
+		for _, child in ipairs(container:GetChildren()) do
+			if not child:IsA("Tool") then
+				continue
+			end
+
+			local category = getCategoryByToolName(child.Name)
+			if category == "Main" then
+				if not mainTool or (character and child:IsDescendantOf(character)) then
+					mainTool = child
+				end
+			elseif category == "Special" then
+				if not specialTool or (character and child:IsDescendantOf(character)) then
+					specialTool = child
+				end
+			end
+		end
+	end
+
+	return mainTool, specialTool
+end
+
+function WeaponsGui:_getSelectedSlotByCurrentWeapon(mainTool, specialTool)
+	local currentWeapon = self.weaponsSystem.currentWeapon
+	local currentTool = if currentWeapon then currentWeapon.instance else nil
+
+	if currentTool and currentTool == specialTool then
+		return 2
+	end
+	if currentTool and currentTool == mainTool then
+		return 1
+	end
+
+	return self.hotbarSelectedSlot
+end
+
+function WeaponsGui:_applyHotbarSelectedVisual(selectedSlot)
+	self.hotbarSelectedSlot = selectedSlot
+
+	for _, layout in ipairs(self.hotbarLayouts) do
+		self:_setSlotScale(layout.item1, if selectedSlot == 1 then HOTBAR_SELECTED_SCALE else HOTBAR_DEFAULT_SCALE)
+		self:_setSlotScale(layout.item2, if selectedSlot == 2 then HOTBAR_SELECTED_SCALE else HOTBAR_DEFAULT_SCALE)
+	end
+end
+
+function WeaponsGui:_refreshHotbar()
+	local mainTool, specialTool = self:_findMainSpecialTools()
+	self.hotbarMainTool = mainTool
+	self.hotbarSpecialTool = specialTool
+
+	local mainImage = self:_getWeaponImageByTool(mainTool, "Main")
+	local specialImage = self:_getWeaponImageByTool(specialTool, "Special")
+
+	for _, layout in ipairs(self.hotbarLayouts) do
+		self:_setSlotImage(layout.item1, mainImage)
+		self:_setSlotImage(layout.item2, specialImage)
+	end
+
+	local selectedSlot = self:_getSelectedSlotByCurrentWeapon(mainTool, specialTool)
+	if selectedSlot ~= 1 and selectedSlot ~= 2 then
+		selectedSlot = 1
+	end
+
+	self:_applyHotbarSelectedVisual(selectedSlot)
+end
+
+function WeaponsGui:_equipTool(tool)
+	if not tool then
+		return
+	end
+
+	local character = LocalPlayer.Character
+	if not character then
+		return
+	end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then
+		return
+	end
+
+	humanoid:EquipTool(tool)
+end
+
+function WeaponsGui:equipHotbarSlot(slot)
+	local currentWeapon = self.weaponsSystem.currentWeapon
+	if currentWeapon and currentWeapon.reloading and currentWeapon.cancelReload then
+		currentWeapon:cancelReload()
+	end
+
+	if slot == 1 then
+		self:_equipTool(self.hotbarMainTool)
+		self:_applyHotbarSelectedVisual(1)
+		return
+	end
+
+	if slot == 2 then
+		self:_equipTool(self.hotbarSpecialTool)
+		self:_applyHotbarSelectedVisual(2)
+	end
+end
+
+function WeaponsGui:_registerHotbarButton(button, slot)
+	if not button or not button:IsA("GuiButton") then
+		return
+	end
+
+	table.insert(self._hotbarConns, button.Activated:Connect(function()
+		self:equipHotbarSlot(slot)
+	end))
+end
+
+function WeaponsGui:_setupHotbarLayout(hotbarRoot)
+	if not hotbarRoot then
+		return
+	end
+
+	local layout = {
+		root = hotbarRoot,
+		item1 = self:_captureHotbarSlot(hotbarRoot, "Item1"),
+		item2 = self:_captureHotbarSlot(hotbarRoot, "Item2"),
+	}
+
+	table.insert(self.hotbarLayouts, layout)
+
+	local item1Button = (layout.item1 and layout.item1.frame and layout.item1.frame:IsA("GuiButton") and layout.item1.frame)
+		or (layout.item1 and layout.item1.image)
+	local item2Button = (layout.item2 and layout.item2.frame and layout.item2.frame:IsA("GuiButton") and layout.item2.frame)
+		or (layout.item2 and layout.item2.image)
+	self:_registerHotbarButton(item1Button, 1)
+	self:_registerHotbarButton(item2Button, 2)
 end
 
 function WeaponsGui:_tryJump()
@@ -222,6 +466,11 @@ function WeaponsGui.new(weaponsSystem)
 	self._isFirePressed = false
 	self._isReloadPressed = false
 	self._isJumpPressed = false
+	self._hotbarConns = {}
+	self.hotbarLayouts = {}
+	self.hotbarMainTool = nil
+	self.hotbarSpecialTool = nil
+	self.hotbarSelectedSlot = 1
 	self.killContainer = nil
 	self.killContainerHideToken = 0
 	self.killContainerDisplayTime = 0.45
@@ -305,6 +554,8 @@ function WeaponsGui.new(weaponsSystem)
 
 		self.smallTouchscreen = self.gui:WaitForChild("SmallTouchscreen")
 		self.largeTouchscreen = self.gui:WaitForChild("LargeTouchscreen")
+		self.hotbarPC = self.gui:FindFirstChild("Hotbar_PC")
+		self.hotbarTouchscreen = self.gui:FindFirstChild("Hotbar_TouchScreen")
 
 		self.smallAimButton = self.smallTouchscreen:WaitForChild("AimButton")
 		self.smallAimButton.Activated:Connect(function() self:onTouchAimButtonActivated() end)
@@ -348,6 +599,11 @@ function WeaponsGui.new(weaponsSystem)
 		self:_trackAndHideDefaultJumpButton()
 
 		self:_refreshTouchButtonsVisuals()
+		self:_disconnectHotbarConns()
+		table.clear(self.hotbarLayouts)
+		self:_setupHotbarLayout(self.hotbarPC)
+		self:_setupHotbarLayout(self.hotbarTouchscreen)
+		self:_refreshHotbar()
 
 		self.gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
 		self.gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function() self:onScreenSizeChanged() end)
@@ -380,6 +636,14 @@ function WeaponsGui.new(weaponsSystem)
 			self.smallReloadButton,
 			self.largeReloadButton,
 		}
+		for _, layout in ipairs(self.hotbarLayouts) do
+			if layout.item1 and layout.item1.image then
+				table.insert(preloadTargets, layout.item1.image)
+			end
+			if layout.item2 and layout.item2.image then
+				table.insert(preloadTargets, layout.item2.image)
+			end
+		end
 		if self.killContainer then
 			table.insert(preloadTargets, self.killContainer)
 		end
@@ -436,6 +700,16 @@ function WeaponsGui:onScreenSizeChanged()
 			self.largeTouchscreen.Visible = false
 		end
 	end
+
+	if self.hotbarPC then
+		self.hotbarPC.Visible = not UserInputService.TouchEnabled
+	end
+	if self.hotbarTouchscreen then
+		self.hotbarTouchscreen.Visible = UserInputService.TouchEnabled
+	end
+
+	self:_refreshHotbar()
+
 	for _, child in pairs(self.scalingElementsFolder:GetChildren()) do
 		self:updateScale(child, viewportSize)
 	end
@@ -497,6 +771,16 @@ function WeaponsGui:setEnabled(enabled)
 
 		self.connections.renderStepped = RunService.RenderStepped:Connect(function(dt) self:onRenderStepped(dt) end)
 		self.connections.inputBegan = UserInputService.InputBegan:Connect(function(input,gp)
+			if not gp then
+				if input.KeyCode == Enum.KeyCode.One then
+					self:equipHotbarSlot(1)
+					return
+				elseif input.KeyCode == Enum.KeyCode.Two then
+					self:equipHotbarSlot(2)
+					return
+				end
+			end
+
 			if input.UserInputType == Enum.UserInputType.MouseButton2 then
 				self:setZoomed(true)
 			elseif not gp and input.UserInputType == Enum.UserInputType.MouseButton1 then
@@ -767,6 +1051,7 @@ function WeaponsGui:onRenderStepped(dt)
 	if not self.enabled or not self.gui then return end
 	self:_hideDefaultJumpButton()
 	self:_applyCrosshairByWeapon()
+	self:_refreshHotbar()
 	self:_updateAmmoDisplay()
 	if self._isShotgun then
 		if os.clock() >= (self._kickCooldownEnd or 0) then
@@ -894,16 +1179,22 @@ end
 
 function WeaponsGui:onWeaponEquipped(weapon)
 	self:_stopReloadProgressAnimation(true)
+	self:_refreshHotbar()
 	return
 end
 
 function WeaponsGui:onWeaponUnequipped()
 	self:_stopReloadProgressAnimation(true)
+	self:_refreshHotbar()
 	return
 end
 
 function WeaponsGui:onWeaponReloadStarted(weapon, reloadTime)
 	self:playReloadProgressAnimation(reloadTime)
+end
+
+function WeaponsGui:stopReloadProgressAnimation()
+	self:_stopReloadProgressAnimation(true)
 end
 
 function WeaponsGui:_getReloadProgressFrame()

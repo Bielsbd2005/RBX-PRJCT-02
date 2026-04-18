@@ -22,6 +22,7 @@ local WeaponData = script.Parent:WaitForChild("WeaponData")
 local WeaponsSystemFolder = script.Parent
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Network = require(Shared.networking.Network)
+local ItemsConfig = require(Shared.constants.ItemsConfig)
 local WeaponTypes = WeaponsSystemFolder:WaitForChild("WeaponTypes")
 local Libraries = WeaponsSystemFolder:WaitForChild("Libraries")
 local ShoulderCamera = require(Libraries:WaitForChild("ShoulderCamera"))
@@ -84,8 +85,136 @@ WeaponsSystem.remoteEvents = {}
 WeaponsSystem.remoteFunctions = {}
 WeaponsSystem.currentWeapon = nil
 WeaponsSystem.aimRayCallback = nil
+WeaponsSystem._hotbarFallbackInProgress = false
+WeaponsSystem._hotbarFallbackTarget = nil
 
 WeaponsSystem.CurrentWeaponChanged = Instance.new("BindableEvent")
+
+local function _getToolCategory(tool: Tool?): string?
+	if not tool then
+		return nil
+	end
+
+	if ItemsConfig.Main[tool.Name] then
+		return "Main"
+	end
+	if ItemsConfig.Special[tool.Name] then
+		return "Special"
+	end
+
+	return nil
+end
+
+local function _findLocalHotbarTools(): (Tool?, Tool?, boolean)
+	if IsServer then
+		return nil, nil, false
+	end
+
+	local player = Players.LocalPlayer
+	if not player then
+		return nil, nil, false
+	end
+
+	local mainTool = nil
+	local specialTool = nil
+	local hasMatchTool = false
+
+	local character = player.Character
+	local backpack = player:FindFirstChildOfClass("Backpack")
+	local containers = { character, backpack }
+
+	for _, container in ipairs(containers) do
+		if not container then
+			continue
+		end
+
+		for _, child in ipairs(container:GetChildren()) do
+			if not child:IsA("Tool") then
+				continue
+			end
+
+			if child:GetAttribute("MatchLoadoutTool") == true then
+				hasMatchTool = true
+			end
+
+			local category = _getToolCategory(child)
+			if category == "Main" then
+				if not mainTool or (character and child:IsDescendantOf(character)) then
+					mainTool = child
+				end
+			elseif category == "Special" then
+				if not specialTool or (character and child:IsDescendantOf(character)) then
+					specialTool = child
+				end
+			end
+		end
+	end
+
+	return mainTool, specialTool, hasMatchTool
+end
+
+local function _tryReequipHotbarFallback(previousWeapon): (boolean, any)
+	if IsServer then
+		return false, nil
+	end
+
+	if WeaponsSystem._hotbarFallbackInProgress then
+		return true, previousWeapon
+	end
+
+	local player = Players.LocalPlayer
+	local character = player and player.Character
+	if not character then
+		return false, nil
+	end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then
+		return false, nil
+	end
+
+	local mainTool, specialTool, hasMatchTool = _findLocalHotbarTools()
+	if not hasMatchTool then
+		return false, nil
+	end
+
+	local prevTool = previousWeapon and previousWeapon.instance
+	local fallbackTool = nil
+
+	if prevTool == mainTool then
+		fallbackTool = specialTool or mainTool
+	else
+		fallbackTool = mainTool or specialTool
+	end
+
+	if not fallbackTool then
+		return false, nil
+	end
+
+	if prevTool and fallbackTool == prevTool then
+		return true, previousWeapon
+	end
+
+	local fallbackWeapon = WeaponsSystem.getWeaponForInstance(fallbackTool)
+	WeaponsSystem._hotbarFallbackInProgress = true
+	WeaponsSystem._hotbarFallbackTarget = fallbackTool
+
+	task.defer(function()
+		if character.Parent and fallbackTool.Parent then
+			local currentlyEquipped = character:FindFirstChildOfClass("Tool")
+			if currentlyEquipped ~= fallbackTool then
+				humanoid:EquipTool(fallbackTool)
+			end
+		end
+
+		if WeaponsSystem._hotbarFallbackTarget == fallbackTool then
+			WeaponsSystem._hotbarFallbackTarget = nil
+			WeaponsSystem._hotbarFallbackInProgress = false
+		end
+	end)
+
+	return true, fallbackWeapon or previousWeapon
+end
 
 local NetworkingCallbacks = require(WeaponsSystemFolder:WaitForChild("NetworkingCallbacks"))
 NetworkingCallbacks.WeaponsSystem = WeaponsSystem
@@ -106,7 +235,7 @@ function WeaponsSystem.setup()
 		warn("Warning: trying to run WeaponsSystem setup twice on the same module.")
 		return
 	end
-	print(script.Parent:GetFullName(), "is now active.")
+	--print(script.Parent:GetFullName(), "is now active.")
 
 	WeaponsSystem.doingSetup = true
 
@@ -158,9 +287,10 @@ function WeaponsSystem.setup()
 		WeaponsSystem.camera = ShoulderCamera.new(WeaponsSystem)
 		WeaponsSystem.gui = WeaponsGui.new(WeaponsSystem)
 
-		if ConfigurationValues.SprintEnabled.Value then
-			WeaponsSystem.camera:setSprintEnabled(ConfigurationValues.SprintEnabled.Value)
-		end
+		-- Sprint disabled
+		-- if ConfigurationValues.SprintEnabled.Value then
+		-- 	WeaponsSystem.camera:setSprintEnabled(ConfigurationValues.SprintEnabled.Value)
+		-- end
 
 		if ConfigurationValues.SlowZoomWalkEnabled.Value then
 			WeaponsSystem.camera:setSlowZoomWalkEnabled(ConfigurationValues.SlowZoomWalkEnabled.Value)
@@ -214,18 +344,51 @@ function WeaponsSystem.setup()
 	WeaponsSystem.didSetup = true
 end
 
-function WeaponsSystem.onCharacterAdded(character)
-	-- Reset state on new character
+function WeaponsSystem.resetClientRuntimeState()
+	if IsServer then
+		return
+	end
+
 	WeaponsSystem.currentWeapon = nil
+	WeaponsSystem._hotbarFallbackInProgress = false
+	WeaponsSystem._hotbarFallbackTarget = nil
+	WeaponsSystem.aimRayCallback = nil
+
 	if WeaponsSystem.gui then
-		WeaponsSystem.gui:setEnabled(false)
+		if WeaponsSystem.gui.setEnabled then
+			WeaponsSystem.gui:setEnabled(false)
+		end
+		if WeaponsSystem.gui.setZoomed then
+			WeaponsSystem.gui:setZoomed(false)
+		end
+		if WeaponsSystem.gui.setScopeEnabled then
+			WeaponsSystem.gui:setScopeEnabled(false)
+		end
 	end
+
 	if WeaponsSystem.camera then
-		WeaponsSystem.camera:setEnabled(false)
+		if WeaponsSystem.camera.setEnabled then
+			WeaponsSystem.camera:setEnabled(false)
+		end
 		WeaponsSystem.camera.rotateCharacterWithCamera = false
-		WeaponsSystem.camera:resetZoomFactor()
-		WeaponsSystem.camera:setHasScope(false)
+		if WeaponsSystem.camera.setForceZoomed then
+			WeaponsSystem.camera:setForceZoomed(false)
+		end
+		if WeaponsSystem.camera.setZoomedFromInput then
+			WeaponsSystem.camera:setZoomedFromInput(false)
+		end
+		if WeaponsSystem.camera.resetZoomFactor then
+			WeaponsSystem.camera:resetZoomFactor()
+		end
+		if WeaponsSystem.camera.setHasScope then
+			WeaponsSystem.camera:setHasScope(false)
+		end
 	end
+end
+
+function WeaponsSystem.onCharacterAdded(character)
+	-- Reset client state on new character so camera/gui do not keep stale values.
+	WeaponsSystem.resetClientRuntimeState()
 
 	-- Make it so players unequip weapons while seated, then reequip weapons when they become unseated
 	local humanoid = character:WaitForChild("Humanoid")
@@ -235,22 +398,16 @@ function WeaponsSystem.onCharacterAdded(character)
 			humanoid:UnequipTools()
 			WeaponsSystem.StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, false)
 		else
-			WeaponsSystem.StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, true)
-			humanoid:EquipTool(WeaponsSystem.seatedWeapon)
+			WeaponsSystem.StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, false)
+			if WeaponsSystem.seatedWeapon then
+				humanoid:EquipTool(WeaponsSystem.seatedWeapon)
+			end
 		end
 	end)
+	WeaponsSystem.StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, false)
 
 	WeaponsSystem.connections.died = humanoid.Died:Connect(function()
-		WeaponsSystem.currentWeapon = nil
-		if WeaponsSystem.gui then
-			WeaponsSystem.gui:setEnabled(false)
-		end
-		if WeaponsSystem.camera then
-			WeaponsSystem.camera:setEnabled(false)
-			WeaponsSystem.camera.rotateCharacterWithCamera = false
-			WeaponsSystem.camera:resetZoomFactor()
-			WeaponsSystem.camera:setHasScope(false)
-		end
+		WeaponsSystem.resetClientRuntimeState()
 	end)
 end
 
@@ -398,18 +555,27 @@ function WeaponsSystem.setWeaponEquipped(weapon, equipped)
 	local lastWeapon = WeaponsSystem.currentWeapon
 	local weaponChanged = false
 
+	if equipped and weapon.instance == WeaponsSystem._hotbarFallbackTarget then
+		WeaponsSystem._hotbarFallbackTarget = nil
+		WeaponsSystem._hotbarFallbackInProgress = false
+	end
+
 	if lastWeapon == weapon then
 		if not equipped then
-			WeaponsSystem.currentWeapon = nil
-			hasWeapon = false
-			weaponChanged = true
+			local blockedUnequip, fallbackWeapon = _tryReequipHotbarFallback(lastWeapon)
+			if blockedUnequip then
+				WeaponsSystem.currentWeapon = fallbackWeapon or lastWeapon
+				weaponChanged = WeaponsSystem.currentWeapon ~= lastWeapon
+			else
+				WeaponsSystem.currentWeapon = nil
+				weaponChanged = true
+			end
 		else
 			weaponChanged = false
 		end
 	else
 		if equipped then
 			WeaponsSystem.currentWeapon = weapon
-			hasWeapon = true
 			weaponChanged = true
 		end
 	end
@@ -565,7 +731,7 @@ end
 
 function WeaponsSystem.playersOnDifferentTeams(player1, player2)
 	if player1 == nil and player2 == nil then
-		print("both player 1 and 2 are nil")
+		--print("both player 1 and 2 are nil")
 	else
 		if player1 ~= nil then
 			if player1.Team.Name ~= player2.Team.Name then
