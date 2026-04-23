@@ -8,7 +8,7 @@ local RunService        = game:GetService("RunService")
 local Players           = game:GetService("Players")
 local SoundService      = game:GetService("SoundService")
 local Workspace         = game:GetService("Workspace")
-local Teams             = game:GetService("Teams")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 -- Abort on server
 if RunService:IsServer() then
@@ -32,83 +32,19 @@ Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
 	currentCamera = Workspace.CurrentCamera
 end)
 
---// Team resolution helpers
-local function getTeamIdFromTeamObject(teamObj: Team?): number
-	if not teamObj then
-		return 0
-	end
+--// Team resolution via shared TeamUtils
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local TeamUtils = require(Shared.utils.TeamUtils)
 
-	local name = teamObj.Name
-	if name == "Green" then
-		return 1
-	elseif name == "Purple" then
-		return 2
-	end
-
-	return 100
-end
-
-local function getTeamIdFromPlayer(player: Player?): number
-	if not player then
-		return 0
-	end
-
-	local team = player.Team
-	if team then
-		return getTeamIdFromTeamObject(team)
-	end
-
-	local attrTeamName = player:GetAttribute("TeamName")
-	if typeof(attrTeamName) == "string" then
-		return getTeamIdFromTeamObject(Teams:FindFirstChild(attrTeamName))
-	end
-
-	local teamValue = player:FindFirstChild("Team")
-	if teamValue and teamValue:IsA("ObjectValue") then
-		local value = teamValue.Value
-		if value and value:IsA("Team") then
-			return getTeamIdFromTeamObject(value)
-		end
-	end
-
-	return 0
-end
-
-local function getTeamIdFromModel(model: Model?): number
-	if not model then
-		return 0
-	end
-
-	local plr = Players:GetPlayerFromCharacter(model)
-	if plr then
-		local teamId = getTeamIdFromPlayer(plr)
-		if teamId ~= 0 then
-			return teamId
-		end
-	end
-
-	local teamValue = model:FindFirstChild("Team")
-	if teamValue and teamValue:IsA("ObjectValue") then
-		local value = teamValue.Value
-		if value and value:IsA("Team") then
-			return getTeamIdFromTeamObject(value)
-		end
-	end
-
-	local attrTeamName = model:GetAttribute("TeamName")
-	if typeof(attrTeamName) == "string" then
-		return getTeamIdFromTeamObject(Teams:FindFirstChild(attrTeamName))
-	end
-
-	return 0
-end
-
---// Cached attacker team ID (avoids recomputing on every hit)
-local attackerTeamId = getTeamIdFromPlayer(localPlayer)
+--// Cached attacker side (avoids recomputing on every hit)
+local attackerSide: string? = TeamUtils.getSide(localPlayer.Character)
 local function refreshAttackerTeam()
-	attackerTeamId = getTeamIdFromPlayer(localPlayer)
+	attackerSide = TeamUtils.getSide(localPlayer.Character)
 end
 localPlayer:GetPropertyChangedSignal("Team"):Connect(refreshAttackerTeam)
+localPlayer.CharacterAdded:Connect(function()
+	task.defer(refreshAttackerTeam)
+end)
 localPlayer.AttributeChanged:Connect(function(attr)
 	if attr == "TeamName" then
 		refreshAttackerTeam()
@@ -155,13 +91,13 @@ local function isCoreModel(model: Model?): boolean
 	return result
 end
 
-local function shouldSkipFriendlyCoreFx(adornee: Instance?): boolean
+local function shouldSkipFriendlyTargetFx(adornee: Instance?): boolean
 	if not adornee then
 		return false
 	end
 
 	-- Fast-path: if attacker has no team, never skip
-	if attackerTeamId == 0 then
+	if not attackerSide then
 		return false
 	end
 
@@ -172,16 +108,21 @@ local function shouldSkipFriendlyCoreFx(adornee: Instance?): boolean
 		targetModel = adornee:FindFirstAncestorOfClass("Model")
 	end
 
-	if not targetModel or not isCoreModel(targetModel) then
+	if not targetModel then
 		return false
 	end
 
-	local targetTeamId = getTeamIdFromModel(targetModel)
-	if targetTeamId == 0 then
+	-- Solo bloqueamos FX para entidades de combate (jugadores/bots con Humanoid).
+	if not targetModel:FindFirstChildOfClass("Humanoid") then
 		return false
 	end
 
-	return attackerTeamId == targetTeamId
+	local targetSide = TeamUtils.getSide(targetModel)
+	if not targetSide then
+		return false
+	end
+
+	return attackerSide == targetSide
 end
 
 --// Cached folders
@@ -190,18 +131,14 @@ local UIFolder = SoundService:WaitForChild("Audio"):WaitForChild("Gameplay")
 local V3_BILLBOARD_OFFSET = Vector3.new(0, 5, 0)
 
 -- Colors
-local COLOR_RED_NORMAL    = Color3.fromRGB(237, 49, 80)    -- normal hits
-local COLOR_HEADSHOT      = Color3.fromRGB(255, 128, 0)    -- headshot
-local COLOR_BLACK         = Color3.new(0, 0, 0)
-
--- Highlight fill colors
-local COLOR_HL_HEAD_FILL  = Color3.fromRGB(255, 155, 45)
-local COLOR_HL_HIT_FILL   = Color3.fromRGB(237, 49, 80)
+local COLOR_NORMAL_TEXT   = Color3.fromRGB(255, 255, 255)  -- normal hits text
+local COLOR_NORMAL_STROKE = Color3.fromRGB(0, 0, 0)        -- normal hits stroke
+local COLOR_HEADSHOT_TEXT = Color3.fromRGB(235, 71, 62)    -- headshot text
+local COLOR_HEADSHOT_STROKE = Color3.fromRGB(118, 35, 32)  -- headshot stroke
 
 -- TweenInfos
 local TI_NUM_APPEAR   = TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local TI_NUM_MOVE     = TweenInfo.new(1.00, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-local TI_HL_FILL_FADE = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
 -- Desktop-only profile (no mobile distinctions)
 local MAX_UI_DISTANCE     = 200
@@ -282,8 +219,8 @@ local billboardLabelPool    = setmetatable({}, { __mode = "k" }) -- billboard ->
 local billboardActiveCount  = setmetatable({}, { __mode = "k" }) -- billboard -> int
 
 local UDim2_CENTER       = UDim2.fromScale(0.5, 0.5)
-local UDim2_APPEAR_START = UDim2.fromScale(0.36, 0.36)
-local UDim2_APPEAR_END   = UDim2.fromScale(0.5, 0.5)
+local UDim2_APPEAR_START = UDim2.fromScale(0.48, 0.48)
+local UDim2_APPEAR_END   = UDim2.fromScale(0.66, 0.66)
 
 --// UIStroke cache per label (avoids FindFirstChildOfClass on every render)
 local labelStrokes = setmetatable({}, { __mode = "k" }) -- label -> UIStroke
@@ -297,7 +234,7 @@ local function ensureStroke(label: TextLabel): UIStroke
 		stroke = Instance.new("UIStroke")
 		stroke.Name = "Outline"
 		stroke.LineJoinMode = Enum.LineJoinMode.Round
-		stroke.Color = COLOR_BLACK
+		stroke.Color = COLOR_NORMAL_STROKE
 		stroke.Thickness = NORMAL_STROKE_THICK
 		stroke.Transparency = 0
 		stroke.Parent = label
@@ -314,13 +251,13 @@ local function resetLabelVisual(label: TextLabel, isHeadshot: boolean?)
 	label.Rotation = 0
 
 	-- Number color
-	label.TextColor3 = isHeadshot and COLOR_HEADSHOT or COLOR_RED_NORMAL
+	label.TextColor3 = isHeadshot and COLOR_HEADSHOT_TEXT or COLOR_NORMAL_TEXT
 
 	-- UIStroke (outline thickness) — use cache
 	local stroke = ensureStroke(label)
-	stroke.Color = COLOR_BLACK
+	stroke.Color = isHeadshot and COLOR_HEADSHOT_STROKE or COLOR_NORMAL_STROKE
 	stroke.Thickness = isHeadshot and HEAD_STROKE_THICK or NORMAL_STROKE_THICK
-	stroke.Transparency = 0
+	stroke.Transparency = isHeadshot and 0 or 0.8
 end
 
 local function getBillboardLabel(billboard: BillboardGui, isHeadshot: boolean): TextLabel?
@@ -372,37 +309,6 @@ local function releaseBillboardLabel(billboard: BillboardGui, label: TextLabel)
 		billboardLabelPool[billboard] = pool
 	end
 	pool[#pool + 1] = label
-end
-
--- Reusable highlight per character with cooldown
-local charHL   = setmetatable({}, { __mode = "k" }) -- character -> Highlight
-local charHL_t = setmetatable({}, { __mode = "k" }) -- character -> lastTime
-local OUTLINE_COLOR_CONST   = Color3.fromRGB(255, 0, 0)
-local OUTLINE_TRANSP_CONST  = 0
-local DEPTH_MODE_CONST      = Enum.HighlightDepthMode.Occluded
-
-local function flashHL(character: Model, isHeadshot: boolean)
-	local now = time()
-	local last = charHL_t[character]
-	if last and (now - last) < 0.10 then
-		return
-	end
-	charHL_t[character] = now
-
-	local hl = charHL[character]
-	if not hl then
-		hl = Instance.new("Highlight")
-		hl.Name = "DamageHighlight"
-		hl.Parent = character
-		charHL[character] = hl
-	end
-
-	hl.DepthMode = DEPTH_MODE_CONST
-	hl.OutlineColor = OUTLINE_COLOR_CONST
-	hl.OutlineTransparency = OUTLINE_TRANSP_CONST
-	hl.FillColor = isHeadshot and COLOR_HL_HEAD_FILL or COLOR_HL_HIT_FILL
-	hl.FillTransparency = 0.16
-	TweenService:Create(hl, TI_HL_FILL_FADE, { FillTransparency = 1 }):Play()
 end
 
 --// Cached head emitters
@@ -526,8 +432,9 @@ local function renderNumber(billboard: BillboardGui, value: number, isHeadshot: 
 	-- Use cached stroke (already guaranteed to exist via ensureStroke)
 	local stroke = labelStrokes[label]
 	if stroke then
+		stroke.Color = isHeadshot and COLOR_HEADSHOT_STROKE or COLOR_NORMAL_STROKE
 		stroke.Thickness = isHeadshot and HEAD_STROKE_THICK or NORMAL_STROKE_THICK
-		stroke.Transparency = 0
+		stroke.Transparency = isHeadshot and 0 or 0.8
 	end
 
 	local moveX, moveY = randomDispersedOffset()
@@ -578,10 +485,6 @@ scheduleFlush = function(billboard: BillboardGui)
 			local adornee  = s.adornee
 
 			if adornee and adornee.Parent then
-				local parent = adornee.Parent
-				if parent and parent:IsA("Model") then
-					flashHL(parent, headshot)
-				end
 				if headshot then
 					local head = getHeadFromAdornee(adornee)
 					if head then
@@ -605,7 +508,7 @@ end
 
 --// Public API
 function DamageBillboardHandler:ShowDamageBillboard(damageAmount: number, adornee: Instance)
-	if shouldSkipFriendlyCoreFx(adornee) then
+	if shouldSkipFriendlyTargetFx(adornee) then
 		return
 	end
 

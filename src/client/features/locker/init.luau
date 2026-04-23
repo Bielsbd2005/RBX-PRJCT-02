@@ -14,6 +14,7 @@ local Packages = ReplicatedStorage:WaitForChild("Packages")
 local Janitor = require(Packages.janitor) :: any
 local Fusion = require(Packages.fusion) :: any
 local LockerCameraController = require(Client.core.camera.LockerCameraController)
+local CameraLock = require(Client.core.camera.CameraLock)
 local LockerCatalog = require(script:WaitForChild("LockerCatalog"))
 local LockerGrid = require(script:WaitForChild("LockerGrid"))
 local FaceApplier = require(script.Appliers.FaceApplier)
@@ -1946,6 +1947,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		restoreEquippedWeaponPreviews()
 		table.clear(lockedWeaponTemplateCache)
 		cameraController:restore()
+		CameraLock.release("locker")
 		setMenuVisibleInstant(true)
 	end
 
@@ -1955,6 +1957,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end
 
 		isOpen = true
+		CameraLock.acquire("locker")
 		if dirtyWhileClosed then
 			dirtyWhileClosed = false
 			rebuildOwnedLookup()

@@ -9,12 +9,15 @@ local LockerConfig = require(Shared.constants.LockerConfig) :: any
 
 export type FusionSkinItem = {
 	ItemKey: string,
+	BaseSkinKey: string,
 	Name: string,
 	Rarity: string,
 	TextureID: string?,
 	BaseColor: Color3?,
 	Animated: boolean?,
 	StudsPerTile: number?,
+	WeaponCategory: string?,
+	WeaponId: string?,
 	PreviewWeaponCategory: string?,
 	PreviewWeaponKey: string?,
 	PreviewWeaponName: string?,
@@ -29,18 +32,19 @@ type InventorySnapshot = {
 }
 
 export type FusionSkinInventory = {
-	_itemsByKey: { [string]: FusionSkinItem },
+	_baseCatalogBySkinKey: { [string]: FusionSkinItem },
+	_stackCatalogByItemKey: { [string]: FusionSkinItem },
 	_slotAssignments: SlotMap,
 	_ownedAmounts: AmountMap,
 	_freeAmounts: AmountMap,
 	BuildFromInventory: (self: FusionSkinInventory, inventory: InventorySnapshot?) -> (),
-	SetSlotSkin: (self: FusionSkinInventory, slotId: string, skinKey: string) -> FusionSkinItem?,
+	SetSlotSkin: (self: FusionSkinInventory, slotId: string, itemKey: string) -> FusionSkinItem?,
 	ClearSlot: (self: FusionSkinInventory, slotId: string) -> (),
 	GetSlotSkin: (self: FusionSkinInventory, slotId: string) -> FusionSkinItem?,
 	GetOccupiedRarity: (self: FusionSkinInventory) -> string?,
 	GetAvailableItems: (self: FusionSkinInventory) -> { FusionSkinItem },
-	GetFreeAmount: (self: FusionSkinInventory, skinKey: string) -> number,
-	GetAssignedAmount: (self: FusionSkinInventory, skinKey: string) -> number,
+	GetFreeAmount: (self: FusionSkinInventory, itemKey: string) -> number,
+	GetAssignedAmount: (self: FusionSkinInventory, itemKey: string) -> number,
 }
 
 local RARITY_RANK = LockerConfig.RarityRank :: { [string]: number }
@@ -55,14 +59,17 @@ end
 local function toSkinItem(itemKey: string, definition: any): FusionSkinItem
 	return {
 		ItemKey = itemKey,
+		BaseSkinKey = itemKey,
 		Name = tostring(definition.Name or itemKey),
 		Rarity = tostring(definition.Rarity or "Common"),
 		TextureID = if type(definition.TextureID) == "string" then definition.TextureID else nil,
 		BaseColor = if typeof(definition.BaseColor) == "Color3" then definition.BaseColor else nil,
 		Animated = definition.Animated == true,
 		StudsPerTile = tonumber(definition.StudsPerTile),
-		PreviewWeaponCategory = "Special",
-		PreviewWeaponKey = "Default",
+		WeaponCategory = nil,
+		WeaponId = nil,
+		PreviewWeaponCategory = nil,
+		PreviewWeaponKey = nil,
 		PreviewWeaponName = nil,
 	}
 end
@@ -80,6 +87,53 @@ local function buildCatalog(): { [string]: FusionSkinItem }
 	return catalog
 end
 
+local function resolveOwnedAmount(rawValue: number | boolean): number
+	if rawValue == true then
+		return 1
+	end
+
+	if type(rawValue) == "number" and rawValue > 0 then
+		return math.max(1, math.floor(rawValue))
+	end
+
+	return 0
+end
+
+local function makeStackItemKey(weaponCategory: string, weaponId: string, baseSkinKey: string): string
+	return string.format("%s|%s|%s", weaponCategory, weaponId, baseSkinKey)
+end
+
+local function resolveWeaponDisplayName(weaponCategory: string, weaponId: string): string
+	local categoryConfig = ItemsConfig[weaponCategory]
+	if type(categoryConfig) == "table" then
+		local weaponConfig = categoryConfig[weaponId]
+		if type(weaponConfig) == "table" and type(weaponConfig.Name) == "string" and weaponConfig.Name ~= "" then
+			return weaponConfig.Name
+		end
+	end
+
+	return weaponId
+end
+
+local function toStackItem(baseItem: FusionSkinItem, weaponCategory: string, weaponId: string): FusionSkinItem
+	local weaponDisplayName = resolveWeaponDisplayName(weaponCategory, weaponId)
+	return {
+		ItemKey = makeStackItemKey(weaponCategory, weaponId, baseItem.BaseSkinKey),
+		BaseSkinKey = baseItem.BaseSkinKey,
+		Name = string.format("%s (%s)", baseItem.Name, weaponDisplayName),
+		Rarity = baseItem.Rarity,
+		TextureID = baseItem.TextureID,
+		BaseColor = baseItem.BaseColor,
+		Animated = baseItem.Animated,
+		StudsPerTile = baseItem.StudsPerTile,
+		WeaponCategory = weaponCategory,
+		WeaponId = weaponId,
+		PreviewWeaponCategory = weaponCategory,
+		PreviewWeaponKey = weaponId,
+		PreviewWeaponName = weaponDisplayName,
+	}
+end
+
 local function computeAssignedAmount(slotAssignments: SlotMap, skinKey: string): number
 	local amount = 0
 	for _, assignedSkin in slotAssignments do
@@ -95,7 +149,8 @@ FusionSkinInventory.__index = FusionSkinInventory
 
 function FusionSkinInventory.new(slotIds: { string }): FusionSkinInventory
 	local self = setmetatable({}, FusionSkinInventory) :: any
-	self._itemsByKey = buildCatalog()
+	self._baseCatalogBySkinKey = buildCatalog()
+	self._stackCatalogByItemKey = {}
 	self._slotAssignments = {}
 	self._ownedAmounts = {}
 	self._freeAmounts = {}
@@ -109,30 +164,31 @@ end
 
 function FusionSkinInventory:BuildFromInventory(inventory: InventorySnapshot?): ()
 	local ownedAmounts = {} :: AmountMap
+	local stackCatalogByItemKey = {} :: { [string]: FusionSkinItem }
 	if inventory and inventory.WeaponSkinsByWeapon then
 		local wrapsByWeapon = inventory.WeaponSkinsByWeapon
-		for _, wrapsByWeaponId in wrapsByWeapon do
-			for _, ownedSkins in wrapsByWeaponId do
+		for weaponCategory, wrapsByWeaponId in wrapsByWeapon do
+			for weaponId, ownedSkins in wrapsByWeaponId do
 				for skinKey, ownedValue in ownedSkins do
-					local ownedAmount = if ownedValue == true
-						then 1
-						else if type(ownedValue) == "number" and ownedValue > 0
-						then math.max(1, math.floor(ownedValue))
-						else 0
-					if ownedAmount > 0 and self._itemsByKey[skinKey] then
-						ownedAmounts[skinKey] = (ownedAmounts[skinKey] or 0) + ownedAmount
+					local baseItem = self._baseCatalogBySkinKey[skinKey]
+					local ownedAmount = resolveOwnedAmount(ownedValue)
+					if ownedAmount > 0 and baseItem then
+						local stackItem = toStackItem(baseItem, weaponCategory, weaponId)
+						stackCatalogByItemKey[stackItem.ItemKey] = stackItem
+						ownedAmounts[stackItem.ItemKey] = ownedAmount
 					end
 				end
 			end
 		end
 	end
 
+	self._stackCatalogByItemKey = stackCatalogByItemKey
 	self._ownedAmounts = ownedAmounts
 
 	local nextAssignments = {} :: SlotMap
 	for slotId, assignedItem in self._slotAssignments do
 		if assignedItem and (ownedAmounts[assignedItem.ItemKey] or 0) > 0 then
-			nextAssignments[slotId] = assignedItem
+			nextAssignments[slotId] = stackCatalogByItemKey[assignedItem.ItemKey]
 		else
 			nextAssignments[slotId] = nil
 		end
@@ -140,26 +196,26 @@ function FusionSkinInventory:BuildFromInventory(inventory: InventorySnapshot?): 
 	self._slotAssignments = nextAssignments
 
 	local freeAmounts = {} :: AmountMap
-	for skinKey in self._itemsByKey do
-		local ownedAmount = ownedAmounts[skinKey] or 0
-		local assignedAmount = computeAssignedAmount(self._slotAssignments, skinKey)
-		freeAmounts[skinKey] = math.max(0, ownedAmount - assignedAmount)
+	for itemKey in self._stackCatalogByItemKey do
+		local ownedAmount = ownedAmounts[itemKey] or 0
+		local assignedAmount = computeAssignedAmount(self._slotAssignments, itemKey)
+		freeAmounts[itemKey] = math.max(0, ownedAmount - assignedAmount)
 	end
 	self._freeAmounts = freeAmounts
 end
 
-function FusionSkinInventory:SetSlotSkin(slotId: string, skinKey: string): FusionSkinItem?
-	if not isFusionEligibleSkin(skinKey) then
-		return nil
-	end
-
-	local targetSkin = self._itemsByKey[skinKey]
+function FusionSkinInventory:SetSlotSkin(slotId: string, itemKey: string): FusionSkinItem?
+	local targetSkin = self._stackCatalogByItemKey[itemKey]
 	if not targetSkin then
 		return nil
 	end
 
+	if not isFusionEligibleSkin(targetSkin.BaseSkinKey) then
+		return nil
+	end
+
 	local currentSkin = self._slotAssignments[slotId]
-	if currentSkin and currentSkin.ItemKey == skinKey then
+	if currentSkin and currentSkin.ItemKey == itemKey then
 		return currentSkin
 	end
 
@@ -168,7 +224,7 @@ function FusionSkinInventory:SetSlotSkin(slotId: string, skinKey: string): Fusio
 		return nil
 	end
 
-	local availableCount = self._freeAmounts[skinKey] or 0
+	local availableCount = self._freeAmounts[itemKey] or 0
 	if currentSkin then
 		availableCount += 1
 	end
@@ -178,7 +234,7 @@ function FusionSkinInventory:SetSlotSkin(slotId: string, skinKey: string): Fusio
 
 	self._slotAssignments[slotId] = targetSkin
 
-	for keyedSkin in self._itemsByKey do
+	for keyedSkin in self._stackCatalogByItemKey do
 		local ownedAmount = self._ownedAmounts[keyedSkin] or 0
 		local assignedAmount = computeAssignedAmount(self._slotAssignments, keyedSkin)
 		self._freeAmounts[keyedSkin] = math.max(0, ownedAmount - assignedAmount)
@@ -194,7 +250,7 @@ function FusionSkinInventory:ClearSlot(slotId: string): ()
 
 	self._slotAssignments[slotId] = nil
 
-	for keyedSkin in self._itemsByKey do
+	for keyedSkin in self._stackCatalogByItemKey do
 		local ownedAmount = self._ownedAmounts[keyedSkin] or 0
 		local assignedAmount = computeAssignedAmount(self._slotAssignments, keyedSkin)
 		self._freeAmounts[keyedSkin] = math.max(0, ownedAmount - assignedAmount)
@@ -217,8 +273,8 @@ end
 function FusionSkinInventory:GetAvailableItems(): { FusionSkinItem }
 	local occupiedRarity = self:GetOccupiedRarity()
 	local result = {} :: { FusionSkinItem }
-	for skinKey, skinItem in self._itemsByKey do
-		local amount = self._freeAmounts[skinKey] or 0
+	for itemKey, skinItem in self._stackCatalogByItemKey do
+		local amount = self._freeAmounts[itemKey] or 0
 		if amount > 0 and (occupiedRarity == nil or skinItem.Rarity == occupiedRarity) then
 			table.insert(result, skinItem)
 		end
@@ -230,19 +286,28 @@ function FusionSkinInventory:GetAvailableItems(): { FusionSkinItem }
 		if rarityA ~= rarityB then
 			return rarityA > rarityB
 		end
+
+		if a.PreviewWeaponCategory ~= b.PreviewWeaponCategory then
+			return tostring(a.PreviewWeaponCategory or "") < tostring(b.PreviewWeaponCategory or "")
+		end
+
+		if a.PreviewWeaponName ~= b.PreviewWeaponName then
+			return tostring(a.PreviewWeaponName or "") < tostring(b.PreviewWeaponName or "")
+		end
+
 		return a.Name < b.Name
 	end)
 
 	return result
 end
 
-function FusionSkinInventory:GetFreeAmount(skinKey: string): number
-	return self._freeAmounts[skinKey] or 0
+function FusionSkinInventory:GetFreeAmount(itemKey: string): number
+	return self._freeAmounts[itemKey] or 0
 end
 
-function FusionSkinInventory:GetAssignedAmount(skinKey: string): number
-	local ownedAmount = self._ownedAmounts[skinKey] or 0
-	local freeAmount = self._freeAmounts[skinKey] or 0
+function FusionSkinInventory:GetAssignedAmount(itemKey: string): number
+	local ownedAmount = self._ownedAmounts[itemKey] or 0
+	local freeAmount = self._freeAmounts[itemKey] or 0
 	return math.max(0, ownedAmount - freeAmount)
 end
 

@@ -8,11 +8,14 @@ local ContentProvider = game:GetService("ContentProvider")
 
 local IsServer = RunService:IsServer()
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
 local WeaponsSystemFolder = script.Parent.Parent
 local Libraries = WeaponsSystemFolder:WaitForChild("Libraries")
 local BaseWeapon = require(Libraries:WaitForChild("BaseWeapon"))
 local Parabola = require(Libraries:WaitForChild("Parabola"))
 local Roblox = require(Libraries:WaitForChild("Roblox"))
+local TeamUtils = require(ReplicatedStorage:WaitForChild("Shared").utils.TeamUtils)
 
 local Effects = WeaponsSystemFolder:WaitForChild("Assets"):WaitForChild("Effects")
 local ShotsFolder = Effects:WaitForChild("Shots")
@@ -503,7 +506,7 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 								humanoid:GetState() ~= Enum.HumanoidStateType.Dead and
 								self.weaponsSystem.gui and
 								explodedPart.Parent ~= self.player.Character and
-								self.weaponsSystem.playersOnDifferentTeams(self.weaponsSystem.getPlayerFromHumanoid(humanoid), self.player)
+								TeamUtils.areEnemies(explodedPart.Parent, self.player.Character)
 							then
 								self.weaponsSystem.gui:OnHitOtherPlayer(self:calculateDamage(hitInfo.d), humanoid, explodedPart)
 							end
@@ -736,7 +739,7 @@ function BulletWeapon:onHit(hitInfo)
 			hitInfo.h:GetState() ~= Enum.HumanoidStateType.Dead and
 			self.weaponsSystem.gui and
 			self.player == Players.LocalPlayer and
-			self.weaponsSystem.playersOnDifferentTeams(self.weaponsSystem.getPlayerFromHumanoid(hitInfo.h), self.player)
+			TeamUtils.areEnemies(hitInfo.h.Parent, self.player.Character)
 		then
 			-- Show hit indicators on gui of client that shot projectile if players are not on same team
 			self.weaponsSystem.gui:OnHitOtherPlayer(self:calculateDamage(hitInfo.d), hitInfo.h, hitPart)

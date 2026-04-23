@@ -5,17 +5,22 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
 local TeamsService = game:GetService("Teams")
 local Workspace = game:GetService("Workspace")
+local HttpService = game:GetService("HttpService")
 
 local ServerScriptService = game:GetService("ServerScriptService")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 
 local GameConfig = require(Shared:WaitForChild("GameConfig"))
 local Network = require(Shared.networking.Network)
+local SpawnSelector = require(script.Parent:WaitForChild("SpawnSelector"))
+local LoadoutService = require(script.Parent:WaitForChild("LoadoutService"))
+local KillEffectsRegistry = require(Shared.locker.killEffects.KillEffectsRegistry)
 
 type MapDefinition = {
 	Name: string,
 	Modes: { string },
 	PlaceholderImage: string,
+	UseIntelligentSpawning: boolean?,
 }
 
 type ActiveVoteState = {
@@ -60,6 +65,7 @@ local _deathAtByUserId: { [number]: number } = {}
 local _respawnDebounceByUserId: { [number]: boolean } = {}
 local _matchKillsByUserId: { [number]: number } = {}
 local _killStreakByUserId: { [number]: number } = {}
+local _matchDeathsByUserId: { [number]: number } = {}
 
 local _teamA: Team? = nil
 local _teamB: Team? = nil
@@ -70,11 +76,9 @@ local _tieBreakToA = false
 
 local VOTE_CHANGE_COOLDOWN = 0.15
 local DEFAULT_PLACEHOLDER_IMAGE = "rbxasset://textures/ui/GuiImagePlaceholder.png"
-local WEAPON_TOOLS_ROOT_NAME = "WeaponTools"
-local MATCH_LOADOUT_TOOL_ATTRIBUTE = "MatchLoadoutTool"
 
 local function _log(message: string)
-	print("[MatchService] " .. message)
+	return
 end
 
 local function _setPhase(nextPhase: string, reason: string?)
@@ -144,6 +148,7 @@ local function _sendPlayerStreakToAll(userId: number)
 		userId = tostring(userId),
 		kills = _matchKillsByUserId[userId] or 0,
 		streak = _killStreakByUserId[userId] or 0,
+		deaths = _matchDeathsByUserId[userId] or 0,
 	})
 end
 
@@ -153,6 +158,7 @@ local function _sendPlayerStreakToPlayer(player: Player, userId: number)
 			userId = tostring(userId),
 			kills = _matchKillsByUserId[userId] or 0,
 			streak = _killStreakByUserId[userId] or 0,
+			deaths = _matchDeathsByUserId[userId] or 0,
 		}, player)
 	end)
 
@@ -165,15 +171,87 @@ local function _sendAllPlayerStreaksToPlayer(player: Player)
 	for _, otherPlayer in Players:GetPlayers() do
 		_sendPlayerStreakToPlayer(player, otherPlayer.UserId)
 	end
+	-- Also send bot streaks
+	for botUserId in _matchKillsByUserId do
+		if botUserId < 0 then
+			_sendPlayerStreakToPlayer(player, botUserId)
+		end
+	end
+end
+
+local function _broadcastBotRoster()
+	if not _AIService then return end
+	local roster = _AIService:GetBotRoster()
+	local ok, json = pcall(HttpService.JSONEncode, HttpService, roster)
+	if ok then
+		Network.Match.BotRoster.SendToAll({ json = json })
+	end
+end
+
+local function _sendBotRosterToPlayer(player: Player)
+	if not _AIService then return end
+	local roster = _AIService:GetBotRoster()
+	local ok, json = pcall(HttpService.JSONEncode, HttpService, roster)
+	if ok then
+		pcall(function()
+			Network.Match.BotRoster.SendTo({ json = json }, player)
+		end)
+	end
+end
+
+local function _resolveBotKillerName(attackerUserId: number): string
+	if _AIService and _AIService.GetBotDisplayName then
+		return _AIService:GetBotDisplayName(attackerUserId) or ""
+	end
+	return ""
+end
+
+local function _resolveKillerPosition(attackerUserId: number?): Vector3
+	if not attackerUserId then
+		return Vector3.zero
+	end
+
+	-- Real player
+	if attackerUserId > 0 then
+		local attackerPlayer = Players:GetPlayerByUserId(attackerUserId)
+		if attackerPlayer and attackerPlayer.Character then
+			local root = attackerPlayer.Character:FindFirstChild("HumanoidRootPart")
+			if root and root:IsA("BasePart") then
+				return root.Position
+			end
+		end
+		return Vector3.zero
+	end
+
+	-- Bot (negative fakeUserId): search in map's Bots folder
+	if _activeMapModel then
+		local botsFolder = (_activeMapModel :: Instance):FindFirstChild("Bots")
+		if botsFolder then
+			for _, child in botsFolder:GetChildren() do
+				if child:IsA("Model") and child:GetAttribute("FakeUserId") == attackerUserId then
+					local root = child:FindFirstChild("HumanoidRootPart")
+					if root and root:IsA("BasePart") then
+						return root.Position
+					end
+					-- Model exists but root removed (ragdoll) — use model pivot
+					return child:GetPivot().Position
+				end
+			end
+		end
+	end
+
+	return Vector3.zero
 end
 
 local function _resetAllPlayerStreakState()
 	table.clear(_matchKillsByUserId)
 	table.clear(_killStreakByUserId)
+	table.clear(_matchDeathsByUserId)
 
 	for _, player in Players:GetPlayers() do
 		_matchKillsByUserId[player.UserId] = 0
 		_killStreakByUserId[player.UserId] = 0
+		_matchDeathsByUserId[player.UserId] = 0
 		_sendPlayerStreakToAll(player.UserId)
 	end
 end
@@ -183,9 +261,18 @@ local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?)
 	if _matchKillsByUserId[deadPlayer.UserId] == nil then
 		_matchKillsByUserId[deadPlayer.UserId] = 0
 	end
+	_matchDeathsByUserId[deadPlayer.UserId] = (_matchDeathsByUserId[deadPlayer.UserId] or 0) + 1
 	_sendPlayerStreakToAll(deadPlayer.UserId)
 
 	if not attackerUserId or attackerUserId == deadPlayer.UserId then
+		return
+	end
+
+	-- Bot attacker (negative fakeUserId)
+	if attackerUserId < 0 then
+		_matchKillsByUserId[attackerUserId] = (_matchKillsByUserId[attackerUserId] or 0) + 1
+		_killStreakByUserId[attackerUserId] = (_killStreakByUserId[attackerUserId] or 0) + 1
+		_sendPlayerStreakToAll(attackerUserId)
 		return
 	end
 
@@ -263,20 +350,45 @@ local function _pickTeamByScoreTieBreak(): "A" | "B"
 	return if _tieBreakToA then "A" else "B"
 end
 
-local function _pickBalancedTeam(userId: number): "A" | "B"
+local function _pickBalancedTeam(userId: number): ("A" | "B")?
 	local assigned = _teamByUserId[userId]
+	local countA, countB = _countActiveRealAssignments()
+	local cap = GameConfig.TeamSizeTarget
+
 	if assigned then
-		return assigned
+		if assigned == "A" and countA < cap then
+			return "A"
+		elseif assigned == "B" and countB < cap then
+			return "B"
+		elseif assigned == "A" and countB < cap then
+			_teamByUserId[userId] = "B"
+			return "B"
+		elseif assigned == "B" and countA < cap then
+			_teamByUserId[userId] = "A"
+			return "A"
+		end
+
+		return nil
 	end
 
-	local countA, countB = _countActiveRealAssignments()
 	local selected: "A" | "B"
-	if countA < countB then
+	local canJoinA = countA < cap
+	local canJoinB = countB < cap
+
+	if canJoinA and canJoinB then
+		if countA < countB then
+			selected = "A"
+		elseif countB < countA then
+			selected = "B"
+		else
+			selected = _pickTeamByScoreTieBreak()
+		end
+	elseif canJoinA then
 		selected = "A"
-	elseif countB < countA then
+	elseif canJoinB then
 		selected = "B"
 	else
-		selected = _pickTeamByScoreTieBreak()
+		return nil
 	end
 
 	_teamByUserId[userId] = selected
@@ -297,7 +409,11 @@ local function _rebalanceBotsForCurrentRound(reason: string)
 	end)
 	if not ok then
 		warn(string.format("[MatchService] Failed to rebalance bots (%s): %s", reason, tostring(err)))
+		return
 	end
+
+	-- Enviar BotRoster de forma asincrónica para no bloquear
+	task.defer(_broadcastBotRoster)
 end
 
 local function _collectSpawnPointsForTeam(activeMapRoot: Instance, side: "A" | "B"): { BasePart }
@@ -322,11 +438,121 @@ local function _collectSpawnPointsForTeam(activeMapRoot: Instance, side: "A" | "
 	return points
 end
 
+local function _getMapDefinitionByName(mapName: string): MapDefinition?
+	for _, mapDef in GameConfig.Maps do
+		if mapDef.Name == mapName then
+			return mapDef
+		end
+	end
+
+	return nil
+end
+
+local function _extractCharacterRootPosition(character: Model): Vector3?
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid or humanoid.Health <= 0 then
+		return nil
+	end
+
+	local root = character:FindFirstChild("HumanoidRootPart")
+	if not root or not root:IsA("BasePart") then
+		return nil
+	end
+
+	return root.Position
+end
+
+local TeamUtils = require(Shared.utils.TeamUtils)
+
+local function _resolveNpcSide(character: Model): "A" | "B"?
+	return TeamUtils.getSide(character) :: any
+end
+
+local function _collectEnemyPositionsForSide(side: "A" | "B", requestingPlayer: Player): { Vector3 }
+	local enemyPositions = {} :: { Vector3 }
+
+	for _, candidatePlayer in Players:GetPlayers() do
+		if candidatePlayer == requestingPlayer then
+			continue
+		end
+
+		local candidateSide = _teamByUserId[candidatePlayer.UserId]
+		if not candidateSide or candidateSide == side then
+			continue
+		end
+
+		local character = candidatePlayer.Character
+		if not character then
+			continue
+		end
+
+		local position = _extractCharacterRootPosition(character)
+		if position then
+			table.insert(enemyPositions, position)
+		end
+	end
+
+	if not _activeMapModel then
+		return enemyPositions
+	end
+
+	for _, node in (_activeMapModel :: Instance):GetDescendants() do
+		if not node:IsA("Model") then
+			continue
+		end
+
+		local npcPlayer = Players:GetPlayerFromCharacter(node)
+		if npcPlayer ~= nil then
+			continue
+		end
+
+		local position = _extractCharacterRootPosition(node)
+		if not position then
+			continue
+		end
+
+		local npcSide = _resolveNpcSide(node)
+		if npcSide and npcSide == side then
+			continue
+		end
+
+		table.insert(enemyPositions, position)
+	end
+
+	return enemyPositions
+end
+
 local function _disconnectDeathConnection(userId: number)
 	local conn = _deathConnectionsByUserId[userId]
 	if conn then
 		conn:Disconnect()
 		_deathConnectionsByUserId[userId] = nil
+	end
+end
+
+local function _getKillEffectIdForAttacker(attackerUserId: number?): string
+	if not attackerUserId then
+		return "Default"
+	end
+	local attackerPlayer = Players:GetPlayerByUserId(attackerUserId)
+	if not attackerPlayer then
+		return "Default"
+	end
+	local profile = if _dataService then _dataService:GetProfile(attackerPlayer) else nil
+	if profile and profile.Data and profile.Data.Loadout then
+		local killEffect = profile.Data.Loadout.KillEffect
+		if type(killEffect) == "string" and killEffect ~= "" then
+			return killEffect
+		end
+	end
+	return "Default"
+end
+
+local function _applyKillEffect(attackerUserId: number?, character: Model)
+	local effectId = _getKillEffectIdForAttacker(attackerUserId)
+	local ok, err = pcall(KillEffectsRegistry.apply, effectId, character)
+	if not ok then
+		warn("[MatchService] KillEffect error: " .. tostring(err))
 	end
 end
 
@@ -337,6 +563,8 @@ local function _registerDeathListener(player: Player, character: Model)
 	if not humanoid then
 		return
 	end
+
+	humanoid.BreakJointsOnDeath = false
 
 	_deathConnectionsByUserId[player.UserId] = humanoid.Died:Connect(function()
 		if not _isRoundActive then
@@ -364,8 +592,18 @@ local function _registerDeathListener(player: Player, character: Model)
 			attackerUserId = nil
 		end
 		local attackerPlayer = if attackerUserId then Players:GetPlayerByUserId(attackerUserId) else nil
-		local killerName = if attackerPlayer then attackerPlayer.Name else ""
+		local killerName: string
+		if attackerPlayer then
+			killerName = attackerPlayer.Name
+		elseif attackerUserId and attackerUserId < 0 then
+			killerName = _resolveBotKillerName(attackerUserId)
+		else
+			killerName = ""
+		end
 		_registerKillEvent(player, attackerUserId)
+
+		-- Aplicar kill effect del asesino (ragdoll visible para todos)
+		_applyKillEffect(attackerUserId, character)
 
 		if deadSide == "A" then
 			_roundScoreB += 1
@@ -384,11 +622,15 @@ local function _registerDeathListener(player: Player, character: Model)
 		end
 
 		if player.Parent == Players then
+			local killerPos = _resolveKillerPosition(attackerUserId)
 			Network.Match.DeathScreenShow.SendTo({
 				respawnCooldown = GameConfig.RespawnCooldown,
 				killerUserId = if attackerUserId then tostring(attackerUserId) else "",
 				killerName = killerName,
 				weaponName = attackerWeaponName,
+				killerPositionX = killerPos.X,
+				killerPositionY = killerPos.Y,
+				killerPositionZ = killerPos.Z,
 			}, player)
 		end
 	end)
@@ -413,168 +655,7 @@ local function _teleportCharacterToSpawn(player: Player, spawnPoint: BasePart)
 	return character
 end
 
-local function _getWeaponToolsRoot(): Folder?
-	local root = ServerStorage:FindFirstChild(WEAPON_TOOLS_ROOT_NAME)
-	if root and root:IsA("Folder") then
-		return root
-	end
-
-	if root ~= nil then
-		warn(string.format("[MatchService] ServerStorage.%s existe pero no es Folder.", WEAPON_TOOLS_ROOT_NAME))
-	end
-
-	return nil
-end
-
-local function _findLoadoutToolTemplate(loadoutCategory: "Main" | "Special", weaponId: string): Tool?
-	if weaponId == "" then
-		return nil
-	end
-
-	local root = _getWeaponToolsRoot()
-	if not root then
-		return nil
-	end
-
-	local byCategory = root:FindFirstChild(loadoutCategory)
-	if byCategory then
-		local direct = byCategory:FindFirstChild(weaponId)
-		if direct and direct:IsA("Tool") then
-			return direct
-		end
-	end
-
-	local fallback = root:FindFirstChild(weaponId)
-	if fallback and fallback:IsA("Tool") then
-		return fallback
-	end
-
-	return nil
-end
-
-local function _clearMatchLoadoutTools(player: Player)
-	local containers = {
-		player:FindFirstChild("Backpack"),
-		player:FindFirstChild("StarterGear"),
-		player.Character,
-	}
-
-	for _, container in containers do
-		if not container then
-			continue
-		end
-		for _, child in container:GetChildren() do
-			if child:IsA("Tool") and child:GetAttribute(MATCH_LOADOUT_TOOL_ATTRIBUTE) == true then
-				child:Destroy()
-			end
-		end
-	end
-end
-
-local function _grantMatchLoadoutTools(player: Player): (boolean, boolean, string?)
-	local profile = if _dataService then _dataService:GetProfile(player) else nil
-	if not profile or not profile.Data or not profile.Data.Loadout then
-		return false, true, nil
-	end
-
-	local loadout = profile.Data.Loadout
-	local mainWeaponId = if type(loadout.MainWeapon) == "string" and loadout.MainWeapon ~= "" then loadout.MainWeapon else "Default"
-	local specialWeaponId = if type(loadout.SpecialWeapon) == "string" and loadout.SpecialWeapon ~= "" then loadout.SpecialWeapon else "Default"
-
-	local backpackNode = player:FindFirstChild("Backpack") or player:WaitForChild("Backpack", 1)
-	local backpack = if backpackNode and backpackNode:IsA("Backpack") then backpackNode else nil
-	if not backpack then
-		return false, true, nil
-	end
-
-	_clearMatchLoadoutTools(player)
-
-	local function cloneIntoInventory(loadoutCategory: "Main" | "Special", weaponId: string): boolean
-		local template = _findLoadoutToolTemplate(loadoutCategory, weaponId)
-		if not template then
-			warn(string.format("[MatchService] Tool no encontrada para %s/%s en ServerStorage.%s.", loadoutCategory, weaponId, WEAPON_TOOLS_ROOT_NAME))
-			return false
-		end
-
-		local backpackClone = template:Clone()
-		backpackClone:SetAttribute(MATCH_LOADOUT_TOOL_ATTRIBUTE, true)
-		backpackClone.Parent = backpack
-		return true
-	end
-
-	local mainOk = cloneIntoInventory("Main", mainWeaponId)
-	local specialOk = cloneIntoInventory("Special", specialWeaponId)
-	if not mainOk or not specialOk then
-		return false, false, nil
-	end
-
-	return true, false, mainWeaponId
-end
-
-local function _equipMainLoadoutTool(player: Player, mainWeaponId: string): boolean
-	if player.Parent ~= Players then
-		return false
-	end
-
-	local character = player.Character
-	if not character then
-		return false
-	end
-
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	if not humanoid then
-		return false
-	end
-
-	local tool = character:FindFirstChild(mainWeaponId)
-	if not tool or not tool:IsA("Tool") then
-		local backpack = player:FindFirstChildOfClass("Backpack")
-		if backpack then
-			local backpackTool = backpack:FindFirstChild(mainWeaponId)
-			if backpackTool and backpackTool:IsA("Tool") then
-				tool = backpackTool
-			end
-		end
-	end
-
-	if not tool or not tool:IsA("Tool") then
-		return false
-	end
-
-	if tool:GetAttribute(MATCH_LOADOUT_TOOL_ATTRIBUTE) ~= true then
-		return false
-	end
-
-	humanoid:EquipTool(tool)
-	return true
-end
-
-local function _grantMatchLoadoutToolsWithRetry(player: Player, timeoutSec: number)
-	local endAt = time() + math.max(0.5, timeoutSec)
-	while player.Parent == Players do
-		local success, retryable, mainWeaponId = _grantMatchLoadoutTools(player)
-		if success then
-			if type(mainWeaponId) == "string" and mainWeaponId ~= "" then
-				local equipDeadline = time() + 2
-				while time() < equipDeadline and player.Parent == Players do
-					if _equipMainLoadoutTool(player, mainWeaponId) then
-						break
-					end
-					task.wait(0.1)
-				end
-			end
-			return
-		end
-		if not retryable then
-			return
-		end
-		if time() >= endAt then
-			warn(string.format("[MatchService] Timeout entregando tools de loadout a %s (perfil/backpack no listos).", player.Name))
-			return
-		end
-		task.wait(0.2)
-	end
-end
+-- [Loadout functions extracted to LoadoutService.luau]
 
 local function _findLobbySpawn(): BasePart?
 	local direct = Workspace:FindFirstChild("LobbySpawn")
@@ -611,14 +692,23 @@ local function _spawnPlayerOnAssignedTeam(player: Player): boolean
 		return false
 	end
 
-	local chosenSpawn = spawnPoints[math.random(1, #spawnPoints)]
+	local mapDefinition = _getMapDefinitionByName(_activeMapName)
+	local useIntelligentSpawning = mapDefinition ~= nil and mapDefinition.UseIntelligentSpawning == true
+	local enemyPositions = _collectEnemyPositionsForSide(side, player)
+	local chosenSpawn = SpawnSelector.select(spawnPoints, enemyPositions, useIntelligentSpawning)
+	if not chosenSpawn then
+		return false
+	end
+
 	local spawnedCharacter = _teleportCharacterToSpawn(player, chosenSpawn)
 	if not spawnedCharacter then
 		return false
 	end
 
+	LoadoutService.applyCosmetics(player, spawnedCharacter, _dataService)
+
 	task.spawn(function()
-		_grantMatchLoadoutToolsWithRetry(player, 8)
+		LoadoutService.grantWeaponsWithRetry(player, _dataService, 8)
 	end)
 	return true
 end
@@ -884,50 +974,48 @@ function _finishRoundAndScheduleRestart(reason: string, winnerTeam: string)
 	_isRoundActive = false
 	_isPlayEnabled = false
 	_sendMapLoadStateToAll()
+
+	-- Despawnear bots inmediatamente al finalizar la ronda.
+	if _AIService then
+		_AIService:OnRoundEnd()
+	end
+
 	for _, player in Players:GetPlayers() do
 		Network.Match.DeathScreenHide.SendTo({}, player)
 	end
 	_setPhase("RoundEnded", reason .. " | winner=" .. winnerTeam)
 	for _, player in Players:GetPlayers() do
-		if _roundEndEligibleByUserId[player.UserId] then
-			Network.Match.RoundEnded.SendTo({
-				winnerTeam = winnerTeam,
-				scoreA = _roundScoreA,
-				scoreB = _roundScoreB,
-			}, player)
+		Network.Match.RoundEnded.SendTo({
+			winnerTeam = winnerTeam,
+			scoreA = _roundScoreA,
+			scoreB = _roundScoreB,
+		}, player)
+	end
+
+	-- Devolver jugadores elegibles al menú inmediatamente.
+	-- El cliente maneja la vuelta al menú al recibir RoundEnded.
+	local lobbySpawn = _findLobbySpawn()
+	for _, player in Players:GetPlayers() do
+		if not _roundEndEligibleByUserId[player.UserId] then
+			continue
+		end
+
+		_isInMenuByUserId[player.UserId] = true
+		_respawnDebounceByUserId[player.UserId] = nil
+		_pendingSpawnByUserId[player.UserId] = nil
+
+		if lobbySpawn then
+			_teleportCharacterToSpawn(player, lobbySpawn)
+		else
+			player:LoadCharacter()
+		end
+
+		if player.Parent == Players then
+			_sendMapLoadStateToPlayer(player)
 		end
 	end
 
-	task.delay(GameConfig.EndResultsDuration, function()
-		if _isRoundActive then
-			return
-		end
-
-		local lobbySpawn = _findLobbySpawn()
-		for _, player in Players:GetPlayers() do
-			if not _roundEndEligibleByUserId[player.UserId] then
-				continue
-			end
-
-			_isInMenuByUserId[player.UserId] = true
-			_respawnDebounceByUserId[player.UserId] = nil
-			_pendingSpawnByUserId[player.UserId] = nil
-
-			if lobbySpawn then
-				_teleportCharacterToSpawn(player, lobbySpawn)
-			else
-				player:LoadCharacter()
-			end
-
-			if player.Parent == Players then
-				Network.Match.DeathScreenHide.SendTo({}, player)
-				Network.Match.ReturnToMenuDone.SendTo({}, player)
-				_sendMapLoadStateToPlayer(player)
-			end
-		end
-
-		_endRoundAndRestartVoting(reason)
-	end)
+	_endRoundAndRestartVoting(reason)
 end
 
 local function _runRoundTimer(roundId: number)
@@ -977,6 +1065,7 @@ local function _startMapLoadFlow(winnerMapName: string)
 	table.clear(_joinDebounceByUserId)
 	table.clear(_deathAtByUserId)
 	table.clear(_respawnDebounceByUserId)
+
 	for _, player in Players:GetPlayers() do
 		_isInMenuByUserId[player.UserId] = true
 	end
@@ -992,10 +1081,33 @@ local function _startMapLoadFlow(winnerMapName: string)
 			_AIService:OnRoundStart({
 				spawnPointsA = spawnPointsA,
 				spawnPointsB = spawnPointsB,
-				onBotDied = function(botTeam: string, _botName: string)
+				mapRoot = _activeMapModel,
+				onBotDied = function(botTeam: string, _botName: string, botHumanoid: Humanoid, botFakeUserId: number)
 					if not _isRoundActive then
 						return
 					end
+
+					-- Credit the kill to whoever killed this bot
+					local attackerUserIdAttr = botHumanoid:GetAttribute("LastAttackerUserId")
+					local attackerAtAttr = botHumanoid:GetAttribute("LastAttackerAt")
+					local attackerUserId = if type(attackerUserIdAttr) == "number" then attackerUserIdAttr else nil
+					local attackerAt = if type(attackerAtAttr) == "number" then attackerAtAttr else 0
+					if attackerAt > 0 and math.abs(time() - attackerAt) > 4 then
+						attackerUserId = nil
+					end
+					if attackerUserId and attackerUserId ~= botFakeUserId then
+						_matchKillsByUserId[attackerUserId] = (_matchKillsByUserId[attackerUserId] or 0) + 1
+						_killStreakByUserId[attackerUserId] = (_killStreakByUserId[attackerUserId] or 0) + 1
+						_sendPlayerStreakToAll(attackerUserId)
+					end
+
+					-- Reset the dead bot's streak and increment its deaths
+					_killStreakByUserId[botFakeUserId] = 0
+					if _matchKillsByUserId[botFakeUserId] == nil then
+						_matchKillsByUserId[botFakeUserId] = 0
+					end
+					_matchDeathsByUserId[botFakeUserId] = (_matchDeathsByUserId[botFakeUserId] or 0) + 1
+					_sendPlayerStreakToAll(botFakeUserId)
 
 					-- Sumar score al equipo contrario (igual que cuando muere un jugador)
 					if botTeam == "A" then
@@ -1006,6 +1118,7 @@ local function _startMapLoadFlow(winnerMapName: string)
 
 					_broadcastRoundState()
 					_rebalanceBotsForCurrentRound("bot death")
+					_broadcastBotRoster()
 
 					if _roundScoreA >= GameConfig.WinScoreLimit then
 						_finishRoundAndScheduleRestart("win score limit reached", "A")
@@ -1032,6 +1145,7 @@ local function _onRequestVoteSync(_: {}, player: Player)
 	_sendMapLoadStateToPlayer(player)
 	_sendRoundStateToPlayer(player)
 	_sendAllPlayerStreaksToPlayer(player)
+	_sendBotRosterToPlayer(player)
 end
 
 local function _disconnectVoteForPlayer(userId: number)
@@ -1294,7 +1408,15 @@ local function _onRequestJoinMatch(_: {}, player: Player)
 		return
 	end
 
-	_pickBalancedTeam(player.UserId)
+	local selectedSide = _pickBalancedTeam(player.UserId)
+	if not selectedSide then
+		_isInMenuByUserId[player.UserId] = true
+		_pendingSpawnByUserId[player.UserId] = nil
+		_joinDebounceByUserId[player.UserId] = nil
+		_log(string.format("Ignored RequestJoinMatch from %s: both teams are full.", player.Name))
+		return
+	end
+
 	_joinDebounceByUserId[player.UserId] = true
 	_pendingSpawnByUserId[player.UserId] = true
 	_isInMenuByUserId[player.UserId] = false
@@ -1355,7 +1477,8 @@ local function _onRequestRespawn(_: {}, player: Player)
 	end
 
 	local deathAt = _deathAtByUserId[player.UserId] or 0
-	if time() - deathAt < GameConfig.RespawnCooldown then
+	-- Minimum anti-spam cooldown (0.5s); the full KillCam duration is enforced client-side.
+	if time() - deathAt < 0.5 then
 		return
 	end
 
@@ -1413,15 +1536,36 @@ function MatchService:Start(dataService: any): ()
 	-- Cargar AIService (require lazy para evitar dependencia circular)
 	local serverRoot = ServerScriptService:FindFirstChild("Server")
 	if serverRoot then
-		local aiModule = serverRoot:FindFirstChild("AI")
-		if aiModule then
-			local ok, result = pcall(require, aiModule)
-			if ok then
-				_AIService = result
-				_log("AIService loaded successfully.")
+		local aiFolder = serverRoot:FindFirstChild("AI")
+		if aiFolder then
+			-- Con Rojo, una carpeta con init.luau se compila directamente como ModuleScript.
+			-- En ese caso aiFolder ya ES el módulo; si no, buscamos un hijo llamado init o AIService.
+			local aiModule: ModuleScript?
+			if aiFolder:IsA("ModuleScript") then
+				aiModule = aiFolder :: ModuleScript
 			else
-				warn("[MatchService] Failed to load AIService: " .. tostring(result))
+				local child = aiFolder:FindFirstChild("init") or aiFolder:FindFirstChild("AIService")
+				if child and child:IsA("ModuleScript") then
+					aiModule = child :: ModuleScript
+				end
 			end
+
+			if aiModule then
+				local ok, result = pcall(require, aiModule)
+				if ok then
+					_AIService = result
+					if _AIService.SetDataService then
+						_AIService:SetDataService(_dataService)
+					end
+					_log("AIService loaded successfully.")
+				else
+					warn("[MatchService] Failed to load AIService: " .. tostring(result))
+				end
+			else
+				_log("AIService module not found (init.luau or AIService.luau not in Server/AI)")
+			end
+		else
+			_log("AI folder not found in Server (bots will not spawn)")
 		end
 	end
 

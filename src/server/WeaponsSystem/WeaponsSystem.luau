@@ -49,7 +49,16 @@ local REMOTE_EVENT_NAMES = {
 	"WeaponReloadCanceled",
 	"WeaponActivated",
 	"PlayerEliminated",
+	"PlayerAssist",
 }
+
+-- Damage contributors per humanoid for assist tracking
+local damageContributors: { [Humanoid]: { [Player]: number } } = {}
+local assistDiedConnections: { [Humanoid]: RBXScriptConnection } = {}
+
+-- Forward declaration; body assigned after WeaponsSystem table exists
+local flushAssists: (target: Humanoid, killerPlayer: Player?) -> ()
+
 local REMOTE_FUNCTION_NAMES = {}
 
 --Set up WeaponTypes lookup table
@@ -89,6 +98,23 @@ WeaponsSystem._hotbarFallbackInProgress = false
 WeaponsSystem._hotbarFallbackTarget = nil
 
 WeaponsSystem.CurrentWeaponChanged = Instance.new("BindableEvent")
+
+-- Assign flushAssists body now that WeaponsSystem exists
+flushAssists = function(target: Humanoid, killerPlayer: Player?)
+	local assistEvent = WeaponsSystem.remoteEvents["PlayerAssist"]
+	if assistEvent and damageContributors[target] then
+		for contributor, _ in damageContributors[target] do
+			if contributor ~= killerPlayer and contributor.Parent then
+				assistEvent:FireClient(contributor)
+			end
+		end
+	end
+	damageContributors[target] = nil
+	if assistDiedConnections[target] then
+		assistDiedConnections[target]:Disconnect()
+		assistDiedConnections[target] = nil
+	end
+end
 
 local function _getToolCategory(tool: Tool?): string?
 	if not tool then
@@ -643,10 +669,20 @@ end
 
 
 -- Función optimizada para servidor
+local TeamUtils = require(Shared.utils.TeamUtils)
+
 local function _defaultDamageCallback(system, target, amount, damageType, dealer, hitInfo, damageData)
 	if not target or not target:IsA("Humanoid") or target.Health <= 0 then return end
 	local targetCharacter = target.Parent
 	if not targetCharacter then return end
+
+	-- Bloquear friendly fire: mismos equipos no se hacen daño
+	if dealer and dealer.Character then
+		if TeamUtils.isSameTeam(dealer.Character, targetCharacter :: Model) then
+			return
+		end
+	end
+
 	local targetPlayer = Players:GetPlayerFromCharacter(targetCharacter)
 	local dealerPlayer = dealer and Players:GetPlayerFromCharacter(dealer.Character)
 	local weaponName = "Unknown Weapon"
@@ -670,26 +706,51 @@ local function _defaultDamageCallback(system, target, amount, damageType, dealer
 			target:SetAttribute("LastAttackerUserId", dealerPlayer.UserId)
 			target:SetAttribute("LastAttackerAt", time())
 			target:SetAttribute("LastAttackerWeaponName", weaponName)
+
+			-- Track damage contributor for assists
+			if not damageContributors[target] then
+				damageContributors[target] = {}
+				-- Listen for death caused by anything (including NPCs bypassing doDamage)
+				if not assistDiedConnections[target] then
+					assistDiedConnections[target] = target.Died:Once(function()
+						-- Delay one frame so the in-callback flush (if any) runs first
+						task.defer(function()
+							if damageContributors[target] then
+								flushAssists(target, nil)
+							end
+						end)
+					end)
+				end
+			end
+			damageContributors[target][dealerPlayer] = (damageContributors[target][dealerPlayer] or 0) + finalDamage
 		end
 
 		target:TakeDamage(finalDamage)
 
-		if target.Health <= 0 and dealerPlayer then
-			if targetPlayer then
-				Network.Match.PlayerStreakState.SendToAll({
-					userId = tostring(targetPlayer.UserId),
-					kills = 0,
-					streak = 0,
-				})
+		if target.Health <= 0 then
+			local victimName = if targetPlayer then targetPlayer.Name
+				else (targetCharacter:GetAttribute("DisplayName") or targetCharacter.Name)
+
+			if dealerPlayer then
+				if targetPlayer then
+					Network.Match.PlayerStreakState.SendToAll({
+						userId = tostring(targetPlayer.UserId),
+						kills = 0,
+						streak = 0,
+					})
+				end
+
+				local eliminatedEvent = WeaponsSystem.remoteEvents["PlayerEliminated"]
+				if eliminatedEvent then
+					local xpGained = wasHeadshot and 150 or 100
+					local targetHrp = targetCharacter:FindFirstChild("HumanoidRootPart")
+					local victimPos = targetHrp and targetHrp.Position or targetCharacter:GetPivot().Position
+					eliminatedEvent:FireClient(dealerPlayer, victimName, xpGained, wasHeadshot, victimPos)
+				end
 			end
-			local eliminatedEvent = WeaponsSystem.remoteEvents["PlayerEliminated"]
-			if eliminatedEvent then
-				local victimName = targetPlayer and targetPlayer.Name or "Unknown"
-				local xpGained = wasHeadshot and 150 or 100
-				local targetHrp = targetCharacter:FindFirstChild("HumanoidRootPart")
-				local victimPos = targetHrp and targetHrp.Position or targetCharacter:GetPivot().Position
-				eliminatedEvent:FireClient(dealerPlayer, victimName, xpGained, wasHeadshot, victimPos)
-			end
+
+			-- Flush assists immediately (cancels the deferred Died listener)
+			flushAssists(target, dealerPlayer)
 		end
 	end
 end
@@ -702,9 +763,10 @@ function WeaponsSystem.doDamage(target, amount, damageType, dealer, hitInfo, dam
 		if target:IsA("Humanoid") and dealer:IsA("Player") and dealer.Character then
 			local dealerHumanoid = dealer.Character:FindFirstChildOfClass("Humanoid")
 			local targetPlayer = Players:GetPlayerFromCharacter(target.Parent)
-			if dealerHumanoid and target ~= dealerHumanoid and targetPlayer then
+			local dealerHRP = dealer.Character:FindFirstChild("HumanoidRootPart")
+			if dealerHumanoid and target ~= dealerHumanoid and targetPlayer and dealerHRP then
 				-- Trigger the damage indicator
-				WeaponData:FireClient(targetPlayer, "HitByOtherPlayer", dealer.Character.HumanoidRootPart.CFrame.Position)
+				WeaponData:FireClient(targetPlayer, "HitByOtherPlayer", dealerHRP.Position)
 			end
 		end
 
@@ -730,20 +792,12 @@ function WeaponsSystem.getTeam(player)
 end
 
 function WeaponsSystem.playersOnDifferentTeams(player1, player2)
-	if player1 == nil and player2 == nil then
-		--print("both player 1 and 2 are nil")
-	else
-		if player1 ~= nil then
-			if player1.Team.Name ~= player2.Team.Name then
-				return true
-			end
-		elseif player1 == nil then
-			return true
-		end
+	if not player1 or not player2 then
+		return true
 	end
-	local player1Team = WeaponsSystem.getTeam(player1)
-	local player2Team = WeaponsSystem.getTeam(player2)
-	return player1Team == 0 or player1Team ~= player2Team
+	local char1 = player1.Character
+	local char2 = player2.Character
+	return TeamUtils.areEnemies(char1, char2)
 end
 
 return WeaponsSystem

@@ -5,9 +5,11 @@
 ]]
 
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local workspace = game:GetService("Workspace")
 
 local LocalPlayer = Players.LocalPlayer
+local TeamUtils = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("utils"):WaitForChild("TeamUtils"))
 
 local AutoAimSystem = {}
 
@@ -42,6 +44,18 @@ function AutoAimSystem.findBestTarget(weaponsSystem)
 
 	local charactersToCheck = {}
 
+	local function addNpcModelIfEnemy(model: Instance)
+		if not model:IsA("Model") then return end
+		if model == localPlayer.Character then return end
+		if Players:GetPlayerFromCharacter(model) then return end
+
+		local hum = model:FindFirstChildOfClass("Humanoid")
+		if not hum or hum.Health <= 0 then return end
+		if TeamUtils.isSameTeam(localPlayer.Character, model) then return end
+
+		table.insert(charactersToCheck, model)
+	end
+
 	-- Add enemy players
 	for _, player in ipairs(Players:GetPlayers()) do
 		if player == localPlayer then continue end
@@ -59,14 +73,17 @@ function AutoAimSystem.findBestTarget(weaponsSystem)
 		end
 	end
 
-	-- Add NPCs/Dummies from the Workspace
+	-- Add NPCs/Dummies from top-level Workspace models
 	for _, child in ipairs(workspace:GetChildren()) do
-		if child:IsA("Model") and child ~= localPlayer.Character then
-			local hum = child:FindFirstChildOfClass("Humanoid")
-			if hum and hum.Health > 0 then
-				if not Players:GetPlayerFromCharacter(child) then
-					table.insert(charactersToCheck, child)
-				end
+		addNpcModelIfEnemy(child)
+	end
+
+	-- Add bots parented under map folders (e.g. Workspace.ActiveMap.<Map>.Bots)
+	for _, child in ipairs(workspace:GetChildren()) do
+		local botsFolder = child:FindFirstChild("Bots", true)
+		if botsFolder and botsFolder:IsA("Folder") then
+			for _, botModel in ipairs(botsFolder:GetChildren()) do
+				addNpcModelIfEnemy(botModel)
 			end
 		end
 	end

@@ -1,6 +1,7 @@
 --!strict
 
 local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
 
 local DeathScreenView = {}
 DeathScreenView.__index = DeathScreenView
@@ -15,8 +16,41 @@ type Refs = {
 	container: GuiObject,
 	menuButton: GuiButton?,
 	respawnButton: GuiButton?,
+	menuPcLabel: TextLabel?,
+	respawnPcLabel: TextLabel?,
 	timerLabel: TextLabel?,
+	barFill: GuiObject?,
 }
+
+local function _resolvePcLabel(buttonNode: Instance?): TextLabel?
+	if not buttonNode then
+		return nil
+	end
+	local pcNode = buttonNode:FindFirstChild("PC")
+	if pcNode and pcNode:IsA("TextLabel") then
+		return pcNode
+	end
+	return nil
+end
+
+local function _isPcPlatform(): boolean
+	return UserInputService.KeyboardEnabled and not UserInputService.TouchEnabled
+end
+
+local function _resolveBarFill(respawnNode: Instance?): GuiObject?
+	if not respawnNode then
+		return nil
+	end
+	local barNode = respawnNode:FindFirstChild("Bar")
+	if not barNode then
+		return nil
+	end
+	local fillNode = barNode:FindFirstChild("Fill")
+	if fillNode and fillNode:IsA("GuiObject") then
+		return fillNode
+	end
+	return nil
+end
 
 local function _resolveRefs(gui: ScreenGui): Refs?
 	local containerNode = gui:FindFirstChild("Container")
@@ -33,8 +67,21 @@ local function _resolveRefs(gui: ScreenGui): Refs?
 		container = containerNode,
 		menuButton = if menuNode and menuNode:IsA("GuiButton") then menuNode else nil,
 		respawnButton = if respawnNode and respawnNode:IsA("GuiButton") then respawnNode else nil,
+		menuPcLabel = _resolvePcLabel(menuNode),
+		respawnPcLabel = _resolvePcLabel(respawnNode),
 		timerLabel = if timerNode and timerNode:IsA("TextLabel") then timerNode else nil,
+		barFill = _resolveBarFill(respawnNode),
 	}
+end
+
+local function _setPcHintsVisible(refs: Refs)
+	local isPc = _isPcPlatform()
+	if refs.menuPcLabel then
+		refs.menuPcLabel.Visible = isPc
+	end
+	if refs.respawnPcLabel then
+		refs.respawnPcLabel.Visible = isPc
+	end
 end
 
 local function _setButtonEnabled(button: GuiButton?, enabled: boolean)
@@ -62,6 +109,7 @@ function DeathScreenView.new(gui: ScreenGui): any
 	refs.root.Enabled = false
 	refs.root.ResetOnSpawn = false
 	refs.container.BackgroundTransparency = self._baseTransparency
+	_setPcHintsVisible(refs)
 
 	return self
 end
@@ -85,11 +133,31 @@ function DeathScreenView:bind(onRespawn: () -> (), onMenu: () -> ())
 			end
 		end))
 	end
+
+	table.insert(self._connections, UserInputService.InputBegan:Connect(function(input, gameProcessed)
+		if gameProcessed or not self._refs.root.Enabled then
+			return
+		end
+
+		if input.KeyCode == Enum.KeyCode.M then
+			if self._onMenu then
+				self._onMenu()
+			end
+			return
+		end
+
+		if input.KeyCode == Enum.KeyCode.Space then
+			if self._onRespawn then
+				self._onRespawn()
+			end
+		end
+	end))
 end
 
 function DeathScreenView:show(respawnCooldown: number)
 	self._countdownToken += 1
 	local token = self._countdownToken
+	_setPcHintsVisible(self._refs)
 	self._refs.root.Enabled = true
 	self._refs.container.BackgroundTransparency = self._baseTransparency
 	TweenService:Create(self._refs.container, STYLE.showTween, {
@@ -97,21 +165,50 @@ function DeathScreenView:show(respawnCooldown: number)
 	}):Play()
 
 	_setButtonEnabled(self._refs.menuButton, true)
-	_setButtonEnabled(self._refs.respawnButton, false)
+	-- Respawn button enabled immediately so the player can skip the killcam at any time.
+	_setButtonEnabled(self._refs.respawnButton, true)
+
+	-- Reset fill bar to 0
+	if self._refs.barFill then
+		self._refs.barFill.Size = UDim2.new(0, 0, 1, 0)
+	end
 
 	task.spawn(function()
-		local endAt = time() + math.max(0, respawnCooldown)
+		local duration = math.max(0, respawnCooldown)
+		local startAt = time()
+		local endAt = startAt + duration
+
 		while self._countdownToken == token do
-			local left = math.ceil(math.max(0, endAt - time()))
+			local elapsed = time() - startAt
+			local progress = math.clamp(if duration > 0 then elapsed / duration else 1, 0, 1)
+
+			-- Update fill bar
+			if self._refs.barFill then
+				self._refs.barFill.Size = UDim2.new(progress, 0, 1, 0)
+			end
+
+			-- Update timer text
 			if self._refs.timerLabel then
+				local left = math.ceil(math.max(0, endAt - time()))
 				self._refs.timerLabel.Text = tostring(left)
 			end
 
-			if left <= 0 then
-				_setButtonEnabled(self._refs.respawnButton, true)
+			-- Auto-respawn when timer completes
+			if progress >= 1 then
+				if self._refs.barFill then
+					self._refs.barFill.Size = UDim2.new(1, 0, 1, 0)
+				end
+				if self._refs.timerLabel then
+					self._refs.timerLabel.Text = "0"
+				end
+				-- Trigger auto-respawn
+				if self._countdownToken == token and self._onRespawn then
+					self._onRespawn()
+				end
 				return
 			end
-			task.wait(0.1)
+
+			task.wait(0.03)
 		end
 	end)
 end
@@ -121,6 +218,9 @@ function DeathScreenView:hide()
 	_setButtonEnabled(self._refs.respawnButton, false)
 	if self._refs.timerLabel then
 		self._refs.timerLabel.Text = "0"
+	end
+	if self._refs.barFill then
+		self._refs.barFill.Size = UDim2.new(0, 0, 1, 0)
 	end
 
 	local tween = TweenService:Create(self._refs.container, STYLE.hideTween, {

@@ -29,9 +29,42 @@ local activeNotifications = {}
 local function getContainer()
 	local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
 	if not playerGui then return nil end
-	local gui = playerGui:FindFirstChild("PersonalKillFeed")
+	local gui = playerGui:FindFirstChild("WeaponsSystemGui")
 	if not gui then return nil end
-	return gui:FindFirstChild("KillFeed")
+	local killFeed = gui:FindFirstChild("KillFeed")
+	if not killFeed or not killFeed:IsA("GuiObject") then return nil end
+	return killFeed
+end
+
+local function getTemplate(templateName)
+	local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+	if playerGui then
+		local gui = playerGui:FindFirstChild("WeaponsSystemGui")
+		if gui then
+			local templatesFolder = gui:FindFirstChild("KillFeedTemplates")
+			if templatesFolder then
+				local template = templatesFolder:FindFirstChild(templateName)
+				if template and template:IsA("GuiObject") then
+					return template
+				end
+			end
+
+			local killFeed = gui:FindFirstChild("KillFeed")
+			if killFeed then
+				local template = killFeed:FindFirstChild(templateName)
+				if template and template:IsA("GuiObject") then
+					return template
+				end
+			end
+		end
+	end
+
+	local localTemplate = script:FindFirstChild(templateName)
+	if localTemplate and localTemplate:IsA("GuiObject") then
+		return localTemplate
+	end
+
+	return nil
 end
 
 local function setObjTransparency(obj, target)
@@ -180,7 +213,7 @@ function PersonalKillFeed.showKill(victimName, xpGained, wasHeadshot)
 	if not container then return end
 
 	local function spawnKO()
-		local koTemplate = script:FindFirstChild("KO")
+		local koTemplate = getTemplate("KO")
 		if koTemplate then
 			local koFrame = koTemplate:Clone()
 			local victimLabel = koFrame:FindFirstChild("Victim")
@@ -195,7 +228,7 @@ function PersonalKillFeed.showKill(victimName, xpGained, wasHeadshot)
 	end
 
 	if wasHeadshot then
-		local headshotTemplate = script:FindFirstChild("Headshot")
+		local headshotTemplate = getTemplate("Headshot")
 		if headshotTemplate then
 			local headshotFrame = headshotTemplate:Clone()
 			local hsXpLabel = headshotFrame:FindFirstChild("XP")
@@ -213,6 +246,19 @@ function PersonalKillFeed.showKill(victimName, xpGained, wasHeadshot)
 	else
 		spawnKO()
 	end
+end
+
+function PersonalKillFeed.showAssist()
+	local container = getContainer()
+	if not container then return end
+
+	local assistTemplate = getTemplate("Assist")
+	if not assistTemplate then return end
+
+	local assistFrame = assistTemplate:Clone()
+
+	local assistWrapper = slideInFromRight(assistFrame, container, false)
+	manageQueue(assistFrame, assistWrapper)
 end
 
 return PersonalKillFeed

@@ -6,28 +6,24 @@ local IsServer = RunService:IsServer()
 local LocalPlayer = (not IsServer) and Players.LocalPlayer or nil
 
 -- =====================================================================
---  KILL STREAK — client-only state
+--  CLIENT-ONLY CONTROLLERS — reset / init on respawn
 -- =====================================================================
-local STREAK_TO_ACTION = {
-	[1] = "Kill",
-	[2] = "DoubleKill",
-	[3] = "TripleKill",
-	[4] = "Rampage",
-	[5] = "Godlike",
-}
-local MAX_STREAK_BADGE = 5  -- clamps to "Godlike" for 5+ kills in a row
+local StreakController = nil
+local HealthBarController = nil
 
-local killStreak = 0
-local BadgeSystem = nil  -- lazy-required on first kill (client only)
-
--- Reset streak and clear badges whenever the local player respawns
 if not IsServer then
-	LocalPlayer.CharacterAdded:Connect(function()
-		killStreak = 0
-		if BadgeSystem then
-			BadgeSystem.clear()
-		end
+	StreakController = require(script.Parent:WaitForChild("Libraries"):WaitForChild("StreakController"))
+	HealthBarController = require(script.Parent:WaitForChild("Libraries"):WaitForChild("HealthBarController"))
+
+	LocalPlayer.CharacterAdded:Connect(function(character)
+		StreakController.reset()
+		HealthBarController.onCharacterAdded(character)
 	end)
+
+	-- Handle already-spawned character
+	if LocalPlayer.Character then
+		task.spawn(HealthBarController.onCharacterAdded, LocalPlayer.Character)
+	end
 end
 -- =====================================================================
 
@@ -159,16 +155,8 @@ function NetworkingCallbacks.PlayerEliminated(victimName, xpGained, wasHeadshot,
 		end
 	end
 
-	-- Badge system: only headshot kills count towards the streak
-	if wasHeadshot then
-		if not BadgeSystem then
-			BadgeSystem = require(script.Parent:WaitForChild("Libraries"):WaitForChild("BadgeSystem"))
-		end
-		killStreak += 1
-		local actionName = STREAK_TO_ACTION[math.min(killStreak, MAX_STREAK_BADGE)]
-		if actionName then
-			BadgeSystem.showBadge(actionName)
-		end
+	if StreakController then
+		StreakController.onKill()
 	end
 
 	if victimPos then
@@ -178,6 +166,36 @@ function NetworkingCallbacks.PlayerEliminated(victimName, xpGained, wasHeadshot,
 				require(MoneyEffectLocal).Play(victimPos)
 			end
 		end)()
+	end
+end
+
+-- Client-side: shows assist notification in the kill feed
+function NetworkingCallbacks.PlayerAssist()
+	if IsServer then return end
+
+	local WeaponsSystem = NetworkingCallbacks.WeaponsSystem
+
+	local audio = SoundService:FindFirstChild("Audio")
+	local gameplay = audio and audio:FindFirstChild("Gameplay")
+	local sound = gameplay and gameplay:FindFirstChild("EliminatedPlayer")
+
+	if sound then
+		local clone = sound:Clone()
+		clone.Parent = SoundService
+		clone:Play()
+		Debris:AddItem(clone, clone.TimeLength + 1)
+	end
+
+	local PersonalKillFeed = require(script.Parent:WaitForChild("Libraries"):WaitForChild("PersonalKillFeed"))
+	PersonalKillFeed.showAssist()
+
+	if WeaponsSystem then
+		if WeaponsSystem.camera then
+			WeaponsSystem.camera:playKillCameraShake(false)
+		end
+		if WeaponsSystem.gui then
+			WeaponsSystem.gui:showKillContainer()
+		end
 	end
 end
 

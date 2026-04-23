@@ -26,6 +26,8 @@ export type ItemConfig = {
 	BaseColor: Color3?,
 	Animated: boolean?,
 	StudsPerTile: number?,
+	ScrollSpeedU: number?,
+	ScrollSpeedV: number?,
 }
 
 export type ItemCategory = { [string]: ItemConfig }
@@ -81,6 +83,8 @@ local ItemsConfig: ItemsConfigType = {
 			TextureID = asset(86966645142772),
 			Animated = true,
 			StudsPerTile = 3,
+			ScrollSpeedU = 1,
+			ScrollSpeedV = 0,
 		},
 		Skin_Blue = {
 			Name = "Blue Skin",
@@ -106,7 +110,7 @@ local ItemsConfig: ItemsConfigType = {
 
 	KillEffects = {
 		Default = { Name = "Default Kill",   Price = 0,    LevelRequired = 1,  Rarity = "Common", Image = "rbxassetid://130437553674754", CanPurchase = false },
-		Gravity = { Name = "Gravity Kill",   Price = 1500, LevelRequired = 10, Rarity = "Rare",   Image = "rbxassetid://130437553674754", CanPurchase = false },
+		Gravity = { Name = "Gravity Kill",   Price = 200, LevelRequired = 0, Rarity = "Rare",   Image = "rbxassetid://130437553674754", CanPurchase = false },
 	},
 
 	Faces = {
@@ -126,7 +130,7 @@ local ItemsConfig: ItemsConfigType = {
 	},
 
 	Hats = {
-		Hat1 = { Name = "Hat1",          Price = 400,  LevelRequired = 3,  Rarity = "Common",    Image = "rbxassetid://97016006374032", CanPurchase = false },
+		Hat1 = { Name = "Hat1",          Price = 12000,  LevelRequired = 0,  Rarity = "Common",    Image = "rbxassetid://97016006374032", CanPurchase = false },
 		Hat2 = { Name = "Hat2",      Price = 1200, LevelRequired = 10, Rarity = "Rare",      Image = "rbxassetid://94019428436806", CanPurchase = false },
 		Hat3 = { Name = "Hat3",        Price = 4000, LevelRequired = 20, Rarity = "Legendary", Image = "rbxassetid://131331207733432", CanPurchase = false },
 	},

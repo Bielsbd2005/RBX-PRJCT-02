@@ -249,12 +249,13 @@ local MatchNamespace = ByteNet.DefineNamespace("Match", function()
 			ReliabilityType = "Reliable",
 		}),
 
-		-- S → C: Estado global de kills y racha por jugador en la partida actual.
+		-- S → C: Estado global de kills, muertes y racha por jugador en la partida actual.
 		PlayerStreakState = ByteNet.DefinePacket({
 			Value = ByteNet.Struct({
 				userId = ByteNet.String,
 				kills = ByteNet.Int32,
 				streak = ByteNet.Int32,
+				deaths = ByteNet.Int32,
 			}),
 			ReliabilityType = "Reliable",
 		}),
@@ -269,6 +270,14 @@ local MatchNamespace = ByteNet.DefineNamespace("Match", function()
 			ReliabilityType = "Reliable",
 		}),
 
+		-- S → C: Roster de bots activos (JSON-encoded array).
+		BotRoster = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				json = ByteNet.String,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+
 		-- S → C: Mostrar death screen con cooldown de respawn.
 		DeathScreenShow = ByteNet.DefinePacket({
 			Value = ByteNet.Struct({
@@ -276,6 +285,9 @@ local MatchNamespace = ByteNet.DefineNamespace("Match", function()
 				killerUserId = ByteNet.String,
 				killerName = ByteNet.String,
 				weaponName = ByteNet.String,
+				killerPositionX = ByteNet.Float32,
+				killerPositionY = ByteNet.Float32,
+				killerPositionZ = ByteNet.Float32,
 			}),
 			ReliabilityType = "Reliable",
 		}),

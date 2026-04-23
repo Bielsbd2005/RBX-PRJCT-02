@@ -12,11 +12,34 @@ local ClientBootstrap = {}
 
 local _started = false
 local _janitor: any = nil
+local CORE_GUI_DISABLE_RETRY_COUNT = 8
+local CORE_GUI_DISABLE_RETRY_DELAY = 0.25
 
 type DeferredFeatureEntry = {
 	label: string,
 	start: (any) -> any,
 }
+
+local function disableDefaultCoreGui(): ()
+	task.spawn(function()
+		for attempt = 1, CORE_GUI_DISABLE_RETRY_COUNT do
+			local playerListOk = pcall(function()
+				StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.PlayerList, false)
+			end)
+			local healthOk = pcall(function()
+				StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Health, false)
+			end)
+
+			if playerListOk and healthOk then
+				return
+			end
+
+			if attempt < CORE_GUI_DISABLE_RETRY_COUNT then
+				task.wait(CORE_GUI_DISABLE_RETRY_DELAY)
+			end
+		end
+	end)
+end
 
 local function findLockerButton(menuGui: ScreenGui): GuiButton?
 	local bottomContainer = menuGui:FindFirstChild("BottomContainer")
@@ -47,6 +70,7 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 
 	-- Evita recreacion de ScreenGuis en respawn (rompe bindings de botones si cambia la instancia).
 	StarterGui.ResetPlayerGuiOnSpawn = false
+	disableDefaultCoreGui()
 
 	local DataController = require(clientRoot.core.data.DataController)
 	local MenuController = require(clientRoot.core.ui.MenuController)
@@ -67,6 +91,10 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 		camera.CameraType = Enum.CameraType.Scriptable
 		camera.CFrame = lobbyPart.CFrame
 	end
+
+	_janitor:Add(game:GetService("Players").LocalPlayer.CharacterAdded:Connect(function()
+		disableDefaultCoreGui()
+	end), "Disconnect")
 
 	local menuController = MenuController.new()
 	_janitor:Add(menuController, "Destroy")

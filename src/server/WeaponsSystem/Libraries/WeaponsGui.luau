@@ -23,6 +23,12 @@ local ACTIVE_BUTTON_TRANSPARENCY = 0
 local INACTIVE_BUTTON_TRANSPARENCY = 0.5
 local HOTBAR_SELECTED_SCALE = 1.25
 local HOTBAR_DEFAULT_SCALE = 1
+local HOTBAR_AMMO_CURRENT_COLOR = "#FFFFFF"
+local HOTBAR_AMMO_TOTAL_COLOR = "#8FD6FF"
+local HIT_HIGHLIGHT_NAME = "WSLocalHitHighlight"
+local HIT_HIGHLIGHT_OUTLINE_COLOR = Color3.fromRGB(255, 64, 64)
+local HIT_HIGHLIGHT_TO_OUTLINE_TWEEN = TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local HIT_HIGHLIGHT_FADE_TWEEN = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
 local RELOAD_PROGRESS_STYLE = {
 	FlipProgress = false,
@@ -122,6 +128,91 @@ function WeaponsGui:_setJumpButtonsPressed(isPressed)
 	self:_setButtonVisual(self.largeJumpButton, isPressed)
 end
 
+function WeaponsGui:_playLocalHitHighlight(humanoidHit)
+	if not humanoidHit or not humanoidHit:IsA("Humanoid") then
+		return
+	end
+
+	local targetModel = humanoidHit.Parent
+	if not targetModel or not targetModel:IsA("Model") then
+		return
+	end
+
+	local existingState = self._activeHitHighlights[targetModel]
+	if existingState then
+		if existingState.colorTween then
+			existingState.colorTween:Cancel()
+		end
+		if existingState.fadeTween then
+			existingState.fadeTween:Cancel()
+		end
+		if existingState.highlight and existingState.highlight.Parent then
+			existingState.highlight:Destroy()
+		end
+		self._activeHitHighlights[targetModel] = nil
+	end
+
+	local oldHighlight = targetModel:FindFirstChild(HIT_HIGHLIGHT_NAME)
+	if oldHighlight and oldHighlight:IsA("Highlight") then
+		oldHighlight:Destroy()
+	end
+
+	local highlight = Instance.new("Highlight")
+	highlight.Name = HIT_HIGHLIGHT_NAME
+	highlight.Adornee = targetModel
+	highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+	highlight.FillColor = Color3.fromRGB(255, 255, 255)
+	highlight.OutlineColor = HIT_HIGHLIGHT_OUTLINE_COLOR
+	highlight.FillTransparency = 0
+	highlight.OutlineTransparency = 0
+	highlight.Parent = targetModel
+
+	self._hitHighlightSerial += 1
+	local serial = self._hitHighlightSerial
+
+	local colorTween = TweenService:Create(highlight, HIT_HIGHLIGHT_TO_OUTLINE_TWEEN, {
+		FillColor = highlight.OutlineColor,
+	})
+
+	self._activeHitHighlights[targetModel] = {
+		serial = serial,
+		highlight = highlight,
+		colorTween = colorTween,
+		fadeTween = nil,
+	}
+
+	colorTween.Completed:Connect(function(playbackState)
+		if playbackState ~= Enum.PlaybackState.Completed then
+			return
+		end
+
+		local state = self._activeHitHighlights[targetModel]
+		if not state or state.serial ~= serial or not highlight.Parent then
+			return
+		end
+
+		local fadeTween = TweenService:Create(highlight, HIT_HIGHLIGHT_FADE_TWEEN, {
+			FillTransparency = 1,
+			OutlineTransparency = 1,
+		})
+		state.fadeTween = fadeTween
+
+		fadeTween.Completed:Connect(function()
+			local currentState = self._activeHitHighlights[targetModel]
+			if currentState and currentState.serial == serial then
+				self._activeHitHighlights[targetModel] = nil
+			end
+			if highlight.Parent then
+				highlight:Destroy()
+			end
+		end)
+
+		fadeTween:Play()
+	end)
+
+	colorTween:Play()
+end
+
 function WeaponsGui:_updateAimButtonsVisual()
 	self:_setButtonVisual(self.smallAimButton, self.isZoomed)
 	self:_setButtonVisual(self.largeAimButton, self.isZoomed)
@@ -153,11 +244,18 @@ function WeaponsGui:_captureHotbarSlot(hotbarRoot, itemName)
 	end
 
 	local itemsFolder = hotbarRoot:FindFirstChild("Items")
-	if not itemsFolder then
-		return nil
-	end
+	local searchRoot = if itemsFolder then itemsFolder else hotbarRoot
 
-	local itemFrame = itemsFolder:FindFirstChild(itemName)
+	local itemFrame = searchRoot:FindFirstChild(itemName)
+	if not itemFrame then
+		local lowercaseName = string.lower(itemName)
+		for _, child in ipairs(searchRoot:GetChildren()) do
+			if string.lower(child.Name) == lowercaseName then
+				itemFrame = child
+				break
+			end
+		end
+	end
 	if not itemFrame or not itemFrame:IsA("GuiObject") then
 		return nil
 	end
@@ -167,11 +265,43 @@ function WeaponsGui:_captureHotbarSlot(hotbarRoot, itemName)
 		imageNode = itemFrame:FindFirstChildWhichIsA("ImageButton") or itemFrame:FindFirstChildWhichIsA("ImageLabel")
 	end
 
+	local strokeNode = itemFrame:FindFirstChildWhichIsA("UIStroke", true)
+	local ammoRoot = itemFrame:FindFirstChild("Ammo")
+	local ammoValueNode = if ammoRoot then ammoRoot:FindFirstChild("Value") else nil
+	local ammoValueLabel = if ammoValueNode and (
+		ammoValueNode:IsA("TextLabel")
+		or ammoValueNode:IsA("TextButton")
+		or ammoValueNode:IsA("TextBox")
+	) then ammoValueNode else nil
+
+	if not ammoValueNode then
+		ammoValueLabel = itemFrame:FindFirstChild("Value", true)
+		if ammoValueLabel and (
+			ammoValueLabel:IsA("TextLabel")
+			or ammoValueLabel:IsA("TextButton")
+			or ammoValueLabel:IsA("TextBox")
+		) then
+			ammoValueNode = ammoValueLabel
+		end
+	end
+
 	return {
 		frame = itemFrame,
 		image = imageNode,
+		stroke = if strokeNode and strokeNode:IsA("UIStroke") then strokeNode else nil,
+		ammoValueNode = ammoValueNode,
+		ammoValueLabel = ammoValueLabel,
 		baseSize = itemFrame.Size,
 	}
+end
+
+function WeaponsGui:_setSlotStrokeVisible(slotNode, isVisible)
+	local stroke = slotNode and slotNode.stroke
+	if not stroke then
+		return
+	end
+
+	stroke.Enabled = isVisible
 end
 
 function WeaponsGui:_setSlotScale(slotNode, scale)
@@ -274,6 +404,87 @@ function WeaponsGui:_applyHotbarSelectedVisual(selectedSlot)
 	for _, layout in ipairs(self.hotbarLayouts) do
 		self:_setSlotScale(layout.item1, if selectedSlot == 1 then HOTBAR_SELECTED_SCALE else HOTBAR_DEFAULT_SCALE)
 		self:_setSlotScale(layout.item2, if selectedSlot == 2 then HOTBAR_SELECTED_SCALE else HOTBAR_DEFAULT_SCALE)
+		self:_setSlotStrokeVisible(layout.item1, selectedSlot == 1)
+		self:_setSlotStrokeVisible(layout.item2, selectedSlot == 2)
+	end
+end
+
+function WeaponsGui:_resolveAmmoCapacityForTool(tool)
+	if not tool then
+		return nil
+	end
+
+	local currentWeapon = self.weaponsSystem.currentWeapon
+	if currentWeapon and currentWeapon.instance == tool and currentWeapon.getConfigValue then
+		local capacityFromWeapon = currentWeapon:getConfigValue("AmmoCapacity", nil)
+		if type(capacityFromWeapon) == "number" then
+			return math.max(0, math.floor(capacityFromWeapon + 0.5))
+		end
+	end
+
+	local configuration = tool:FindFirstChildOfClass("Configuration")
+	if configuration then
+		local ammoCapacityValue = configuration:FindFirstChild("AmmoCapacity")
+		if ammoCapacityValue and ammoCapacityValue:IsA("ValueBase") then
+			local rawValue = ammoCapacityValue.Value
+			if type(rawValue) == "number" then
+				return math.max(0, math.floor(rawValue + 0.5))
+			end
+		end
+	end
+
+	return nil
+end
+
+function WeaponsGui:_formatHotbarAmmoRichText(currentAmmo, totalAmmo)
+	return string.format(
+		"<font color=\"%s\">%d</font><font color=\"%s\">/%d</font>",
+		HOTBAR_AMMO_CURRENT_COLOR,
+		currentAmmo,
+		HOTBAR_AMMO_TOTAL_COLOR,
+		totalAmmo
+	)
+end
+
+function WeaponsGui:_setSlotAmmoText(slotNode, currentAmmo, totalAmmo)
+	if not slotNode then
+		return
+	end
+
+	local ammoValueLabel = slotNode.ammoValueLabel
+	local ammoValueNode = slotNode.ammoValueNode
+	local hasAmmo = type(currentAmmo) == "number" and type(totalAmmo) == "number"
+	local richText = if hasAmmo
+		then self:_formatHotbarAmmoRichText(
+			math.max(0, math.floor(currentAmmo + 0.5)),
+			math.max(0, math.floor(totalAmmo + 0.5))
+		)
+		else ""
+
+	if ammoValueLabel then
+		ammoValueLabel.RichText = true
+		ammoValueLabel.Text = richText
+		return
+	end
+
+	if ammoValueNode and ammoValueNode:IsA("StringValue") then
+		ammoValueNode.Value = richText
+	elseif ammoValueNode and ammoValueNode:IsA("IntValue") then
+		ammoValueNode.Value = if hasAmmo then math.max(0, math.floor(currentAmmo + 0.5)) else 0
+	elseif ammoValueNode and ammoValueNode:IsA("NumberValue") then
+		ammoValueNode.Value = if hasAmmo then math.max(0, math.floor(currentAmmo + 0.5)) else 0
+	end
+end
+
+function WeaponsGui:_updateHotbarAmmoDisplay(mainTool, specialTool)
+	local mainCurrent = if mainTool then mainTool:GetAttribute("CurrentAmmo") else nil
+	local specialCurrent = if specialTool then specialTool:GetAttribute("CurrentAmmo") else nil
+	local mainTotal = self:_resolveAmmoCapacityForTool(mainTool)
+	local specialTotal = self:_resolveAmmoCapacityForTool(specialTool)
+
+	for _, layout in ipairs(self.hotbarLayouts) do
+		self:_setSlotAmmoText(layout.item1, mainCurrent, mainTotal)
+		self:_setSlotAmmoText(layout.item2, specialCurrent, specialTotal)
 	end
 end
 
@@ -289,6 +500,8 @@ function WeaponsGui:_refreshHotbar()
 		self:_setSlotImage(layout.item1, mainImage)
 		self:_setSlotImage(layout.item2, specialImage)
 	end
+
+	self:_updateHotbarAmmoDisplay(mainTool, specialTool)
 
 	local selectedSlot = self:_getSelectedSlotByCurrentWeapon(mainTool, specialTool)
 	if selectedSlot ~= 1 and selectedSlot ~= 2 then
@@ -440,6 +653,8 @@ function WeaponsGui.new(weaponsSystem)
 	self.weaponsSystem = weaponsSystem
 	self.connections = {}
 	self.enabled = false
+	self._activeHitHighlights = setmetatable({}, { __mode = "k" })
+	self._hitHighlightSerial = 0
 
 	self.referenceViewportSize = Vector2.new(1000, 1000)
 	self.scaleWeight = 0.75
@@ -1040,6 +1255,7 @@ function WeaponsGui:OnHitOtherPlayer(damage, humanoidHit)
 	local fadeGoal = { Size = UDim2.new(0, midSize, 0, midSize), ImageTransparency = 1, ImageColor3 = Color3.new(1, 1, 0.7), Rotation = 0 }
 	self.currentFadeTween = TweenService:Create(self.hitMarker, fadeTweenInfo, fadeGoal)
 	self.currentFadeTween:Play()
+	self:_playLocalHitHighlight(humanoidHit)
 	DamageBillboardHandler:ShowDamageBillboard(damage, humanoidHit.Parent:FindFirstChild("Head"))
 end
 

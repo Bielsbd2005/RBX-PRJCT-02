@@ -101,18 +101,43 @@ function DirectionalIndicatorGuiManager:ActivateDirectionalIndicator(DIName, oth
 end
 
 function DirectionalIndicatorGuiManager:CalculateDIRotation(otherPosition)
-	local camera = self.weaponsGui.weaponsSystem.camera
-	local localPlayerOffsetPositionXZ = Vector3.new(camera.currentCamera.Focus.X, 0, camera.currentCamera.Focus.Z)
-	local otherPlayerPositionXZ = Vector3.new(otherPosition.X, 0, otherPosition.Z)
-	local toOtherPlayer = (localPlayerOffsetPositionXZ - otherPlayerPositionXZ).Unit
-	local forward = (Vector3.new(camera.currentCFrame.LookVector.X, 0, camera.currentCFrame.LookVector.Z)).Unit
-	if toOtherPlayer == Vector3.new() then
-		toOtherPlayer = forward
+	if not otherPosition then
+		return 0
 	end
-	local dotProduct = forward:Dot(toOtherPlayer)
+
+	local shoulderCamera = self.weaponsGui and self.weaponsGui.weaponsSystem and self.weaponsGui.weaponsSystem.camera
+	local liveCamera = workspace.CurrentCamera
+	local focusCFrame = nil
+	local lookCFrame = nil
+
+	if shoulderCamera then
+		focusCFrame = shoulderCamera.currentCamera and shoulderCamera.currentCamera.Focus or nil
+		lookCFrame = shoulderCamera.currentCFrame or nil
+	end
+
+	if not focusCFrame and liveCamera then
+		focusCFrame = liveCamera.Focus
+	end
+	if not lookCFrame and liveCamera then
+		lookCFrame = liveCamera.CFrame
+	end
+
+	if not focusCFrame or not lookCFrame then
+		return 0
+	end
+
+	local localPlayerOffsetPositionXZ = Vector3.new(focusCFrame.X, 0, focusCFrame.Z)
+	local otherPlayerPositionXZ = Vector3.new(otherPosition.X, 0, otherPosition.Z)
+	local toOtherVector = localPlayerOffsetPositionXZ - otherPlayerPositionXZ
+	local forwardVector = Vector3.new(lookCFrame.LookVector.X, 0, lookCFrame.LookVector.Z)
+
+	local forward = if forwardVector.Magnitude > 0 then forwardVector.Unit else Vector3.new(0, 0, -1)
+	local toOtherPlayer = if toOtherVector.Magnitude > 0 then toOtherVector.Unit else forward
+
+	local dotProduct = math.clamp(forward:Dot(toOtherPlayer), -1, 1)
 	local crossProduct = forward:Cross(toOtherPlayer)
 	local acosAngle = math.deg(math.acos(dotProduct))
-	local asinAngle = math.deg(math.asin(crossProduct.Y))
+	local asinAngle = math.deg(math.asin(math.clamp(crossProduct.Y, -1, 1)))
 	if asinAngle >= 0 then
 		acosAngle = 360 - acosAngle
 	end

@@ -8,17 +8,53 @@ local KillCamController = {}
 KillCamController.__index = KillCamController
 
 local CONFIG = {
-	duration = 6,
-	fadeInTime = 0.3,
-	fadeOutTime = 0.35,
-	initialHeight = 3,
-	finalHeight = 6,
-	rotationSpeed = 0.55,
-	zoomDistance = 15,
-	finalZoomDistance = 10,
-	smoothness = 0.12,
-	lookOffsetY = 2,
+	-- Posición inicial: elevada y lejana
+	initialHeight = 8,
+	initialDistance = 20,
+	-- Posición final: cercana y ligeramente elevada, enfrente del killer
+	finalHeight = 2.5,
+	finalDistance = 12,
+	-- Offset lateral sutil para evitar alineación perfecta
+	sideOffset = 3,
+	-- Altura del punto de mirada relativo al killer
+	lookOffsetY = 1.2,
+	-- Suavidad del movimiento de cámara
+	cameraSmoothness = 0.08,
+	-- Duración del acercamiento
+	zoomDuration = 5,
+	-- Fade cinematica
+	fadeToBlackTime = 0.12,
+	fadeFromBlackTime = 0.22,
+	fadeStopToBlackTime = 0.1,
+	fadeStopFromBlackTime = 0.18,
 }
+
+local function _createFadeGui(playerGui: PlayerGui): (ScreenGui, Frame)
+	local existing = playerGui:FindFirstChild("KillCamFade")
+	if existing and existing:IsA("ScreenGui") then
+		existing:Destroy()
+	end
+
+	local screenGui = Instance.new("ScreenGui")
+	screenGui.Name = "KillCamFade"
+	screenGui.ResetOnSpawn = false
+	screenGui.IgnoreGuiInset = true
+	screenGui.DisplayOrder = 10001
+	screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	screenGui.Parent = playerGui
+
+	local frame = Instance.new("Frame")
+	frame.Name = "Fade"
+	frame.Size = UDim2.fromScale(1, 1)
+	frame.Position = UDim2.fromScale(0, 0)
+	frame.BorderSizePixel = 0
+	frame.BackgroundColor3 = Color3.new(0, 0, 0)
+	frame.BackgroundTransparency = 1
+	frame.ZIndex = 10001
+	frame.Parent = screenGui
+
+	return screenGui, frame
+end
 
 local function _resolveRootPartFromCharacter(character: Model?): BasePart?
 	if not character then
@@ -31,43 +67,46 @@ local function _resolveRootPartFromCharacter(character: Model?): BasePart?
 	return nil
 end
 
-local function _resolveCharacterRootByUserId(userId: number?): BasePart?
-	if not userId then
-		return nil
+local function _resolveKillerRoot(killerUserId: number?, fallbackPosition: Vector3?): (BasePart?, Vector3)
+	local fallback = fallbackPosition or Vector3.zero
+
+	if not killerUserId then
+		return nil, fallback
 	end
-	local player = Players:GetPlayerByUserId(userId)
-	if not player then
-		return nil
+
+	-- Real player (positive userId)
+	if killerUserId > 0 then
+		local player = Players:GetPlayerByUserId(killerUserId)
+		if player then
+			local root = _resolveRootPartFromCharacter(player.Character)
+			if root then
+				return root, root.Position
+			end
+		end
+		return nil, fallback
 	end
-	return _resolveRootPartFromCharacter(player.Character)
+
+	-- Bot (negative fakeUserId): search workspace for model with matching FakeUserId attribute
+	for _, descendant in workspace:GetDescendants() do
+		if descendant:IsA("Model") and descendant:GetAttribute("FakeUserId") == killerUserId then
+			local root = _resolveRootPartFromCharacter(descendant)
+			if root then
+				return root, root.Position
+			end
+			-- Model exists but root removed (ragdoll) — use model pivot
+			return nil, descendant:GetPivot().Position
+		end
+	end
+
+	return nil, fallback
 end
 
-local function _createFadeGui(playerGui: PlayerGui): (ScreenGui, Frame)
-	local existing = playerGui:FindFirstChild("KillCamFade")
-	if existing and existing:IsA("ScreenGui") then
-		existing:Destroy()
-	end
-
-	local screenGui = Instance.new("ScreenGui")
-	screenGui.Name = "KillCamFade"
-	screenGui.ResetOnSpawn = false
-	screenGui.IgnoreGuiInset = true
-	screenGui.DisplayOrder = 10000
-	screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-	screenGui.Parent = playerGui
-
-	local frame = Instance.new("Frame")
-	frame.Name = "Fade"
-	frame.Size = UDim2.fromScale(1, 1)
-	frame.Position = UDim2.fromScale(0, 0)
-	frame.BorderSizePixel = 0
-	frame.BackgroundColor3 = Color3.new(0, 0, 0)
-	frame.BackgroundTransparency = 1
-	frame.ZIndex = 10000
-	frame.Parent = screenGui
-
-	return screenGui, frame
-end
+export type StartData = {
+	killerUserId: string,
+	killerName: string,
+	weaponName: string,
+	killerPosition: Vector3?,
+}
 
 function KillCamController.new(playerGui: PlayerGui): any
 	local self = setmetatable({}, KillCamController)
@@ -75,11 +114,10 @@ function KillCamController.new(playerGui: PlayerGui): any
 	self._playerGui = playerGui
 	self._active = false
 	self._renderConn = nil :: RBXScriptConnection?
-	self._charConn = nil :: RBXScriptConnection?
-	self._fadeGui = nil :: ScreenGui?
-	self._fadeFrame = nil :: Frame?
 	self._originalCameraType = nil :: Enum.CameraType?
 	self._originalCameraSubject = nil :: Instance?
+	self._fadeGui = nil :: ScreenGui?
+	self._fadeFrame = nil :: Frame?
 	return self
 end
 
@@ -97,13 +135,15 @@ function KillCamController:_playFade(toTransparency: number, duration: number)
 	if not self._fadeFrame then
 		return
 	end
-	local tween = TweenService:Create(self._fadeFrame, TweenInfo.new(duration, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-		BackgroundTransparency = toTransparency,
-	})
+	local tween = TweenService:Create(
+		self._fadeFrame,
+		TweenInfo.new(duration, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+		{ BackgroundTransparency = toTransparency }
+	)
 	tween:Play()
 end
 
-function KillCamController:start(data: { killerUserId: string, killerName: string, weaponName: string }?)
+function KillCamController:start(data: StartData?)
 	if self._active then
 		self:stop()
 	end
@@ -118,64 +158,93 @@ function KillCamController:start(data: { killerUserId: string, killerName: strin
 	self._originalCameraSubject = camera.CameraSubject
 
 	local killerUserId = if data and data.killerUserId ~= "" then tonumber(data.killerUserId) else nil
-	local focusRoot = _resolveCharacterRootByUserId(killerUserId)
-	if not focusRoot then
-		focusRoot = _resolveRootPartFromCharacter(self._player.Character)
-	end
-	if not focusRoot then
-		self._active = false
-		return
+	local serverFallbackPos = if data then data.killerPosition else nil
+
+	local focusRoot, lastKnownPosition = _resolveKillerRoot(killerUserId, serverFallbackPos)
+
+	-- If no killer info at all, fall back to local player's death position
+	if not focusRoot and lastKnownPosition == Vector3.zero then
+		local localRoot = _resolveRootPartFromCharacter(self._player.Character)
+		if localRoot then
+			focusRoot = localRoot
+			lastKnownPosition = localRoot.Position
+		else
+			self._active = false
+			return
+		end
 	end
 
 	camera.CameraType = Enum.CameraType.Scriptable
 
-	self:_playFade(0, CONFIG.fadeInTime)
-	task.delay(CONFIG.fadeInTime, function()
-		if not self._active then
-			return
-		end
-		self:_playFade(1, CONFIG.fadeOutTime)
+	-- Fade a negro breve para suavizar el corte de cámara.
+	self:_playFade(0, CONFIG.fadeToBlackTime)
+	task.delay(CONFIG.fadeToBlackTime, function()
+		self:_playFade(1, CONFIG.fadeFromBlackTime)
 	end)
 
 	local startAt = time()
-	local angle = 0
 	local currentCameraPos = camera.CFrame.Position
-
-	if self._charConn then
-		self._charConn:Disconnect()
-		self._charConn = nil
-	end
-	self._charConn = self._player.CharacterAdded:Connect(function()
-		self:stop()
-	end)
 
 	self._renderConn = RunService.RenderStepped:Connect(function(dt)
 		if not self._active then
 			return
 		end
 
-		if focusRoot and focusRoot.Parent == nil then
-			focusRoot = _resolveRootPartFromCharacter(self._player.Character)
-			if not focusRoot then
-				self:stop()
-				return
+		-- Try to re-resolve the focus root if it was destroyed (ragdoll cleanup)
+		if focusRoot and focusRoot.Parent then
+			lastKnownPosition = focusRoot.Position
+		else
+			-- Root is gone — try to re-resolve from killer's character (they may have respawned)
+			-- But we prefer lastKnownPosition (where they died/were) to avoid snapping to their new spawn
+			focusRoot = nil
+			if killerUserId then
+				local newRoot, _ = _resolveKillerRoot(killerUserId, nil)
+				-- Only use new root if it's near the last known position (same ragdoll area)
+				if newRoot and (newRoot.Position - lastKnownPosition).Magnitude < 20 then
+					focusRoot = newRoot
+					lastKnownPosition = newRoot.Position
+				end
 			end
 		end
 
 		local elapsed = time() - startAt
-		local progress = math.clamp(elapsed / CONFIG.duration, 0, 1)
-		local currentHeight = CONFIG.initialHeight + (CONFIG.finalHeight - CONFIG.initialHeight) * progress
-		local currentZoom = CONFIG.zoomDistance + (CONFIG.finalZoomDistance - CONFIG.zoomDistance) * progress
-		angle += CONFIG.rotationSpeed * dt
+		local progress = math.clamp(elapsed / CONFIG.zoomDuration, 0, 1)
 
-		local pivot = focusRoot.Position
-		local targetPos = pivot + Vector3.new(math.sin(angle) * currentZoom, currentHeight, math.cos(angle) * currentZoom)
-		currentCameraPos = currentCameraPos:Lerp(targetPos, CONFIG.smoothness)
-		camera.CFrame = CFrame.lookAt(currentCameraPos, pivot + Vector3.new(0, CONFIG.lookOffsetY, 0))
+		-- Easing suave: comienza lento, acelera, y desacelera al final (ease in-out cubic)
+		local easedProgress = if progress < 0.5
+			then 4 * progress * progress * progress
+			else 1 - math.pow(-2 * progress + 2, 3) / 2
 
-		if elapsed >= CONFIG.duration then
-			self:stop()
+		local currentHeight = CONFIG.initialHeight + (CONFIG.finalHeight - CONFIG.initialHeight) * easedProgress
+		local currentDistance = CONFIG.initialDistance + (CONFIG.finalDistance - CONFIG.initialDistance) * easedProgress
+
+		local pivot = lastKnownPosition
+
+		-- Determinar dirección hacia dónde "mira" el killer
+		-- Si el killer está mirando a una dirección específica, usarla; de lo contrario, usar dirección arbitraria
+		local killerDirection = Vector3.new(1, 0, 0) -- Dirección predeterminada
+		if focusRoot then
+			-- Intentar obtener orientación del killer
+			local killerCFrame = focusRoot.CFrame
+			killerDirection = killerCFrame.LookVector
 		end
+
+		-- Posición de cámara: enfrente del killer (con offset lateral sutil)
+		-- Usar cross product para obtener vector perpendicular
+		local upVector = Vector3.new(0, 1, 0)
+		local rightRaw = killerDirection:Cross(upVector)
+		local rightVector = if rightRaw.Magnitude > 0.001 then rightRaw.Unit else Vector3.new(1, 0, 0)
+
+		local targetPos = pivot
+			+ killerDirection * currentDistance          -- Distancia enfrente
+			+ rightVector * CONFIG.sideOffset            -- Offset lateral
+			+ Vector3.new(0, currentHeight, 0)           -- Altura
+
+		currentCameraPos = currentCameraPos:Lerp(targetPos, CONFIG.cameraSmoothness)
+
+		-- Mirar hacia el killer con un pequeño offset de altura
+		local lookTarget = pivot + Vector3.new(0, CONFIG.lookOffsetY, 0)
+		camera.CFrame = CFrame.lookAt(currentCameraPos, lookTarget)
 	end)
 end
 
@@ -185,14 +254,14 @@ function KillCamController:stop()
 	end
 
 	self._active = false
+	self:_playFade(0, CONFIG.fadeStopToBlackTime)
+	task.delay(CONFIG.fadeStopToBlackTime, function()
+		self:_playFade(1, CONFIG.fadeStopFromBlackTime)
+	end)
 
 	if self._renderConn then
 		self._renderConn:Disconnect()
 		self._renderConn = nil
-	end
-	if self._charConn then
-		self._charConn:Disconnect()
-		self._charConn = nil
 	end
 
 	local camera = workspace.CurrentCamera
@@ -206,16 +275,19 @@ function KillCamController:stop()
 			camera.CameraSubject = self._originalCameraSubject
 		end
 	end
+end
 
+function KillCamController:isActive(): boolean
+	return self._active
+end
+
+function KillCamController:Destroy()
+	self:stop()
 	if self._fadeGui then
 		self._fadeGui:Destroy()
 		self._fadeGui = nil
 		self._fadeFrame = nil
 	end
-end
-
-function KillCamController:Destroy()
-	self:stop()
 end
 
 return KillCamController

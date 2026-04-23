@@ -11,6 +11,7 @@ local Packages = ReplicatedStorage:WaitForChild("Packages")
 local Janitor = require(Packages.janitor) :: any
 local Fusion = require(Packages.fusion) :: any
 local LockerCameraController = require(Client.core.camera.LockerCameraController)
+local CameraLock = require(Client.core.camera.CameraLock)
 local MenuHover = require(Client.core.ui.MenuHover)
 local InteractiveScaleTween = require(Client.core.ui.animators.InteractiveScaleTween)
 local DataController = require(Client.core.data.DataController)
@@ -739,6 +740,7 @@ function FusionFeature.start(menuController: any): any
 		end
 
 		isOpen = true
+		CameraLock.acquire("fusion")
 		cameraController:apply()
 		fusionGui.Enabled = true
 		setMenuVisibleInstant(false)
@@ -753,6 +755,7 @@ function FusionFeature.start(menuController: any): any
 		closeSkinsPanel()
 		fusionGui.Enabled = false
 		cameraController:restore()
+		CameraLock.release("fusion")
 		setMenuVisibleInstant(true)
 	end
 
@@ -779,6 +782,7 @@ function FusionFeature.start(menuController: any): any
 			isOpen = false
 			closeSkinsPanel()
 			cameraController:restore()
+			CameraLock.release("fusion")
 			setMenuVisibleInstant(true)
 		end
 	end), "Disconnect")
@@ -786,6 +790,7 @@ function FusionFeature.start(menuController: any): any
 	janitor:Add(function()
 		if isOpen then
 			cameraController:restore()
+			CameraLock.release("fusion")
 			setMenuVisibleInstant(true)
 		end
 	end, true)

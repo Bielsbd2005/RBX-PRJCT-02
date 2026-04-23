@@ -22,10 +22,9 @@ type StatsData = {
 
 type HudRefs = {
 	cashValue: TextLabel?,
-	xpFill: Frame?,
-	xpLabel: TextLabel?,
-	actualLabel: TextLabel?,
-	nextLabel: TextLabel?,
+	level: TextLabel?,
+	next: TextLabel?,
+	barFill: Frame?,
 }
 
 export type MenuController = {
@@ -76,63 +75,49 @@ local function resolveHudRefs(menuGui: ScreenGui): HudRefs
 	if not upper then
 		return {
 			cashValue = nil,
-			xpFill = nil,
-			xpLabel = nil,
-			actualLabel = nil,
-			nextLabel = nil,
+			level = nil,
+			next = nil,
+			barFill = nil,
 		}
 	end
 
 	local cashNode = upper:FindFirstChild("Cash")
-	local cashValueNode = if cashNode then cashNode:FindFirstChild("Value") else nil
-	local cashValue = if cashValueNode and cashValueNode:IsA("TextLabel") then cashValueNode else nil
+	local cashValue = if cashNode and cashNode:FindFirstChild("Value") then (if cashNode.Value:IsA("TextLabel") then cashNode.Value else nil) else nil
 
-	local xpNode = upper:FindFirstChild("XP")
-	if not xpNode then
-		return {
-			cashValue = cashValue,
-			xpFill = nil,
-			xpLabel = nil,
-			actualLabel = nil,
-			nextLabel = nil,
-		}
-	end
+	local levelNode = upper:FindFirstChild("Level")
+	local level = if levelNode and levelNode:IsA("TextLabel") then levelNode else nil
 
-	local xpContainer = xpNode:FindFirstChild("Container")
-	local xpFillNode = if xpContainer then findDescendantByName(xpContainer, { "Fill" }) else nil
-	local xpFill = if xpFillNode and xpFillNode:IsA("Frame") then xpFillNode else nil
-	local xpLabel = if xpContainer then findTextLabel(xpContainer, { "XP", "Value" }) else nil
+	local nextNode = upper:FindFirstChild("Next")
+	local next = if nextNode and nextNode:IsA("TextLabel") then nextNode else nil
+
+	local barNode = upper:FindFirstChild("Bar")
+	local barFill = if barNode then (if barNode:FindFirstChild("Fill") then (if barNode.Fill:IsA("Frame") then barNode.Fill else nil) else nil) else nil
 
 	return {
 		cashValue = cashValue,
-		xpFill = xpFill,
-		xpLabel = xpLabel,
-		actualLabel = findTextLabel(xpNode, { "Actual", "Current", "NivelActual" }),
-		nextLabel = findTextLabel(xpNode, { "Proximo", "Próximo", "Next", "Siguiente" }),
+		level = level,
+		next = next,
+		barFill = barFill,
 	}
 end
 
 local function updateTopHud(hudRefs: HudRefs, stats: StatsData): ()
-	if not hudRefs.cashValue and not hudRefs.xpFill and not hudRefs.xpLabel and not hudRefs.actualLabel and not hudRefs.nextLabel then
+	if not hudRefs.cashValue and not hudRefs.level and not hudRefs.next and not hudRefs.barFill then
 		return
 	end
 
 	setText(hudRefs.cashValue, tostring(stats.Cash))
 
-	if hudRefs.xpFill then
+	if hudRefs.barFill then
 		local ratio = 0
 		if stats.XPToNextLevel > 0 then
 			ratio = math.clamp(stats.XP / stats.XPToNextLevel, 0, 1)
 		end
-		hudRefs.xpFill.Size = UDim2.new(ratio, 0, 1, 0)
+		hudRefs.barFill.Size = UDim2.new(ratio, 0, 1, 0)
 	end
 
-	if hudRefs.xpLabel then
-		hudRefs.xpLabel.Text = string.format("%d / %d", stats.XP, stats.XPToNextLevel)
-	end
-
-	setText(hudRefs.actualLabel, "Lvl " .. tostring(stats.Level))
-	setText(hudRefs.nextLabel, "Lvl " .. tostring(stats.Level + 1))
+	setText(hudRefs.level, "Lvl " .. tostring(stats.Level))
+	setText(hudRefs.next, "Lvl " .. tostring(stats.Level + 1))
 end
 
 function MenuController.new(): MenuController

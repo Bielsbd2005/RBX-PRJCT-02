@@ -305,16 +305,7 @@ function Roblox.rayPlaneIntersect(ray, pointOnPlane, planeNormal)
 end
 
 function Roblox.debugPrint(t, level)
-	level = level or 0
-	local tabs = string.rep("\t", level)
-	if typeof(t) == "table" then
-		for key, val in pairs(t) do
-			print(tabs, key, "=", val)
-			if typeof(val) == "table" then
-				Roblox.debugPrint(val, level + 1)
-			end
-		end
-	end
+	return
 end
 
 local function findInstanceImpl(root, path, getChildFunc)

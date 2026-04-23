@@ -24,6 +24,7 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Janitor = require(Packages.janitor) :: any
 local Fusion = require(Packages.fusion) :: any
 local LockerCameraController = require(Client.core.camera.LockerCameraController)
+local CameraLock = require(Client.core.camera.CameraLock)
 local MenuHover = require(Client.core.ui.MenuHover)
 local InteractiveScaleTween = require(Client.core.ui.animators.InteractiveScaleTween)
 local DataController = require(Client.core.data.DataController)
@@ -535,6 +536,7 @@ function CasesFeature.start(menuController: any): any
 	local function processUnboxingQueue()
 		if isUnboxing or #unboxingQueue == 0 then return end
 		isUnboxing = true
+		CameraLock.acquire("cases_unboxing")
 		local isScreenBlack = false
 
 		local savedCameraCFrame = Workspace.CurrentCamera.CFrame
@@ -620,6 +622,7 @@ function CasesFeature.start(menuController: any): any
 		fadeFromBlack()
 		isScreenBlack = false
 
+		CameraLock.release("cases_unboxing")
 		isUnboxing = false
 	end
 

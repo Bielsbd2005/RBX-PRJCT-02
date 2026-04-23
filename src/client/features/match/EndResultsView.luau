@@ -23,6 +23,7 @@
 
 local TweenService = game:GetService("TweenService")
 local Players      = game:GetService("Players")
+local Lighting     = game:GetService("Lighting")
 
 -- ── Colores ──────────────────────────────────────────────────
 local VICTORY_COLOR   = Color3.fromRGB(0,   152, 246)
@@ -33,14 +34,15 @@ local GRADIENT_TEAM_B = { Color3.fromRGB(204,  68, 103), Color3.fromRGB(215, 107
 local GRADIENT_LOCAL  = { Color3.fromRGB(220, 153,  53), Color3.fromRGB(241, 224,  74) }
 
 -- ── Timing ───────────────────────────────────────────────────
-local RESULT_PHASE_DURATION = 3     -- segundos antes de que aparezca Summary
 local REWARD_STAGGER        = 0.25  -- segundos entre cada ítem de Rewards
+local SUMMARY_TO_REWARDS_DELAY = 0.5
 
 -- ── TweenInfos ───────────────────────────────────────────────
 local TWEEN_SLIDE  = TweenInfo.new(0.5,  Enum.EasingStyle.Back,  Enum.EasingDirection.Out)
 local TWEEN_VALUE  = TweenInfo.new(0.35, Enum.EasingStyle.Quad,  Enum.EasingDirection.Out)
 local TWEEN_REWARD = TweenInfo.new(0.55, Enum.EasingStyle.Back,  Enum.EasingDirection.Out)
 local TWEEN_HIDE   = TweenInfo.new(0.25, Enum.EasingStyle.Quad,  Enum.EasingDirection.In)
+local TWEEN_SUMMARY_DROP = TweenInfo.new(0.55, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 
 -- ── Tipos ────────────────────────────────────────────────────
 export type PlayerEntry = {
@@ -98,6 +100,24 @@ local function _tweenGroupIn(obj: GuiObject, tweenInfo: TweenInfo)
 	end)
 end
 
+local function _tweenSummaryDropIn(obj: GuiObject)
+	local targetPos = obj.Position
+	obj.Visible = true
+	obj.Position = UDim2.new(targetPos.X.Scale, targetPos.X.Offset, targetPos.Y.Scale - 1, targetPos.Y.Offset)
+
+	pcall(function()
+		(obj :: any).GroupTransparency = 1
+	end)
+
+	TweenService:Create(obj, TWEEN_SUMMARY_DROP, {
+		Position = targetPos,
+	}):Play()
+
+	pcall(function()
+		TweenService:Create(obj, TWEEN_SUMMARY_DROP, { GroupTransparency = 0 }):Play()
+	end)
+end
+
 -- Aplica o crea UIGradient en frame.
 local function _setGradient(frame: GuiObject, colorA: Color3, colorB: Color3)
 	local gradient = frame:FindFirstChildOfClass("UIGradient") or Instance.new("UIGradient")
@@ -107,6 +127,13 @@ local function _setGradient(frame: GuiObject, colorA: Color3, colorB: Color3)
 	})
 	gradient.Rotation = 90
 	gradient.Parent = frame
+end
+
+local function _setResultsBlurEnabled(enabled: boolean)
+	local blur = Lighting:FindFirstChild("Blur")
+	if blur and blur:IsA("BlurEffect") then
+		blur.Enabled = enabled
+	end
 end
 
 -- Localiza el Canvas dentro del ScreenGui.
@@ -231,6 +258,7 @@ end
 local function _playSummaryPhase(
 	canvas:      GuiObject,
 	resultColor: Color3,
+	isVictory:   boolean,
 	scoreA:      number,
 	scoreB:      number,
 	players:     { PlayerEntry },
@@ -274,7 +302,12 @@ local function _playSummaryPhase(
 	_populateList(listANode, players, "A", localUserId)
 	_populateList(listBNode, players, "B", localUserId)
 
-	_tweenGroupIn(summary, TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out))
+	summary.Visible = true
+	if main then
+		_tweenSummaryDropIn(main)
+	else
+		_tweenSummaryDropIn(summary)
+	end
 end
 
 -- ── Fase 3: Rewards ───────────────────────────────────────────
@@ -332,6 +365,7 @@ function EndResultsView.new(gui: ScreenGui): any
 	self._canvas = canvas
 	self._token  = 0
 	self._onFinished = nil :: (() -> ())?
+	self._closeBtnConnection = nil :: RBXScriptConnection?
 
 	gui.Enabled      = false
 	gui.ResetOnSpawn = false
@@ -343,6 +377,16 @@ function EndResultsView.new(gui: ScreenGui): any
 	if resultPanel  then resultPanel.Visible  = false end
 	if summaryPanel then summaryPanel.Visible = false end
 	if rewardsPanel then rewardsPanel.Visible = false end
+
+	-- Vincular CloseBtn dentro de Canvas
+	local closeBtn = canvas:FindFirstChild("CloseBtn")
+	if closeBtn and closeBtn:IsA("GuiButton") then
+		self._closeBtnConnection = closeBtn.MouseButton1Click:Connect(function()
+			if self._onFinished then
+				self._onFinished()
+			end
+		end)
+	end
 
 	return self
 end
@@ -365,43 +409,29 @@ function EndResultsView:show(data: ShowData, onFinished: (() -> ())?)
 	if summaryPanel then summaryPanel.Visible = false end
 	if rewardsPanel then rewardsPanel.Visible = false end
 
+	_setResultsBlurEnabled(true)
 	self._gui.Enabled = true
-
-	-- Fase 1: Result
-	_playResultPhase(canvas, resultColor, isVictory)
 
 	task.spawn(function()
 		local localUserId = Players.LocalPlayer.UserId
 
-		-- Esperar antes de Summary
-		task.wait(RESULT_PHASE_DURATION)
-		if self._token ~= token then return end
-
 		-- Fase 2: Summary
-		_playSummaryPhase(canvas, resultColor, data.scoreA, data.scoreB, data.players, localUserId)
+		_playSummaryPhase(canvas, resultColor, isVictory, data.scoreA, data.scoreB, data.players, localUserId)
 
 		-- Esperar a que Summary termine de entrar
-		task.wait(0.5)
+		task.wait(SUMMARY_TO_REWARDS_DELAY)
 		if self._token ~= token then return end
 
 		-- Fase 3: Rewards
-		local rewardDuration = _playRewardsPhase(canvas)
+		_playRewardsPhase(canvas)
 
-		-- Esperar duración restante y llamar callback
-		local elapsed = RESULT_PHASE_DURATION + 0.5 + rewardDuration
-		local remaining = data.duration - elapsed
-		if remaining > 0 then
-			task.wait(remaining)
-		end
-
-		if self._token == token and self._onFinished then
-			self._onFinished()
-		end
+		-- El cierre lo controla el jugador pulsando CloseBtn.
 	end)
 end
 
-function EndResultsView:hide()
+function EndResultsView:hide(onHidden: (() -> ())?)
 	self._token += 1
+	_setResultsBlurEnabled(false)
 
 	local canvas: GuiObject = self._canvas
 	local gui = self._gui
@@ -426,12 +456,20 @@ function EndResultsView:hide()
 		if resultPanel  then resultPanel.Visible  = false end
 		if summaryPanel then summaryPanel.Visible = false end
 		if rewardsPanel then rewardsPanel.Visible = false end
+		if onHidden then
+			onHidden()
+		end
 	end)
 end
 
 function EndResultsView:Destroy()
 	self._token += 1
 	self._onFinished = nil
+	if self._closeBtnConnection then
+		self._closeBtnConnection:Disconnect()
+		self._closeBtnConnection = nil
+	end
+	_setResultsBlurEnabled(false)
 	self._gui.Enabled = false
 end
 

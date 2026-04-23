@@ -20,6 +20,8 @@ local GameSettings = Settings.GameSettings
 local CAMERA_RENDERSTEP_NAME = "ShoulderCameraUpdate"
 local ZOOM_ACTION_NAME = "ShoulderCameraZoom"
 local SPRINT_ACTION_NAME = "ShoulderCameraSprint"
+local MATCH_LOADOUT_HAT_ATTRIBUTE = "MatchLoadoutHat"
+local HAT_AIM_TRANSPARENCY = 0.7
 local CONTROLLABLE_HUMANOID_STATES = {
 	[Enum.HumanoidStateType.Running] = true,
 	[Enum.HumanoidStateType.RunningNoPhysics] = true,
@@ -893,6 +895,7 @@ function ShoulderCamera:handlePartTransparencies()
 			hidden = partsLookup[child.Name] == true
 			child.LocalTransparencyModifier = hidden and 1 or 0
 		elseif child:IsA("Accoutrement") then
+			local isMatchLoadoutHat = child:GetAttribute(MATCH_LOADOUT_HAT_ATTRIBUTE) == true
 			local descendants = child:GetDescendants()
 			local accoutrementParts = {}
 			for _, desc in pairs(descendants) do
@@ -903,7 +906,13 @@ function ShoulderCamera:handlePartTransparencies()
 				end
 			end
 			for _, part in pairs(accoutrementParts) do
-				part.LocalTransparencyModifier = hidden and 1 or 0
+				if hidden then
+					part.LocalTransparencyModifier = 1
+				elseif isMatchLoadoutHat and self.zoomState then
+					part.LocalTransparencyModifier = HAT_AIM_TRANSPARENCY
+				else
+					part.LocalTransparencyModifier = 0
+				end
 			end
 		elseif child:IsA("Tool") then
 			hidden = self.zoomState and (self.hasScope or self.hideToolWhileZoomed)
