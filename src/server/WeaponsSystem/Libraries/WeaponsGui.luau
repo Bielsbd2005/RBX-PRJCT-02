@@ -29,6 +29,8 @@ local HIT_HIGHLIGHT_NAME = "WSLocalHitHighlight"
 local HIT_HIGHLIGHT_OUTLINE_COLOR = Color3.fromRGB(255, 64, 64)
 local HIT_HIGHLIGHT_TO_OUTLINE_TWEEN = TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local HIT_HIGHLIGHT_FADE_TWEEN = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local VIGNETTE_KILL_COLOR = Color3.fromRGB(0, 172, 237)
+local VIGNETTE_HEALTH_COLOR = Color3.fromRGB(255, 0, 0)
 
 local RELOAD_PROGRESS_STYLE = {
 	FlipProgress = false,
@@ -77,6 +79,22 @@ local function setGuiTransparencyRecursive(guiObject, alpha)
 
 	for _, child in ipairs(guiObject:GetChildren()) do
 		setGuiTransparencyRecursive(child, alpha)
+	end
+end
+
+local function setGuiColorRecursive(guiObject, color)
+	if guiObject:IsA("ImageLabel") or guiObject:IsA("ImageButton") then
+		guiObject.ImageColor3 = color
+	end
+	if guiObject:IsA("Frame") or guiObject:IsA("TextLabel") or guiObject:IsA("TextButton") or guiObject:IsA("TextBox") then
+		guiObject.BackgroundColor3 = color
+	end
+	if guiObject:IsA("UIStroke") then
+		guiObject.Color = color
+	end
+
+	for _, child in ipairs(guiObject:GetChildren()) do
+		setGuiColorRecursive(child, color)
 	end
 end
 
@@ -686,12 +704,13 @@ function WeaponsGui.new(weaponsSystem)
 	self.hotbarMainTool = nil
 	self.hotbarSpecialTool = nil
 	self.hotbarSelectedSlot = 1
-	self.killContainer = nil
-	self.killContainerHideToken = 0
-	self.killContainerDisplayTime = 0.45
-	self.killContainerFadeTween = nil
-	self.killContainerAlphaDriver = nil
-	self.killContainerAlphaConn = nil
+	self.vignette = nil
+	self.vignetteHideToken = 0
+	self.vignetteDisplayTime = 0.45
+	self.vignetteFadeTween = nil
+	self.vignetteKillAlphaDriver = nil
+	self.vignetteHealthAlphaDriver = nil
+	self.vignetteStateConn = nil
 	self.ammoDisplayNode = nil
 	self.ammoDisplayLabel = nil
 	self._lastAmmoDisplayText = nil
@@ -740,17 +759,52 @@ function WeaponsGui.new(weaponsSystem)
 		end
 
 		self.hitMarker = self.scalingElementsFolder:WaitForChild("HitMarker"):WaitForChild("HitMarkerImage")
-		self.killContainer = self.gui:FindFirstChild("KillContainer", true)
-		if self.killContainer and self.killContainer:IsA("GuiObject") then
-			self.killContainer.Visible = false
-			self.killContainerAlphaDriver = Instance.new("NumberValue")
-			self.killContainerAlphaDriver.Name = "KillContainerAlphaDriver"
-			self.killContainerAlphaDriver.Value = 1
-			self.killContainerAlphaDriver.Parent = self.killContainer
-			self.killContainerAlphaConn = self.killContainerAlphaDriver.Changed:Connect(function(value)
-				setGuiTransparencyRecursive(self.killContainer, value)
-			end)
-			setGuiTransparencyRecursive(self.killContainer, 1)
+		self.vignette = self.gui:FindFirstChild("Vignette", true)
+		if not self.vignette then
+			self.vignette = self.gui:FindFirstChild("KillContainer", true)
+		end
+		if self.vignette and self.vignette:IsA("GuiObject") then
+			self.vignette.Visible = false
+			self.vignetteKillAlphaDriver = self.vignette:FindFirstChild("KillAlphaDriver")
+			if not (self.vignetteKillAlphaDriver and self.vignetteKillAlphaDriver:IsA("NumberValue")) then
+				self.vignetteKillAlphaDriver = Instance.new("NumberValue")
+				self.vignetteKillAlphaDriver.Name = "KillAlphaDriver"
+				self.vignetteKillAlphaDriver.Parent = self.vignette
+			end
+			self.vignetteKillAlphaDriver.Value = 0
+
+			self.vignetteHealthAlphaDriver = self.vignette:FindFirstChild("HealthAlphaDriver")
+			if not (self.vignetteHealthAlphaDriver and self.vignetteHealthAlphaDriver:IsA("NumberValue")) then
+				self.vignetteHealthAlphaDriver = Instance.new("NumberValue")
+				self.vignetteHealthAlphaDriver.Name = "HealthAlphaDriver"
+				self.vignetteHealthAlphaDriver.Parent = self.vignette
+			end
+			self.vignetteHealthAlphaDriver.Value = self.vignetteHealthAlphaDriver.Value or 0
+
+			local function refreshVignette()
+				if not self.vignette then
+					return
+				end
+
+				local killAlpha = if self.vignetteKillAlphaDriver then self.vignetteKillAlphaDriver.Value else 0
+				local healthAlpha = if self.vignetteHealthAlphaDriver then self.vignetteHealthAlphaDriver.Value else 0
+				local visibleAlpha = math.max(killAlpha, healthAlpha)
+
+				if visibleAlpha <= 0 then
+					setGuiTransparencyRecursive(self.vignette, 1)
+					self.vignette.Visible = false
+					return
+				end
+
+				local color = if killAlpha >= healthAlpha then VIGNETTE_KILL_COLOR else VIGNETTE_HEALTH_COLOR
+				setGuiColorRecursive(self.vignette, color)
+				setGuiTransparencyRecursive(self.vignette, 1 - math.clamp(visibleAlpha, 0, 1))
+				self.vignette.Visible = true
+			end
+
+			self.vignetteStateConn = self.vignetteKillAlphaDriver.Changed:Connect(refreshVignette)
+			self.vignetteHealthAlphaDriver.Changed:Connect(refreshVignette)
+			refreshVignette()
 		end
 
 		self.scopeFrame = self.gui:WaitForChild("Scope")
@@ -859,8 +913,8 @@ function WeaponsGui.new(weaponsSystem)
 				table.insert(preloadTargets, layout.item2.image)
 			end
 		end
-		if self.killContainer then
-			table.insert(preloadTargets, self.killContainer)
+		if self.vignette then
+			table.insert(preloadTargets, self.vignette)
 		end
 		ContentProvider:PreloadAsync(preloadTargets)
 	end)()
@@ -1037,66 +1091,49 @@ function WeaponsGui:setEnabled(enabled)
 end
 
 function WeaponsGui:hideKillContainer(immediate)
-	if not self.killContainer then return end
-	self.killContainerHideToken += 1
-	if self.killContainerFadeTween then
-		self.killContainerFadeTween:Cancel()
-		self.killContainerFadeTween = nil
+	if not self.vignette then return end
+	self.vignetteHideToken += 1
+	if self.vignetteFadeTween then
+		self.vignetteFadeTween:Cancel()
+		self.vignetteFadeTween = nil
 	end
 
 	if immediate then
-		if self.killContainerAlphaDriver then
-			self.killContainerAlphaDriver.Value = 1
+		if self.vignetteKillAlphaDriver then
+			self.vignetteKillAlphaDriver.Value = 0
 		else
-			setGuiTransparencyRecursive(self.killContainer, 1)
+			setGuiTransparencyRecursive(self.vignette, 1)
 		end
-		self.killContainer.Visible = false
+		if not self.vignetteHealthAlphaDriver or self.vignetteHealthAlphaDriver.Value <= 0 then
+			self.vignette.Visible = false
+		end
 		return
 	end
 
-	local hideToken = self.killContainerHideToken
-	local alphaDriver = self.killContainerAlphaDriver
+	local hideToken = self.vignetteHideToken
+	local alphaDriver = self.vignetteKillAlphaDriver
 	if alphaDriver then
-		self.killContainerFadeTween = TweenService:Create(alphaDriver, TweenInfo.new(0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.In), { Value = 1 })
-		self.killContainerFadeTween:Play()
-		self.killContainerFadeTween.Completed:Once(function()
-			if self.killContainerHideToken ~= hideToken or not self.killContainer then
+		self.vignetteFadeTween = TweenService:Create(alphaDriver, TweenInfo.new(0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.In), { Value = 0 })
+		self.vignetteFadeTween:Play()
+		self.vignetteFadeTween.Completed:Once(function()
+			if self.vignetteHideToken ~= hideToken or not self.vignette then
 				return
 			end
-			self.killContainer.Visible = false
-			self.killContainerFadeTween = nil
+			if not self.vignetteHealthAlphaDriver or self.vignetteHealthAlphaDriver.Value <= 0 then
+				self.vignette.Visible = false
+			end
+			self.vignetteFadeTween = nil
 		end)
 	else
-		setGuiTransparencyRecursive(self.killContainer, 1)
-		self.killContainer.Visible = false
+		setGuiTransparencyRecursive(self.vignette, 1)
+		self.vignette.Visible = false
 	end
 end
 
 function WeaponsGui:showKillContainer()
-	if not self.killContainer or not self.enabled then return end
-
-	self.killContainerHideToken += 1
-	local hideToken = self.killContainerHideToken
-	if self.killContainerFadeTween then
-		self.killContainerFadeTween:Cancel()
-		self.killContainerFadeTween = nil
+	if self.vignetteKillAlphaDriver then
+		self.vignetteKillAlphaDriver.Value = 0
 	end
-
-	self.killContainer.Visible = true
-	if self.killContainerAlphaDriver then
-		self.killContainerAlphaDriver.Value = 1
-		self.killContainerFadeTween = TweenService:Create(self.killContainerAlphaDriver, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Value = 0 })
-		self.killContainerFadeTween:Play()
-	else
-		setGuiTransparencyRecursive(self.killContainer, 0)
-	end
-
-	task.delay(self.killContainerDisplayTime, function()
-		if self.killContainerHideToken ~= hideToken then
-			return
-		end
-		self:hideKillContainer(false)
-	end)
 end
 
 function WeaponsGui:setCrosshairEnabled(crosshairEnabled)

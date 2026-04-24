@@ -170,8 +170,8 @@ function ShoulderCamera.new(weaponsSystem)
 	self.sprintingWalkSpeed = 32
 	self.sprintFOV = 82 -- Field of view when sprinting
 	self.sprintCrosshairScale = 1.5 -- Crosshair scale when sprinting
-	self.killFOVKick = 3.5
-	self.headshotFOVKick = 5.5
+	self.killFOVKick = 5
+	self.headshotFOVKick = 7
 	self.fovKickDecay = 6
 
 	-- Current state

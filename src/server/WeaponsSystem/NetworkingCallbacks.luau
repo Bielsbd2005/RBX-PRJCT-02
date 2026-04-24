@@ -125,7 +125,7 @@ function NetworkingCallbacks.WeaponActivated(player, instance, activated)
 end
 
 -- Client-side: plays the elimination sound and shows kill feed for the killer
-function NetworkingCallbacks.PlayerEliminated(victimName, xpGained, wasHeadshot, victimPos)
+function NetworkingCallbacks.PlayerEliminated(victimName, xpGained, wasHeadshot, victimPos, coinAmount, streak)
 	if IsServer then return end
 
 	local WeaponsSystem = NetworkingCallbacks.WeaponsSystem
@@ -159,11 +159,12 @@ function NetworkingCallbacks.PlayerEliminated(victimName, xpGained, wasHeadshot,
 		StreakController.onKill()
 	end
 
+	-- Mostrar BonusEffect basado en la racha
 	if victimPos then
 		coroutine.wrap(function()
-			local MoneyEffectLocal = script.Parent:WaitForChild("Libraries"):FindFirstChild("MoneyEffectLocal")
-			if MoneyEffectLocal then
-				require(MoneyEffectLocal).Play(victimPos)
+			local BonusEffect = script.Parent:WaitForChild("Libraries"):FindFirstChild("BonusEffect")
+			if BonusEffect then
+				require(BonusEffect).Play(victimPos, streak or 1)
 			end
 		end)()
 	end

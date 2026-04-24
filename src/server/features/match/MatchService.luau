@@ -1522,6 +1522,11 @@ local function _onRequestReturnToMenu(_: {}, player: Player)
 	end
 end
 
+function MatchService:GetPlayerKillStreak(playerOrUserId: Player | number): number
+	local userId = if typeof(playerOrUserId) == "number" then playerOrUserId else playerOrUserId.UserId
+	return _killStreakByUserId[userId] or 0
+end
+
 function MatchService:Start(dataService: any): ()
 	if _started then
 		_log("Start ignored: service already started.")

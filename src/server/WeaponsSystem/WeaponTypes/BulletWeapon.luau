@@ -8,14 +8,11 @@ local ContentProvider = game:GetService("ContentProvider")
 
 local IsServer = RunService:IsServer()
 
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-
 local WeaponsSystemFolder = script.Parent.Parent
 local Libraries = WeaponsSystemFolder:WaitForChild("Libraries")
 local BaseWeapon = require(Libraries:WaitForChild("BaseWeapon"))
 local Parabola = require(Libraries:WaitForChild("Parabola"))
 local Roblox = require(Libraries:WaitForChild("Roblox"))
-local TeamUtils = require(ReplicatedStorage:WaitForChild("Shared").utils.TeamUtils)
 
 local Effects = WeaponsSystemFolder:WaitForChild("Assets"):WaitForChild("Effects")
 local ShotsFolder = Effects:WaitForChild("Shots")
@@ -271,9 +268,8 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 	-- Retrieve config values
 	local bulletSpeed = self:getConfigValue("BulletSpeed", 1000)
 	local maxDistance = self:getConfigValue("MaxDistance", 2000)
-	local trailLength = self:getConfigValue("TrailLength", nil)
-	local trailLengthFactor = self:getConfigValue("TrailLengthFactor", 1)
-	local showEntireTrailUntilHit = self:getConfigValue("ShowEntireTrailUntilHit", false)
+	-- Tracer: always show the full trajectory from origin to current bullet position
+	local tracerFadeTime = self:getConfigValue("TracerFadeTime", 0.3)
 	local gravityFactor = self:getConfigValue("GravityFactor", 0)
 	local minSpread = self:getConfigValue("MinSpread", 0)
 	local maxSpread = self:getConfigValue("MaxSpread", 0)
@@ -306,11 +302,6 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 	CollectionService:AddTag(bulletEffect, "WeaponsSystemIgnore")
 
 	local leadingParticles = bulletEffect:FindFirstChild("LeadingParticles", true)
-	local attachment0 = bulletEffect:FindFirstChild("Attachment0")
-	local trailParticles = nil
-	if attachment0 then
-		trailParticles = attachment0:FindFirstChild("TrailParticles")
-	end
 
 	local hitAttach = bulletEffect:FindFirstChild("HitEffect")
 	local hitParticles = bulletEffect:FindFirstChild("HitParticles", true)
@@ -323,7 +314,6 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 
 	local beamThickness0 = self:getConfigValue("BeamWidth0", 1.5)
 	local beamThickness1 = self:getConfigValue("BeamWidth1", 1.8)
-	local beamFadeTime = self:getConfigValue("BeamFadeTime", nil)
 
 	-- Enable beam trails for projectile
 	local beam0 = bulletEffect:FindFirstChild("Beam0")
@@ -368,11 +358,6 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 		flyingSound:Play()
 	end
 
-	-- Enable trail particles
-	if trailParticles then
-		trailParticles.Enabled = true
-	end
-
 	-- Set up parabola for projectile path
 	local parabola = Parabola.new()
 	parabola:setPhysicsLaunch(origin, dir * bulletSpeed, nil, 35 * -gravityFactor)
@@ -395,10 +380,7 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 	local timeSinceStart = 0
 	local flyingVisualEffectsFinished = false -- true if all particle effects shown while projectile is flying are done
 	local visualEffectsFinishTime = math.huge
-	local visualEffectsLingerTime = 0 -- max time any visual effect needs to finish
-	if beamFadeTime then
-		visualEffectsLingerTime = beamFadeTime
-	end
+	local visualEffectsLingerTime = tracerFadeTime
 	local hitInfo = {
 		sid = fireInfo.id,
 		pid = projectileIdx,
@@ -415,20 +397,13 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 		timeSinceStart = now - startTime
 
 		local travelDist = bulletSpeed * dt -- distance projectile has travelled since last frame
-		trailLength = trailLength or travelDist * trailLengthFactor
 
-		-- Note: the next three variables are all in terms of distance from starting point (which should be tip of current weapon)
-		local projBack = pTravelDistance - trailLength -- furthest back part of projectile (including the trail effect, so will be the start of the trail effect if any)
+		-- Tracer: always show from origin (0) to current bullet position
+		local projBack = 0 -- always start from the origin
 		local projFront = pTravelDistance -- most forward part of projectile
 		local maxDist = hitInfo.maxDist or 0 -- before it collides, this is the max distance the projectile can travel. After it collides, this is the hit point
 
-		-- This will make trailing beams render from tip of gun to wherever projectile is until projectile is destroyed
-		if showEntireTrailUntilHit then
-			projBack = 0
-		end
-
-		-- Validate projBack and projFront
-		projBack = math.clamp(projBack, 0, maxDist)
+		-- Clamp front to max distance
 		projFront = math.clamp(projFront, 0, maxDist)
 
 		if not didHit then
@@ -467,11 +442,6 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 
 				-- Deal with all effects that start/stop/change on hit
 
-				-- Disable trail particles
-				if trailParticles then
-					trailParticles.Enabled = false
-				end
-
 				-- Stop bullet flying sound
 				if flyingSound and flyingSound.IsPlaying then
 					flyingSound:Stop()
@@ -506,7 +476,7 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 								humanoid:GetState() ~= Enum.HumanoidStateType.Dead and
 								self.weaponsSystem.gui and
 								explodedPart.Parent ~= self.player.Character and
-								TeamUtils.areEnemies(explodedPart.Parent, self.player.Character)
+								self.weaponsSystem.playersOnDifferentTeams(self.weaponsSystem.getPlayerFromHumanoid(humanoid), self.player)
 							then
 								self.weaponsSystem.gui:OnHitOtherPlayer(self:calculateDamage(hitInfo.d), humanoid, explodedPart)
 							end
@@ -595,25 +565,6 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 					weld.Part1 = hitPart
 					weld.Parent = hitMark
 
-					-- Fade impact billboard's size and transparency over time
-					local impactBillboard = hitMark:FindFirstChild("ImpactBillboard")
-					if impactBillboard then
-						local impact = impactBillboard:FindFirstChild("Impact")
-						local impactTween = TweenService:Create(
-							impact,
-							TweenInfo.new(0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out, 0, false, 0),
-							{ Size = UDim2.new(1, 0, 1, 0) }
-						)
-						impactTween.Completed:Connect(function()
-							TweenService:Create(
-								impact,
-								TweenInfo.new(0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out, 0, false, 0),
-								{ Size = UDim2.new(0.5, 0, 0.5, 0), ImageTransparency = 1 }
-							):Play()
-						end)
-						impactTween:Play()
-					end
-
 					-- Destroy hitMark in 5 seconds
 					Debris:AddItem(hitMark, 5)
 				end
@@ -648,21 +599,22 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 
 		-- Update visual effects each frame
 
-		-- Update CFrame/velocity of projectile if the projectile uses a model (such as rocket or grenade)
-		if shouldMovePart then
+		-- Always update bulletEffect position to follow the bullet front (needed for trail particles on Attachment0)
+		if not stoppedMotion then
 			local bulletPos = parabola:samplePoint(1)
 			local bulletVelocity = parabola:sampleVelocity(1)
 			bulletEffect.CFrame = CFrame.new(bulletPos, bulletPos + bulletVelocity)
-			bulletEffect.Velocity = bulletVelocity.Unit * bulletSpeed
+			if shouldMovePart then
+				bulletEffect.Velocity = bulletVelocity.Unit * bulletSpeed
+			end
 		end
 
-		-- Update thickness and render trailing beams
+		-- Tracer beam: show full trajectory and fade out after hit
 		local thickness0 = beamThickness0
 		local thickness1 = beamThickness1
-		if beamFadeTime then
-			-- Fade out trail beams if projectile is no longer moving (hit something or reached max distance)
-			local timeSinceEnd = stoppedMotion and (now - stoppedMotionAt) or 0
-			local fadeAlpha = math.clamp(timeSinceEnd / beamFadeTime, 0, 1)
+		if stoppedMotion and tracerFadeTime > 0 then
+			local timeSinceEnd = now - stoppedMotionAt
+			local fadeAlpha = math.clamp(timeSinceEnd / tracerFadeTime, 0, 1)
 			thickness0 = thickness0 * (1 - fadeAlpha)
 			thickness1 = thickness1 * (1 - fadeAlpha)
 		end
@@ -739,7 +691,7 @@ function BulletWeapon:onHit(hitInfo)
 			hitInfo.h:GetState() ~= Enum.HumanoidStateType.Dead and
 			self.weaponsSystem.gui and
 			self.player == Players.LocalPlayer and
-			TeamUtils.areEnemies(hitInfo.h.Parent, self.player.Character)
+			self.weaponsSystem.playersOnDifferentTeams(self.weaponsSystem.getPlayerFromHumanoid(hitInfo.h), self.player)
 		then
 			-- Show hit indicators on gui of client that shot projectile if players are not on same team
 			self.weaponsSystem.gui:OnHitOtherPlayer(self:calculateDamage(hitInfo.d), hitInfo.h, hitPart)

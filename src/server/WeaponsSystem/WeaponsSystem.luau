@@ -14,6 +14,7 @@ local CollectionService = game:GetService("CollectionService")
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
 local Teams = game:GetService("Teams")
 local IsServer = RunService:IsServer()
 
@@ -30,6 +31,53 @@ local WeaponsGui = require(Libraries:WaitForChild("WeaponsGui"))
 local SpringService = require(Libraries:WaitForChild("SpringService"))
 local ancestorHasTag = require(Libraries:WaitForChild("ancestorHasTag"))
 ShoulderCamera.SpringService = SpringService
+
+local CashBonusSystem = nil
+local MatchService = nil
+local DataService = nil
+
+if IsServer then
+	local serverRoot = ServerScriptService:FindFirstChild("Server")
+	if serverRoot then
+		local featuresFolder = serverRoot:FindFirstChild("features")
+		local matchFeatures = featuresFolder and featuresFolder:FindFirstChild("match")
+		if matchFeatures then
+			local cashBonusModule = matchFeatures:FindFirstChild("CashBonusSystem")
+			if cashBonusModule and cashBonusModule:IsA("ModuleScript") then
+				local ok, result = pcall(require, cashBonusModule)
+				if ok then
+					CashBonusSystem = result
+				else
+					warn("WeaponsSystem: Failed to load CashBonusSystem: " .. tostring(result))
+				end
+			end
+
+			local matchServiceModule = matchFeatures:FindFirstChild("MatchService")
+			if matchServiceModule and matchServiceModule:IsA("ModuleScript") then
+				local ok, result = pcall(require, matchServiceModule)
+				if ok then
+					MatchService = result
+				else
+					warn("WeaponsSystem: Failed to load MatchService: " .. tostring(result))
+				end
+			end
+		end
+
+		local coreFolder = serverRoot:FindFirstChild("core")
+		local dataFolder = coreFolder and coreFolder:FindFirstChild("data")
+		if dataFolder then
+			local dataServiceModule = dataFolder:FindFirstChild("DataService")
+			if dataServiceModule and dataServiceModule:IsA("ModuleScript") then
+				local ok, result = pcall(require, dataServiceModule)
+				if ok then
+					DataService = result
+				else
+					warn("WeaponsSystem: Failed to load DataService: " .. tostring(result))
+				end
+			end
+		end
+	end
+end
 
 local Configuration = WeaponsSystemFolder:WaitForChild("Configuration")
 local ConfigurationValues = {
@@ -745,7 +793,32 @@ local function _defaultDamageCallback(system, target, amount, damageType, dealer
 					local xpGained = wasHeadshot and 150 or 100
 					local targetHrp = targetCharacter:FindFirstChild("HumanoidRootPart")
 					local victimPos = targetHrp and targetHrp.Position or targetCharacter:GetPivot().Position
-					eliminatedEvent:FireClient(dealerPlayer, victimName, xpGained, wasHeadshot, victimPos)
+
+					local streakAfterKill = 1
+					if MatchService and MatchService.GetPlayerKillStreak then
+						local ok, currentStreak = pcall(function()
+							return MatchService:GetPlayerKillStreak(dealerPlayer)
+						end)
+						if ok and typeof(currentStreak) == "number" then
+							streakAfterKill = math.max(1, currentStreak + 1)
+						end
+					end
+
+					local coinAmount = nil
+					if CashBonusSystem and CashBonusSystem.CalculateKillReward then
+						local reward = CashBonusSystem.CalculateKillReward(wasHeadshot, streakAfterKill)
+						if reward then
+							coinAmount = reward.coinAmount
+							if DataService and DataService.Increment and reward.totalCash > 0 then
+								local okIncrement = DataService:Increment(dealerPlayer, { "Stats", "Cash" }, reward.totalCash)
+								if not okIncrement then
+									warn("WeaponsSystem: Failed to grant kill cash to " .. dealerPlayer.Name)
+								end
+							end
+						end
+					end
+
+					eliminatedEvent:FireClient(dealerPlayer, victimName, xpGained, wasHeadshot, victimPos, coinAmount, streakAfterKill)
 				end
 			end
 

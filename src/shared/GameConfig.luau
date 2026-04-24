@@ -47,7 +47,7 @@ local GameConfig: GameConfigType = {
 	RealPlayerCapPerServer = 6,
 	TeamSizeTarget = 4,
 	TotalParticipantsTarget = 8,
-	MaxRoundDuration = 3,
+	MaxRoundDuration = 120,
 	WinScoreLimit = 30,
 
 	Teams = {
