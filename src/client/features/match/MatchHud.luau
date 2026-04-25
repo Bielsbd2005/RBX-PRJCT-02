@@ -348,7 +348,10 @@ function MatchHud:resetMatchState()
 	table.clear(self._killsByUserId)
 	table.clear(self._deathsByUserId)
 	table.clear(self._streakByUserId)
-	table.clear(self._botRoster)
+	-- NOTE: _botRoster no se limpia aquí porque el servidor lo envía
+	-- de forma asíncrona vía Network.Match.BotRoster y puede llegar
+	-- antes de JoinMatchSpawned. Se reemplaza completamente cada vez
+	-- que llega un BotRoster nuevo desde el servidor.
 	self._killsByUserId[self._localUserId] = 0
 	self._deathsByUserId[self._localUserId] = 0
 	self:queuePlayerRowsUpdate()
@@ -411,7 +414,7 @@ function MatchHud:captureEndResultsData(): (string, { EndResultsPlayerEntry })
 		})
 	end
 
-	for fakeUserId, entry in self._botRoster do
+	for fakeUserId, entry in pairs(self._botRoster) do
 		table.insert(entries, {
 			userId = fakeUserId,
 			name = entry.displayName,
@@ -524,7 +527,7 @@ function MatchHud:_updatePlayerRows()
 		end
 	end
 
-	for fakeUserId, entry in self._botRoster do
+	for fakeUserId, entry in pairs(self._botRoster) do
 		if entry.team == "A" or entry.team == "B" then
 			table.insert(entriesByTeam[entry.team], { userId = fakeUserId, name = entry.displayName, image = entry.image, isBot = true, team = entry.team })
 		end
@@ -552,8 +555,9 @@ function MatchHud:_updatePlayerRows()
 	end
 
 	for index, rowRef in ipairs(self._hudRefs.teamBPlayerRows) do
-		local reverseIndex = (#self._hudRefs.teamBPlayerRows - index) + 1
-		self:_applyRowEntry(rowRef, string.format("B%d", index), entriesByTeam.B[reverseIndex])
+		local reverseIndex = (#entriesByTeam.B - index) + 1
+		local entry = if reverseIndex >= 1 then entriesByTeam.B[reverseIndex] else nil
+		self:_applyRowEntry(rowRef, string.format("B%d", index), entry)
 	end
 end
 
