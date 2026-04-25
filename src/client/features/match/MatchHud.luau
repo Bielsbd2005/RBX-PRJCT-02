@@ -262,6 +262,7 @@ function MatchHud.new(matchHudGui: ScreenGui?): any
 	-- Tracking de partida
 	self._killsByUserId = {} :: { [number]: number }
 	self._deathsByUserId = {} :: { [number]: number }
+	self._streakByUserId = {} :: { [number]: number }
 	self._botRoster = {} :: { [number]: BotRosterEntry }
 
 	-- Thumbnails
@@ -346,18 +347,22 @@ end
 function MatchHud:resetMatchState()
 	table.clear(self._killsByUserId)
 	table.clear(self._deathsByUserId)
+	table.clear(self._streakByUserId)
 	table.clear(self._botRoster)
 	self._killsByUserId[self._localUserId] = 0
 	self._deathsByUserId[self._localUserId] = 0
 	self:queuePlayerRowsUpdate()
 end
 
-function MatchHud:applyPlayerState(userId: number, kills: number, deaths: number?)
+function MatchHud:applyPlayerState(userId: number, kills: number, deaths: number?, streak: number?)
 	self._killsByUserId[userId] = math.max(0, kills)
 	if deaths ~= nil then
 		if userId < 0 then
 			self._deathsByUserId[userId] = math.max(0, deaths)
 		end
+	end
+	if streak ~= nil then
+		self._streakByUserId[userId] = math.max(0, streak)
 	end
 	self:queuePlayerRowsUpdate()
 end

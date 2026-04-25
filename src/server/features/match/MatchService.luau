@@ -66,6 +66,11 @@ local _respawnDebounceByUserId: { [number]: boolean } = {}
 local _matchKillsByUserId: { [number]: number } = {}
 local _killStreakByUserId: { [number]: number } = {}
 local _matchDeathsByUserId: { [number]: number } = {}
+local _killStreakTimeoutByUserId: { [number]: thread? } = {}
+local _lastMapLoadStateBroadcastKey: string? = nil
+local _lastRoundStateBroadcastKey: string? = nil
+local _lastBotRosterJsonBroadcast: string? = nil
+local _lastBroadcastStreakKeyByUserId: { [number]: string } = {}
 
 local _teamA: Team? = nil
 local _teamB: Team? = nil
@@ -92,6 +97,12 @@ local function _setPhase(nextPhase: string, reason: string?)
 end
 
 local function _sendMapLoadStateToAll()
+	local key = string.format("%s|%s|%s", tostring(_isMapLoading), tostring(_isPlayEnabled), _activeMapName)
+	if _lastMapLoadStateBroadcastKey == key then
+		return
+	end
+	_lastMapLoadStateBroadcastKey = key
+
 	Network.Match.MapLoadState.SendToAll({
 		isLoading = _isMapLoading,
 		playEnabled = _isPlayEnabled,
@@ -126,6 +137,11 @@ local function _broadcastRoundState()
 	end
 
 	local timeLeft = math.ceil(math.max(0, _roundEndAt - time()))
+	local key = string.format("%d|%d|%d", _roundScoreA, _roundScoreB, timeLeft)
+	if _lastRoundStateBroadcastKey == key then
+		return
+	end
+	_lastRoundStateBroadcastKey = key
 	Network.Match.RoundState.SendToAll(_buildRoundStatePacket(timeLeft))
 end
 
@@ -143,12 +159,40 @@ local function _sendRoundStateToPlayer(player: Player)
 	end
 end
 
-local function _sendPlayerStreakToAll(userId: number)
+local _sendPlayerStreakToAll: (userId: number) -> ()
+
+local function _resetStreakTimeout(userId: number)
+	if _killStreakTimeoutByUserId[userId] then
+		if type(task.cancel) == "function" then
+			pcall(task.cancel, _killStreakTimeoutByUserId[userId])
+		end
+		_killStreakTimeoutByUserId[userId] = nil
+	end
+end
+
+local function _setupStreakTimeout(userId: number)
+	_resetStreakTimeout(userId)
+	_killStreakTimeoutByUserId[userId] = task.delay(7, function()
+		_killStreakByUserId[userId] = 0
+		_killStreakTimeoutByUserId[userId] = nil
+		_sendPlayerStreakToAll(userId)
+	end)
+end
+
+_sendPlayerStreakToAll = function(userId: number)
+	local streak = _killStreakByUserId[userId] or 0
+	local kills = _matchKillsByUserId[userId] or 0
+	local deaths = _matchDeathsByUserId[userId] or 0
+	local key = string.format("%d|%d|%d", kills, streak, deaths)
+	if _lastBroadcastStreakKeyByUserId[userId] == key then
+		return
+	end
+	_lastBroadcastStreakKeyByUserId[userId] = key
 	Network.Match.PlayerStreakState.SendToAll({
 		userId = tostring(userId),
-		kills = _matchKillsByUserId[userId] or 0,
-		streak = _killStreakByUserId[userId] or 0,
-		deaths = _matchDeathsByUserId[userId] or 0,
+		kills = kills,
+		streak = streak,
+		deaths = deaths,
 	})
 end
 
@@ -171,10 +215,15 @@ local function _sendAllPlayerStreaksToPlayer(player: Player)
 	for _, otherPlayer in Players:GetPlayers() do
 		_sendPlayerStreakToPlayer(player, otherPlayer.UserId)
 	end
-	-- Also send bot streaks
+	-- Para bots, enviar solo si tienen actividad.
 	for botUserId in _matchKillsByUserId do
 		if botUserId < 0 then
-			_sendPlayerStreakToPlayer(player, botUserId)
+			local kills = _matchKillsByUserId[botUserId] or 0
+			local deaths = _matchDeathsByUserId[botUserId] or 0
+			local streak = _killStreakByUserId[botUserId] or 0
+			if kills > 0 or deaths > 0 or streak > 0 then
+				_sendPlayerStreakToPlayer(player, botUserId)
+			end
 		end
 	end
 end
@@ -184,6 +233,10 @@ local function _broadcastBotRoster()
 	local roster = _AIService:GetBotRoster()
 	local ok, json = pcall(HttpService.JSONEncode, HttpService, roster)
 	if ok then
+		if _lastBotRosterJsonBroadcast == json then
+			return
+		end
+		_lastBotRosterJsonBroadcast = json
 		Network.Match.BotRoster.SendToAll({ json = json })
 	end
 end
@@ -247,6 +300,17 @@ local function _resetAllPlayerStreakState()
 	table.clear(_matchKillsByUserId)
 	table.clear(_killStreakByUserId)
 	table.clear(_matchDeathsByUserId)
+	table.clear(_lastBroadcastStreakKeyByUserId)
+
+	-- Clear all streak timeouts
+	for userId, timeout in _killStreakTimeoutByUserId do
+		if timeout then
+			if type(task.cancel) == "function" then
+				pcall(task.cancel, timeout)
+			end
+		end
+	end
+	table.clear(_killStreakTimeoutByUserId)
 
 	for _, player in Players:GetPlayers() do
 		_matchKillsByUserId[player.UserId] = 0
@@ -258,6 +322,7 @@ end
 
 local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?)
 	_killStreakByUserId[deadPlayer.UserId] = 0
+	_resetStreakTimeout(deadPlayer.UserId)
 	if _matchKillsByUserId[deadPlayer.UserId] == nil then
 		_matchKillsByUserId[deadPlayer.UserId] = 0
 	end
@@ -268,11 +333,8 @@ local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?)
 		return
 	end
 
-	-- Bot attacker (negative fakeUserId)
+	-- Solo contar kills de jugadores, NO de bots
 	if attackerUserId < 0 then
-		_matchKillsByUserId[attackerUserId] = (_matchKillsByUserId[attackerUserId] or 0) + 1
-		_killStreakByUserId[attackerUserId] = (_killStreakByUserId[attackerUserId] or 0) + 1
-		_sendPlayerStreakToAll(attackerUserId)
 		return
 	end
 
@@ -287,6 +349,7 @@ local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?)
 
 	_matchKillsByUserId[attackerUserId] = (_matchKillsByUserId[attackerUserId] or 0) + 1
 	_killStreakByUserId[attackerUserId] = (_killStreakByUserId[attackerUserId] or 0) + 1
+	_setupStreakTimeout(attackerUserId)
 	_sendPlayerStreakToAll(attackerUserId)
 end
 
@@ -957,8 +1020,22 @@ local function _endRoundAndRestartVoting(reason: string)
 	table.clear(_roundEndEligibleByUserId)
 	table.clear(_matchKillsByUserId)
 	table.clear(_killStreakByUserId)
+	table.clear(_lastBroadcastStreakKeyByUserId)
+
+	-- Clear all streak timeouts
+	for userId, timeout in _killStreakTimeoutByUserId do
+		if timeout then
+			if type(task.cancel) == "function" then
+				pcall(task.cancel, timeout)
+			end
+		end
+	end
+	table.clear(_killStreakTimeoutByUserId)
 
 	_hasCompletedInitialVote = false
+	_lastMapLoadStateBroadcastKey = nil
+	_lastRoundStateBroadcastKey = nil
+	_lastBotRosterJsonBroadcast = nil
 	_setPhase("Idle", "round cleaned; starting next vote")
 	task.defer(function()
 		_startVoteIfPossible()
@@ -1035,6 +1112,9 @@ local function _startMapLoadFlow(winnerMapName: string)
 	_isMapLoading = true
 	_isPlayEnabled = false
 	_activeMapName = winnerMapName
+	_lastMapLoadStateBroadcastKey = nil
+	_lastRoundStateBroadcastKey = nil
+	_lastBotRosterJsonBroadcast = nil
 	_setPhase("MapLoading", winnerMapName)
 	_sendMapLoadStateToAll()
 
@@ -1095,14 +1175,17 @@ local function _startMapLoadFlow(winnerMapName: string)
 					if attackerAt > 0 and math.abs(time() - attackerAt) > 4 then
 						attackerUserId = nil
 					end
-					if attackerUserId and attackerUserId ~= botFakeUserId then
+						if attackerUserId and attackerUserId ~= botFakeUserId then
 						_matchKillsByUserId[attackerUserId] = (_matchKillsByUserId[attackerUserId] or 0) + 1
-						_killStreakByUserId[attackerUserId] = (_killStreakByUserId[attackerUserId] or 0) + 1
+							-- Solo los jugadores humanos acumulan streak/timer.
+							if attackerUserId > 0 then
+								_killStreakByUserId[attackerUserId] = (_killStreakByUserId[attackerUserId] or 0) + 1
+								_setupStreakTimeout(attackerUserId)
+							end
 						_sendPlayerStreakToAll(attackerUserId)
 					end
 
-					-- Reset the dead bot's streak and increment its deaths
-					_killStreakByUserId[botFakeUserId] = 0
+						-- Los bots no usan streak: solo contabilizar kills/deaths para HUD.
 					if _matchKillsByUserId[botFakeUserId] == nil then
 						_matchKillsByUserId[botFakeUserId] = 0
 					end
@@ -1501,6 +1584,7 @@ local function _onRequestReturnToMenu(_: {}, player: Player)
 	_respawnDebounceByUserId[player.UserId] = nil
 	_pendingSpawnByUserId[player.UserId] = nil
 	_killStreakByUserId[player.UserId] = 0
+	_resetStreakTimeout(player.UserId)
 	_rebalanceBotsForCurrentRound("return to menu")
 	if _matchKillsByUserId[player.UserId] == nil then
 		_matchKillsByUserId[player.UserId] = 0
@@ -1606,6 +1690,7 @@ function MatchService:Start(dataService: any): ()
 		_respawnDebounceByUserId[player.UserId] = nil
 		_matchKillsByUserId[player.UserId] = nil
 		_killStreakByUserId[player.UserId] = nil
+		_resetStreakTimeout(player.UserId)
 		_log(string.format("Player removing: %s (%d).", player.Name, player.UserId))
 		_disconnectVoteForPlayer(player.UserId)
 		_joinDebounceByUserId[player.UserId] = nil

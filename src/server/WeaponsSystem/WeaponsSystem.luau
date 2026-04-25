@@ -98,6 +98,7 @@ local REMOTE_EVENT_NAMES = {
 	"WeaponActivated",
 	"PlayerEliminated",
 	"PlayerAssist",
+	"SyncStreakState",
 }
 
 -- Damage contributors per humanoid for assist tracking
@@ -780,14 +781,6 @@ local function _defaultDamageCallback(system, target, amount, damageType, dealer
 				else (targetCharacter:GetAttribute("DisplayName") or targetCharacter.Name)
 
 			if dealerPlayer then
-				if targetPlayer then
-					Network.Match.PlayerStreakState.SendToAll({
-						userId = tostring(targetPlayer.UserId),
-						kills = 0,
-						streak = 0,
-					})
-				end
-
 				local eliminatedEvent = WeaponsSystem.remoteEvents["PlayerEliminated"]
 				if eliminatedEvent then
 					local xpGained = wasHeadshot and 150 or 100

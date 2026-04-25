@@ -29,6 +29,7 @@ local NPCHighlightController = require(script.NPCHighlightController)
 local HealthBillboardController = require(script.HealthBillboardController)
 local MapVoteView = require(script.MapVoteView)
 
+
 local MatchFeature = {}
 
 local LOCAL_VOTE_COOLDOWN = 0.12
@@ -401,12 +402,15 @@ function MatchFeature.start(menuController: any): any
 		userId: string,
 		kills: number,
 		deaths: number,
+		streak: number,
 	})
 		local userId = tonumber(data.userId)
 		if not userId then
 			return
 		end
-		hud:applyPlayerState(userId, data.kills, data.deaths)
+		hud:applyPlayerState(userId, data.kills, data.deaths, data.streak)
+
+		-- Si es el jugador local, sincroniza el StreakController con el streak del servidor
 	end), true)
 
 	-- ── Network: BotRoster ───────────────────────────────────

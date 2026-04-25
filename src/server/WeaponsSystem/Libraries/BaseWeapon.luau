@@ -126,21 +126,23 @@ function BaseWeapon:doInitialSetup()
 			self.handle = self.instance:FindFirstChild("Handle")
 
 			local model = self.instance:FindFirstChildOfClass("Model")
-			local handleAttachment = model:FindFirstChild("HandleAttachment", true)
+			if model then
+				local handleAttachment = model:FindFirstChild("HandleAttachment", true)
 
-			if self.handle and handleAttachment then
-				local handleOffset = model.PrimaryPart.CFrame:toObjectSpace(handleAttachment.WorldCFrame)
+				if self.handle and handleAttachment then
+					local handleOffset = model.PrimaryPart.CFrame:toObjectSpace(handleAttachment.WorldCFrame)
 
-				local weld = Instance.new("Weld")
-				weld.Name = "HandleWeld"
-				weld.Part0 = self.handle
-				weld.Part1 = model.PrimaryPart
-				weld.C0 = CFrame.new()
-				weld.C1 = handleOffset
-				weld.Parent = self.handle
+					local weld = Instance.new("Weld")
+					weld.Name = "HandleWeld"
+					weld.Part0 = self.handle
+					weld.Part1 = model.PrimaryPart
+					weld.C0 = CFrame.new()
+					weld.C1 = handleOffset
+					weld.Parent = self.handle
 
-				self.handle.Anchored = false
-				model.PrimaryPart.Anchored = false
+					self.handle.Anchored = false
+					model.PrimaryPart.Anchored = false
+				end
 			end
 		end
 	end

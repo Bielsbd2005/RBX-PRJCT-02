@@ -342,4 +342,28 @@ function StreakController.onKill()
 	startIdlePulse(currentStreak)     -- Breathing + gentle rotation sway (continuous)
 end
 
+-- ═══════════════════════════════════════════════════
+-- Sincroniza el streak desde el servidor
+-- Cuando el servidor resetea el streak o lo actualiza, se sincroniza aquí
+-- ═══════════════════════════════════════════════════
+function StreakController.setServerStreak(serverStreak: number)
+	if serverStreak == 0 then
+		-- Si el servidor dice que el streak es 0, reseteamos
+		StreakController.reset()
+	elseif serverStreak > 0 then
+		-- Si el servidor tiene un streak mayor a 0, sincronizamos
+		-- Pero no llamamos a onKill nuevamente para no duplicar efectos
+		if currentStreak ~= serverStreak then
+			currentStreak = serverStreak
+			local frame = resolveUI()
+			if frame then
+				setTitleText(currentStreak)
+				setStreakColors(currentStreak)
+				frame.Visible = true
+				restartBarDrainTween()
+			end
+		end
+	end
+end
+
 return StreakController

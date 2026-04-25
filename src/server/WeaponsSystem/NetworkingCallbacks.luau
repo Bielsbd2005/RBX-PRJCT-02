@@ -200,4 +200,16 @@ function NetworkingCallbacks.PlayerAssist()
 	end
 end
 
+-- Client-side: sincroniza el StreakController con el estado del servidor
+function NetworkingCallbacks.SyncStreakState(newStreak: number)
+	if IsServer then return end
+
+	if StreakController then
+		StreakController.setServerStreak(newStreak)
+	end
+end
+
+-- Exportar globalmente para que el cliente pueda acceder
+_G.WeaponsSystemNetworkingCallbacks = NetworkingCallbacks
+
 return NetworkingCallbacks
