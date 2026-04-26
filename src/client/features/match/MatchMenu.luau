@@ -5,6 +5,7 @@
 ]]
 
 local MatchMenu = {}
+local UserInputService = game:GetService("UserInputService")
 
 local _menuController: any = nil
 local _playerGui: PlayerGui = nil :: any
@@ -55,6 +56,40 @@ local function _findPlayStatusLabel(playButton: GuiButton): TextLabel?
 	return nil
 end
 
+local function _findPlayPcNode(playButton: GuiButton): GuiObject?
+	local contentNode = playButton:FindFirstChild("Content")
+	if not contentNode then
+		return nil
+	end
+
+	local pcNode = contentNode:FindFirstChild("PC")
+	if pcNode and pcNode:IsA("GuiObject") then
+		return pcNode
+	end
+
+	local recursivePcNode = contentNode:FindFirstChild("PC", true)
+	if recursivePcNode and recursivePcNode:IsA("GuiObject") then
+		return recursivePcNode
+	end
+
+	return nil
+end
+
+local function _isDesktopPlatform(): boolean
+	return UserInputService.KeyboardEnabled and not UserInputService.TouchEnabled
+end
+
+local function _applyPlatformVisibilityToButton(button: GuiButton?)
+	if not button then
+		return
+	end
+
+	local pcNode = _findPlayPcNode(button)
+	if pcNode then
+		pcNode.Visible = _isDesktopPlatform()
+	end
+end
+
 local function _applyPhaseLabelToButton(button: GuiButton?)
 	if not button then
 		return
@@ -83,6 +118,7 @@ function MatchMenu.init(
 
 	local playButton = _findPlayButton(menuGui)
 	_applyPhaseLabelToButton(playButton)
+	_applyPlatformVisibilityToButton(playButton)
 end
 
 function MatchMenu.getCurrentGui(): ScreenGui?
@@ -150,6 +186,7 @@ end
 function MatchMenu.applyPhaseLabelToNewGui(gui: ScreenGui)
 	local playButton = _findPlayButton(gui)
 	_applyPhaseLabelToButton(playButton)
+	_applyPlatformVisibilityToButton(playButton)
 end
 
 --- Detecta si hay algún panel de lobby abierto (Locker, Settings, Store, etc.).

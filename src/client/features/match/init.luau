@@ -3,6 +3,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local HttpService = game:GetService("HttpService")
+local UserInputService = game:GetService("UserInputService")
 
 local Client = script.Parent.Parent
 local Packages = ReplicatedStorage:WaitForChild("Packages")
@@ -209,6 +210,29 @@ function MatchFeature.start(menuController: any): any
 		playButton.AutoButtonColor = enabled
 	end
 
+	local function tryJoinMatchFromLobby()
+		if not playEnabled or MatchState.getPhase() ~= "Lobby" then
+			return
+		end
+
+		MatchState.setPhase("Joining")
+		MatchMenu.enforceHidden()
+		iris:close(function()
+			if MatchState.getPhase() == "Joining" then
+				Network.Match.RequestJoinMatch.Send({})
+				task.delay(JOIN_CONFIRM_TIMEOUT, function()
+					if MatchState.getPhase() ~= "Joining" then
+						return
+					end
+					MatchState.setPhase("Lobby")
+					MatchMenu.forceShow()
+					iris:open()
+					warn("[MatchFeature] Join timeout waiting for spawn confirmation.")
+				end)
+			end
+		end)
+	end
+
 	local function notInActiveMatch(): boolean
 		return not MatchState.isActive()
 	end
@@ -261,25 +285,20 @@ function MatchFeature.start(menuController: any): any
 
 	-- ── Play button ──────────────────────────────────────────
 	janitor:Add(playButton.MouseButton1Click:Connect(function()
-		if not playEnabled or MatchState.getPhase() ~= "Lobby" then
+		tryJoinMatchFromLobby()
+	end), "Disconnect")
+
+	janitor:Add(UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessedEvent: boolean)
+		if gameProcessedEvent then
 			return
 		end
-		MatchState.setPhase("Joining")
-		MatchMenu.enforceHidden()
-		iris:close(function()
-			if MatchState.getPhase() == "Joining" then
-				Network.Match.RequestJoinMatch.Send({})
-				task.delay(JOIN_CONFIRM_TIMEOUT, function()
-					if MatchState.getPhase() ~= "Joining" then
-						return
-					end
-					MatchState.setPhase("Lobby")
-					MatchMenu.forceShow()
-					iris:open()
-					warn("[MatchFeature] Join timeout waiting for spawn confirmation.")
-				end)
-			end
-		end)
+		if input.KeyCode ~= Enum.KeyCode.Space then
+			return
+		end
+		if UserInputService:GetFocusedTextBox() ~= nil then
+			return
+		end
+		tryJoinMatchFromLobby()
 	end), "Disconnect")
 
 	-- ── Network: MapLoadState ────────────────────────────────
