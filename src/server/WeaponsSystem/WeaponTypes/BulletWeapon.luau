@@ -5,14 +5,17 @@ local Debris = game:GetService("Debris")
 local ContextActionService = game:GetService("ContextActionService")
 local CollectionService = game:GetService("CollectionService")
 local ContentProvider = game:GetService("ContentProvider")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local IsServer = RunService:IsServer()
 
 local WeaponsSystemFolder = script.Parent.Parent
+local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Libraries = WeaponsSystemFolder:WaitForChild("Libraries")
 local BaseWeapon = require(Libraries:WaitForChild("BaseWeapon"))
 local Parabola = require(Libraries:WaitForChild("Parabola"))
 local Roblox = require(Libraries:WaitForChild("Roblox"))
+local TeamUtils = require(Shared.utils.TeamUtils)
 
 local Effects = WeaponsSystemFolder:WaitForChild("Assets"):WaitForChild("Effects")
 local ShotsFolder = Effects:WaitForChild("Shots")
@@ -35,6 +38,19 @@ local localPlayer = not IsServer and Players.LocalPlayer
 local BulletWeapon = {}
 BulletWeapon.__index = BulletWeapon
 setmetatable(BulletWeapon, BaseWeapon)
+
+local function isEnemyHumanoidForPlayer(humanoid, player)
+	if not humanoid or not player or not player.Character then
+		return true
+	end
+
+	local targetCharacter = humanoid.Parent
+	if not targetCharacter or not targetCharacter:IsA("Model") then
+		return true
+	end
+
+	return TeamUtils.areEnemies(player.Character, targetCharacter)
+end
 
 BulletWeapon.CanAimDownSights = true
 BulletWeapon.CanBeFired = true
@@ -476,7 +492,7 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 								humanoid:GetState() ~= Enum.HumanoidStateType.Dead and
 								self.weaponsSystem.gui and
 								explodedPart.Parent ~= self.player.Character and
-								self.weaponsSystem.playersOnDifferentTeams(self.weaponsSystem.getPlayerFromHumanoid(humanoid), self.player)
+								isEnemyHumanoidForPlayer(humanoid, self.player)
 							then
 								self.weaponsSystem.gui:OnHitOtherPlayer(self:calculateDamage(hitInfo.d), humanoid, explodedPart)
 							end
@@ -496,7 +512,7 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 				if hitPart and hitPart:IsA("Terrain") then
 					hitPartColor = workspace.Terrain:GetMaterialColor(hitMaterial or Enum.Material.Sand)
 				end
-				if hitInfo.h and hitInfo.h:IsA("Humanoid") and hitParticles and numHitParticles > 0 and hitPart then
+				if hitInfo.h and hitInfo.h:IsA("Humanoid") and hitParticles and numHitParticles > 0 and hitPart and isEnemyHumanoidForPlayer(hitInfo.h, self.player) then
 					-- Show particle effect for hitting a player/humanoid
 					hitParticles.Color = ColorSequence.new(Color3.fromRGB(255, 255, 255))
 					hitParticles:Emit(numHitParticles)
@@ -684,14 +700,14 @@ function BulletWeapon:onHit(hitInfo)
 
 		if IsServer and
 			(not hitInfo.h:IsA("Humanoid") or
-				self.weaponsSystem.playersOnDifferentTeams(self.weaponsSystem.getPlayerFromHumanoid(hitInfo.h), self.player))
+				isEnemyHumanoidForPlayer(hitInfo.h, self.player))
 		then
 			self:applyDamage(hitInfo)
 		elseif hitInfo.h:IsA("Humanoid") and
 			hitInfo.h:GetState() ~= Enum.HumanoidStateType.Dead and
 			self.weaponsSystem.gui and
 			self.player == Players.LocalPlayer and
-			self.weaponsSystem.playersOnDifferentTeams(self.weaponsSystem.getPlayerFromHumanoid(hitInfo.h), self.player)
+			isEnemyHumanoidForPlayer(hitInfo.h, self.player)
 		then
 			-- Show hit indicators on gui of client that shot projectile if players are not on same team
 			self.weaponsSystem.gui:OnHitOtherPlayer(self:calculateDamage(hitInfo.d), hitInfo.h, hitPart)

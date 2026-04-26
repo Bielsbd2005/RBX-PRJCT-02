@@ -74,6 +74,7 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 
 	local DataController = require(clientRoot.core.data.DataController)
 	local MenuController = require(clientRoot.core.ui.MenuController)
+	local WeaponWrapAnimator = require(clientRoot.core.visuals.WeaponWrapAnimator)
 	local FusionFeature = require(clientRoot.features.fusion)
 	local StoreFeature = require(clientRoot.features.store)
 	local SettingsFeature = require(clientRoot.features.settings)
@@ -83,6 +84,10 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 	local MatchFeature = require(clientRoot.features.match)
 
 	DataController:Start()
+	WeaponWrapAnimator.start()
+	_janitor:Add(function()
+		WeaponWrapAnimator.stop()
+	end, true)
 
 	local camera = Workspace.CurrentCamera
 	local camerasFolder = Workspace:WaitForChild("Cameras")

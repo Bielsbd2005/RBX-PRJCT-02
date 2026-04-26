@@ -9,7 +9,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
-local RunService = game:GetService("RunService")
+local CollectionService = game:GetService("CollectionService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ItemsConfig = require(Shared.constants.ItemsConfig)
@@ -24,6 +24,7 @@ local DEFAULT_WEAPON_SKIN_ID = "Default"
 local DEFAULT_WRAP_STUDS_PER_TILE = 3
 local DEFAULT_WRAP_SCROLL_SPEED_U = 1
 local DEFAULT_WRAP_SCROLL_SPEED_V = 0
+local ANIMATED_WRAP_TEXTURE_TAG = "AnimatedWeaponWrapTexture"
 
 local WEAPON_WRAP_TEXTURE_FACE_BY_NAME: { [string]: Enum.NormalId } = {
 	ScrollTexture_Top = Enum.NormalId.Top,
@@ -42,8 +43,6 @@ local WEAPON_WRAP_TEXTURE_ORDER = {
 	"ScrollTexture_Front",
 	"ScrollTexture_Back",
 }
-
-local _animatedWrapConnections: { [Tool]: RBXScriptConnection } = {}
 
 -- ── Helpers internos ─────────────────────────────────────────
 
@@ -159,12 +158,6 @@ local function _resolveWeaponWrapForLoadout(loadout: any, loadoutCategory: "Main
 end
 
 local function _applyWeaponWrapToTool(tool: Tool, wrapId: string)
-	local existingAnimationConnection = _animatedWrapConnections[tool]
-	if existingAnimationConnection then
-		existingAnimationConnection:Disconnect()
-		_animatedWrapConnections[tool] = nil
-	end
-
 	local weaponModelNode = tool:FindFirstChild("WeaponModel", true)
 	if not weaponModelNode or not weaponModelNode:IsA("Model") then
 		return
@@ -189,7 +182,6 @@ local function _applyWeaponWrapToTool(tool: Tool, wrapId: string)
 	local animated = validDefinition and wrapDefinition.Animated == true
 	local scrollSpeedU = if validDefinition then tonumber(wrapDefinition.ScrollSpeedU) or DEFAULT_WRAP_SCROLL_SPEED_U else DEFAULT_WRAP_SCROLL_SPEED_U
 	local scrollSpeedV = if validDefinition then tonumber(wrapDefinition.ScrollSpeedV) or DEFAULT_WRAP_SCROLL_SPEED_V else DEFAULT_WRAP_SCROLL_SPEED_V
-	local animatedTextures = {} :: { Texture }
 
 	for _, child in primaryPart:GetChildren() do
 		if child:IsA("Texture") and string.sub(child.Name, 1, 14) == "ScrollTexture_" then
@@ -218,42 +210,18 @@ local function _applyWeaponWrapToTool(tool: Tool, wrapId: string)
 			texture.StudsPerTileV = studsPerTile
 			texture.OffsetStudsU = 0
 			texture.OffsetStudsV = 0
-			table.insert(animatedTextures, texture)
+			texture:SetAttribute("WrapAnimated", animated)
+			texture:SetAttribute("WrapScrollSpeedU", scrollSpeedU)
+			texture:SetAttribute("WrapScrollSpeedV", scrollSpeedV)
+
+			if animated then
+				CollectionService:AddTag(texture, ANIMATED_WRAP_TEXTURE_TAG)
+			else
+				CollectionService:RemoveTag(texture, ANIMATED_WRAP_TEXTURE_TAG)
+			end
 		end
 	elseif baseColor then
 		primaryPart.Color = baseColor
-	end
-
-	if textureId and animated and #animatedTextures > 0 then
-		_animatedWrapConnections[tool] = RunService.Heartbeat:Connect(function(dt)
-			if tool.Parent == nil then
-				local connection = _animatedWrapConnections[tool]
-				if connection then
-					connection:Disconnect()
-					_animatedWrapConnections[tool] = nil
-				end
-				return
-			end
-
-			local hasAliveTexture = false
-			for _, texture in animatedTextures do
-				if texture.Parent then
-					hasAliveTexture = true
-					local tileU = if texture.StudsPerTileU ~= 0 then texture.StudsPerTileU else 1
-					local tileV = if texture.StudsPerTileV ~= 0 then texture.StudsPerTileV else 1
-					texture.OffsetStudsU = (texture.OffsetStudsU + scrollSpeedU * dt) % tileU
-					texture.OffsetStudsV = (texture.OffsetStudsV + scrollSpeedV * dt) % tileV
-				end
-			end
-
-			if not hasAliveTexture then
-				local connection = _animatedWrapConnections[tool]
-				if connection then
-					connection:Disconnect()
-					_animatedWrapConnections[tool] = nil
-				end
-			end
-		end)
 	end
 end
 
