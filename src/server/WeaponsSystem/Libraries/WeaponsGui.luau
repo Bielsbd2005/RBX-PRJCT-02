@@ -1,6 +1,7 @@
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local HapticService = game:GetService("HapticService")
 local ContentProvider = game:GetService("ContentProvider")
 local TweenService = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -31,6 +32,13 @@ local HIT_HIGHLIGHT_TO_OUTLINE_TWEEN = TweenInfo.new(0.12, Enum.EasingStyle.Quad
 local HIT_HIGHLIGHT_FADE_TWEEN = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local VIGNETTE_KILL_COLOR = Color3.fromRGB(0, 172, 237)
 local VIGNETTE_HEALTH_COLOR = Color3.fromRGB(255, 0, 0)
+local MOBILE_HAPTIC_HIT_INTENSITY = 0.18
+local MOBILE_HAPTIC_HEADSHOT_INTENSITY = 0.4
+local MOBILE_HAPTIC_HIT_DURATION = 0.04
+local MOBILE_HAPTIC_HEADSHOT_DURATION = 0.065
+local MOBILE_HAPTIC_COOLDOWN = 0.07
+local MOBILE_HAPTIC_INPUT_TYPES = { Enum.UserInputType.Touch, Enum.UserInputType.Gamepad1 }
+local MOBILE_HAPTIC_MOTORS = { Enum.VibrationMotor.Small, Enum.VibrationMotor.Large }
 
 local RELOAD_PROGRESS_STYLE = {
 	FlipProgress = false,
@@ -96,6 +104,25 @@ local function setGuiColorRecursive(guiObject, color)
 	for _, child in ipairs(guiObject:GetChildren()) do
 		setGuiColorRecursive(child, color)
 	end
+end
+
+local function isMobileTouchDevice()
+    return UserInputService.TouchEnabled
+end
+
+local function getSupportedHapticTargets()
+    local targets = {}
+    for _, inputType in ipairs(MOBILE_HAPTIC_INPUT_TYPES) do
+        for _, motor in ipairs(MOBILE_HAPTIC_MOTORS) do
+            local ok, supported = pcall(function()
+                return HapticService:IsMotorSupported(inputType, motor)
+            end)
+            if ok and supported then
+                table.insert(targets, { inputType = inputType, motor = motor })
+            end
+        end
+    end
+    return targets
 end
 
 function WeaponsGui:_getInactiveButtonColor()
@@ -1270,9 +1297,54 @@ function WeaponsGui:_kickShotgunSpread()
 	end)
 end
 
-function WeaponsGui:OnHitOtherPlayer(damage, humanoidHit)
+function WeaponsGui:_pulseMobileHaptics(isHeadshot)
+	if not isMobileTouchDevice() then
+		return
+	end
+
+	local now = os.clock()
+	if now - (self._lastMobileHapticAt or 0) < MOBILE_HAPTIC_COOLDOWN then
+		return
+	end
+	self._lastMobileHapticAt = now
+
+	local targets = getSupportedHapticTargets()
+	if #targets == 0 then
+		if not self._warnedNoMobileHaptics then
+			self._warnedNoMobileHaptics = true
+			warn("WeaponsGui: HapticService no reporta motores soportados para este dispositivo")
+		end
+		return
+	end
+
+	local intensity = if isHeadshot then MOBILE_HAPTIC_HEADSHOT_INTENSITY else MOBILE_HAPTIC_HIT_INTENSITY
+	local duration = if isHeadshot then MOBILE_HAPTIC_HEADSHOT_DURATION else MOBILE_HAPTIC_HIT_DURATION
+	local pulseId = (self._mobileHapticPulseId or 0) + 1
+	self._mobileHapticPulseId = pulseId
+
+	for _, target in ipairs(targets) do
+		pcall(function()
+			HapticService:SetMotor(target.inputType, target.motor, intensity)
+		end)
+	end
+
+	task.delay(duration, function()
+		if self._mobileHapticPulseId ~= pulseId then
+			return
+		end
+		for _, target in ipairs(targets) do
+			pcall(function()
+				HapticService:SetMotor(target.inputType, target.motor, 0)
+			end)
+		end
+	end)
+end
+
+function WeaponsGui:OnHitOtherPlayer(damage, humanoidHit, hitPart)
 	if self.currentHitTween then self.currentHitTween:Cancel() end
 	if self.currentFadeTween then self.currentFadeTween:Cancel() end
+	local isHeadshot = hitPart and hitPart.Name == "Head"
+	self:_pulseMobileHaptics(isHeadshot)
 	self.hitMarker.AnchorPoint = Vector2.new(0.5, 0.5)
 	self.hitMarker.Position = UDim2.new(0.5, 0, 0.5, 0)
 	self.hitMarker.ImageTransparency = 0
