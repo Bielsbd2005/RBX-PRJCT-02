@@ -13,6 +13,10 @@ local Janitor = require(Packages.janitor) :: any
 local Fusion = require(Packages.fusion)
 local GameConfig = require(Shared.GameConfig)
 local Network = require(Shared.networking.Network)
+local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
+local DailyTasksConfig = require(Shared.constants.DailyTasks)
+
+local DAILY_TASK_COMPLETED_ICON = "rbxassetid://113694528712529"
 
 local DataController = require(Client.core.data.DataController)
 local IrisTransition = require(Client.core.ui.IrisTransition)
@@ -25,7 +29,6 @@ local MatchHud = require(script.MatchHud)
 
 local DeathScreenView = require(script.DeathScreenView)
 local EndResultsView = require(script.EndResultsView)
-local KillCamController = require(script.KillCamController)
 local NPCHighlightController = require(script.NPCHighlightController)
 local HealthBillboardController = require(script.HealthBillboardController)
 local MapVoteView = require(script.MapVoteView)
@@ -35,83 +38,64 @@ local MatchFeature = {}
 
 local LOCAL_VOTE_COOLDOWN = 0.12
 local JOIN_CONFIRM_TIMEOUT = 8
+local RESPAWN_REQUEST_TIMEOUT = 5
+local RETURN_TO_MENU_TIMEOUT = 8
 
--- ── Helpers de resolución de GUI (uso puntual, no extraídos) ──
+-- ── Helpers de resolución de GUI ──
 
-local function _findScreenGuiAncestor(node: Instance): ScreenGui?
-	local current: Instance? = node
-	while current ~= nil do
-		if current:IsA("ScreenGui") then
-			return current
-		end
-		current = current.Parent
+local function _resolveEndResultsGui(playerGui: PlayerGui): ScreenGui?
+	local node = playerGui:FindFirstChild("EndResultsGui")
+	if node and node:IsA("ScreenGui") then
+		return node
 	end
 	return nil
 end
 
-local function _resolveEndResultsGui(playerGui: PlayerGui): ScreenGui?
-	local direct = playerGui:FindFirstChild("EndResultsGui") or playerGui:FindFirstChild("EndResults")
-	if direct then
-		if direct:IsA("ScreenGui") then
-			return direct
-		end
-		local fromDirect = _findScreenGuiAncestor(direct)
-		if fromDirect then
-			return fromDirect
-		end
+local function _resolveMapVote(menuGui: ScreenGui): (GuiObject?, GuiObject?)
+	local mapVote = menuGui:FindFirstChild("MapVote")
+	if not mapVote or not mapVote:IsA("GuiObject") then
+		return nil, nil
+	end
+	local options = mapVote:FindFirstChild("Options")
+	if not options or not options:IsA("GuiObject") then
+		return mapVote, nil
+	end
+	return mapVote, options
+end
+
+-- Resolver el Model del jugador/bot que mató al local. Para humanos vamos por
+-- userId; para bots negativos buscamos el FakeUserId attribute en mapRoot/Bots.
+local function _resolveKillerCharacter(killerUserIdStr: string): Model?
+	if killerUserIdStr == "" then
+		return nil
+	end
+	local killerUserId = tonumber(killerUserIdStr)
+	if not killerUserId then
+		return nil
 	end
 
-	local recursiveNamed = playerGui:FindFirstChild("EndResultsGui", true) or playerGui:FindFirstChild("EndResults", true)
-	if recursiveNamed then
-		if recursiveNamed:IsA("ScreenGui") then
-			return recursiveNamed
-		end
-		local fromNamed = _findScreenGuiAncestor(recursiveNamed)
-		if fromNamed then
-			return fromNamed
-		end
+	if killerUserId > 0 then
+		local player = Players:GetPlayerByUserId(killerUserId)
+		return if player then player.Character else nil
 	end
 
-	local resultsScreen = playerGui:FindFirstChild("ResultsScreen", true)
-	if resultsScreen then
-		local fromResults = _findScreenGuiAncestor(resultsScreen)
-		if fromResults then
-			return fromResults
+	-- Bot
+	for _, child in workspace:GetChildren() do
+		if child:IsA("Model") and child:GetAttribute("FakeUserId") == killerUserId then
+			return child
 		end
-	end
-
-	for _, guiNode in playerGui:GetDescendants() do
-		if guiNode:IsA("TextLabel") and string.lower(guiNode.Name) == "winner" then
-			local maybeGui = _findScreenGuiAncestor(guiNode)
-			if maybeGui then
-				return maybeGui
+		if child:IsA("Folder") or child:IsA("Model") then
+			local botsFolder = if child.Name == "Bots" then child else child:FindFirstChild("Bots")
+			if botsFolder then
+				for _, bot in botsFolder:GetChildren() do
+					if bot:IsA("Model") and bot:GetAttribute("FakeUserId") == killerUserId then
+						return bot
+					end
+				end
 			end
 		end
 	end
-
 	return nil
-end
-
-local function _resolveMapVote(playerGui: PlayerGui, menuGui: ScreenGui): (GuiObject?, GuiObject?)
-	local mapVoteFromMenu = menuGui:FindFirstChild("MapVote", true)
-	if mapVoteFromMenu and mapVoteFromMenu:IsA("GuiObject") then
-		local options = mapVoteFromMenu:FindFirstChild("Options", true)
-		if options and options:IsA("GuiObject") then
-			return mapVoteFromMenu, options
-		end
-	end
-
-	for _, candidate in playerGui:GetDescendants() do
-		if candidate.Name ~= "MapVote" or not candidate:IsA("GuiObject") then
-			continue
-		end
-		local options = candidate:FindFirstChild("Options", true)
-		if options and options:IsA("GuiObject") then
-			return candidate, options
-		end
-	end
-
-	return nil, nil
 end
 
 -- ── Feature principal ────────────────────────────────────────
@@ -122,7 +106,7 @@ function MatchFeature.start(menuController: any): any
 
 	local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui") :: PlayerGui
 	local menuGui = menuController:getGui()
-	local mapVoteNode, optionsNode = _resolveMapVote(playerGui, menuGui)
+	local mapVoteNode, optionsNode = _resolveMapVote(menuGui)
 	local deathScreenGui = playerGui:FindFirstChild("DeathScreen")
 	local endResultsGui = _resolveEndResultsGui(playerGui)
 	local iris = IrisTransition.new(playerGui)
@@ -138,9 +122,9 @@ function MatchFeature.start(menuController: any): any
 
 	-- ── Inicializar sub-módulos ──────────────────────────────
 	MatchState.reset()
-	MatchMenu.init(menuController, playerGui, menuGui, MatchState.shouldKeepMenuHidden)
+	local matchMenu = MatchMenu.new(menuController, playerGui, menuGui, MatchState.shouldKeepMenuHidden)
 
-	local playButton = MatchMenu.getPlayButton()
+	local playButton = matchMenu:getPlayButton()
 	if not playButton then
 		warn("[MatchFeature] No se encontro Menu.BottomContainer.Footer.Play")
 		return janitor
@@ -151,12 +135,7 @@ function MatchFeature.start(menuController: any): any
 	hud:setScores(0, 0, GameConfig.MaxRoundDuration)
 
 	-- ── Vistas ───────────────────────────────────────────────
-	local voteScreenGui = _findScreenGuiAncestor(mapVoteNode)
-	local voteScreenWasEnabled = if voteScreenGui then voteScreenGui.Enabled else nil
-	local shouldToggleVoteScreenGui = voteScreenGui ~= nil and voteScreenGui ~= menuGui
-	local voteScreenTemporarilyEnabled = false
-
-	MatchMenu.setPhaseLabel("DEPLOY")
+	matchMenu:setPhaseLabel("DEPLOY")
 
 	local view = MapVoteView.new(mapVoteNode, optionsNode)
 	janitor:Add(view, "Destroy")
@@ -164,8 +143,6 @@ function MatchFeature.start(menuController: any): any
 	local deathView = if deathScreenGui and deathScreenGui:IsA("ScreenGui")
 		then DeathScreenView.new(deathScreenGui)
 		else nil
-	local killCam = KillCamController.new(playerGui)
-	janitor:Add(killCam, "Destroy")
 
 	NPCHighlightController:Start()
 	HealthBillboardController:Start()
@@ -216,7 +193,7 @@ function MatchFeature.start(menuController: any): any
 		end
 
 		MatchState.setPhase("Joining")
-		MatchMenu.enforceHidden()
+		matchMenu:enforceHidden()
 		iris:close(function()
 			if MatchState.getPhase() == "Joining" then
 				Network.Match.RequestJoinMatch.Send({})
@@ -225,7 +202,7 @@ function MatchFeature.start(menuController: any): any
 						return
 					end
 					MatchState.setPhase("Lobby")
-					MatchMenu.forceShow()
+					matchMenu:forceShow()
 					iris:open()
 					warn("[MatchFeature] Join timeout waiting for spawn confirmation.")
 				end)
@@ -246,6 +223,11 @@ function MatchFeature.start(menuController: any): any
 			end
 			respawnRequestSent = true
 			Network.Match.RequestRespawn.Send({})
+			task.delay(RESPAWN_REQUEST_TIMEOUT, function()
+				if respawnRequestSent and MatchState.getPhase() ~= "ReturningToMenu" then
+					respawnRequestSent = false
+				end
+			end)
 		end, function()
 			if MatchState.getPhase() == "ReturningToMenu" then
 				return
@@ -254,6 +236,14 @@ function MatchFeature.start(menuController: any): any
 			iris:close(function()
 				if MatchState.getPhase() == "ReturningToMenu" then
 					Network.Match.RequestReturnToMenu.Send({})
+					task.delay(RETURN_TO_MENU_TIMEOUT, function()
+						if MatchState.getPhase() == "ReturningToMenu" then
+							MatchState.setPhase("Lobby")
+							matchMenu:forceShow()
+							iris:open()
+							warn("[MatchFeature] ReturnToMenu timeout — recuperando estado.")
+						end
+					end)
 				end
 			end)
 		end)
@@ -308,24 +298,24 @@ function MatchFeature.start(menuController: any): any
 		mapName: string,
 	})
 		if isVoting then
-			MatchMenu.setPhaseLabel("VOTING")
+			matchMenu:setPhaseLabel("VOTING")
 		else
-			MatchMenu.setPhaseLabel("DEPLOY")
+			matchMenu:setPhaseLabel("DEPLOY")
 		end
 		setPlayEnabled(data.playEnabled and not data.isLoading)
-		MatchMenu.enforceHidden()
+		matchMenu:enforceHidden()
 	end), true)
 
 	-- ── Menu GUI tracking ────────────────────────────────────
 	janitor:Add(menuGui:GetPropertyChangedSignal("Enabled"):Connect(function()
-		MatchMenu.enforceHidden()
+		matchMenu:enforceHidden()
 	end), "Disconnect")
 
 	janitor:Add(playerGui.ChildAdded:Connect(function(child)
 		if child.Name == "Menu" and child:IsA("ScreenGui") then
 			child.ResetOnSpawn = false
-			MatchMenu.applyPhaseLabelToNewGui(child)
-			if MatchMenu.shouldKeepHidden() then
+			matchMenu:applyPhaseLabelToNewGui(child)
+			if matchMenu:shouldKeepHidden() then
 				child.Enabled = false
 			end
 		end
@@ -350,7 +340,10 @@ function MatchFeature.start(menuController: any): any
 					end
 				end)
 			end
-			MatchMenu.enforceHidden()
+			-- Reset HUD al respawnear durante resultados — evita mostrar kills/deaths
+			-- de la partida anterior si el jugador rejoin antes de volver al lobby.
+			hud:resetMatchState()
+			matchMenu:enforceHidden()
 			return
 		end
 
@@ -358,14 +351,10 @@ function MatchFeature.start(menuController: any): any
 			return
 		end
 
-		-- En kill cam: mantener cámara Scriptable, no restaurar a gameplay.
+		-- "Dying": la death screen cubre la pantalla; no tocamos la cámara
+		-- hasta que DeathScreenHide reactive la de gameplay.
 		if phase == "Dying" then
-			task.defer(function()
-				if MatchState.getPhase() == "Dying" then
-					MatchCamera.forceScriptable()
-				end
-			end)
-			MatchMenu.enforceHidden()
+			matchMenu:enforceHidden()
 			return
 		end
 
@@ -377,16 +366,15 @@ function MatchFeature.start(menuController: any): any
 		task.defer(function()
 			MatchCamera.setGameplay(character)
 		end)
-		MatchMenu.enforceHidden()
+		matchMenu:enforceHidden()
 	end), "Disconnect")
 
 	-- ── Network: JoinMatchSpawned ────────────────────────────
 	janitor:Add(Network.Match.JoinMatchSpawned.Listen(function(_: {})
 		MatchState.setPhase("InMatch")
-		killCam:stop()
 		hud:resetMatchState()
 		menuController:hide()
-		MatchMenu.enforceHidden()
+		matchMenu:enforceHidden()
 		if deathView then
 			deathView:hide()
 		end
@@ -456,10 +444,9 @@ function MatchFeature.start(menuController: any): any
 		respawnCooldown: number,
 		killerUserId: string,
 		killerName: string,
+		killerKills: number,
+		killerLevel: number,
 		weaponName: string,
-		killerPositionX: number,
-		killerPositionY: number,
-		killerPositionZ: number,
 	})
 		hud:incrementLocalDeaths()
 		if not deathView then
@@ -468,23 +455,20 @@ function MatchFeature.start(menuController: any): any
 
 		MatchState.setPhase("Dying")
 		respawnRequestSent = false
-		MatchCamera.forceScriptable()
 		hud:setEnabled(false)
 
-		local killerPos = Vector3.new(data.killerPositionX, data.killerPositionY, data.killerPositionZ)
-		killCam:start({
-			killerUserId = data.killerUserId,
-			killerName = data.killerName,
-			weaponName = data.weaponName,
-			killerPosition = if killerPos.Magnitude > 0 then killerPos else nil,
+		local killerCharacter = _resolveKillerCharacter(data.killerUserId)
+		deathView:show(data.respawnCooldown, {
+			name = data.killerName,
+			kills = data.killerKills,
+			level = data.killerLevel,
+			character = killerCharacter,
 		})
-		deathView:show(GameConfig.KillCamDuration)
 	end), true)
 
 	-- ── Network: DeathScreenHide ─────────────────────────────
 	janitor:Add(Network.Match.DeathScreenHide.Listen(function(_: {})
 		respawnRequestSent = false
-		killCam:stop()
 		if deathView then
 			deathView:hide()
 		end
@@ -502,7 +486,6 @@ function MatchFeature.start(menuController: any): any
 	-- ── Network: ReturnToMenuDone ────────────────────────────
 	janitor:Add(Network.Match.ReturnToMenuDone.Listen(function(_: {})
 		MatchState.setPhase("Lobby")
-		killCam:stop()
 		hud:resetMatchState()
 		if deathView then
 			deathView:hide()
@@ -520,7 +503,7 @@ function MatchFeature.start(menuController: any): any
 		hud:setEnabled(false)
 		MatchWeapons.cleanAllWithRetries(playerGui, notInActiveMatch)
 		MatchCamera.forceLobbyWithRetries(notInActiveMatch)
-		MatchMenu.forceShow()
+		matchMenu:forceShow()
 		iris:open()
 		Network.Match.RequestVoteSync.Send({})
 	end), true)
@@ -537,8 +520,7 @@ function MatchFeature.start(menuController: any): any
 
 		-- Limpiar estado inmediatamente.
 		MatchState.setPhase("Lobby")
-		MatchMenu.setPhaseLabel("ENDING")
-		killCam:stop()
+		matchMenu:setPhaseLabel("ENDING")
 		setPlayEnabled(false)
 		hud:setEnabled(false)
 		if deathView then
@@ -562,7 +544,7 @@ function MatchFeature.start(menuController: any): any
 		-- Si estaba en partida: mostrar ResultsScreen; al pulsar CloseBtn → menú.
 		if wasActive then
 			MatchState.setPhase("ShowingResults")
-			MatchMenu.enforceHidden()
+			matchMenu:enforceHidden()
 			local activeEndResultsView = ensureEndResultsView()
 			if activeEndResultsView then
 				activeEndResultsView:show({
@@ -575,16 +557,16 @@ function MatchFeature.start(menuController: any): any
 				}, function()
 					activeEndResultsView:hide(function()
 						MatchState.setPhase("Lobby")
-						MatchMenu.setPhaseLabel("DEPLOY")
-						MatchMenu.forceShow()
+						matchMenu:setPhaseLabel("DEPLOY")
+						matchMenu:forceShow()
 					end)
 				end)
 			else
 				MatchState.setPhase("Lobby")
-				MatchMenu.forceShow()
+				matchMenu:forceShow()
 			end
 		elseif wasJoining then
-			MatchMenu.forceShow()
+			matchMenu:forceShow()
 		end
 	end), true)
 
@@ -602,17 +584,9 @@ function MatchFeature.start(menuController: any): any
 		duration: number,
 	})
 		isVoting = true
-		MatchMenu.setPhaseLabel("VOTING")
+		matchMenu:setPhaseLabel("VOTING")
 		selectedMapName = ""
-		if mapVoteNode:IsA("GuiObject") then
-			mapVoteNode.Visible = true
-		end
-		local hasOpenPanel = MatchMenu.hasOpenLobbyPanel()
-		voteScreenTemporarilyEnabled = false
-		if shouldToggleVoteScreenGui and voteScreenGui and voteScreenGui.Enabled == false and not hasOpenPanel then
-			voteScreenGui.Enabled = true
-			voteScreenTemporarilyEnabled = true
-		end
+		menuController:setMapVoteVisible(true)
 		view:show({
 			optionA = { mapName = data.optionAName, mapImage = data.optionAImage, mapMode = data.optionAMode },
 			optionB = { mapName = data.optionBName, mapImage = data.optionBImage, mapMode = data.optionBMode },
@@ -648,27 +622,191 @@ function MatchFeature.start(menuController: any): any
 	-- ── Network: EndVote ─────────────────────────────────────
 	janitor:Add(Network.Match.EndVote.Listen(function(_: { winnerMapName: string })
 		isVoting = false
-		MatchMenu.setPhaseLabel("DEPLOY")
+		matchMenu:setPhaseLabel("DEPLOY")
 		selectedMapName = ""
 		view:hide()
-		if mapVoteNode:IsA("GuiObject") then
-			mapVoteNode.Visible = false
-		end
-		if shouldToggleVoteScreenGui and voteScreenTemporarilyEnabled and voteScreenGui then
-			voteScreenGui.Enabled = false
-		end
-		voteScreenTemporarilyEnabled = false
+		menuController:setMapVoteVisible(false)
 	end), true)
 
 	-- ── DataController observer ──────────────────────────────
+	local function findLevelUpUnlock(level: number): any
+		for category, items in ItemsConfig do
+			if type(items) == "table" then
+				for itemKey, definition in items do
+					if type(definition) == "table" and tonumber(definition.LevelRequired) == level then
+						local name = if type(definition.Name) == "string" and definition.Name ~= ""
+							then definition.Name
+							else tostring(itemKey)
+						local image = if type(definition.Image) == "string" then definition.Image else nil
+						return {
+							name = name,
+							category = tostring(category),
+							image = image,
+						}
+					end
+				end
+			end
+		end
+		return nil
+	end
+
+	local function _isKillChallengeSkin(skinKey: string): (boolean, any)
+		local weaponSkins = ItemsConfig.WeaponSkins
+		if type(weaponSkins) ~= "table" then
+			return false, nil
+		end
+		local def = weaponSkins[skinKey]
+		if type(def) ~= "table" then
+			return false, nil
+		end
+		local challenge = def.KillChallenge
+		if type(challenge) == "table" and tonumber(challenge.Kills) and challenge.Kills > 0 then
+			return true, def
+		end
+		return false, nil
+	end
+
 	DataController:WhenReady():andThen(function()
+		local lastSeenLevel: number? = nil
 		local function updateCashAndLevel()
 			local stats = Fusion.peek(DataController.Stats) :: any
 			hud:updateCashLevel(stats)
+
+			local currentLevel = if stats and type(stats.Level) == "number" then math.max(0, math.floor(stats.Level)) else 0
+			if lastSeenLevel ~= nil and currentLevel > lastSeenLevel then
+				local unlock = findLevelUpUnlock(currentLevel)
+				hud:playLevelUpAnimation(currentLevel, unlock)
+			end
+			lastSeenLevel = currentLevel
 		end
 		local statsObserver = fusionScope:Observer(DataController.Stats)
 		janitor:Add(statsObserver:onBind(updateCashAndLevel), true)
 		updateCashAndLevel()
+
+		-- BattlePass tier-up: detecta CurrentTier subiendo y dispara la animación.
+		-- Convención: el jugador percibe "Lvl. N" como el último tier completado,
+		-- así que mostramos `currentTier - 1` (CurrentTier internamente es "el tier
+		-- hacia el que progreso"). Si ocurre cascading tier-up (subir 3 niveles
+		-- en una sola kill), disparamos un único toast con el tier final, igual
+		-- que hace el level up de character.
+		local lastSeenBPTier: number? = nil
+		local function checkBattlePassLevelUp()
+			local bp = Fusion.peek(DataController.BattlePass) :: any
+			if type(bp) ~= "table" then return end
+			local currentTier = if type(bp.CurrentTier) == "number" then math.max(1, math.floor(bp.CurrentTier)) else 1
+			if lastSeenBPTier ~= nil and currentTier > lastSeenBPTier then
+				local displayLevel = math.max(0, currentTier - 1)
+				hud:playBattlePassLevelUpAnimation(displayLevel)
+			end
+			lastSeenBPTier = currentTier
+		end
+		local bpObserver = fusionScope:Observer(DataController.BattlePass)
+		janitor:Add(bpObserver:onBind(checkBattlePassLevelUp), true)
+		checkBattlePassLevelUp()
+
+		-- Snapshot inicial de wraps owned por arma para detectar desbloqueos.
+		local previousByWeapon: { [string]: { [string]: { [string]: boolean } } } = {}
+		local wrapsSeeded = false
+		local function snapshotWrapsOwned(inventory: any): { [string]: { [string]: { [string]: boolean } } }
+			local snapshot: { [string]: { [string]: { [string]: boolean } } } = {}
+			local byWeapon = if type(inventory) == "table" then inventory.WeaponSkinsByWeapon else nil
+			if type(byWeapon) ~= "table" then
+				return snapshot
+			end
+			for category, weaponMap in byWeapon do
+				if type(weaponMap) == "table" then
+					local catSnap: { [string]: { [string]: boolean } } = {}
+					for weaponKey, skinMap in weaponMap do
+						if type(skinMap) == "table" then
+							local skinSnap: { [string]: boolean } = {}
+							for skinKey, owned in skinMap do
+								if owned == true or (type(owned) == "number" and owned > 0) then
+									skinSnap[skinKey] = true
+								end
+							end
+							catSnap[weaponKey] = skinSnap
+						end
+					end
+					snapshot[category] = catSnap
+				end
+			end
+			return snapshot
+		end
+
+		local function updateWrapsAndDetectUnlocks()
+			local inventory = Fusion.peek(DataController.Inventory) :: any
+			local current = snapshotWrapsOwned(inventory)
+
+			if wrapsSeeded then
+				for category, weaponMap in current do
+					local prevCat = previousByWeapon[category] or {}
+					for weaponKey, skinMap in weaponMap do
+						local prevSkins = prevCat[weaponKey] or {}
+						for skinKey, _ in skinMap do
+							if not prevSkins[skinKey] then
+								local isChallenge, def = _isKillChallengeSkin(skinKey)
+								if isChallenge then
+									hud:playChallengeCompletedAnimation({
+										name = if type(def.Name) == "string" and def.Name ~= "" then def.Name else skinKey,
+										image = if type(def.Image) == "string" and def.Image ~= "" then def.Image else nil,
+										previewWeaponCategory = category,
+										previewWeaponKey = weaponKey,
+										itemKey = skinKey,
+										category = "WeaponSkins",
+										textureID = if type(def.TextureID) == "string" then def.TextureID else nil,
+										baseColor = if typeof(def.BaseColor) == "Color3" then def.BaseColor else nil,
+										animated = def.Animated == true,
+										studsPerTile = tonumber(def.StudsPerTile),
+									})
+								end
+							end
+						end
+					end
+				end
+			end
+
+			previousByWeapon = current
+			wrapsSeeded = true
+		end
+
+		local inventoryObserver = fusionScope:Observer(DataController.Inventory)
+		janitor:Add(inventoryObserver:onBind(updateWrapsAndDetectUnlocks), true)
+
+		-- ── Daily tasks: detectar transición Claimed false→true ────
+		-- Solo dispara la animación de "Completed" cuando el HUD de partida
+		-- está activo (matchHudGui.Enabled). En menú no se muestra; el frame
+		-- del lobby ya pinta el fill verde como feedback.
+		local prevClaimed: { [string]: boolean } = {}
+		local claimedSeeded = false
+		local function onDailyTasksChanged()
+			local state = Fusion.peek(DataController.DailyTasks) :: any
+			local claimed = if state and type(state.Claimed) == "table" then state.Claimed else {}
+
+			if claimedSeeded and matchHudGui and matchHudGui.Enabled then
+				for _, def in DailyTasksConfig.Tasks do
+					local now = (claimed :: any)[def.Id] == true
+					local before = prevClaimed[def.Id] == true
+					if now and not before then
+						-- Description leerá "You earned Cash"; Reward.Value
+						-- mostrará el monto otorgado por la tarea.
+						hud:playChallengeCompletedAnimation({
+							name = "Cash",
+							image = DAILY_TASK_COMPLETED_ICON,
+							cashAmount = def.Cash,
+						})
+					end
+				end
+			end
+
+			local snapshot: { [string]: boolean } = {}
+			for _, def in DailyTasksConfig.Tasks do
+				snapshot[def.Id] = (claimed :: any)[def.Id] == true
+			end
+			prevClaimed = snapshot
+			claimedSeeded = true
+		end
+		local dailyTasksObserver = fusionScope:Observer(DataController.DailyTasks)
+		janitor:Add(dailyTasksObserver:onBind(onDailyTasksChanged), true)
 	end)
 
 	-- ── Cleanup ──────────────────────────────────────────────
@@ -682,21 +820,12 @@ function MatchFeature.start(menuController: any): any
 		if deathView then
 			deathView:hide()
 		end
-		killCam:stop()
-		if mapVoteNode:IsA("GuiObject") then
-			mapVoteNode.Visible = false
-		end
+		menuController:setMapVoteVisible(false)
 		hud:setEnabled(false)
 		if endResultsGui then
 			endResultsGui.Enabled = false
 		end
-		local irisCircle = iris._circle
-		irisCircle.Size = UDim2.new(0, 0, 0, 0)
-		irisCircle.Visible = false
-		if voteScreenGui and voteScreenWasEnabled ~= nil then
-			voteScreenGui.Enabled = voteScreenWasEnabled
-		end
-		voteScreenTemporarilyEnabled = false
+		iris:reset()
 		Fusion.doCleanup(fusionScope)
 	end, true)
 

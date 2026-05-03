@@ -1365,7 +1365,7 @@ function WeaponsGui:OnHitOtherPlayer(damage, humanoidHit, hitPart)
 	self.currentFadeTween = TweenService:Create(self.hitMarker, fadeTweenInfo, fadeGoal)
 	self.currentFadeTween:Play()
 	self:_playLocalHitHighlight(humanoidHit)
-	DamageBillboardHandler:ShowDamageBillboard(damage, humanoidHit.Parent:FindFirstChild("Head"))
+	DamageBillboardHandler:ShowDamageBillboard(damage, humanoidHit.Parent:FindFirstChild("Head"), isHeadshot)
 end
 
 function WeaponsGui:onRenderStepped(dt)

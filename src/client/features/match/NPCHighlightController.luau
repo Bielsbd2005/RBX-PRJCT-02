@@ -52,6 +52,9 @@ local function _isBotModel(instance: Instance): boolean
 end
 
 local function _scanExisting()
+	-- Una pasada al arrancar / al cambiar el equipo local. El coste es
+	-- aceptable porque ya no se ejecuta en bucle (el rescan periódico cada 2s
+	-- fue eliminado).
 	for _, desc in workspace:GetDescendants() do
 		if _isBotModel(desc) then
 			_colorBotHighlight(desc :: Model)
@@ -60,22 +63,22 @@ local function _scanExisting()
 end
 
 local function _onDescendantAdded(instance: Instance)
-	if not _isBotModel(instance) then
+	-- Caso 1: el Highlight se replica DESPUÉS que el modelo del bot (el servidor
+	-- crea el highlight en BotAI:Start, que corre tras parentar el modelo). Esto
+	-- es lo que provoca el bug del highlight "blanco": cuando dispara
+	-- DescendantAdded para el Model, el Highlight aún no existe en el cliente.
+	-- Por eso reaccionamos también al añadirse el propio Highlight.
+	if instance:IsA("Highlight") and instance.Name == "BotHighlight" then
+		local parent = instance.Parent
+		if parent and _isBotModel(parent) then
+			_colorBotHighlight(parent :: Model)
+		end
 		return
 	end
-	local model = instance :: Model
 
-	-- Esperar a que el Highlight exista (puede añadirse justo después del modelo)
-	local highlight = model:FindFirstChild("BotHighlight")
-	if highlight then
-		_colorBotHighlight(model)
-	else
-		task.defer(function()
-			if model.Parent == nil then
-				return
-			end
-			_colorBotHighlight(model)
-		end)
+	-- Caso 2: el Model aparece (por si el Highlight ya viene incluido).
+	if _isBotModel(instance) then
+		_colorBotHighlight(instance :: Model)
 	end
 end
 
@@ -93,18 +96,13 @@ local NPCHighlightController = {}
 function NPCHighlightController:Start()
 	_scanExisting()
 
+	-- DescendantAdded: filtro IsA("Model") + name match descarta de inmediato
+	-- la mayoría de adds (BaseParts, attachments, partículas, beams, etc.).
 	workspace.DescendantAdded:Connect(_onDescendantAdded)
 
+	-- Cuando el jugador local cambia de equipo, re-evaluar todos los bots
+	-- (sustituye el rescan periódico que corría cada 2s).
 	localPlayer:GetPropertyChangedSignal("Team"):Connect(_onTeamChanged)
-
-	-- Re-scan ligero cada 2s para capturar cambios tardíos de color
-	-- (ej. si el equipo del jugador se asigna después del spawn de bots)
-	task.spawn(function()
-		while true do
-			task.wait(2)
-			_scanExisting()
-		end
-	end)
 end
 
 return NPCHighlightController

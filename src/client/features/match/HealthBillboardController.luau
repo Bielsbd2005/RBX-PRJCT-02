@@ -4,7 +4,6 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local TeamUtils = require(Shared.utils.TeamUtils)
@@ -323,22 +322,43 @@ function HealthBillboardController:Start()
 		end
 	end)
 
-	-- Bots que aparecen en workspace
+	-- Bots que aparecen como descendants de workspace (típicamente en
+	-- mapRoot/Bots, dentro de ActiveMap). El filtro IsA("Model") descarta de
+	-- inmediato la enorme mayoría de adds (partes, attachments, partículas).
 	workspace.DescendantAdded:Connect(function(instance)
 		if not instance:IsA("Model") then return end
-		-- Esperar brevemente a que tenga Humanoid (los bots pueden cargarse por partes)
-		task.defer(function()
+		-- Heurística rápida: si el padre es un Model, NO es un character.
+		if instance.Parent and instance.Parent:IsA("Model") then return end
+
+		local function attemptTrack()
 			if not instance.Parent then return end
-			if not instance:FindFirstChildOfClass("Humanoid") then
-				instance:WaitForChild("Humanoid", 3)
-			end
-			if not instance:FindFirstChild("Head") then
-				instance:WaitForChild("Head", 3)
-			end
-			if instance.Parent then
-				tryTrack(instance :: Model)
+			tryTrack(instance :: Model)
+		end
+
+		if instance:FindFirstChildOfClass("Humanoid") and instance:FindFirstChild("Head") then
+			attemptTrack()
+			return
+		end
+
+		local resolved = false
+		local ancestryConn: RBXScriptConnection? = nil
+		local childConn: RBXScriptConnection? = nil
+		local function cleanup()
+			if ancestryConn then ancestryConn:Disconnect() ancestryConn = nil end
+			if childConn then childConn:Disconnect() childConn = nil end
+		end
+		ancestryConn = instance.AncestryChanged:Connect(function()
+			if not instance:IsDescendantOf(game) then cleanup() end
+		end)
+		childConn = instance.ChildAdded:Connect(function()
+			if resolved then return end
+			if instance:FindFirstChildOfClass("Humanoid") and instance:FindFirstChild("Head") then
+				resolved = true
+				cleanup()
+				attemptTrack()
 			end
 		end)
+		task.delay(5, function() if not resolved then cleanup() end end)
 	end)
 
 	-- Cuando cambia el equipo local, refrescar todos
@@ -348,15 +368,8 @@ function HealthBillboardController:Start()
 		end
 	end)
 
-	-- Heartbeat: actualizar vida de todos los trackeados cada frame
-	-- (respaldo infalible para health que no dispare HealthChanged)
-	RunService.Heartbeat:Connect(function()
-		for _, state in tracked do
-			updateState(state)
-		end
-	end)
-
-	-- Scan inicial
+	-- Scan inicial: una sola pasada al arrancar, costo aceptable porque no se
+	-- repite (lo que era caro era el rescan periódico cada 2s, eliminado).
 	for _, desc in workspace:GetDescendants() do
 		if desc:IsA("Model") then
 			tryTrack(desc)

@@ -7,6 +7,8 @@ local Packages = ReplicatedStorage:WaitForChild("Packages")
 
 local Janitor = require(Packages.janitor) :: any
 local WeaponSkinWrapPreviewer = require(script.Parent.Previewers.WeaponSkinWrapPreviewer)
+local UITheme = require(script.Parent.Parent.Parent.core.ui.UITheme)
+local UIUtils = require(script.Parent.Parent.Parent.core.ui.UIUtils)
 
 export type LockerCatalogItem = {
 	Id: string,
@@ -25,9 +27,19 @@ export type LockerCatalogItem = {
 	PreviewWeaponCategory: string?,
 	PreviewWeaponKey: string?,
 	PreviewWeaponName: string?,
+	KillGoal: number?,
+	KillProgress: number?,
+}
+
+export type TemplateKey = "default" | "wraps"
+
+export type LockerGridTemplates = {
+	default: GuiObject,
+	wraps: GuiObject,
 }
 
 type ItemGridCardRefs = {
+	templateKey: TemplateKey,
 	button: GuiButton?,
 	itemNode: GuiObject?,
 	itemNodeDefaultSize: UDim2?,
@@ -41,6 +53,12 @@ type ItemGridCardRefs = {
 	lockedLevelNode: TextLabel?,
 	lockedTemplate: GuiObject?,
 	lockedParent: Instance?,
+	titleNode: GuiObject?,
+	titleDefaultText: string?,
+	barNode: GuiObject?,
+	barFillNode: GuiObject?,
+	barFillDefaultSize: UDim2?,
+	barValueNode: TextLabel?,
 	buttonStroke: UIStroke?,
 	buttonStrokeCached: boolean?,
 }
@@ -57,12 +75,13 @@ type LockerGridCallbacks = {
 
 export type LockerGrid = {
 	_itemGrid: GuiObject,
-	_itemGridTemplate: GuiObject,
+	_templates: LockerGridTemplates,
 	_callbacks: LockerGridCallbacks,
 	_canUseHoverAnimations: boolean,
 	_populateGeneration: number,
 	_activeGridCards: { GuiObject },
-	_gridCardPool: { GuiObject },
+	_gridCardPools: { [TemplateKey]: { GuiObject } },
+	_currentTemplateKey: TemplateKey?,
 	_cachedGridCardRefs: { [GuiObject]: ItemGridCardRefs },
 	_cardPreviewJanitors: { [GuiObject]: any },
 	_gridButtonItems: { [GuiButton]: LockerCatalogItem },
@@ -77,12 +96,15 @@ export type LockerGrid = {
 	_populateJanitor: any,
 	Destroy: (self: LockerGrid) -> (),
 	Clear: (self: LockerGrid) -> (),
-	Populate: (self: LockerGrid, items: { LockerCatalogItem }, selectedItemId: string?) -> (),
+	Populate: (self: LockerGrid, items: { LockerCatalogItem }, selectedItemId: string?, templateKey: TemplateKey?) -> (),
 	RefreshVisibleState: (self: LockerGrid, notifySelection: boolean?) -> (),
 	GetSelectedItem: (self: LockerGrid) -> LockerCatalogItem?,
+	GetCardForItem: (self: LockerGrid, itemId: string) -> GuiObject?,
 	_getButtonStroke: (self: LockerGrid, button: GuiButton) -> UIStroke?,
+	_buildGridCardRefs: (self: LockerGrid, card: GuiObject, templateKey: TemplateKey) -> ItemGridCardRefs,
 	_getGridCardRefs: (self: LockerGrid, card: GuiObject) -> ItemGridCardRefs,
-	_acquireGridCard: (self: LockerGrid) -> GuiObject,
+	_acquireGridCard: (self: LockerGrid, templateKey: TemplateKey) -> GuiObject,
+	_returnCardToPool: (self: LockerGrid, card: GuiObject) -> (),
 	_setSelectedButton: (self: LockerGrid, targetButton: GuiButton) -> (),
 	_updateGridCardVisual: (self: LockerGrid, button: GuiButton) -> (),
 	_getOrCreateGridButtonScale: (self: LockerGrid, button: GuiButton) -> UIScale,
@@ -94,15 +116,15 @@ export type LockerGrid = {
 	_resetTransientState: (self: LockerGrid, notifySelection: boolean) -> (),
 }
 
-local GRID_BUTTON_HOVER_TWEEN_INFO = TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-local GRID_BUTTON_CLICK_TWEEN_INFO = TweenInfo.new(0.07, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local GRID_BUTTON_HOVER_TWEEN_INFO = UITheme.HoverTweenInfo
+local GRID_BUTTON_CLICK_TWEEN_INFO = UITheme.ClickTweenInfo
 local GRID_BUTTON_DEFAULT_SCALE = 1
-local GRID_BUTTON_HOVER_SCALE = 1.04
-local GRID_BUTTON_CLICK_SCALE = 0.96
+local GRID_BUTTON_HOVER_SCALE = UITheme.ButtonHoverScale
+local GRID_BUTTON_CLICK_SCALE = UITheme.ButtonClickScale
 local GRID_ITEM_DEFAULT_COLOR = Color3.fromRGB(255, 255, 255)
 local GRID_ITEM_LOCKED_WEAPON_COLOR = Color3.fromRGB(0, 0, 0)
-local STROKE_DEFAULT = Color3.fromRGB(38, 38, 38)
-local STROKE_WHITE = Color3.fromRGB(255, 255, 255)
+local STROKE_DEFAULT = UITheme.StrokeDefault
+local STROKE_WHITE = UITheme.StrokeHover
 local POPULATE_SYNC_ITEM_COUNT = 24
 local POPULATE_ASYNC_BATCH_SIZE = 16
 local DEFAULT_WEAPON_SKIN_KEY = "Default"
@@ -112,18 +134,22 @@ LockerGrid.__index = LockerGrid
 
 function LockerGrid.new(
 	itemGrid: GuiObject,
-	itemGridTemplate: GuiObject,
+	templates: LockerGridTemplates,
 	canUseHoverAnimations: boolean,
 	callbacks: LockerGridCallbacks
 ): LockerGrid
 	local self = setmetatable({}, LockerGrid) :: any
 	self._itemGrid = itemGrid
-	self._itemGridTemplate = itemGridTemplate
+	self._templates = templates
 	self._callbacks = callbacks
 	self._canUseHoverAnimations = canUseHoverAnimations
 	self._populateGeneration = 0
 	self._activeGridCards = {}
-	self._gridCardPool = {}
+	self._gridCardPools = {
+		default = {},
+		wraps = {},
+	}
+	self._currentTemplateKey = nil
 	self._cachedGridCardRefs = {}
 	self._cardPreviewJanitors = {}
 	self._gridButtonItems = {}
@@ -158,27 +184,66 @@ function LockerGrid:_getButtonStroke(button: GuiButton): UIStroke?
 	return if stroke and stroke:IsA("UIStroke") then stroke else nil
 end
 
-function LockerGrid:_getGridCardRefs(card: GuiObject): ItemGridCardRefs
-	local cached = self._cachedGridCardRefs[card]
-	if cached then
-		return cached
-	end
-
+function LockerGrid:_buildGridCardRefs(card: GuiObject, templateKey: TemplateKey): ItemGridCardRefs
 	local buttonNode = card:FindFirstChild("Button")
 	local button = if buttonNode and buttonNode:IsA("GuiButton") then buttonNode else nil
-	local itemNode = if button then button:FindFirstChild("Item", true) else nil
-	local resolvedItemNode = if itemNode and (itemNode:IsA("ImageLabel") or itemNode:IsA("ImageButton")) then itemNode else nil
-	local viewportNode = if button then button:FindFirstChildWhichIsA("ViewportFrame", true) else nil
-	local amountNode = if button then button:FindFirstChild("Amount", true) else nil
-	local priceNode = if button then button:FindFirstChild("Price", true) else nil
-	local currencyNode = if button then button:FindFirstChild("Currency", true) else nil
-	local ownedNode = if button then button:FindFirstChild("Owned", true) else nil
-	local equippedNode = if button then button:FindFirstChild("Equiped", true) else nil
-	local lockedNode = if button then button:FindFirstChild("Locked", true) else nil
-	local lockedGui = if lockedNode and lockedNode:IsA("GuiObject") then lockedNode else nil
-	local lockedLevelNode = if lockedGui then lockedGui:FindFirstChild("lvl", true) else nil
 
-	local refs = {
+	if templateKey == "wraps" then
+		local viewportNode = if button then button:FindFirstChild("ViewportFrame") else nil
+		local viewport = if viewportNode and viewportNode:IsA("ViewportFrame") then viewportNode else nil
+
+		local equippedNode = if button then button:FindFirstChild("Equiped") else nil
+		local amountNode = if viewport then viewport:FindFirstChild("Amount") else nil
+		local titleNode = if button then button:FindFirstChild("Title") else nil
+		local barNode = if button then button:FindFirstChild("Bar") else nil
+		local wrapsLockedNode = if button then button:FindFirstChild("Locked") else nil
+		local wrapsLockedGui = if wrapsLockedNode and wrapsLockedNode:IsA("GuiObject") then wrapsLockedNode else nil
+		local barGui = if barNode and barNode:IsA("GuiObject") then barNode else nil
+		local barFillNode = if barGui then barGui:FindFirstChild("Fill") else nil
+		local barFillGui = if barFillNode and barFillNode:IsA("GuiObject") then barFillNode else nil
+		local barValueNode = if barGui then barGui:FindFirstChild("Value") else nil
+
+		local refs: ItemGridCardRefs = {
+			templateKey = templateKey,
+			button = button,
+			itemNode = nil,
+			itemNodeDefaultSize = nil,
+			viewportNode = viewport,
+			amountNode = if amountNode and amountNode:IsA("TextLabel") then amountNode else nil,
+			priceNode = nil,
+			currencyNode = nil,
+			ownedNode = nil,
+			equippedNode = if equippedNode and equippedNode:IsA("GuiObject") then equippedNode else nil,
+			lockedNode = wrapsLockedGui,
+			lockedLevelNode = nil,
+			lockedTemplate = nil,
+			lockedParent = nil,
+			titleNode = if titleNode and titleNode:IsA("GuiObject") then titleNode else nil,
+			titleDefaultText = if titleNode and titleNode:IsA("TextLabel") then titleNode.Text else nil,
+			barNode = barGui,
+			barFillNode = barFillGui,
+			barFillDefaultSize = if barFillGui then barFillGui.Size else nil,
+			barValueNode = if barValueNode and barValueNode:IsA("TextLabel") then barValueNode else nil,
+		}
+
+		self._cachedGridCardRefs[card] = refs
+		return refs
+	end
+
+	local itemNode = if button then button:FindFirstChild("Item") else nil
+	local resolvedItemNode = if itemNode and (itemNode:IsA("ImageLabel") or itemNode:IsA("ImageButton")) then itemNode else nil
+	local viewportNode = if button then button:FindFirstChild("ViewportFrame") else nil
+	local amountNode = if button then button:FindFirstChild("Amount") else nil
+	local priceNode = if button then button:FindFirstChild("Price") else nil
+	local currencyNode = if button then button:FindFirstChild("Currency") else nil
+	local ownedNode = if button then button:FindFirstChild("Owned") else nil
+	local equippedNode = if button then button:FindFirstChild("Equiped") else nil
+	local lockedNode = if button then button:FindFirstChild("Locked") else nil
+	local lockedGui = if lockedNode and lockedNode:IsA("GuiObject") then lockedNode else nil
+	local lockedLevelNode = if lockedGui then lockedGui:FindFirstChild("Value") else nil
+
+	local refs: ItemGridCardRefs = {
+		templateKey = templateKey,
 		button = button,
 		itemNode = resolvedItemNode,
 		itemNodeDefaultSize = if resolvedItemNode then resolvedItemNode.Size else nil,
@@ -192,10 +257,25 @@ function LockerGrid:_getGridCardRefs(card: GuiObject): ItemGridCardRefs
 		lockedLevelNode = if lockedLevelNode and lockedLevelNode:IsA("TextLabel") then lockedLevelNode else nil,
 		lockedTemplate = if lockedGui then lockedGui:Clone() else nil,
 		lockedParent = if lockedGui then lockedGui.Parent else nil,
+		titleNode = nil,
+		barNode = nil,
+		barFillNode = nil,
+		barFillDefaultSize = nil,
+		barValueNode = nil,
 	}
 
 	self._cachedGridCardRefs[card] = refs
 	return refs
+end
+
+function LockerGrid:_getGridCardRefs(card: GuiObject): ItemGridCardRefs
+	local cached = self._cachedGridCardRefs[card]
+	if cached then
+		return cached
+	end
+
+	-- Fallback: legacy default template (should not normally hit since cards are built on acquire).
+	return self:_buildGridCardRefs(card, "default")
 end
 
 function LockerGrid:_clearCardViewportPreview(card: GuiObject)
@@ -212,9 +292,14 @@ function LockerGrid:_clearCardViewportPreview(card: GuiObject)
 
 	viewportNode.CurrentCamera = nil
 	for _, child in viewportNode:GetChildren() do
-		child:Destroy()
+		if not child:IsA("GuiObject") then
+			child:Destroy()
+		end
 	end
-	viewportNode.Visible = false
+
+	if refs.templateKey ~= "wraps" then
+		viewportNode.Visible = false
+	end
 end
 
 function LockerGrid:_applyWeaponSkinViewportPreview(card: GuiObject, item: LockerCatalogItem): boolean
@@ -243,13 +328,40 @@ local function shouldUseFullSizeWeaponImage(item: LockerCatalogItem): boolean
 	return item.Category == "Main" or item.Category == "Special"
 end
 
-function LockerGrid:_acquireGridCard(): GuiObject
-	local pooledCard = table.remove(self._gridCardPool)
+local function isKillChallengeItem(item: LockerCatalogItem): boolean
+	local goal = item.KillGoal
+	return goal ~= nil and goal > 0
+end
+
+function LockerGrid:_acquireGridCard(templateKey: TemplateKey): GuiObject
+	local pool = self._gridCardPools[templateKey]
+	local pooledCard = if pool then table.remove(pool) else nil
 	if pooledCard then
 		return pooledCard
 	end
 
-	return self._itemGridTemplate:Clone()
+	local template = self._templates[templateKey]
+	local card = template:Clone()
+	self:_buildGridCardRefs(card, templateKey)
+	return card
+end
+
+function LockerGrid:_returnCardToPool(card: GuiObject)
+	local refs = self._cachedGridCardRefs[card]
+	local templateKey: TemplateKey = if refs then refs.templateKey else "default"
+
+	self:_clearCardViewportPreview(card)
+	card.Visible = false
+
+	if refs and refs.button then
+		self._gridButtonItems[refs.button] = nil
+		self._gridCardByButton[refs.button] = nil
+	end
+
+	local pool = self._gridCardPools[templateKey]
+	if pool then
+		table.insert(pool, card)
+	end
 end
 
 function LockerGrid:_updateGridCardVisual(button: GuiButton)
@@ -267,9 +379,74 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 	local owned = self._callbacks.isItemOwned(item)
 	local itemAmount = if self._callbacks.getItemAmount then self._callbacks.getItemAmount(item) else if owned then 1 else 0
 	local equipped = self._callbacks.isItemEquipped(item)
+	local isSelectedButton = button == self._selectedCatalogButton
+
+	if refs.templateKey == "wraps" then
+		if refs.amountNode then
+			refs.amountNode.Visible = itemAmount > 1
+			if itemAmount > 1 then
+				refs.amountNode.Text = "x" .. tostring(itemAmount)
+			end
+		end
+
+		if refs.equippedNode then
+			refs.equippedNode.Visible = equipped
+		end
+
+		local isChallenge = isKillChallengeItem(item) and not owned
+		local isDefaultWrap = item.ItemKey == DEFAULT_WEAPON_SKIN_KEY
+		if refs.titleNode then
+			-- Si esta equipado se muestra solo el badge `Equiped`, sin titulo.
+			refs.titleNode.Visible = not equipped
+			if refs.titleNode:IsA("TextLabel") then
+				if isChallenge then
+					refs.titleNode.Text = refs.titleDefaultText or refs.titleNode.Text
+				elseif isDefaultWrap then
+					refs.titleNode.Text = "DEFAULT"
+				else
+					refs.titleNode.Text = tostring(item.Rarity)
+				end
+			end
+		end
+		if refs.barNode then
+			refs.barNode.Visible = isChallenge
+		end
+		if refs.lockedNode then
+			refs.lockedNode.Visible = isChallenge
+		end
+
+		if isChallenge then
+			local goal = math.max(1, item.KillGoal or 0)
+			local progress = math.clamp(item.KillProgress or 0, 0, goal)
+			if refs.barFillNode then
+				local defaultSize = refs.barFillDefaultSize or refs.barFillNode.Size
+				local ratio = progress / goal
+				refs.barFillNode.Size = UDim2.new(defaultSize.X.Scale * ratio, defaultSize.X.Offset, defaultSize.Y.Scale, defaultSize.Y.Offset)
+			end
+			if refs.barValueNode then
+				refs.barValueNode.Text = tostring(progress) .. "/" .. tostring(goal)
+			end
+		end
+
+		local stroke = self:_getButtonStroke(button)
+		if not stroke then
+			return
+		end
+
+		if isSelectedButton and not owned then
+			stroke.Enabled = false
+			stroke.Transparency = 1
+			return
+		end
+
+		stroke.Enabled = true
+		stroke.Transparency = 0
+		stroke.Color = if equipped then STROKE_WHITE else STROKE_DEFAULT
+		return
+	end
+
 	local currentLevel = self._cachedLevel
 	local isLevelLocked = not owned and currentLevel < item.LevelRequired
-	local isSelectedButton = button == self._selectedCatalogButton
 	local shouldBlackoutWeaponImage = shouldUseFullSizeWeaponImage(item) and isLevelLocked
 
 	if refs.itemNode then
@@ -285,7 +462,7 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 				clonedLocked.Parent = lockedParent
 				refs.lockedNode = clonedLocked
 
-				local clonedLevelNode = clonedLocked:FindFirstChild("lvl", true)
+				local clonedLevelNode = clonedLocked:FindFirstChild("Value")
 				refs.lockedLevelNode = if clonedLevelNode and clonedLevelNode:IsA("TextLabel") then clonedLevelNode else nil
 			end
 		end
@@ -431,6 +608,7 @@ function LockerGrid:_applyCatalogItemToCard(card: GuiObject, item: LockerCatalog
 
 	local refs = self:_getGridCardRefs(card)
 	local needsViewport = shouldUseWeaponSkinViewportPreview(item)
+		or (refs.templateKey == "wraps" and item.Category == "WeaponSkins")
 	local usesViewportPreview = false
 
 	if needsViewport then
@@ -441,7 +619,11 @@ function LockerGrid:_applyCatalogItemToCard(card: GuiObject, item: LockerCatalog
 	end
 
 	if refs.viewportNode then
-		refs.viewportNode.Visible = usesViewportPreview
+		if refs.templateKey == "wraps" then
+			refs.viewportNode.Visible = true
+		else
+			refs.viewportNode.Visible = usesViewportPreview
+		end
 	end
 
 	if refs.itemNode and (refs.itemNode:IsA("ImageLabel") or refs.itemNode:IsA("ImageButton")) then
@@ -456,7 +638,7 @@ function LockerGrid:_applyCatalogItemToCard(card: GuiObject, item: LockerCatalog
 	end
 
 	if refs.priceNode then
-		refs.priceNode.Text = tostring(item.Price)
+		refs.priceNode.Text = UIUtils.formatCashAmount(item.Price)
 		refs.priceNode.Visible = true
 	end
 
@@ -475,6 +657,14 @@ function LockerGrid:_applyCatalogItemToCard(card: GuiObject, item: LockerCatalog
 
 	if refs.equippedNode then
 		refs.equippedNode.Visible = false
+	end
+
+	if refs.titleNode then
+		refs.titleNode.Visible = false
+	end
+
+	if refs.barNode then
+		refs.barNode.Visible = false
 	end
 
 	local button = refs.button
@@ -542,13 +732,28 @@ function LockerGrid:Clear()
 
 	for index = #self._activeGridCards, 1, -1 do
 		local card = self._activeGridCards[index]
-		self:_clearCardViewportPreview(card)
-		card.Visible = false
+		self:_returnCardToPool(card)
+		self._activeGridCards[index] = nil
 	end
+
+	self._currentTemplateKey = nil
 end
 
-function LockerGrid:Populate(items: { LockerCatalogItem }, selectedItemId: string?)
-	self:_resetTransientState(false)
+function LockerGrid:Populate(items: { LockerCatalogItem }, selectedItemId: string?, templateKey: TemplateKey?)
+	local resolvedTemplateKey: TemplateKey = templateKey or "default"
+
+	if self._currentTemplateKey ~= nil and self._currentTemplateKey ~= resolvedTemplateKey then
+		self:_resetTransientState(false)
+		for index = #self._activeGridCards, 1, -1 do
+			local card = self._activeGridCards[index]
+			self:_returnCardToPool(card)
+			self._activeGridCards[index] = nil
+		end
+	else
+		self:_resetTransientState(false)
+	end
+
+	self._currentTemplateKey = resolvedTemplateKey
 	self._cachedLevel = self._callbacks.getCurrentLevel()
 	local generation = self._populateGeneration
 	local totalItems = #items
@@ -557,7 +762,7 @@ function LockerGrid:Populate(items: { LockerCatalogItem }, selectedItemId: strin
 	local function applyCatalogItem(layoutOrder: number)
 		local card = self._activeGridCards[layoutOrder]
 		if not card then
-			card = self:_acquireGridCard()
+			card = self:_acquireGridCard(resolvedTemplateKey)
 			card.Parent = self._itemGrid
 			self._activeGridCards[layoutOrder] = card
 		end
@@ -688,6 +893,14 @@ end
 
 function LockerGrid:GetSelectedItem(): LockerCatalogItem?
 	return self._selectedCatalogItem
+end
+
+function LockerGrid:GetCardForItem(itemId: string): GuiObject?
+	local button = self._gridButtonByItemId[itemId]
+	if not button then
+		return nil
+	end
+	return self._gridCardByButton[button]
 end
 
 function LockerGrid:Destroy()

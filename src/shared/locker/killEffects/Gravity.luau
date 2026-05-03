@@ -33,28 +33,27 @@ local R15_WELDS = {
 	{ Part0 = "LeftLowerLeg", Part1 = "LeftFoot" },
 }
 
-local function getImpulsePart(char: Model): BasePart?
-	local lowerTorso = char:FindFirstChild("LowerTorso", true)
-	if lowerTorso and lowerTorso:IsA("BasePart") then
-		return lowerTorso
+-- Construye un lookup name→BasePart para los hijos directos del personaje.
+-- En rigs R15/R6 todas las partes del cuerpo son hijos directos del Model;
+-- no hace falta FindFirstChild(name, true) recursivo (que escanea todo el
+-- subárbol — incluyendo accesorios, tools y particles).
+local function buildPartLookup(char: Model): { [string]: BasePart }
+	local map = {}
+	for _, child in ipairs(char:GetChildren()) do
+		if child:IsA("BasePart") then
+			map[child.Name] = child
+		end
 	end
-
-	local torso = char:FindFirstChild("Torso", true)
-	if torso and torso:IsA("BasePart") then
-		return torso
-	end
-
-	local root = char:FindFirstChild("HumanoidRootPart", true)
-	if root and root:IsA("BasePart") then
-		return root
-	end
-
-	return nil
+	return map
 end
 
-local function buildRagdoll(char: Model)
-	local head = char:FindFirstChild("Head", true)
-	local upperTorso = char:FindFirstChild("UpperTorso", true)
+local function getImpulsePart(parts: { [string]: BasePart }): BasePart?
+	return parts.LowerTorso or parts.Torso or parts.HumanoidRootPart
+end
+
+local function buildRagdoll(char: Model, parts: { [string]: BasePart })
+	local head = parts.Head
+	local upperTorso = parts.UpperTorso
 
 	if CONFIG.RAGDOLL_HEAD_AS_JOINT then
 		if head and upperTorso then
@@ -69,8 +68,8 @@ local function buildRagdoll(char: Model)
 	end
 
 	for _, jointData in ipairs(R15_JOINTS) do
-		local part0 = char:FindFirstChild(jointData.Part0, true)
-		local part1 = char:FindFirstChild(jointData.Part1, true)
+		local part0 = parts[jointData.Part0]
+		local part1 = parts[jointData.Part1]
 
 		if part0 and part1 then
 			local att0 = part0:FindFirstChild(jointData.Att0)
@@ -83,8 +82,8 @@ local function buildRagdoll(char: Model)
 	end
 
 	for _, weldData in ipairs(R15_WELDS) do
-		local part0 = char:FindFirstChild(weldData.Part0, true)
-		local part1 = char:FindFirstChild(weldData.Part1, true)
+		local part0 = parts[weldData.Part0]
+		local part1 = parts[weldData.Part1]
 
 		if part0 and part1 then
 			Utils.createWeld(part0, part1)
@@ -115,7 +114,9 @@ local function applyRagdoll(char: Model, hum: Humanoid)
 	Utils.anchor(char, true)
 	Utils.destroyMotors(char)
 
-	local root = char:FindFirstChild("HumanoidRootPart", true)
+	local parts = buildPartLookup(char)
+
+	local root = parts.HumanoidRootPart
 	if root then
 		root:ClearAllChildren()
 		root.CanCollide = false
@@ -126,7 +127,7 @@ local function applyRagdoll(char: Model, hum: Humanoid)
 	hum:SetStateEnabled(Enum.HumanoidStateType.GettingUp, false)
 
 	if hum.RigType == Enum.HumanoidRigType.R15 then
-		buildRagdoll(char)
+		buildRagdoll(char, parts)
 		preventInternalCollisions(char)
 	end
 
@@ -157,7 +158,7 @@ local function applyRagdoll(char: Model, hum: Humanoid)
 
 	Utils.anchor(char, false)
 
-	local impulsePart = getImpulsePart(char)
+	local impulsePart = getImpulsePart(parts)
 	if impulsePart then
 		local vx = rng:NextInteger(-CONFIG.THROW_FORCE_XZ, CONFIG.THROW_FORCE_XZ)
 		local vy = CONFIG.THROW_FORCE_Y

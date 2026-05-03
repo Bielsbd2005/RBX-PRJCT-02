@@ -48,6 +48,20 @@ local Promise           = require(Packages["typed-promise"]) :: any
 
 local DataTemplate = require(Shared.constants.DataTemplate) :: any
 
+-- Deep-copy local: el template está `table.freeze`d. Si sembramos un Value de
+-- Fusion con la referencia directa, cualquier mutación accidental por algún
+-- componente lanza error en runtime. Sembramos copias para aislar.
+local function _deepCopy(value: any): any
+	if type(value) ~= "table" then
+		return value
+	end
+	local copy = {}
+	for key, nested in value do
+		copy[key] = _deepCopy(nested)
+	end
+	return copy
+end
+
 -- ────────────────────────────────────────────────────────────
 -- ESTADO PRIVADO
 -- ────────────────────────────────────────────────────────────
@@ -72,12 +86,19 @@ local _readyResolve:  ((any) -> ())? = nil
 -- El tipo real es Fusion.Value<T>; los consumidores pueden castear si lo desean.
 local DataController = {}
 
-DataController.Stats     = nil :: any
-DataController.Inventory = nil :: any
-DataController.Loadout   = nil :: any
-DataController.Settings  = nil :: any
-DataController.Rewards   = nil :: any
-DataController.Cases     = nil :: any
+DataController.Stats         = nil :: any
+DataController.Inventory     = nil :: any
+DataController.InventoryMeta = nil :: any
+DataController.Loadout       = nil :: any
+DataController.WeaponKills   = nil :: any
+DataController.Settings      = nil :: any
+DataController.Rewards       = nil :: any
+DataController.Cases         = nil :: any
+DataController.LoginStreak   = nil :: any
+DataController.NewItemFlags  = nil :: any
+DataController.DailyTasks    = nil :: any
+DataController.BattlePass    = nil :: any
+DataController.Metadata      = nil :: any
 
 -- ────────────────────────────────────────────────────────────
 -- API PÚBLICA
@@ -106,13 +127,21 @@ function DataController:Start(): ()
 		Fusion.doCleanup(_scope)
 	end, true)
 
-	-- Inicializar Values con los datos por defecto del template
-	DataController.Stats     = _scope:Value(DataTemplate.Stats)
-	DataController.Inventory = _scope:Value(DataTemplate.Inventory)
-	DataController.Loadout   = _scope:Value(DataTemplate.Loadout)
-	DataController.Settings  = _scope:Value(DataTemplate.Settings)
-	DataController.Rewards   = _scope:Value(DataTemplate.Rewards)
-	DataController.Cases     = _scope:Value(DataTemplate.Cases)
+	-- Inicializar Values con copias profundas del template (template está
+	-- congelado; las copias permiten mutación segura por consumidores).
+	DataController.Stats         = _scope:Value(_deepCopy(DataTemplate.Stats))
+	DataController.Inventory     = _scope:Value(_deepCopy(DataTemplate.Inventory))
+	DataController.InventoryMeta = _scope:Value(_deepCopy(DataTemplate.InventoryMeta))
+	DataController.Loadout       = _scope:Value(_deepCopy(DataTemplate.Loadout))
+	DataController.WeaponKills   = _scope:Value(_deepCopy(DataTemplate.WeaponKills))
+	DataController.Settings      = _scope:Value(_deepCopy(DataTemplate.Settings))
+	DataController.Rewards       = _scope:Value(_deepCopy(DataTemplate.Rewards))
+	DataController.Cases         = _scope:Value(_deepCopy(DataTemplate.Cases))
+	DataController.LoginStreak   = _scope:Value(_deepCopy(DataTemplate.LoginStreak))
+	DataController.NewItemFlags  = _scope:Value(_deepCopy(DataTemplate.NewItemFlags))
+	DataController.DailyTasks    = _scope:Value(_deepCopy(DataTemplate.DailyTasks))
+	DataController.BattlePass    = _scope:Value(_deepCopy(DataTemplate.BattlePass))
+	DataController.Metadata      = _scope:Value(_deepCopy(DataTemplate.Metadata))
 
 	-- Promise que se resuelve cuando llega la Replica del servidor
 	_readyPromise = Promise.new(function(resolve: (any) -> ())
@@ -124,15 +153,30 @@ function DataController:Start(): ()
 
 	-- Registrarse para recibir la Replica "PlayerProfile"
 	local connection = ReplicaController.ReplicaOfClassCreated("PlayerProfile", function(replica: any)
+		-- Guard: el servidor solo crea UNA replica PlayerProfile por jugador
+		-- (Replication = player). Si llega una segunda (server bug, hot reload),
+		-- duplicaríamos los listeners y _replica quedaría inconsistente.
+		if _replica ~= nil then
+			warn("[DataController] Segunda replica PlayerProfile ignorada")
+			return
+		end
+
 		_replica = replica
 
 		-- ── Sembrar Values con snapshot inicial ──────────
 		DataController.Stats:set(replica.Data.Stats)
 		DataController.Inventory:set(replica.Data.Inventory)
+		DataController.InventoryMeta:set(replica.Data.InventoryMeta)
 		DataController.Loadout:set(replica.Data.Loadout)
+		DataController.WeaponKills:set(replica.Data.WeaponKills)
 		DataController.Settings:set(replica.Data.Settings)
 		DataController.Rewards:set(replica.Data.Rewards)
 		DataController.Cases:set(replica.Data.Cases)
+		DataController.LoginStreak:set(replica.Data.LoginStreak)
+		DataController.NewItemFlags:set(replica.Data.NewItemFlags)
+		DataController.DailyTasks:set(replica.Data.DailyTasks)
+		DataController.BattlePass:set(replica.Data.BattlePass)
+		DataController.Metadata:set(replica.Data.Metadata)
 
 		-- ── Suscribir listeners de cambio por sección ────
 		-- Cada listener recibe la NUEVA tabla de sección (nueva referencia
@@ -157,6 +201,12 @@ function DataController:Start(): ()
 		)
 
 		replica:AddCleanupTask(
+			replica:ListenToChange({ "WeaponKills" }, function(newWeaponKills: any)
+				DataController.WeaponKills:set(newWeaponKills)
+			end)
+		)
+
+		replica:AddCleanupTask(
 			replica:ListenToChange({ "Settings" }, function(newSettings: any)
 				DataController.Settings:set(newSettings)
 			end)
@@ -171,6 +221,42 @@ function DataController:Start(): ()
 		replica:AddCleanupTask(
 			replica:ListenToChange({ "Cases" }, function(newCases: any)
 				DataController.Cases:set(newCases)
+			end)
+		)
+
+		replica:AddCleanupTask(
+			replica:ListenToChange({ "InventoryMeta" }, function(newInventoryMeta: any)
+				DataController.InventoryMeta:set(newInventoryMeta)
+			end)
+		)
+
+		replica:AddCleanupTask(
+			replica:ListenToChange({ "LoginStreak" }, function(newLoginStreak: any)
+				DataController.LoginStreak:set(newLoginStreak)
+			end)
+		)
+
+		replica:AddCleanupTask(
+			replica:ListenToChange({ "NewItemFlags" }, function(newNewItemFlags: any)
+				DataController.NewItemFlags:set(newNewItemFlags)
+			end)
+		)
+
+		replica:AddCleanupTask(
+			replica:ListenToChange({ "DailyTasks" }, function(newDailyTasks: any)
+				DataController.DailyTasks:set(newDailyTasks)
+			end)
+		)
+
+		replica:AddCleanupTask(
+			replica:ListenToChange({ "BattlePass" }, function(newBattlePass: any)
+				DataController.BattlePass:set(newBattlePass)
+			end)
+		)
+
+		replica:AddCleanupTask(
+			replica:ListenToChange({ "Metadata" }, function(newMetadata: any)
+				DataController.Metadata:set(newMetadata)
 			end)
 		)
 
@@ -206,8 +292,12 @@ end
 
 --[[
 	Lectura directa del dato (sin reactividad).
-	  path  nil      → devuelve toda la tabla de datos (replica.Data)
+	  path  nil      → devuelve copia profunda de toda la tabla de datos
 	  path  {string} → navega por la ruta y devuelve el valor en la hoja
+	                   (deep-copy si es tabla, primitivo si no)
+
+	Devuelve copias para evitar que el caller mute el estado replicado por
+	accidente — eso desincronizaría el cliente sin notificar listeners.
 
 	Útil para lógica de negocio en controladores (no en UI reactiva).
 ]]
@@ -217,7 +307,7 @@ function DataController:Get(path: { string }?): any
 	end
 
 	if path == nil then
-		return _replica.Data
+		return _deepCopy(_replica.Data)
 	end
 
 	local pointer: any = _replica.Data
@@ -227,7 +317,7 @@ function DataController:Get(path: { string }?): any
 		end
 		pointer = pointer[key]
 	end
-	return pointer
+	return _deepCopy(pointer)
 end
 
 --[[

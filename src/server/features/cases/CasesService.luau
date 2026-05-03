@@ -28,6 +28,8 @@ local CasesConfig = require(Shared.constants.CasesConfig)
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
 local StoreProducts = require(Shared.constants.StoreProducts)
 
+local BattlePassService = require(script.Parent.Parent.battlepass.BattlePassService)
+
 local STORE_PRODUCTS_BY_ID = StoreProducts.ProductsByProductId :: { [number]: { CashAmount: number } }
 
 local COOLDOWN = 0.5
@@ -36,39 +38,6 @@ type OwnedWeaponEntry = {
 	category: WeaponCategory,
 	weaponId: string,
 }
-
-local function getOwnedWeaponWrapCount(profileData: any, weaponCategory: string, weaponId: string, skinId: string): number
-	local inventory = profileData.Inventory
-	if type(inventory) ~= "table" then
-		return 0
-	end
-
-	local wrapsByWeapon = inventory.WeaponSkinsByWeapon
-	if type(wrapsByWeapon) ~= "table" then
-		return 0
-	end
-
-	local categoryWraps = wrapsByWeapon[weaponCategory]
-	if type(categoryWraps) ~= "table" then
-		return 0
-	end
-
-	local weaponWraps = categoryWraps[weaponId]
-	if type(weaponWraps) ~= "table" then
-		return 0
-	end
-
-	local ownedValue = weaponWraps[skinId]
-	if ownedValue == true then
-		return 1
-	end
-
-	if type(ownedValue) == "number" and ownedValue > 0 then
-		return math.max(1, math.floor(ownedValue))
-	end
-
-	return 0
-end
 
 -- ────────────────────────────────────────────────────────────
 -- ESTADO
@@ -166,32 +135,13 @@ end
 -- SUMMON HANDLER
 -- ────────────────────────────────────────────────────────────
 
-local function processSingleSummon(player: Player, caseId: string, caseDef: CasesConfig.CaseDefinition, profile: any): (string, boolean, number)
-	local useLucky = isLuckyActive(profile)
-
-	-- Leer pity counter actual
-	local casesData = profile.Data.Cases or {}
-	local pityCounters = if type(casesData.PityCounters) == "table" then casesData.PityCounters else {}
-	local currentPity = if type(pityCounters[caseId]) == "number" then pityCounters[caseId] else 0
-
-	local isPity = false
-	local chosenSkinId: string
-
-	-- Pity check: si la siguiente tirada (currentPity + 1) alcanza el threshold
-	if (currentPity + 1) >= caseDef.PityThreshold then
-		chosenSkinId = caseDef.PityDropSkinId
-		isPity = true
-		currentPity = 0
-	else
-		local chosenDrop = weightedRandomPick(caseDef.Drops, useLucky)
-		chosenSkinId = chosenDrop.SkinId
-		currentPity = currentPity + 1
+local function onSummon(data: { caseId: string, multi: boolean }, player: Player): ()
+	-- Validación de payload (defensiva sobre ByteNet).
+	if type(data) ~= "table" or type(data.caseId) ~= "string" or data.caseId == "" then
+		Network.Cases.Response.SendTo({ success = false, message = "Payload inválido." }, player)
+		return
 	end
 
-	return chosenSkinId, isPity, currentPity
-end
-
-local function onSummon(data: { caseId: string, multi: boolean }, player: Player): ()
 	if not checkCooldown(player, "summon") then
 		Network.Cases.Response.SendTo({ success = false, message = "Demasiadas peticiones." }, player)
 		return
@@ -277,22 +227,36 @@ local function onSummon(data: { caseId: string, multi: boolean }, player: Player
 		})
 	end
 
-	-- Construir batch de updates
+	-- Construir batch de updates. Cash con delta para evitar TOCTOU.
 	local updates = {
-		{ path = { "Stats", "Cash" }, value = currentCash - totalPrice },
+		{ path = { "Stats", "Cash" }, delta = -totalPrice },
 		{ path = { "Cases", "PityCounters", caseId }, value = runningPity },
 	}
 
-	-- Agregar skins al inventario por arma (WeaponSkinsByWeapon)
+	-- Agregar skins al inventario por arma (WeaponSkinsByWeapon).
+	-- Delta para mantener consistencia con el resto del codebase y resilencia
+	-- ante futuras introducciones de yields entre el read y el write.
+	-- También marcar NEW! flag y metadata para que el Locker pinte badge.
+	local seenSkinIds: { [string]: boolean } = {}
 	for weaponCategory, weaponsLookup in wrapsWonByWeapon do
 		for weaponId, skinsLookup in weaponsLookup do
 			for skinId, amountWon in skinsLookup do
 				if ItemsConfig.WeaponSkins and ItemsConfig.WeaponSkins[skinId] then
-					local existingAmount = getOwnedWeaponWrapCount(profile.Data, weaponCategory, weaponId, skinId)
 					table.insert(updates, {
 						path = { "Inventory", "WeaponSkinsByWeapon", weaponCategory, weaponId, skinId },
-						value = existingAmount + amountWon,
+						delta = amountWon,
 					})
+					if not seenSkinIds[skinId] then
+						seenSkinIds[skinId] = true
+						table.insert(updates, {
+							path = { "InventoryMeta", "WeaponSkins", skinId },
+							value = { AcquiredAt = os.time(), Source = "Case" },
+						})
+						table.insert(updates, {
+							path = { "NewItemFlags", "WeaponSkins", skinId },
+							value = true,
+						})
+					end
 				end
 			end
 		end
@@ -343,6 +307,12 @@ local function onLuckyProductPurchased(receiptInfo: any): Enum.ProductPurchaseDe
 		return Enum.ProductPurchaseDecision.NotProcessedYet
 	end
 
+	-- Idempotencia: si ya procesamos este PurchaseId, no re-otorgar.
+	local purchaseId = tostring(receiptInfo.PurchaseId)
+	if _dataService:IsReceiptProcessed(player, purchaseId) then
+		return Enum.ProductPurchaseDecision.PurchaseGranted
+	end
+
 	local durationSeconds = CasesConfig.LuckyBoost.DurationMinutes * 60
 	local currentExpiry: number = 0
 	local casesData = profile.Data.Cases
@@ -354,7 +324,13 @@ local function onLuckyProductPurchased(receiptInfo: any): Enum.ProductPurchaseDe
 	local baseTime = math.max(os.time(), currentExpiry)
 	local newExpiry = baseTime + durationSeconds
 
-	local success = _dataService:SetValue(player, { "Cases", "LuckyExpiresAt" }, newExpiry)
+	-- Atómico: grant + mark en el mismo BatchUpdate. Sin esto, si el jugador
+	-- se va entre SetValue y MarkReceiptProcessed, el receipt queda sin marcar
+	-- y un futuro reintento de Roblox dupea el lucky boost.
+	local success = _dataService:BatchUpdate(player, {
+		{ path = { "Cases", "LuckyExpiresAt" }, value = newExpiry },
+		{ path = { "ProcessedReceipts", purchaseId }, value = os.time() },
+	})
 	if not success then
 		return Enum.ProductPurchaseDecision.NotProcessedYet
 	end
@@ -380,6 +356,12 @@ function CasesService:Start(dataService: any): ()
 
 	-- ProcessReceipt centralizado: maneja lucky boost y delega productos de tienda
 	MarketplaceService.ProcessReceipt = function(receiptInfo: any): Enum.ProductPurchaseDecision
+		-- Battle Pass Premium: el servicio devuelve nil si el productId no es suyo.
+		local bpDecision = BattlePassService:ProcessReceipt(receiptInfo)
+		if bpDecision ~= nil then
+			return bpDecision
+		end
+
 		-- Lucky boost
 		if receiptInfo.ProductId == CasesConfig.LuckyBoost.ProductId and CasesConfig.LuckyBoost.ProductId > 0 then
 			return onLuckyProductPurchased(receiptInfo)
@@ -392,7 +374,18 @@ function CasesService:Start(dataService: any): ()
 			if not buyer or not _dataService then
 				return Enum.ProductPurchaseDecision.NotProcessedYet
 			end
-			local ok = _dataService:Increment(buyer, { "Stats", "Cash" }, storeProduct.CashAmount)
+
+			-- Idempotencia: si ya procesamos este PurchaseId, no re-otorgar Cash.
+			local purchaseId = tostring(receiptInfo.PurchaseId)
+			if _dataService:IsReceiptProcessed(buyer, purchaseId) then
+				return Enum.ProductPurchaseDecision.PurchaseGranted
+			end
+
+			-- Atómico: grant Cash + mark receipt en el mismo BatchUpdate.
+			local ok = _dataService:BatchUpdate(buyer, {
+				{ path = { "Stats", "Cash" }, delta = storeProduct.CashAmount },
+				{ path = { "ProcessedReceipts", purchaseId }, value = os.time() },
+			})
 			if ok then
 				return Enum.ProductPurchaseDecision.PurchaseGranted
 			end

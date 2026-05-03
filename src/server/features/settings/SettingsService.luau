@@ -1,8 +1,21 @@
 --!strict
 --[[
 	SettingsService.luau (Server)
-	Escucha los cambios tipados de Settings del cliente, valida la clave y el rango,
-	y actualiza el DataService atómicamente.
+	Listener tipado para mutaciones de Settings desde el cliente.
+
+	Whitelist por handler:
+	  • UpdateSlider  → claves en NUMERIC_SETTINGS, value clamped a [0,1].
+	  • UpdateToggle  → claves en BOOLEAN_SETTINGS, value bool.
+	  • UpdateChoice  → claves en CHOICE_SETTINGS, value string en su set.
+	  • UpdateColor   → claves en COLOR_SETTINGS, RGB clamped a [0,1].
+
+	Añadir un setting nuevo:
+	  1. Añadir el campo al DataTemplate.Settings con default sensato.
+	  2. Añadir la clave a la whitelist de su tipo aquí.
+	  3. UI cliente envía vía Network.Settings.UpdateX correspondiente.
+
+	No persiste valores fuera de los whitelists — defensa contra clientes
+	que intenten escribir secciones arbitrarias del perfil.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -20,14 +33,40 @@ local _cooldowns: { [number]: { [string]: number } } = {}
 
 local RATE_LIMIT_SECONDS = 0.1
 
+-- Sliders: value se clampa a [0,1] (mapeo a unidades reales en el cliente).
 local NUMERIC_SETTINGS = {
+	MasterVolume = true,
 	MusicVolume = true,
+	SFXVolume = true,
 	CameraSensitivity = true,
+	FOV = true,
+	HUDScale = true,
 }
 
 local BOOLEAN_SETTINGS = {
 	Vibration = true,
 	AimAssist = true,
+	ShowDamageNumbers = true,
+}
+
+-- Enums: clave → set de valores válidos. Defensa contra clientes que envían
+-- strings arbitrarias.
+local CHOICE_SETTINGS: { [string]: { [string]: boolean } } = {
+	ColorblindMode = {
+		None = true,
+		Protanopia = true,
+		Deuteranopia = true,
+		Tritanopia = true,
+	},
+	Language = {
+		en = true, es = true, fr = true, pt = true, de = true,
+		it = true, ja = true, ko = true, zh = true, ru = true,
+	},
+}
+
+-- Colores: clave → true (presencia indica que el setting acepta RGB).
+local COLOR_SETTINGS = {
+	CrosshairColor = true,
 }
 
 local function _checkCooldown(player: Player, action: string): boolean
@@ -61,6 +100,13 @@ local function _canUpdate(player: Player, key: string): boolean
 end
 
 local function _onUpdateSlider(data: { key: string, value: number }, player: Player): ()
+	if type(data) ~= "table" or type(data.key) ~= "string" then
+		return
+	end
+	if type(data.value) ~= "number" or data.value ~= data.value then -- NaN check
+		return
+	end
+
 	if not _checkCooldown(player, "slider:" .. data.key) then
 		return
 	end
@@ -74,6 +120,10 @@ local function _onUpdateSlider(data: { key: string, value: number }, player: Pla
 end
 
 local function _onUpdateToggle(data: { key: string, value: boolean }, player: Player): ()
+	if type(data) ~= "table" or type(data.key) ~= "string" or type(data.value) ~= "boolean" then
+		return
+	end
+
 	if not _checkCooldown(player, "toggle:" .. data.key) then
 		return
 	end
@@ -83,6 +133,55 @@ local function _onUpdateToggle(data: { key: string, value: boolean }, player: Pl
 	end
 
 	_dataService:SetValue(player, { "Settings", data.key }, data.value)
+end
+
+local function _onUpdateChoice(data: { key: string, value: string }, player: Player): ()
+	if type(data) ~= "table" or type(data.key) ~= "string" or type(data.value) ~= "string" then
+		return
+	end
+
+	if not _checkCooldown(player, "choice:" .. data.key) then
+		return
+	end
+
+	local validValues = CHOICE_SETTINGS[data.key]
+	if not validValues or not validValues[data.value] then
+		warn(`[SettingsService] Choice inválida {data.key}={data.value}`)
+		return
+	end
+
+	if not _canUpdate(player, data.key) then
+		return
+	end
+
+	_dataService:SetValue(player, { "Settings", data.key }, data.value)
+end
+
+local function _onUpdateColor(data: { key: string, r: number, g: number, b: number }, player: Player): ()
+	if type(data) ~= "table" or type(data.key) ~= "string" then
+		return
+	end
+	if type(data.r) ~= "number" or type(data.g) ~= "number" or type(data.b) ~= "number" then
+		return
+	end
+	if data.r ~= data.r or data.g ~= data.g or data.b ~= data.b then
+		return
+	end
+
+	if not _checkCooldown(player, "color:" .. data.key) then
+		return
+	end
+
+	if not COLOR_SETTINGS[data.key] or not _canUpdate(player, data.key) then
+		return
+	end
+
+	local color = {
+		R = math.clamp(data.r, 0, 1),
+		G = math.clamp(data.g, 0, 1),
+		B = math.clamp(data.b, 0, 1),
+	}
+	_dataService:SetValue(player, { "Settings", data.key }, color)
 end
 
 function SettingsService:Start(dataService: any): ()
@@ -99,6 +198,8 @@ function SettingsService:Start(dataService: any): ()
 
 	Network.Settings.UpdateSlider.Listen(_onUpdateSlider)
 	Network.Settings.UpdateToggle.Listen(_onUpdateToggle)
+	Network.Settings.UpdateChoice.Listen(_onUpdateChoice)
+	Network.Settings.UpdateColor.Listen(_onUpdateColor)
 end
 
 return SettingsService

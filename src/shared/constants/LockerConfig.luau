@@ -48,7 +48,10 @@ local ITEMS_CONFIG_BY_NAV = table.freeze({
 local CATEGORY_TO_LOADOUT_SLOT = table.freeze({
 	Main = "MainWeapon",
 	Special = "SpecialWeapon",
-	WeaponSkins = "ActiveSkin",
+	-- WeaponSkins NO se mapea aquí: la skin equipada es por-arma vía
+	-- MainWeaponWraps[weaponId] / SpecialWeaponWraps[weaponId]. Los call-sites
+	-- de WeaponSkins toman ramas explícitas (ver ShopService:_onBuyItem y
+	-- locker/init.luau item.Category == "WeaponSkins").
 	KillEffects = "KillEffect",
 	Faces = "Face",
 	Hats = "Hat",

@@ -13,8 +13,7 @@ local BotAI = require(script:WaitForChild("BotAI"))
 type BotIdentity = { name: string, image: string }
 
 type RoundStartConfig = {
-	spawnPointsA: { BasePart },
-	spawnPointsB: { BasePart },
+	spawnPoints: { BasePart },
 	mapRoot: Instance?,
 	onBotDied: ((string, string, Humanoid, number) -> ())?,
 }
@@ -64,10 +63,7 @@ local AIService = {}
 
 local _isRoundActive = false
 local _mapRoot: Instance? = nil
-local _spawnPointsByTeam: { A: { BasePart }, B: { BasePart } } = {
-	A = {},
-	B = {},
-}
+local _spawnPoints: { BasePart } = {}
 local _onBotDied: ((string, string, Humanoid, number) -> ())? = nil
 local _botsByName: { [string]: BotRecord } = {}
 local _botNamesByTeam: { A: { string }, B: { string } } = {
@@ -130,13 +126,12 @@ local function _refreshAliveLists()
 	_clearTeamList("B")
 end
 
-local function _getSpawnPointForTeam(team: "A" | "B"): BasePart?
-	local spawnPoints = _spawnPointsByTeam[team]
-	if #spawnPoints == 0 then
+local function _getRandomSpawnPoint(): BasePart?
+	if #_spawnPoints == 0 then
 		return nil
 	end
 
-	return spawnPoints[math.random(1, #spawnPoints)]
+	return _spawnPoints[math.random(1, #_spawnPoints)]
 end
 
 local function _findTemplateBot(): Model?
@@ -292,7 +287,7 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 		return false
 	end
 
-	local spawnPoint = _getSpawnPointForTeam(team)
+	local spawnPoint = _getRandomSpawnPoint()
 	if not spawnPoint then
 		return false
 	end
@@ -366,31 +361,41 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 		end
 		record.deathReported = true
 
-		-- Aplicar kill effect del asesino (ragdoll visible para todos)
+		-- 1. Aplicar kill effect del asesino (ragdoll visible para todos)
 		local effectId = _getKillEffectForBotAttacker(humanoid)
 		pcall(KillEffectsRegistry.apply, effectId, botModel)
 
-		-- Recycle identity so the replacement bot keeps the same fakeUserId+name
-		table.insert(_recycledByTeam[team], { identity = identity, fakeUserId = fakeUserId })
-
-		if _onBotDied then
-			_onBotDied(team, botName, humanoid, fakeUserId)
-		end
-
-		-- Retrasar destruccion para que el ragdoll se vea
+		-- 2. Parar la IA y animaciones ANTES del callback de juego. El callback
+		-- _onBotDied es pesado (persistencia, remotes, rebalance de bots) y si
+		-- alguna de esas operaciones lanza un error, el resto del handler se
+		-- cancela en cascada — dejando al bot con la animación de correr
+		-- congelada y sin programar nunca su destrucción.
 		record.ai:Stop()
 		if record.deathConnection then
 			record.deathConnection:Disconnect()
 			record.deathConnection = nil
 		end
+
+		-- 3. Recycle identity so the replacement bot keeps the same fakeUserId+name
+		table.insert(_recycledByTeam[team], { identity = identity, fakeUserId = fakeUserId })
 		_botsByName[botName] = nil
 		_refreshAliveLists()
 
+		-- 4. Programar destrucción siempre, incluso si _onBotDied falla.
 		task.delay(BOT_RAGDOLL_CLEANUP_DELAY, function()
 			if botModel.Parent ~= nil then
 				botModel:Destroy()
 			end
 		end)
+
+		-- 5. Callback de lógica de juego aislado: cualquier error aquí no debe
+		-- impedir la limpieza del NPC (animación congelada / modelo persistente).
+		if _onBotDied then
+			local ok, err = pcall(_onBotDied, team, botName, humanoid, fakeUserId)
+			if not ok then
+				warn(string.format("[AIService] _onBotDied error en %s: %s", botName, tostring(err)))
+			end
+		end
 	end)
 
 	_botsByName[botName] = record
@@ -441,8 +446,7 @@ function AIService:OnRoundStart(config: RoundStartConfig)
 	self:OnRoundEnd()
 	_isRoundActive = true
 	_mapRoot = config.mapRoot
-	_spawnPointsByTeam.A = table.clone(config.spawnPointsA or {})
-	_spawnPointsByTeam.B = table.clone(config.spawnPointsB or {})
+	_spawnPoints = table.clone(config.spawnPoints or {})
 	_onBotDied = config.onBotDied
 	_nextBotId = 1
 	_fakeUserIdCounter = 0
@@ -479,8 +483,7 @@ function AIService:OnRoundEnd()
 	table.clear(_botsByName)
 	table.clear(_botNamesByTeam.A)
 	table.clear(_botNamesByTeam.B)
-	_spawnPointsByTeam.A = {}
-	_spawnPointsByTeam.B = {}
+	_spawnPoints = {}
 	_mapRoot = nil
 	_onBotDied = nil
 	table.clear(_usedIdentityIndices)

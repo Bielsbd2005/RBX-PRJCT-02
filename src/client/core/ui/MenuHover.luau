@@ -64,7 +64,6 @@ function MenuHover.new(menuGui: ScreenGui)
 
 	local bottomContainer = menuGui:FindFirstChild("BottomContainer")
 	local footer = bottomContainer and bottomContainer:FindFirstChild("Footer")
-	local rightContainer = menuGui:FindFirstChild("RightContainer")
 
 	local function bindContainer(container: Instance)
 		for _, descendant in ipairs(container:GetDescendants()) do
@@ -76,10 +75,6 @@ function MenuHover.new(menuGui: ScreenGui)
 
 	if footer then
 		bindContainer(footer)
-	end
-
-	if rightContainer then
-		bindContainer(rightContainer)
 	end
 
 	return self

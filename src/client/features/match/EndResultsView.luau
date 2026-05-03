@@ -21,9 +21,14 @@
 	    ResultsScreen.Canvas.Rewards → ítems aparecen uno a uno con tween
 ]]
 
-local TweenService = game:GetService("TweenService")
-local Players      = game:GetService("Players")
-local Lighting     = game:GetService("Lighting")
+local TweenService     = game:GetService("TweenService")
+local Players          = game:GetService("Players")
+local Lighting         = game:GetService("Lighting")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Packages = ReplicatedStorage:WaitForChild("Packages")
+local Janitor  = require(Packages.janitor) :: any
+local MenuHover = require(script.Parent.Parent.Parent.core.ui.MenuHover)
 
 -- ── Colores ──────────────────────────────────────────────────
 local VICTORY_COLOR   = Color3.fromRGB(0,   152, 246)
@@ -136,27 +141,12 @@ local function _setResultsBlurEnabled(enabled: boolean)
 	end
 end
 
--- Localiza el Canvas dentro del ScreenGui.
--- Orden: 1) Canvas hijo directo del ScreenGui  2) Canvas dentro de ResultsScreen  3) Canvas en cualquier descendiente
-local function _resolveCanvas(gui: ScreenGui): GuiObject?
-	-- 1. Canvas es hijo directo del ScreenGui (el ScreenGui se llama ResultsScreen)
-	local direct = gui:FindFirstChild("Canvas")
-	if direct and direct:IsA("GuiObject") then
-		return direct
+local function _resolveContainer(gui: ScreenGui): GuiObject?
+	local container = gui:FindFirstChild("Container")
+	if container and container:IsA("GuiObject") then
+		return container
 	end
-
-	-- 2. Canvas está dentro de un Frame hijo llamado ResultsScreen
-	local rs = gui:FindFirstChild("ResultsScreen")
-	if rs and rs:IsA("GuiObject") then
-		local canvas = rs:FindFirstChild("Canvas")
-		if canvas and canvas:IsA("GuiObject") then
-			return canvas
-		end
-	end
-
-	-- 3. Búsqueda recursiva como último recurso
-	local deepCanvas = gui:FindFirstChild("Canvas", true)
-	return if deepCanvas and deepCanvas:IsA("GuiObject") then deepCanvas else nil
+	return nil
 end
 
 -- ── Fase 1: Result ────────────────────────────────────────────
@@ -355,7 +345,7 @@ local EndResultsView = {}
 EndResultsView.__index = EndResultsView
 
 function EndResultsView.new(gui: ScreenGui): any
-	local canvas = _resolveCanvas(gui)
+	local canvas = _resolveContainer(gui)
 	if not canvas then
 		return nil
 	end
@@ -365,7 +355,7 @@ function EndResultsView.new(gui: ScreenGui): any
 	self._canvas = canvas
 	self._token  = 0
 	self._onFinished = nil :: (() -> ())?
-	self._closeBtnConnection = nil :: RBXScriptConnection?
+	self._janitor = Janitor.new()
 
 	gui.Enabled      = false
 	gui.ResetOnSpawn = false
@@ -378,14 +368,16 @@ function EndResultsView.new(gui: ScreenGui): any
 	if summaryPanel then summaryPanel.Visible = false end
 	if rewardsPanel then rewardsPanel.Visible = false end
 
-	-- Vincular CloseBtn dentro de Canvas
+	-- CloseBtn: hover de stroke + click handler
 	local closeBtn = canvas:FindFirstChild("CloseBtn")
 	if closeBtn and closeBtn:IsA("GuiButton") then
-		self._closeBtnConnection = closeBtn.MouseButton1Click:Connect(function()
+		local resetClose = MenuHover.bindButton(closeBtn, self._janitor)
+		self._janitor:Add(closeBtn.MouseButton1Click:Connect(function()
+			resetClose()
 			if self._onFinished then
 				self._onFinished()
 			end
-		end)
+		end), "Disconnect")
 	end
 
 	return self
@@ -465,10 +457,7 @@ end
 function EndResultsView:Destroy()
 	self._token += 1
 	self._onFinished = nil
-	if self._closeBtnConnection then
-		self._closeBtnConnection:Disconnect()
-		self._closeBtnConnection = nil
-	end
+	self._janitor:Destroy()
 	_setResultsBlurEnabled(false)
 	self._gui.Enabled = false
 end

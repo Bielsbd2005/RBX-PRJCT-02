@@ -7,6 +7,7 @@ local IsServer = RunService:IsServer()
 local WeaponsSystemFolder = script.Parent.Parent
 local AnimationsFolder = WeaponsSystemFolder:WaitForChild("Assets"):WaitForChild("Animations")
 local AutoAimSystem = require(script.Parent:WaitForChild("AutoAimSystem"))
+local WeaponsNetwork = require(script.Parent:WaitForChild("WeaponsNetwork"))
 
 local function _isTouchPrimaryInput(): boolean
 	return UserInputService.TouchEnabled and not UserInputService.MouseEnabled
@@ -94,11 +95,10 @@ function BaseWeapon:doInitialSetup()
 			if IsServer or (Players.LocalPlayer and (self.instance:IsDescendantOf(Players.LocalPlayer.Backpack) or self.instance:IsDescendantOf(Players.LocalPlayer.Character))) then
 				self:setEquipped(true)
 				if self:getAmmoInWeapon() <= 0 then
-					-- Have to wait a frame, otherwise the reload animation will not play
-					coroutine.wrap(function()
-						wait()
+					-- Esperar un frame: si no, la animación de recarga no se reproduce.
+					task.defer(function()
 						self:reload()
-					end)()
+					end)
 				end
 			end
 		end)
@@ -300,9 +300,20 @@ function BaseWeapon:setActivated(activated, fromNetwork)
 		return
 	end
 
+	-- Server-side debounce: descarta cambios de estado más rápidos que ACTIVATE_DEBOUNCE
+	-- (protege contra spam por exploit del RemoteEvent).
+	if IsServer and fromNetwork then
+		local now = os.clock()
+		local last = self._lastActivatedAt or 0
+		if now - last < 0.1 then
+			return
+		end
+		self._lastActivatedAt = now
+	end
+
 	self.activated = activated
 	if IsServer and not fromNetwork then
-		self.weaponsSystem.getRemoteEvent("WeaponActivated"):FireAllClients(self.player, self.instance, self.activated)
+		WeaponsNetwork.broadcastWeaponActivated(self.player, self.instance, self.activated)
 	end
 
 	self:onActivatedChanged()
@@ -359,7 +370,7 @@ function BaseWeapon:fire(origin, dir, charge)
 
 	if not IsServer then
 		self:onFired(self.player, fireInfo, false)
-		self.weaponsSystem.getRemoteEvent("WeaponFired"):FireServer(self.instance, fireInfo)
+		WeaponsNetwork.fireWeaponFired(self.instance, fireInfo)
 	else
 		self:onFired(self.player, fireInfo, false)
 	end
@@ -377,7 +388,7 @@ function BaseWeapon:onFired(firingPlayer, fireInfo, fromNetwork)
 			return
 		end
 
-		self.weaponsSystem.getRemoteEvent("WeaponFired"):FireAllClients(firingPlayer, self.instance, fireInfo)
+		WeaponsNetwork.broadcastWeaponFired(firingPlayer, self.instance, fireInfo)
 	end
 end
 
@@ -425,7 +436,32 @@ function BaseWeapon:getSound(soundName)
 end
 
 function BaseWeapon:onDestroyed()
+	-- Disconnect all RBXScriptConnections
+	if self.connections then
+		for name, conn in self.connections do
+			if typeof(conn) == "RBXScriptConnection" then
+				conn:Disconnect()
+			end
+			self.connections[name] = nil
+		end
+	end
 
+	-- Stop and detach any cached animation tracks
+	if self.animTracks then
+		for name, track in self.animTracks do
+			if typeof(track) == "Instance" then
+				pcall(function()
+					(track :: AnimationTrack):Stop(0)
+				end)
+			end
+			self.animTracks[name] = nil
+		end
+	end
+
+	-- Clear sound template cache (don't destroy — they live in the instance tree)
+	if self.sounds then
+		table.clear(self.sounds)
+	end
 end
 
 function BaseWeapon:onConfigValueAdded(valueObj)
@@ -626,16 +662,23 @@ function BaseWeapon:onStepped(dt)
 	if (now - self.lastFireTime) < cooldown then return end
 	if not _isTouchPrimaryInput() then return end
 
-	-- Determine weapon muzzle origin matching BulletWeapon's self.tipAttach precisely
+	-- Determine weapon muzzle origin matching BulletWeapon's self.tipAttach precisely.
+	-- El lookup se cachea: el subárbol del Tool no cambia en runtime, y los
+	-- FindFirstChild recursivos (true) son caros — esto se ejecutaba en cada
+	-- disparo del auto-aim.
 	local weaponOrigin = cameraOrigin
 	if self.tipAttach then
 		weaponOrigin = self.tipAttach.WorldPosition
 	else
-		local muzzlePart = self.instance:FindFirstChild("TipAttachment", true) or
-			self.instance:FindFirstChild("Muzzle", true) or
-			self.instance:FindFirstChild("FirePoint", true) or
-			self.instance:FindFirstChild("Tip", true) or
-			self.instance:FindFirstChild("Hole", true)
+		local muzzlePart = self._cachedMuzzlePart
+		if not muzzlePart or not muzzlePart.Parent then
+			muzzlePart = self.instance:FindFirstChild("TipAttachment", true) or
+				self.instance:FindFirstChild("Muzzle", true) or
+				self.instance:FindFirstChild("FirePoint", true) or
+				self.instance:FindFirstChild("Tip", true) or
+				self.instance:FindFirstChild("Hole", true)
+			self._cachedMuzzlePart = muzzlePart
+		end
 
 		if muzzlePart then
 			if muzzlePart:IsA("Attachment") then
@@ -754,11 +797,11 @@ function BaseWeapon:reload(player, fromNetwork)
 		if self.player ~= nil and self.player ~= Players.LocalPlayer then
 			return
 		end
-		self.weaponsSystem.getRemoteEvent("WeaponReloadRequest"):FireServer(self.instance)
+		WeaponsNetwork.fireReloadRequest(self.instance)
 		self:onReloaded(self.player)
 	else
 		self:onReloaded(player, fromNetwork)
-		self.weaponsSystem.getRemoteEvent("WeaponReloaded"):FireAllClients(player, self.instance)
+		WeaponsNetwork.broadcastReloaded(player, self.instance)
 	end
 end
 
@@ -801,34 +844,20 @@ function BaseWeapon:onReloaded(player, fromNetwork)
 		--print("[BaseWeapon] Not calling animation - IsServer:", IsServer, "gui exists:", self.weaponsSystem.gui ~= nil)
 	end
 
-	if self.connections.reload ~= nil then -- this prevents an endless ammo bug
-		return
-	end
-	self.connections.reload = RunService.Heartbeat:Connect(function()
-		-- Stop trying to reload if the player unequipped this weapon or reloading was canceled some other way
-		if not self.reloading then
-			if self.connections.reload then
-				self.connections.reload:Disconnect()
-				self.connections.reload = nil
-			end
-		end
+	-- Token-based: en vez de un Heartbeat ejecutándose 60 veces/seg verificando
+	-- si pasó el tiempo, agendamos el cierre de la recarga con task.delay y
+	-- usamos un token incremental para invalidar callbacks superpuestos
+	-- (cancelReload o un nuevo reload mientras este aún no terminó).
+	self._reloadToken = (self._reloadToken or 0) + 1
+	local token = self._reloadToken
 
-		-- Wait until gun finishes reloading
-		if tick() < startTime + reloadTime then
-			return
-		end
+	task.delay(reloadTime, function()
+		if self._reloadToken ~= token then return end
+		if not self.reloading then return end
 
-			-- Add ammo to weapon
 		self.instance:SetAttribute("CurrentAmmo", self:getConfigValue("AmmoCapacity", 30))
-
-		if self.connections.reload then
-			self.connections.reload:Disconnect()
-			self.connections.reload = nil
-		end
-
 		self.reloading = false
 		self.instance:SetAttribute("IsReloading", false)
-
 		self.canReload = false
 	end)
 end
@@ -842,9 +871,9 @@ function BaseWeapon:cancelReload(player, fromNetwork)
 	end
 
 	if not IsServer and not fromNetwork and player == Players.LocalPlayer then
-		self.weaponsSystem.getRemoteEvent("WeaponReloadCanceled"):FireServer(self.instance)
+		WeaponsNetwork.fireReloadCanceled(self.instance)
 	elseif IsServer and fromNetwork then
-		self.weaponsSystem.getRemoteEvent("WeaponReloadCanceled"):FireAllClients(player, self.instance)
+		WeaponsNetwork.broadcastReloadCanceled(player, self.instance)
 	end
 
 	self.reloading = false

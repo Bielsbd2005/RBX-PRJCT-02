@@ -13,6 +13,9 @@ local Fusion = require(Packages.fusion)
 local Network = require(Shared.networking.Network)
 local DataController = require(Client.core.data.DataController)
 local PanelController = require(Client.core.ui.PanelController)
+local BlurController = require(Client.core.ui.BlurController)
+
+local BLUR_KEY = "Rewards"
 
 local RewardsFeature = {}
 
@@ -99,13 +102,13 @@ function RewardsFeature.start(menuController: any): any
 	local playerGui = player:WaitForChild("PlayerGui")
 	local menuGui = menuController:getGui()
 
-	local menuBtn = menuGui.RightContainer:WaitForChild("rewards") :: GuiButton
+	local menuBtn = menuGui:WaitForChild("UpperContainer"):WaitForChild("rewards") :: GuiButton
 
-	local gui = playerGui:WaitForChild("RewardsGui") :: ScreenGui
-	local container = gui:WaitForChild("Container") :: Frame
-	local mainFrame = container:WaitForChild("MainFrame") :: Frame
-	local closeBtn = mainFrame:WaitForChild("CloseBtn") :: GuiButton
-	local contentBackground = mainFrame:WaitForChild("ContentBackground") :: Frame
+	local uiGui = playerGui:WaitForChild("UserInterface") :: ScreenGui
+	local frame = uiGui:WaitForChild("Rewards") :: Frame
+
+	local closeBtn = frame:WaitForChild("CloseBtn") :: GuiButton
+	local contentBackground = frame:WaitForChild("ContentBackground") :: Frame
 
 	local likeJoinClaimBtn = contentBackground:WaitForChild("Like&Join"):WaitForChild("Claim") :: ImageButton
 	local notificationsClaimBtn = contentBackground:WaitForChild("Notifications"):WaitForChild("Claim") :: ImageButton
@@ -113,8 +116,17 @@ function RewardsFeature.start(menuController: any): any
 	local claimCodeBtn = claimCodesNode:WaitForChild("Claim") :: ImageButton
 	local codeTextBox = claimCodesNode:WaitForChild("TextBox") :: TextBox
 
-	local panel = PanelController.new(menuController, gui, container, menuBtn, closeBtn)
+	local panel = PanelController.new(menuController, frame, menuBtn, closeBtn, {
+		onOpen = function()
+			BlurController.acquire(BLUR_KEY)
+		end,
+		onClose = function()
+			BlurController.release(BLUR_KEY)
+		end,
+	})
 	janitor:Add(panel, "Destroy")
+
+	local REWARDS_REQUEST_TIMEOUT = 5
 
 	local pending = {
 		LikeJoin = false,
@@ -122,11 +134,34 @@ function RewardsFeature.start(menuController: any): any
 		Code = false,
 	}
 
+	local pendingTokens = {
+		LikeJoin = 0,
+		Notifications = 0,
+		Code = 0,
+	}
+
+	local pendingButtons: { [string]: ImageButton } = {}
+
 	local function setPending(button: ImageButton, key: string, isPending: boolean)
 		pending[key] = isPending
+		pendingButtons[key] = button
 		button.Active = not isPending
 		button.AutoButtonColor = not isPending
 		button.ImageTransparency = if isPending then 0.35 else 0
+	end
+
+	local function armTimeout(key: string)
+		pendingTokens[key] += 1
+		local token = pendingTokens[key]
+		task.delay(REWARDS_REQUEST_TIMEOUT, function()
+			if pendingTokens[key] == token and pending[key] then
+				local button = pendingButtons[key]
+				if button then
+					setPending(button, key, false)
+				end
+				notify("Sin respuesta del servidor")
+			end
+		end)
 	end
 
 	janitor:Add(likeJoinClaimBtn.MouseButton1Click:Connect(function()
@@ -136,6 +171,7 @@ function RewardsFeature.start(menuController: any): any
 
 		promptCommunity()
 		setPending(likeJoinClaimBtn, "LikeJoin", true)
+		armTimeout("LikeJoin")
 		Network.Rewards.ClaimLikeJoin.Send({})
 	end), "Disconnect")
 
@@ -146,6 +182,7 @@ function RewardsFeature.start(menuController: any): any
 
 		promptEnableNotifications()
 		setPending(notificationsClaimBtn, "Notifications", true)
+		armTimeout("Notifications")
 		Network.Rewards.ClaimNotifications.Send({})
 	end), "Disconnect")
 
@@ -161,6 +198,7 @@ function RewardsFeature.start(menuController: any): any
 		end
 
 		setPending(claimCodeBtn, "Code", true)
+		armTimeout("Code")
 		Network.Rewards.RedeemCode.Send({
 			code = code,
 		})

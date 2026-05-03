@@ -26,6 +26,10 @@ local CODE_REWARDS: { [string]: number } = {
 	REWARDS = 100,
 }
 
+-- Sanity cap: ningún código puede recompensar más que esto, sin importar la
+-- entrada en CODE_REWARDS. Defensa contra typos / valores inflados accidentales.
+local MAX_CODE_REWARD = 10000
+
 local _cooldowns: { [number]: { [string]: number } } = {}
 local _sessionTokens: { [number]: string } = {}
 
@@ -132,9 +136,8 @@ local function _onClaimLikeJoin(_: {}, player: Player): ()
 	end
 
 	local rewardCash = CLAIM_CASH_REWARD.LikeJoin
-	local currentCash = profile.Data.Stats.Cash or 0
 	local ok = _dataService:BatchUpdate(player, {
-		{ path = { "Stats", "Cash" }, value = currentCash + rewardCash },
+		{ path = { "Stats", "Cash" }, delta = rewardCash },
 		{ path = { "Rewards", "LikeState" }, value = "Claimed" },
 		{ path = { "Rewards", "GroupClaimed" }, value = true },
 		{ path = { "Rewards", "LikePendingSessionToken" }, value = "" },
@@ -165,9 +168,8 @@ local function _onClaimNotifications(_: {}, player: Player): ()
 	end
 
 	local rewardCash = CLAIM_CASH_REWARD.Notifications
-	local currentCash = profile.Data.Stats.Cash or 0
 	local ok = _dataService:BatchUpdate(player, {
-		{ path = { "Stats", "Cash" }, value = currentCash + rewardCash },
+		{ path = { "Stats", "Cash" }, delta = rewardCash },
 		{ path = { "Rewards", "NotificationsClaimed" }, value = true },
 	})
 
@@ -202,14 +204,19 @@ local function _onRedeemCode(data: { code: string }, player: Player): ()
 		return
 	end
 
+	-- Sanity cap por si CODE_REWARDS tiene un valor inflado.
+	if rewardCash > MAX_CODE_REWARD then
+		warn(("[RewardsService] Code %s exceeds MAX_CODE_REWARD (%d > %d) — capping."):format(normalizedCode, rewardCash, MAX_CODE_REWARD))
+		rewardCash = MAX_CODE_REWARD
+	end
+
 	if profile.Data.Rewards.ClaimedCodes[normalizedCode] then
 		_send(player, false, "Ese codigo ya fue reclamado.", "Code", 0)
 		return
 	end
 
-	local currentCash = profile.Data.Stats.Cash or 0
 	local ok = _dataService:BatchUpdate(player, {
-		{ path = { "Stats", "Cash" }, value = currentCash + rewardCash },
+		{ path = { "Stats", "Cash" }, delta = rewardCash },
 		{ path = { "Rewards", "ClaimedCodes", normalizedCode }, value = true },
 	})
 

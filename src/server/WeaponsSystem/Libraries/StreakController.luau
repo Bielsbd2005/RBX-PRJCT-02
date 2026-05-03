@@ -43,7 +43,7 @@ local valueLabel: TextLabel? = nil
 local frameUIScale: UIScale? = nil
 local originalPosition: UDim2? = nil
 local shakeConnection: RBXScriptConnection? = nil
-local pulseConnection: RBXScriptConnection? = nil
+local pulseTween: Tween? = nil
 local punchTween: Tween? = nil
 
 local function getColorTier(streak: number): number
@@ -222,30 +222,27 @@ local function startIdlePulse(streak: number)
 	ensureUIScale()
 	if not frameUIScale then return end
 
-	if pulseConnection then
-		pulseConnection:Disconnect()
-		pulseConnection = nil
+	-- Cancelar el tween anterior antes de iniciar uno nuevo (cambio de streak).
+	if pulseTween then
+		pulseTween:Cancel()
+		pulseTween = nil
 	end
 
 	-- Pulse speed: 1.8 → 4.0 Hz | Scale delta: 0.01 → 0.035
 	local pulseSpeed = math.clamp(1.8 + streak * 0.4, 1.8, 4.0)
 	local pulseAmount = math.clamp(0.01 + streak * 0.005, 0.01, 0.035)
 
-
-
-	local accumulated = 0
-
-	pulseConnection = RunService.Heartbeat:Connect(function(dt)
-		accumulated += dt
-
-		local scaleWave = math.sin(accumulated * pulseSpeed * math.pi * 2)
-
-		-- Scale breathes
-		if frameUIScale then
-			frameUIScale.Scale = 1 + scaleWave * pulseAmount
-		end
-
-	end)
+	-- Ping-pong tween en lugar de Heartbeat de 60Hz: TweenService corre en C++
+	-- y un único tween infinito reemplaza el callback Lua frame a frame.
+	-- halfPeriod = (1/speed)/2 → un ciclo completo = halfPeriod*2 (subida+bajada).
+	local halfPeriod = 1 / (pulseSpeed * 2)
+	frameUIScale.Scale = 1 - pulseAmount
+	pulseTween = TweenService:Create(
+		frameUIScale,
+		TweenInfo.new(halfPeriod, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+		{ Scale = 1 + pulseAmount }
+	)
+	pulseTween:Play()
 end
 
 -- ═══════════════════════════════════════════════════
@@ -288,9 +285,9 @@ local function stopAllFX()
 		shakeConnection:Disconnect()
 		shakeConnection = nil
 	end
-	if pulseConnection then
-		pulseConnection:Disconnect()
-		pulseConnection = nil
+	if pulseTween then
+		pulseTween:Cancel()
+		pulseTween = nil
 	end
 	if punchTween then
 		punchTween:Cancel()

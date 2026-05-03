@@ -56,56 +56,24 @@ end
 local function _resolveOptionRefs(optionsRoot: Instance): { OptionRefs }
 	local refs = {} :: { OptionRefs }
 	for _, container in _findOptionContainers(optionsRoot) do
-		local buttonRoot = container:FindFirstChild("Button")
-		if not buttonRoot then
-			continue
-		end
+		local buttonRoot = container:WaitForChild("Button") :: GuiButton
+		local indicator = buttonRoot:FindFirstChild("Indicator")
+		local voteCountRoot = container:FindFirstChild("VoteCount")
+		local mapNameLabel = if voteCountRoot then voteCountRoot:FindFirstChild("name") :: TextLabel? else nil
+		local mapNameButtonLabel = buttonRoot:FindFirstChild("Name") :: TextLabel?
+		local mapModeLabel = buttonRoot:FindFirstChild("Mode") :: TextLabel?
 
-		local buttonNode: GuiButton? = nil
-		if buttonRoot:IsA("GuiButton") then
-			buttonNode = buttonRoot
-		else
-			local nestedButton = buttonRoot:FindFirstChildWhichIsA("GuiButton", true)
-			if nestedButton then
-				buttonNode = nestedButton
-			end
-		end
-
-		if not buttonNode then
-			continue
-		end
-
-		local indicator = buttonRoot:FindFirstChild("Indicator", true)
-		local indicatorObject = if indicator and indicator:IsA("GuiObject") then indicator else nil
-
-		-- Buscar VoteCount recursivamente en el container completo para cubrir
-		-- tanto Button-como-Frame como Button-como-GuiButton.
-		local voteCountRoot = container:FindFirstChild("VoteCount", true)
-		local mapNameNode = if voteCountRoot then voteCountRoot:FindFirstChild("name") else nil
-		local mapNameLabel = if mapNameNode and mapNameNode:IsA("TextLabel") then mapNameNode else nil
-
-		-- Etiquetas de nombre y modo ubicadas como hijos directos del Button.
-		local mapNameBtnNode = buttonRoot:FindFirstChild("Name")
-		local mapNameButtonLabel = if mapNameBtnNode and mapNameBtnNode:IsA("TextLabel") then mapNameBtnNode else nil
-		local mapModeNode = buttonRoot:FindFirstChild("Mode")
-		local mapModeLabel = if mapModeNode and mapModeNode:IsA("TextLabel") then mapModeNode else nil
-
-		-- Ocultar el template Vote si existe (se usara solo como ancora de parent).
-		local voteTemplateAnchor = if voteCountRoot then voteCountRoot:FindFirstChild("Vote") else nil
-		if voteTemplateAnchor and voteTemplateAnchor:IsA("GuiObject") then
+		local voteTemplateAnchor = if voteCountRoot then voteCountRoot:FindFirstChild("Vote") :: GuiObject? else nil
+		if voteTemplateAnchor then
 			voteTemplateAnchor.Visible = false
-		end
-
-		if not voteCountRoot then
-			warn("[MapVoteView] VoteCount no encontrado en container: " .. container:GetFullName())
 		end
 
 		table.insert(refs, {
 			container = container,
-			button = buttonNode,
-			indicator = indicatorObject,
+			button = buttonRoot,
+			indicator = if indicator and indicator:IsA("GuiObject") then indicator else nil,
 			voteCountRoot = voteCountRoot,
-			voteTemplate = voteTemplateAnchor :: GuiObject?,
+			voteTemplate = voteTemplateAnchor,
 			mapNameLabel = mapNameLabel,
 			mapNameButtonLabel = mapNameButtonLabel,
 			mapModeLabel = mapModeLabel,
@@ -128,20 +96,9 @@ function MapVoteView.new(mapVoteFrame: GuiObject, optionsRoot: GuiObject): any
 	local self = setmetatable({}, MapVoteView)
 
 	self._frame = mapVoteFrame
-	self._timerLabel = mapVoteFrame:FindFirstChild("Timer", true) :: TextLabel?
-	self._barFill = (function(): Frame?
-		local bar = mapVoteFrame:FindFirstChild("Bar", true)
-		if not bar then
-			return nil
-		end
-
-		local fill = bar:FindFirstChild("Fill", true)
-		if fill and fill:IsA("Frame") then
-			return fill
-		end
-
-		return nil
-	end)()
+	self._timerLabel = mapVoteFrame:FindFirstChild("Timer") :: TextLabel?
+	local bar = mapVoteFrame:FindFirstChild("Bar")
+	self._barFill = if bar then bar:FindFirstChild("Fill") :: Frame? else nil
 	self._options = _resolveOptionRefs(optionsRoot)
 	self._selectedMapName = ""
 	self._duration = 1
@@ -182,7 +139,10 @@ end
 function MapVoteView:show(optionsByKey: { [string]: OptionModel }, duration: number)
 	self._duration = math.max(1, duration)
 	self._selectedMapName = ""
-	self._frame.Visible = true
+	-- La visibilidad del frame la controla MenuController:setMapVoteVisible —
+	-- si la votación arranca con un panel abierto (locker, settings...), el
+	-- MenuController mantiene el frame oculto hasta que se cierre el panel.
+	-- Aquí solo poblamos contenido.
 
 	local options = _toArray(optionsByKey)
 	for index, optionRef in self._options do
@@ -220,7 +180,8 @@ function MapVoteView:show(optionsByKey: { [string]: OptionModel }, duration: num
 end
 
 function MapVoteView:hide()
-	self._frame.Visible = false
+	-- Visibilidad la controla MenuController:setMapVoteVisible(false) (que
+	-- siempre se llama justo después de view:hide en init.luau:603-604).
 	self._selectedMapName = ""
 	for _, optionRef in self._options do
 		optionRef.mapName = ""

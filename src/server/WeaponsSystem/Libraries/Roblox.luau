@@ -115,7 +115,7 @@ end
 function Roblox.waitForTween(tweenInstance, tweenInfo, tweenProps)
 	local tween = TweenService:Create(tweenInstance, tweenInfo, tweenProps)
 	tween:Play()
-	tween.Completed:wait()
+	tween.Completed:Wait()
 end
 
 function Roblox.tween(tweenInstance, tweenInfo, tweenProps)

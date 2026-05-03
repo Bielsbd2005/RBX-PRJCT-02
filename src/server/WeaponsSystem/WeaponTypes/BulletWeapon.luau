@@ -1,4 +1,3 @@
-local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
 local Debris = game:GetService("Debris")
@@ -15,22 +14,30 @@ local Libraries = WeaponsSystemFolder:WaitForChild("Libraries")
 local BaseWeapon = require(Libraries:WaitForChild("BaseWeapon"))
 local Parabola = require(Libraries:WaitForChild("Parabola"))
 local Roblox = require(Libraries:WaitForChild("Roblox"))
+local WeaponsNetwork = require(Libraries:WaitForChild("WeaponsNetwork"))
 local TeamUtils = require(Shared.utils.TeamUtils)
 
 local Effects = WeaponsSystemFolder:WaitForChild("Assets"):WaitForChild("Effects")
 local ShotsFolder = Effects:WaitForChild("Shots")
 local HitMarksFolder = Effects:WaitForChild("HitMarks")
-local CasingsFolder = Effects:WaitForChild("Casings")
 
 local NO_BULLET_DECALS = false
-local NO_BULLET_CASINGS = true
 
 --The ignore list will fill up over time. This is how many seconds it will go before
 --being refreshed in order to keep it from filling up with instances that aren't in
 --the datamodel anymore.
 local IGNORE_LIST_LIFETIME = 5
 
-local MAX_BULLET_TIME = 10
+local MAX_BULLET_TIME = 4
+-- Gravedad base aplicada al proyectil — multiplicada por gravityFactor del config.
+local PROJECTILE_GRAVITY_BASE = 35
+-- Umbrales de subdivisión de la trayectoria parabólica (más samples = más detección
+-- de impactos en arcos pronunciados, pero más raycasts).
+local PARABOLA_HIGH_GRAVITY_THRESHOLD = 0.66
+local PARABOLA_MID_GRAVITY_THRESHOLD = 0.33
+local PARABOLA_SAMPLES_HIGH = 3
+local PARABOLA_SAMPLES_MID = 2
+local PARABOLA_SAMPLES_LOW = 1
 
 local localRandom = Random.new()
 local localPlayer = not IsServer and Players.LocalPlayer
@@ -77,10 +84,6 @@ function BulletWeapon.new(weaponsSystem, instance)
 
 	self:addOptionalDescendant("tipAttach", "TipAttachment")
 
-	self:addOptionalDescendant("boltMotor", "BoltMotor")
-	self:addOptionalDescendant("boltMotorStart", "BoltMotorStart")
-	self:addOptionalDescendant("boltMotorTarget", "BoltMotorTarget")
-
 	self:addOptionalDescendant("chargeGlowPart", "ChargeGlow")
 	self:addOptionalDescendant("chargeCompleteParticles", "ChargeCompleteParticles")
 	self:addOptionalDescendant("dischargeCompleteParticles", "DischargeCompleteParticles")
@@ -90,9 +93,6 @@ function BulletWeapon.new(weaponsSystem, instance)
 	self:addOptionalDescendant("muzzleFlashBeam", "MuzzleFlash")
 
 	self.hitMarkTemplate = HitMarksFolder:FindFirstChild(self:getConfigValue("HitMarkEffect", "BulletHole"))
-
-	self.casingTemplate = CasingsFolder:FindFirstChild(self:getConfigValue("CasingEffect", ""))
-	self:addOptionalDescendant("casingEjectPoint", "CasingEjectPoint")
 
 	self.ignoreList = {}
 	self.ignoreListRefreshTime = 0
@@ -154,27 +154,94 @@ function BulletWeapon:onReloadAction(actionName, inputState, inputObj)
 	end
 end
 
-function BulletWeapon:animateBoltAction(isOpen)
-	if not self.boltMotor or not self.boltMotorStart or not self.boltMotorTarget then
+function BulletWeapon:getRandomSeedForId(id)
+	return id
+end
+
+-- Emite partículas de muzzle desde el bulletEffect, agrupadas en passes con velocidades aleatorias
+-- para dispersión natural. No depende de self.
+local function _emitMuzzleParticles(bulletEffect: Instance, origin: Vector3, dir: Vector3, totalParticles: number)
+	local muzzleParticles = bulletEffect:FindFirstChild("MuzzleParticles", true)
+	if not muzzleParticles then
+		return
+	end
+	local emitter = muzzleParticles.Parent
+	emitter.CFrame = CFrame.new(origin, origin + dir)
+	local numSteps = 5
+	local perStep = totalParticles / numSteps
+	for _ = 1, numSteps do
+		emitter.Velocity = Vector3.new(
+			localRandom:NextNumber(-10, 10),
+			localRandom:NextNumber(-10, 10),
+			localRandom:NextNumber(-10, 10)
+		)
+		muzzleParticles:Emit(perStep)
+	end
+end
+
+-- Muestra el muzzle flash en self.tipAttach. Devuelve true si se mostró (para que el caller
+-- pueda hacer fade-out con timer).
+function BulletWeapon:_showMuzzleFlash(randomGenerator: Random): boolean
+	if not (self.tipAttach and self.muzzleFlash0 and self.muzzleFlash1 and self.muzzleFlashBeam) then
+		return false
+	end
+
+	local minFlashRotation = self:getConfigValue("MuzzleFlashRotation0", -math.pi)
+	local maxFlashRotation = self:getConfigValue("MuzzleFlashRotation1", math.pi)
+	local minFlashSize = self:getConfigValue("MuzzleFlashSize0", 1)
+	local maxFlashSize = self:getConfigValue("MuzzleFlashSize1", 1)
+	local flashRotation = randomGenerator:NextNumber(minFlashRotation, maxFlashRotation)
+	local flashSize = randomGenerator:NextNumber(minFlashSize, maxFlashSize)
+	local baseCFrame = self.tipAttach.CFrame * CFrame.Angles(0, 0, flashRotation)
+	self.muzzleFlash0.CFrame = baseCFrame * CFrame.new(flashSize * -0.5, 0, 0) * CFrame.Angles(0, math.pi, 0)
+	self.muzzleFlash1.CFrame = baseCFrame * CFrame.new(flashSize * 0.5, 0, 0) * CFrame.Angles(0, math.pi, 0)
+
+	self.muzzleFlashBeam.Enabled = true
+	self.muzzleFlashBeam.Width0 = flashSize
+	self.muzzleFlashBeam.Width1 = flashSize
+	return true
+end
+
+-- Spawnea un hitMark sobre la superficie golpeada (decals/billboards). Lo weldéa al hitPart
+-- y lo destruye automáticamente tras HIT_MARK_LIFETIME segundos.
+local HIT_MARK_LIFETIME = 5
+
+function BulletWeapon:_spawnHitMark(hitPart: BasePart, hitPoint: Vector3, hitNormal: Vector3, parabola: any)
+	if NO_BULLET_DECALS or not hitPart or not hitPart.Parent or not self.hitMarkTemplate then
+		return
+	end
+	if hitPart.Parent:FindFirstChildOfClass("Humanoid") then
 		return
 	end
 
-	if isOpen then
-		self:tryPlaySound("BoltOpenSound")
-	else
-		self:tryPlaySound("BoltCloseSound")
+	local hitPointObjectSpace = hitPart.CFrame:pointToObjectSpace(hitPoint)
+	local hitNormalObjectSpace = hitPart.CFrame:vectorToObjectSpace(hitNormal)
+	if not hitPointObjectSpace or not hitNormalObjectSpace then
+		return
 	end
 
-	local actionMoveTime = isOpen and self:getConfigValue("ActionOpenTime", 0.025) or self:getConfigValue("ActionCloseTime", 0.075)
-	local targetCFrame = isOpen and self.boltMotorTarget.CFrame or self.boltMotorStart.CFrame
+	local hitMark = self.hitMarkTemplate:Clone()
+	hitMark.Parent = hitPart
+	CollectionService:AddTag(hitMark, "WeaponsSystemIgnore")
 
-	local boltTween = TweenService:Create(self.boltMotor, TweenInfo.new(actionMoveTime, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut), { C0 = targetCFrame })
-	boltTween:Play()
-	boltTween.Completed:Wait()
-end
+	local incomingVec = parabola:sampleVelocity(1).Unit
+	if self:getConfigValue("AlignHitMarkToNormal", true) then
+		local forward = hitNormalObjectSpace
+		local up = incomingVec
+		local right = -forward:Cross(up).Unit
+		up = forward:Cross(right)
+		local orientationCFrame = CFrame.fromMatrix(hitPointObjectSpace + hitNormalObjectSpace * 0.05, right, up, -forward)
+		hitMark.CFrame = hitPart.CFrame:toWorldSpace(orientationCFrame)
+	else
+		hitMark.CFrame = hitPart.CFrame * CFrame.new(hitPointObjectSpace, hitPointObjectSpace + hitPart.CFrame:vectorToObjectSpace(incomingVec))
+	end
 
-function BulletWeapon:getRandomSeedForId(id)
-	return id
+	local weld = Instance.new("WeldConstraint")
+	weld.Part0 = hitMark
+	weld.Part1 = hitPart
+	weld.Parent = hitMark
+
+	Debris:AddItem(hitMark, HIT_MARK_LIFETIME)
 end
 
 -- This function is only called on clients
@@ -194,49 +261,13 @@ function BulletWeapon:simulateFire(firingPlayer, fireInfo)
 		self:simulateProjectile(firingPlayer, fireInfo, i, randomGenerator)
 	end
 
-	-- Animate the bolt if the current gun has one
-	local actionOpenTime = self:getConfigValue("ActionOpenTime", 0.025)
-	if self.boltMotor then
-		coroutine.wrap(function()
-			self:animateBoltAction(true)
-			wait(actionOpenTime)
-			self:animateBoltAction(false)
-		end)()
-	end
-
-	-- Eject bullet casings and play "CasingHitSound" (child of casing) sound if applicable for current weapon
-	if not NO_BULLET_CASINGS and self.casingTemplate and self.casingEjectPoint then
-		local casing = self.casingTemplate:Clone()
-		casing.Anchored = false
-		casing.Archivable = false
-		casing.CFrame = self.casingEjectPoint.WorldCFrame
-		casing.Velocity = self.casingEjectPoint.Parent.Velocity + (self.casingEjectPoint.WorldAxis * localRandom:NextNumber(self:getConfigValue("CasingEjectSpeedMin", 15), self:getConfigValue("CasingEjectSpeedMax", 18)))
-		casing.Parent = workspace.CurrentCamera
-		CollectionService:AddTag(casing, "WeaponsSystemIgnore")
-
-		local casingHitSound = casing:FindFirstChild("CasingHitSound")
-		if casingHitSound then
-			local touchedConn = nil
-			touchedConn = casing.Touched:Connect(function(hitPart)
-				if not hitPart:IsDescendantOf(self.instance) then
-					casingHitSound:Play()
-					touchedConn:Disconnect()
-					touchedConn = nil
-				end
-			end)
-		end
-
-		Debris:AddItem(casing, 2)
-	end
-
 	if self.player == Players.LocalPlayer then
 		coroutine.wrap(function()
-			-- Wait for "RecoilDelayTime" before adding recoil
-			local startTime = tick()
+			-- Wait for "RecoilDelayTime" before adding recoil. task.wait usa el
+			-- scheduler interno (un solo resume), evitando el bucle de
+			-- RenderStepped:Wait que iteraba a 60-120Hz solo para esperar.
 			local recoilDelayTime = self:getConfigValue("RecoilDelayTime", 0.07)
-			while tick() < startTime + recoilDelayTime do
-				RunService.RenderStepped:Wait()
-			end
+			task.wait(recoilDelayTime)
 			RunService.RenderStepped:Wait()
 
 			-- Add recoil to camera
@@ -298,12 +329,17 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 		local tipCFrame = self.tipAttach.WorldCFrame
 		local tipPos = tipCFrame.Position
 		local tipDir = tipCFrame.LookVector
-		local amountToCheatBack = math.abs((self.instance:FindFirstChild("Handle").Position - tipPos):Dot(tipDir)) + 1
-		local gunRay = Ray.new(tipPos - tipDir.Unit * amountToCheatBack, tipDir.Unit * amountToCheatBack)
-		local hitPart, hitPoint = Roblox.penetrateCast(gunRay, self:getIgnoreList(localPlayerInitiatedShot))
-		if hitPart and math.abs((tipPos - hitPoint).Magnitude) > 0 then
-			fireInfo.origin = hitPoint - tipDir.Unit * 0.1
-			fireInfo.dir = tipDir.Unit
+		-- Algunas armas (ej. Tool de NPC) pueden no tener un BasePart "Handle"
+		-- estándar — usar self.handle si existe, o saltar el cheat-back.
+		local handlePart = self.handle or self.instance:FindFirstChild("Handle")
+		if handlePart and handlePart:IsA("BasePart") then
+			local amountToCheatBack = math.abs((handlePart.Position - tipPos):Dot(tipDir)) + 1
+			local gunRay = Ray.new(tipPos - tipDir.Unit * amountToCheatBack, tipDir.Unit * amountToCheatBack)
+			local hitPart, hitPoint = Roblox.penetrateCast(gunRay, self:getIgnoreList(localPlayerInitiatedShot))
+			if hitPart and math.abs((tipPos - hitPoint).Magnitude) > 0 then
+				fireInfo.origin = hitPoint - tipDir.Unit * 0.1
+				fireInfo.dir = tipDir.Unit
+			end
 		end
 	end
 
@@ -342,31 +378,12 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 	end
 
 	-- Emit muzzle particles
-	local muzzleParticles = bulletEffect:FindFirstChild("MuzzleParticles", true)
 	local numMuzzleParticles = self:getConfigValue("NumMuzzleParticles", 50)
-	if muzzleParticles then
-		muzzleParticles.Parent.CFrame = CFrame.new(origin, origin + dir)
-		local numSteps = 5
-		for _ = 1, numSteps do
-			muzzleParticles.Parent.Velocity = Vector3.new(localRandom:NextNumber(-10, 10), localRandom:NextNumber(-10, 10), localRandom:NextNumber(-10, 10))
-			muzzleParticles:Emit(numMuzzleParticles / numSteps)
-		end
-	end
+	_emitMuzzleParticles(bulletEffect, origin, dir, numMuzzleParticles)
 
-	-- Show muzzle flash
-	if self.tipAttach and self.muzzleFlash0 and self.muzzleFlash1 and self.muzzleFlashBeam and projectileIdx == 1 then
-		local minFlashRotation, maxFlashRotation = self:getConfigValue("MuzzleFlashRotation0", -math.pi), self:getConfigValue("MuzzleFlashRotation1", math.pi)
-		local minFlashSize, maxFlashSize = self:getConfigValue("MuzzleFlashSize0", 1), self:getConfigValue("MuzzleFlashSize1", 1)
-		local flashRotation = localRandom:NextNumber(minFlashRotation, maxFlashRotation)
-		local flashSize = localRandom:NextNumber(minFlashSize, maxFlashSize)
-		local baseCFrame = self.tipAttach.CFrame * CFrame.Angles(0, 0, flashRotation)
-		self.muzzleFlash0.CFrame = baseCFrame * CFrame.new(flashSize * -0.5, 0, 0) * CFrame.Angles(0, math.pi, 0)
-		self.muzzleFlash1.CFrame = baseCFrame * CFrame.new(flashSize * 0.5, 0, 0) * CFrame.Angles(0, math.pi, 0)
-
-		self.muzzleFlashBeam.Enabled = true
-		self.muzzleFlashBeam.Width0 = flashSize
-		self.muzzleFlashBeam.Width1 = flashSize
-		muzzleFlashShown = true
+	-- Show muzzle flash (solo en el primer proyectil de un disparo multi-bala)
+	if projectileIdx == 1 then
+		muzzleFlashShown = self:_showMuzzleFlash(localRandom)
 	end
 
 	-- Play projectile flying sound
@@ -376,14 +393,14 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 
 	-- Set up parabola for projectile path
 	local parabola = Parabola.new()
-	parabola:setPhysicsLaunch(origin, dir * bulletSpeed, nil, 35 * -gravityFactor)
+	parabola:setPhysicsLaunch(origin, dir * bulletSpeed, nil, -PROJECTILE_GRAVITY_BASE * gravityFactor)
 	-- More samples for higher gravity since path will be more curved but raycasts can only be straight lines
-	if gravityFactor > 0.66 then
-		parabola:setNumSamples(3)
-	elseif gravityFactor > 0.33 then
-		parabola:setNumSamples(2)
+	if gravityFactor > PARABOLA_HIGH_GRAVITY_THRESHOLD then
+		parabola:setNumSamples(PARABOLA_SAMPLES_HIGH)
+	elseif gravityFactor > PARABOLA_MID_GRAVITY_THRESHOLD then
+		parabola:setNumSamples(PARABOLA_SAMPLES_MID)
 	else
-		parabola:setNumSamples(1)
+		parabola:setNumSamples(PARABOLA_SAMPLES_LOW)
 	end
 
 	-- Set up/initialize variables used in steppedCallback
@@ -452,7 +469,7 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 					for hitInfoKey, value in pairs(hitInfo) do
 						hitInfoClone[hitInfoKey] = value
 					end
-					self.weaponsSystem.getRemoteEvent("WeaponHit"):FireServer(self.instance, hitInfoClone)
+					WeaponsNetwork.fireWeaponHit(self.instance, hitInfoClone)
 				end
 
 
@@ -474,7 +491,9 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 					visualEffectsLingerTime = math.max(visualEffectsLingerTime, leadingParticles.Lifetime.Max)
 				end
 
-				-- Show the explosion on clients for explosive projectiles
+				-- Show the explosion on clients for explosive projectiles. Visible=false
+				-- porque las partículas custom se reproducen vía PlayExplosionVFX
+				-- broadcast — el flash naranja default de Roblox compite visualmente.
 				if explodeOnImpact then
 					local explosion = Instance.new("Explosion")
 					explosion.Position = hitPoint + (hitNormal * 0.5)
@@ -482,7 +501,7 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 					explosion.BlastPressure = 0 -- no blast pressure because the real explosion happens on server
 					explosion.ExplosionType = Enum.ExplosionType.NoCraters
 					explosion.DestroyJointRadiusPercent = 0
-					explosion.Visible = true
+					explosion.Visible = false
 					if localPlayerInitiatedShot then
 						-- Trigger hit indicators on client that initiated the shot if the explosion hit another player/humanoid
 						explosion.Hit:Connect(function(explodedPart, hitDist)
@@ -544,46 +563,8 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 					visualEffectsLingerTime = math.max(visualEffectsLingerTime, hitSound.TimeLength)
 				end
 
-				-- Manage/show decals, billboards, and models (such as an arrow) that appear where the projectile hit (only if the hit object was not a humanoid/player)
-
-				local hitPointObjectSpace = hitPart.CFrame:pointToObjectSpace(hitPoint)
-				local hitNormalObjectSpace = hitPart.CFrame:vectorToObjectSpace(hitNormal)
-				if not NO_BULLET_DECALS and
-					hitPart and
-					not hitPart.Parent or not hitPart.Parent:FindFirstChildOfClass("Humanoid") and
-					hitPointObjectSpace and
-					hitNormalObjectSpace and
-					self.hitMarkTemplate
-				then
-					-- Clone hitMark (this contains all the decals/billboards/models to show on the hit surface)
-					local hitMark = self.hitMarkTemplate:Clone()
-					hitMark.Parent = hitPart
-					CollectionService:AddTag(hitMark, "WeaponsSystemIgnore")
-
-					-- Move/align hitMark to the hit surface
-					local incomingVec = parabola:sampleVelocity(1).Unit
-					if self:getConfigValue("AlignHitMarkToNormal", true) then
-						-- Make hitMark face straight out from surface where projectile hit (good for decals)
-						local forward = hitNormalObjectSpace
-						local up = incomingVec
-						local right = -forward:Cross(up).Unit
-						up = forward:Cross(right)
-						local orientationCFrame = CFrame.fromMatrix(hitPointObjectSpace + hitNormalObjectSpace * 0.05, right, up, -forward)
-						hitMark.CFrame = hitPart.CFrame:toWorldSpace(orientationCFrame)
-					else
-						-- Make hitmark appear stuck in the hit surface from the direction the projectile came from (good for things like arrows)
-						hitMark.CFrame = hitPart.CFrame * CFrame.new(hitPointObjectSpace, hitPointObjectSpace + hitPart.CFrame:vectorToObjectSpace(incomingVec))
-					end
-
-					-- Weld hitMark to the hitPart
-					local weld = Instance.new("WeldConstraint")
-					weld.Part0 = hitMark
-					weld.Part1 = hitPart
-					weld.Parent = hitMark
-
-					-- Destroy hitMark in 5 seconds
-					Debris:AddItem(hitMark, 5)
-				end
+				-- Manage/show decals, billboards, and models (such as an arrow) that appear where the projectile hit
+				self:_spawnHitMark(hitPart, hitPoint, hitNormal, parabola)
 
 				flyingVisualEffectsFinished = true
 				visualEffectsFinishTime = now + visualEffectsLingerTime
@@ -686,7 +667,10 @@ function BulletWeapon:applyDamage(hitInfo)
 		return
 	end
 
-	self.weaponsSystem.doDamage(hitInfo.h, damage, nil, self.player)
+	-- Pasar hitInfo a doDamage para que _defaultDamageCallback acceda a
+	-- hitInfo.wasHeadshot (poblado en onHit). Antes el flag era global y
+	-- racy entre hits concurrentes.
+	self.weaponsSystem.doDamage(hitInfo.h, damage, nil, self.player, hitInfo)
 end
 
 function BulletWeapon:onHit(hitInfo)
@@ -695,8 +679,9 @@ function BulletWeapon:onHit(hitInfo)
 	local hitPart = hitInfo.part
 
 	if hitPart and hitPart.Parent then
-		local humanoid = self.weaponsSystem.getHumanoid(hitPart)
+		local humanoid, wasHeadshot = self.weaponsSystem.getHumanoid(hitPart)
 		hitInfo.h = humanoid or hitPart
+		hitInfo.wasHeadshot = wasHeadshot == true
 
 		if IsServer and
 			(not hitInfo.h:IsA("Humanoid") or
@@ -748,6 +733,10 @@ function BulletWeapon:onHit(hitInfo)
 		end)
 
 		explosion.Parent = workspace
+
+		-- Broadcast a todos los clientes para que reproduzcan las partículas
+		-- de explosión locales (template en Effects.ExplosionParticles).
+		WeaponsNetwork.broadcastExplosionVFX(explosion.Position)
 	end
 end
 
@@ -813,14 +802,6 @@ function BulletWeapon:onConfigValueChanged(valueName, newValue, oldValue)
 		self.hitMarkTemplate = HitMarksFolder:FindFirstChild(self:getConfigValue("HitMarkEffect", "BulletHole"))
 		if self.hitMarkTemplate then
 			local config = self.hitMarkTemplate:FindFirstChildOfClass("Configuration")
-			if config then
-				self:importConfiguration(config)
-			end
-		end
-	elseif valueName == "CasingEffect" then
-		self.casingTemplate = CasingsFolder:FindFirstChild(self:getConfigValue("CasingEffect", ""))
-		if self.casingTemplate then
-			local config = self.casingTemplate:FindFirstChildOfClass("Configuration")
 			if config then
 				self:importConfiguration(config)
 			end

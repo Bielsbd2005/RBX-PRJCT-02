@@ -17,7 +17,6 @@ end
 
 --// Config (cached references)
 local cfgRoot             = script.Parent.Parent.Configuration
-local dmiHandler          = cfgRoot:WaitForChild("dmiHandler")          -- BoolValue-like (true=headshot)
 local HeadshotMultiplier  = cfgRoot:WaitForChild("HeadshotMultiplier")  -- NumberValue
 
 --// LocalPlayer safe fetch
@@ -507,10 +506,15 @@ scheduleFlush = function(billboard: BillboardGui)
 end
 
 --// Public API
-function DamageBillboardHandler:ShowDamageBillboard(damageAmount: number, adornee: Instance)
+function DamageBillboardHandler:ShowDamageBillboard(damageAmount: number, adornee: Instance, isHeadshot: boolean?)
 	if shouldSkipFriendlyTargetFx(adornee) then
 		return
 	end
+
+	-- Headshot flag llega como parámetro desde el caller (que sabe qué part
+	-- hiteó). Antes leíamos de un BoolValue global mutable que era racy entre
+	-- hits concurrentes; ahora es un valor inmutable por llamada.
+	local headshot = isHeadshot == true
 
 	-- Distance culling: keep audio (use cached camera)
 	local pos = getWorldPos(adornee)
@@ -518,20 +522,17 @@ function DamageBillboardHandler:ShowDamageBillboard(damageAmount: number, adorne
 		local cam = currentCamera
 		if cam and (pos - cam.CFrame.Position).Magnitude > MAX_UI_DISTANCE then
 			local progressivePitch_far = getCurrentPitch()
-			local isHeadshot_far = dmiHandler.Value
-			playUIAudio(isHeadshot_far and "Headshot" or "HitSound", progressivePitch_far)
+			playUIAudio(headshot and "Headshot" or "HitSound", progressivePitch_far)
 			return
 		end
 	end
 
-	-- Headshot flag from dmiHandler.Value
-	local isHeadshot = dmiHandler.Value
 	local mult = (HeadshotMultiplier and HeadshotMultiplier.Value) or 1
-	local shownDamage = isHeadshot and math.ceil(damageAmount * mult) or math.ceil(damageAmount)
+	local shownDamage = headshot and math.ceil(damageAmount * mult) or math.ceil(damageAmount)
 
 	-- Progressive audio
 	local progressivePitch = getCurrentPitch()
-	playUIAudio(isHeadshot and "Headshot" or "HitSound", progressivePitch)
+	playUIAudio(headshot and "Headshot" or "HitSound", progressivePitch)
 
 	-- Billboard
 	local billboard = self:CreateBillboardForAdornee(adornee)
@@ -543,7 +544,7 @@ function DamageBillboardHandler:ShowDamageBillboard(damageAmount: number, adorne
 		mergeState[billboard] = state
 	end
 	state.sum += shownDamage
-	state.headshot = state.headshot or isHeadshot
+	state.headshot = state.headshot or headshot
 	state.adornee = adornee
 	state.deadline = time() + MERGE_WINDOW
 	scheduleFlush(billboard)

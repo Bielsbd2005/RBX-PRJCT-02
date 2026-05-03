@@ -75,12 +75,12 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 	local DataController = require(clientRoot.core.data.DataController)
 	local MenuController = require(clientRoot.core.ui.MenuController)
 	local WeaponWrapAnimator = require(clientRoot.core.visuals.WeaponWrapAnimator)
-	local FusionFeature = require(clientRoot.features.fusion)
 	local StoreFeature = require(clientRoot.features.store)
 	local SettingsFeature = require(clientRoot.features.settings)
 	local RewardsFeature = require(clientRoot.features.rewards)
 	local CasesFeature = require(clientRoot.features.cases)
-	local PlayTimeRewardsFeature = require(clientRoot.features.playtimerewards)
+	local DailyTasksFeature = require(clientRoot.features.dailyTasks)
+	local BattlePassFeature = require(clientRoot.features.battlepass)
 	local MatchFeature = require(clientRoot.features.match)
 
 	DataController:Start()
@@ -105,12 +105,12 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 	_janitor:Add(menuController, "Destroy")
 
 	local deferredFeatures = {
-		{ label = "fusion", start = FusionFeature.start },
 		{ label = "store", start = StoreFeature.start },
 		{ label = "settings", start = SettingsFeature.start },
 		{ label = "rewards", start = RewardsFeature.start },
 		{ label = "cases", start = CasesFeature.start },
-		{ label = "playtimerewards", start = PlayTimeRewardsFeature.start },
+		{ label = "dailyTasks", start = DailyTasksFeature.start },
+		{ label = "battlepass", start = BattlePassFeature.start },
 		{ label = "match", start = MatchFeature.start },
 	} :: { DeferredFeatureEntry }
 

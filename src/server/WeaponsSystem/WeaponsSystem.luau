@@ -24,6 +24,7 @@ local WeaponsSystemFolder = script.Parent
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Network = require(Shared.networking.Network)
 local ItemsConfig = require(Shared.constants.ItemsConfig)
+local ActionRewards = require(Shared.constants.ActionRewards)
 local WeaponTypes = WeaponsSystemFolder:WaitForChild("WeaponTypes")
 local Libraries = WeaponsSystemFolder:WaitForChild("Libraries")
 local ShoulderCamera = require(Libraries:WaitForChild("ShoulderCamera"))
@@ -32,51 +33,84 @@ local SpringService = require(Libraries:WaitForChild("SpringService"))
 local ancestorHasTag = require(Libraries:WaitForChild("ancestorHasTag"))
 ShoulderCamera.SpringService = SpringService
 
+-- ─── Servicios inyectables ───────────────────────────────────
+-- WeaponsSystem usa estos servicios para conceder Cash/XP/dailies en kills.
+-- Dos rutas para resolverlos:
+--
+--   1. Inyección explícita (preferida): ServerBootstrap llama
+--      `WeaponsSystem.injectServices({ DataService = ..., MatchService = ..., ... })`
+--      antes de `WeaponsSystem.setup()`. Necesario para tests con mocks.
+--
+--   2. Autoload (fallback): si nadie inyecta, intentamos resolver los módulos
+--      por nombre desde ServerScriptService.Server. Usamos WaitForChild con
+--      timeout corto para tolerar carga concurrente (vs FindFirstChild antes).
+--
+-- Las variables son `local` para que las closures definidas más abajo capturen
+-- el upvalue: re-asignar la variable se ve desde todas las funciones.
 local CashBonusSystem = nil
 local MatchService = nil
 local DataService = nil
+local DailyTasksService = nil
+local BattlePassService = nil
 
-if IsServer then
-	local serverRoot = ServerScriptService:FindFirstChild("Server")
-	if serverRoot then
-		local featuresFolder = serverRoot:FindFirstChild("features")
-		local matchFeatures = featuresFolder and featuresFolder:FindFirstChild("match")
-		if matchFeatures then
-			local cashBonusModule = matchFeatures:FindFirstChild("CashBonusSystem")
-			if cashBonusModule and cashBonusModule:IsA("ModuleScript") then
-				local ok, result = pcall(require, cashBonusModule)
-				if ok then
-					CashBonusSystem = result
-				else
-					warn("WeaponsSystem: Failed to load CashBonusSystem: " .. tostring(result))
-				end
-			end
+local _AUTOLOAD_TIMEOUT = 5
 
-			local matchServiceModule = matchFeatures:FindFirstChild("MatchService")
-			if matchServiceModule and matchServiceModule:IsA("ModuleScript") then
-				local ok, result = pcall(require, matchServiceModule)
-				if ok then
-					MatchService = result
-				else
-					warn("WeaponsSystem: Failed to load MatchService: " .. tostring(result))
-				end
-			end
+local function _safeWaitForChild(parent: Instance, name: string): Instance?
+	local ok, result = pcall(function()
+		return parent:WaitForChild(name, _AUTOLOAD_TIMEOUT)
+	end)
+	if ok then
+		return result
+	end
+	return nil
+end
+
+local function _safeRequire(module: Instance?, label: string): any
+	if not module or not module:IsA("ModuleScript") then
+		return nil
+	end
+	local ok, result = pcall(require, module)
+	if not ok then
+		warn(("WeaponsSystem: Failed to load %s: %s"):format(label, tostring(result)))
+		return nil
+	end
+	return result
+end
+
+local function _autoloadServices()
+	local serverRoot = _safeWaitForChild(ServerScriptService, "Server")
+	if not serverRoot then return end
+
+	local featuresFolder = _safeWaitForChild(serverRoot, "features")
+	local matchFeatures = featuresFolder and _safeWaitForChild(featuresFolder, "match")
+	if matchFeatures then
+		if not CashBonusSystem then
+			CashBonusSystem = _safeRequire(matchFeatures:FindFirstChild("CashBonusSystem"), "CashBonusSystem")
 		end
-
-		local coreFolder = serverRoot:FindFirstChild("core")
-		local dataFolder = coreFolder and coreFolder:FindFirstChild("data")
-		if dataFolder then
-			local dataServiceModule = dataFolder:FindFirstChild("DataService")
-			if dataServiceModule and dataServiceModule:IsA("ModuleScript") then
-				local ok, result = pcall(require, dataServiceModule)
-				if ok then
-					DataService = result
-				else
-					warn("WeaponsSystem: Failed to load DataService: " .. tostring(result))
-				end
-			end
+		if not MatchService then
+			MatchService = _safeRequire(matchFeatures:FindFirstChild("MatchService"), "MatchService")
 		end
 	end
+
+	local coreFolder = _safeWaitForChild(serverRoot, "core")
+	local dataFolder = coreFolder and _safeWaitForChild(coreFolder, "data")
+	if dataFolder and not DataService then
+		DataService = _safeRequire(dataFolder:FindFirstChild("DataService"), "DataService")
+	end
+
+	local dailyTasksFolder = featuresFolder and _safeWaitForChild(featuresFolder, "dailyTasks")
+	if dailyTasksFolder and not DailyTasksService then
+		DailyTasksService = _safeRequire(dailyTasksFolder:FindFirstChild("DailyTasksService"), "DailyTasksService")
+	end
+
+	local battlePassFolder = featuresFolder and _safeWaitForChild(featuresFolder, "battlepass")
+	if battlePassFolder and not BattlePassService then
+		BattlePassService = _safeRequire(battlePassFolder:FindFirstChild("BattlePassService"), "BattlePassService")
+	end
+end
+
+if IsServer then
+	_autoloadServices()
 end
 
 local Configuration = WeaponsSystemFolder:WaitForChild("Configuration")
@@ -99,11 +133,25 @@ local REMOTE_EVENT_NAMES = {
 	"PlayerEliminated",
 	"PlayerAssist",
 	"SyncStreakState",
+	"PlayExplosionVFX",
 }
 
 -- Damage contributors per humanoid for assist tracking
 local damageContributors: { [Humanoid]: { [Player]: number } } = {}
 local assistDiedConnections: { [Humanoid]: RBXScriptConnection } = {}
+local assistAncestryConnections: { [Humanoid]: RBXScriptConnection } = {}
+
+local function _clearDamageContributors(target: Humanoid)
+	damageContributors[target] = nil
+	if assistDiedConnections[target] then
+		assistDiedConnections[target]:Disconnect()
+		assistDiedConnections[target] = nil
+	end
+	if assistAncestryConnections[target] then
+		assistAncestryConnections[target]:Disconnect()
+		assistAncestryConnections[target] = nil
+	end
+end
 
 -- Forward declaration; body assigned after WeaponsSystem table exists
 local flushAssists: (target: Humanoid, killerPlayer: Player?) -> ()
@@ -148,21 +196,66 @@ WeaponsSystem._hotbarFallbackTarget = nil
 
 WeaponsSystem.CurrentWeaponChanged = Instance.new("BindableEvent")
 
+-- Inyección explícita de servicios. Llama a esto desde ServerBootstrap antes
+-- de WeaponsSystem.setup() para evitar el autoload por nombre y para tests.
+-- Las claves son opcionales: solo se sobrescriben las pasadas.
+function WeaponsSystem.injectServices(services: {
+	DataService: any?,
+	MatchService: any?,
+	DailyTasksService: any?,
+	BattlePassService: any?,
+	CashBonusSystem: any?,
+})
+	if services.DataService ~= nil then DataService = services.DataService end
+	if services.MatchService ~= nil then MatchService = services.MatchService end
+	if services.DailyTasksService ~= nil then DailyTasksService = services.DailyTasksService end
+	if services.BattlePassService ~= nil then BattlePassService = services.BattlePassService end
+	if services.CashBonusSystem ~= nil then CashBonusSystem = services.CashBonusSystem end
+end
+
 -- Assign flushAssists body now that WeaponsSystem exists
 flushAssists = function(target: Humanoid, killerPlayer: Player?)
 	local assistEvent = WeaponsSystem.remoteEvents["PlayerAssist"]
-	if assistEvent and damageContributors[target] then
+	if damageContributors[target] then
+		local assistXP = ActionRewards.GetXP("Assist")
+		local assistCash = ActionRewards.GetCash("Assist")
 		for contributor, _ in damageContributors[target] do
+			-- Guard estricto: contributor sigue en el server Y no es el killer.
+			-- Re-evaluamos contributor.Parent justo antes del write (puede haber
+			-- cambiado entre iteraciones si dispatchamos algo que yieldea, aunque
+			-- aquí no es el caso — defensa proactiva).
 			if contributor ~= killerPlayer and contributor.Parent then
-				assistEvent:FireClient(contributor)
+				if assistEvent then
+					assistEvent:FireClient(contributor)
+				end
+				if DataService then
+					-- BatchUpdate atómico: Stats.Assists + Cash en un único save.
+					-- Stats.Assists existe en el schema AAA (Stats expandido).
+					local updates = {
+						{ path = { "Stats", "Assists" }, delta = 1 },
+					}
+					if assistCash > 0 then
+						table.insert(updates, { path = { "Stats", "Cash" }, delta = assistCash })
+					end
+					if (DataService :: any).BatchUpdate then
+						local ok, err = pcall((DataService :: any).BatchUpdate, DataService, contributor, updates)
+						if not ok then
+							warn("WeaponsSystem: Assist BatchUpdate error: " .. tostring(err))
+						end
+					end
+					-- AddXP es separado porque tiene lógica de level-up en cascada
+					-- que no encaja en BatchUpdate genérico.
+					if assistXP > 0 and (DataService :: any).AddXP then
+						local ok, err = pcall((DataService :: any).AddXP, DataService, contributor, assistXP)
+						if not ok then
+							warn("WeaponsSystem: Assist AddXP error: " .. tostring(err))
+						end
+					end
+				end
 			end
 		end
 	end
-	damageContributors[target] = nil
-	if assistDiedConnections[target] then
-		assistDiedConnections[target]:Disconnect()
-		assistDiedConnections[target] = nil
-	end
+	_clearDamageContributors(target)
 end
 
 local function _getToolCategory(tool: Tool?): string?
@@ -274,14 +367,29 @@ local function _tryReequipHotbarFallback(previousWeapon): (boolean, any)
 	WeaponsSystem._hotbarFallbackInProgress = true
 	WeaponsSystem._hotbarFallbackTarget = fallbackTool
 
+	-- Watchdog: si EquipTool bloquea o el cleanup nunca corre, libera el flag
+	-- a los 2s. Sin esto, el flag pegado bloquea futuras llamadas de fallback.
+	task.delay(2, function()
+		if WeaponsSystem._hotbarFallbackTarget == fallbackTool then
+			WeaponsSystem._hotbarFallbackTarget = nil
+			WeaponsSystem._hotbarFallbackInProgress = false
+		end
+	end)
+
 	task.defer(function()
 		if character.Parent and fallbackTool.Parent then
 			local currentlyEquipped = character:FindFirstChildOfClass("Tool")
 			if currentlyEquipped ~= fallbackTool then
-				humanoid:EquipTool(fallbackTool)
+				-- pcall por si EquipTool falla (tool destruido a mitad).
+				pcall(function()
+					humanoid:EquipTool(fallbackTool)
+				end)
 			end
 		end
 
+		-- Liberar siempre, no solo cuando target sigue siendo el nuestro.
+		-- El watchdog ya cubre el caso degenerado, pero clear inmediato es lo
+		-- que queremos en el path normal.
 		if WeaponsSystem._hotbarFallbackTarget == fallbackTool then
 			WeaponsSystem._hotbarFallbackTarget = nil
 			WeaponsSystem._hotbarFallbackInProgress = false
@@ -313,6 +421,10 @@ function WeaponsSystem.setup()
 	--print(script.Parent:GetFullName(), "is now active.")
 
 	WeaponsSystem.doingSetup = true
+
+	-- Bind WeaponsNetwork singleton — antes de cualquier require de armas que lo use.
+	local WeaponsNetwork = require(script.Parent:WaitForChild("Libraries"):WaitForChild("WeaponsNetwork"))
+	WeaponsNetwork.bind(WeaponsSystem)
 
 	--Setup network routing
 	if IsServer then
@@ -686,11 +798,6 @@ function WeaponsSystem.setWeaponEquipped(weapon, equipped)
 end
 
 
--- Headshot multiplier
-
-local damageMultiHandler = script.Parent.Configuration.dmiHandler
-
-
 function WeaponsSystem.getPlayerFromHumanoid(humanoid)
 	for _, player in ipairs(Players:GetPlayers()) do
 		if player.Character and humanoid:IsDescendantOf(player.Character) then
@@ -700,20 +807,32 @@ function WeaponsSystem.getPlayerFromHumanoid(humanoid)
 end
 
 
-function WeaponsSystem.getHumanoid(part)
-	while part and part ~= workspace do
+--[[
+	Resuelve el humanoid del modelo padre del part hiteado, devolviendo además
+	si el hit fue un headshot.
 
+	Antes usábamos un BoolValue global (`dmiHandler`) que getHumanoid mutaba y
+	_defaultDamageCallback leía. Eso permitía races: dos hits concurrentes
+	(p. ej. múltiples parts en el radio de una explosión) podían interleavear
+	la mutación del flag y el siguiente hit leía el valor del anterior.
+
+	Ahora devolvemos `(humanoid, wasHeadshot)` como tuple. Los callers que
+	necesitan el flag (BulletWeapon.onHit) lo guardan en hitInfo y lo pasan
+	a doDamage; los que no, ignoran el segundo retorno.
+]]
+function WeaponsSystem.getHumanoid(part)
+	local wasHeadshot = false
+	while part and part ~= workspace do
 		if part:IsA("Model") and part.PrimaryPart and part.PrimaryPart.Name == "HumanoidRootPart" then
-			return part:FindFirstChildOfClass("Humanoid")
+			return part:FindFirstChildOfClass("Humanoid"), wasHeadshot
 		end
 
 		if part.Name == "Head" then
-			damageMultiHandler.Value = true
-		elseif part.Name ~= "Head" then
-			damageMultiHandler.Value = false
+			wasHeadshot = true
 		end
 		part = part.Parent
 	end
+	return nil, false
 end
 
 
@@ -746,7 +865,10 @@ local function _defaultDamageCallback(system, target, amount, damageType, dealer
 			weaponName = damageData.Name
 		end
 	end
-	local wasHeadshot = damageMultiHandler and damageMultiHandler.Value == true
+	-- wasHeadshot llega via hitInfo (poblado por BulletWeapon.onHit usando el
+	-- segundo retorno de getHumanoid). Defensivo: si el caller no lo pasó
+	-- (e.g. damage de una explosión), tratamos como bodyshot.
+	local wasHeadshot = type(hitInfo) == "table" and hitInfo.wasHeadshot == true
 	local finalDamage = wasHeadshot and (amount * 2) or amount
 	local isLethal = target.Health <= finalDamage
 
@@ -755,6 +877,7 @@ local function _defaultDamageCallback(system, target, amount, damageType, dealer
 			target:SetAttribute("LastAttackerUserId", dealerPlayer.UserId)
 			target:SetAttribute("LastAttackerAt", time())
 			target:SetAttribute("LastAttackerWeaponName", weaponName)
+			target:SetAttribute("LastAttackerHeadshot", wasHeadshot == true)
 
 			-- Track damage contributor for assists
 			if not damageContributors[target] then
@@ -768,6 +891,16 @@ local function _defaultDamageCallback(system, target, amount, damageType, dealer
 								flushAssists(target, nil)
 							end
 						end)
+					end)
+				end
+				-- Listen for the humanoid leaving the data model (respawn, despawn, etc.)
+				-- Without this, contributor entries leak when bots are removed or characters
+				-- are destroyed without firing Died.
+				if not assistAncestryConnections[target] then
+					assistAncestryConnections[target] = target.AncestryChanged:Connect(function()
+						if not target:IsDescendantOf(game) then
+							_clearDamageContributors(target)
+						end
 					end)
 				end
 			end
@@ -812,6 +945,20 @@ local function _defaultDamageCallback(system, target, amount, damageType, dealer
 					end
 
 					eliminatedEvent:FireClient(dealerPlayer, victimName, xpGained, wasHeadshot, victimPos, coinAmount, streakAfterKill)
+
+					-- Daily task: Eliminations
+					if DailyTasksService and DailyTasksService.OnKill then
+						pcall(function()
+							DailyTasksService:OnKill(dealerPlayer)
+						end)
+					end
+
+					-- Battle Pass XP por kill
+					if BattlePassService and BattlePassService.OnKill then
+						pcall(function()
+							BattlePassService:OnKill(dealerPlayer)
+						end)
+					end
 				end
 			end
 

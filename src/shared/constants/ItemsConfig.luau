@@ -22,12 +22,14 @@ export type ItemConfig = {
 	Rarity: string,         -- "Common" | "Uncommon" | "Rare" | "Epic" | "Legendary"
 	Image: string?,         -- Thumbnail para UI (rbxassetid://...)
 	CanPurchase: boolean?,  -- Flag para habilitar compra desde UI
+	BPExclusive: boolean?,  -- Si true, sólo se obtiene vía Battle Pass; oculto en Locker hasta poseerse y rechazado por Shop.
 	TextureID: string?,
 	BaseColor: Color3?,
 	Animated: boolean?,
 	StudsPerTile: number?,
 	ScrollSpeedU: number?,
 	ScrollSpeedV: number?,
+	KillChallenge: { Kills: number }?,
 }
 
 export type ItemCategory = { [string]: ItemConfig }
@@ -54,7 +56,7 @@ local ItemsConfig: ItemsConfigType = {
 
 	Main = {
 		AR       = { Name = "AR",  		 Price = 0,    LevelRequired = 0,  Rarity = "Common",    Image = asset(136728627576131), CanPurchase = false },
-		Sniper   = { Name = "Sniper",         Price = 2,  LevelRequired = 0,  Rarity = "Uncommon",  Image = asset(122930463834964), CanPurchase = false },
+		Sniper   = { Name = "Sniper",         Price = 2,  LevelRequired = 1,  Rarity = "Uncommon",  Image = asset(122930463834964), CanPurchase = false },
 		Groza   = { Name = "Groza",         Price = 1000, LevelRequired = 0, Rarity = "Rare",      Image = asset(114523558287606), CanPurchase = false },
 	},
 
@@ -64,7 +66,7 @@ local ItemsConfig: ItemsConfigType = {
 
 	WeaponSkins = {
 		Default   = {
-			Name = "Default",
+			Name = "DefaulEt",
 			Price = 0,
 			LevelRequired = 1,
 			Rarity = "Common",
@@ -106,6 +108,39 @@ local ItemsConfig: ItemsConfigType = {
 			Animated = false,
 			StudsPerTile = 3,
 		},
+		Mastery_Bronze = {
+			Name = "Bronze Mastery",
+			Price = 0,
+			LevelRequired = 0,
+			Rarity = "Rare",
+			CanPurchase = false,
+			BaseColor = Color3.fromRGB(176, 110, 60),
+			Animated = false,
+			StudsPerTile = 3,
+			KillChallenge = { Kills = 4 },
+		},
+		Mastery_Silver = {
+			Name = "Silver Mastery",
+			Price = 0,
+			LevelRequired = 0,
+			Rarity = "Epic",
+			CanPurchase = false,
+			BaseColor = Color3.fromRGB(192, 192, 192),
+			Animated = false,
+			StudsPerTile = 3,
+			KillChallenge = { Kills = 500 },
+		},
+		Mastery_Diamond = {
+			Name = "Diamond Mastery",
+			Price = 0,
+			LevelRequired = 0,
+			Rarity = "Legendary",
+			CanPurchase = false,
+			BaseColor = Color3.fromRGB(120, 220, 255),
+			Animated = false,
+			StudsPerTile = 3,
+			KillChallenge = { Kills = 1500 },
+		},
 	},
 
 	KillEffects = {
@@ -130,9 +165,22 @@ local ItemsConfig: ItemsConfigType = {
 	},
 
 	Hats = {
-		Hat1 = { Name = "Hat1",          Price = 12000,  LevelRequired = 0,  Rarity = "Common",    Image = "rbxassetid://97016006374032", CanPurchase = false },
-		Hat2 = { Name = "Hat2",      Price = 1200, LevelRequired = 10, Rarity = "Rare",      Image = "rbxassetid://94019428436806", CanPurchase = false },
-		Hat3 = { Name = "Hat3",        Price = 4000, LevelRequired = 20, Rarity = "Legendary", Image = "rbxassetid://131331207733432", CanPurchase = false },
+		Hat1 = { Name = "Bunny",          Price = 12000,  LevelRequired = 0,  Rarity = "Common",    Image = "rbxassetid://117004939623250", CanPurchase = false },
+		Hat2 = { Name = "Cone",      Price = 1200, LevelRequired = 10, Rarity = "Rare",      Image = "rbxassetid://138341632720877", CanPurchase = false },
+		Hat3 = { Name = "Crown",        Price = 4000, LevelRequired = 20, Rarity = "Legendary", Image = "rbxassetid://119183410438332", CanPurchase = false },
+		Hat4 = { Name = "Squid",        Price = 4000, LevelRequired = 20, Rarity = "Legendary", Image = "rbxassetid://74317816532636", CanPurchase = false },
+		Hat5 = { Name = "Alaska",        Price = 4000, LevelRequired = 20, Rarity = "Legendary", Image = "rbxassetid://83643028468192", CanPurchase = false },
+		Hat6 = { Name = "Drink",        Price = 4000, LevelRequired = 20, Rarity = "Legendary", Image = "rbxassetid://130927276777389", CanPurchase = false },
+		Hat7 = { Name = "IceCream",        Price = 4000, LevelRequired = 20, Rarity = "Legendary", Image = "rbxassetid://89103967355981", CanPurchase = false },
+		Hat8 = { Name = "Spartan",        Price = 4000, LevelRequired = 20, Rarity = "Legendary", Image = "rbxassetid://89103967355981", CanPurchase = false },
+		Hat9 = { Name = "RaceHelmet",        Price = 4000, LevelRequired = 20, Rarity = "Legendary", Image = "rbxassetid://84090421736652", CanPurchase = false },
+		Hat10 = { Name = "Pan",        Price = 4000, LevelRequired = 20, Rarity = "Legendary", Image = "rbxassetid://97418970357486", CanPurchase = false },
+		Hat11 = { Name = "Football",        Price = 4000, LevelRequired = 20, Rarity = "Legendary", Image = "rbxassetid://86457108228550", CanPurchase = false },
+		Hat12 = { Name = "Mexican",        Price = 4000, LevelRequired = 20, Rarity = "Legendary", Image = "rbxassetid://79179819137524", CanPurchase = false },
+		Hat13 = { Name = "Shark",        Price = 4000, LevelRequired = 20, Rarity = "Legendary", Image = "rbxassetid://72319063957484", CanPurchase = false },
+		Hat14 = { Name = "Unicorn",        Price = 4000, LevelRequired = 20, Rarity = "Legendary", Image = "rbxassetid://112312308063894", CanPurchase = false },
+
+
 	},
 
 	Outfits = {

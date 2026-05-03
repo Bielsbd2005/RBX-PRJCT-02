@@ -59,29 +59,19 @@ function AutoAimSystem.findBestTarget(weaponsSystem)
 	-- Add enemy players
 	for _, player in ipairs(Players:GetPlayers()) do
 		if player == localPlayer then continue end
-
-		-- Check teams — only target enemies
-		local onDifferentTeams = true
-		local success = pcall(function()
-			onDifferentTeams = weaponsSystem.playersOnDifferentTeams(localPlayer, player)
-		end)
-		if not success then
-			onDifferentTeams = true -- Default to treating as enemy if team check fails
-		end
-		if onDifferentTeams and player.Character then
+		if not player.Character then continue end
+		if weaponsSystem.playersOnDifferentTeams(localPlayer, player) then
 			table.insert(charactersToCheck, player.Character)
 		end
 	end
 
-	-- Add NPCs/Dummies from top-level Workspace models
+	-- Add NPCs: una sola pasada por workspace:GetChildren(); cada hijo cuenta
+	-- como NPC potencial Y se inspecciona su carpeta "Bots" directa (sin
+	-- FindFirstChild recursivo, que escanearía subárboles enteros).
 	for _, child in ipairs(workspace:GetChildren()) do
 		addNpcModelIfEnemy(child)
-	end
-
-	-- Add bots parented under map folders (e.g. Workspace.ActiveMap.<Map>.Bots)
-	for _, child in ipairs(workspace:GetChildren()) do
-		local botsFolder = child:FindFirstChild("Bots", true)
-		if botsFolder and botsFolder:IsA("Folder") then
+		local botsFolder = if child.Name == "Bots" then child else child:FindFirstChild("Bots")
+		if botsFolder and (botsFolder:IsA("Folder") or botsFolder:IsA("Model")) then
 			for _, botModel in ipairs(botsFolder:GetChildren()) do
 				addNpcModelIfEnemy(botModel)
 			end

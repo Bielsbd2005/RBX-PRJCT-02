@@ -13,6 +13,9 @@ local Janitor = require(Packages.janitor) :: any
 local Network = require(Shared.networking.Network)
 local DataController = require(Client.core.data.DataController)
 local PanelController = require(Client.core.ui.PanelController)
+local BlurController = require(Client.core.ui.BlurController)
+
+local BLUR_KEY = "Settings"
 
 local SettingsFeature = {}
 
@@ -152,14 +155,14 @@ function SettingsFeature.start(menuController: any): any
 	local player = Players.LocalPlayer
 	local playerGui = player:WaitForChild("PlayerGui")
 	local menuGui = menuController:getGui()
-	local settingsBtn = menuGui.BottomContainer.Footer:WaitForChild("settings") :: GuiButton
+	local settingsBtn = menuGui.UpperContainer:WaitForChild("settings") :: GuiButton
 
-	local gui = playerGui:WaitForChild("SettingsGui") :: ScreenGui
-	local container = gui:WaitForChild("Container") :: Frame
-	local mainFrame = container:WaitForChild("MainFrame") :: Frame
-	local contentBg = mainFrame:WaitForChild("ContentBackground") :: Frame
+	local uiGui = playerGui:WaitForChild("UserInterface") :: ScreenGui
+	local frame = uiGui:WaitForChild("Settings") :: Frame
+
+	local contentBg = frame:WaitForChild("ContentBackground") :: Frame
 	local settingsList = contentBg:WaitForChild("SettingsList") :: Frame
-	local closeBtn = mainFrame:WaitForChild("CloseBtn") :: GuiButton
+	local closeBtn = frame:WaitForChild("CloseBtn") :: GuiButton
 	local resetBtn = contentBg:WaitForChild("Reset") :: GuiButton
 
 	local musicSetting = settingsList:WaitForChild("Music")
@@ -167,7 +170,14 @@ function SettingsFeature.start(menuController: any): any
 	local vibSetting = settingsList:WaitForChild("Vibration")
 	local aimSetting = settingsList:WaitForChild("AimAssist")
 
-	local panel = PanelController.new(menuController, gui, container, settingsBtn, closeBtn)
+	local panel = PanelController.new(menuController, frame, settingsBtn, closeBtn, {
+		onOpen = function()
+			BlurController.acquire(BLUR_KEY)
+		end,
+		onClose = function()
+			BlurController.release(BLUR_KEY)
+		end,
+	})
 	janitor:Add(panel, "Destroy")
 
 	local currentConfig = {
@@ -239,8 +249,8 @@ function SettingsFeature.start(menuController: any): any
 		flushPendingSaves()
 	end), "Disconnect")
 
-	janitor:Add(gui:GetPropertyChangedSignal("Enabled"):Connect(function()
-		if gui.Enabled == false then
+	janitor:Add(frame:GetPropertyChangedSignal("Visible"):Connect(function()
+		if frame.Visible == false then
 			flushPendingSaves()
 		end
 	end), "Disconnect")

@@ -31,7 +31,6 @@ export type GameConfigType = {
 	TotalParticipantsTarget: number,
 	MaxRoundDuration: number,
 	WinScoreLimit: number,
-	KillCamDuration: number,
 	Teams: TeamsDefinition,
 	Maps: { MapDefinition },
 }
@@ -42,13 +41,12 @@ local GameConfig: GameConfigType = {
 	PregameCountdown = 5,
 	EndResultsDuration = 10,
 	RespawnCooldown = 5,
-	KillCamDuration = 5,
 	MinPlayersToStart = 1,
 	RealPlayerCapPerServer = 6,
 	TeamSizeTarget = 4,
 	TotalParticipantsTarget = 8,
-	MaxRoundDuration = 30,
-	WinScoreLimit = 30,
+	MaxRoundDuration = 480,
+	WinScoreLimit = 240,
 
 	Teams = {
 		A = {
@@ -63,8 +61,8 @@ local GameConfig: GameConfigType = {
 
 	Maps = {
 		{ Name = "Canyon",   Modes = { "TeamDeathmatch" }, PlaceholderImage = "rbxassetid://138703710359327", UseIntelligentSpawning = true },
-		{ Name = "Factory",  Modes = { "TeamDeathmatch" }, PlaceholderImage = "rbxassetid://138703710359327", UseIntelligentSpawning = false },
-		{ Name = "Rooftops", Modes = { "TeamDeathmatch" }, PlaceholderImage = "rbxassetid://138703710359327", UseIntelligentSpawning = false },
+		{ Name = "Factory",  Modes = { "TeamDeathmatch" }, PlaceholderImage = "rbxassetid://138703710359327", UseIntelligentSpawning = true },
+		{ Name = "Rooftops", Modes = { "TeamDeathmatch" }, PlaceholderImage = "rbxassetid://138703710359327", UseIntelligentSpawning = true },
 	},
 }
 

@@ -11,6 +11,8 @@ local STYLE = {
 	hideTween = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
 }
 
+local KILLER_VIEWPORT_ANIM_ID = "rbxassetid://126774009783214"
+
 type Refs = {
 	root: ScreenGui,
 	container: GuiObject,
@@ -18,8 +20,18 @@ type Refs = {
 	respawnButton: GuiButton?,
 	menuPcLabel: TextLabel?,
 	respawnPcLabel: TextLabel?,
-	timerLabel: TextLabel?,
 	barFill: GuiObject?,
+	cardName: TextLabel?,
+	cardKills: TextLabel?,
+	cardLevel: TextLabel?,
+	viewportFrame: ViewportFrame?,
+}
+
+export type KillerInfo = {
+	name: string,
+	kills: number,
+	level: number,
+	character: Model?,
 }
 
 local function _resolvePcLabel(buttonNode: Instance?): TextLabel?
@@ -52,6 +64,17 @@ local function _resolveBarFill(respawnNode: Instance?): GuiObject?
 	return nil
 end
 
+local function _resolveCardLabel(cardNode: Instance?, name: string): TextLabel?
+	if not cardNode then
+		return nil
+	end
+	local node = cardNode:FindFirstChild(name)
+	if node and node:IsA("TextLabel") then
+		return node
+	end
+	return nil
+end
+
 local function _resolveRefs(gui: ScreenGui): Refs?
 	local containerNode = gui:FindFirstChild("Container")
 	if not containerNode or not containerNode:IsA("GuiObject") then
@@ -60,7 +83,8 @@ local function _resolveRefs(gui: ScreenGui): Refs?
 
 	local menuNode = containerNode:FindFirstChild("Menu")
 	local respawnNode = containerNode:FindFirstChild("Respawn")
-	local timerNode = containerNode:FindFirstChild("Timer")
+	local cardNode = containerNode:FindFirstChild("Card")
+	local viewportNode = containerNode:FindFirstChild("ViewportFrame")
 
 	return {
 		root = gui,
@@ -69,8 +93,11 @@ local function _resolveRefs(gui: ScreenGui): Refs?
 		respawnButton = if respawnNode and respawnNode:IsA("GuiButton") then respawnNode else nil,
 		menuPcLabel = _resolvePcLabel(menuNode),
 		respawnPcLabel = _resolvePcLabel(respawnNode),
-		timerLabel = if timerNode and timerNode:IsA("TextLabel") then timerNode else nil,
 		barFill = _resolveBarFill(respawnNode),
+		cardName = _resolveCardLabel(cardNode, "Name"),
+		cardKills = _resolveCardLabel(cardNode, "Kills"),
+		cardLevel = _resolveCardLabel(cardNode, "Level"),
+		viewportFrame = if viewportNode and viewportNode:IsA("ViewportFrame") then viewportNode else nil,
 	}
 end
 
@@ -92,6 +119,110 @@ local function _setButtonEnabled(button: GuiButton?, enabled: boolean)
 	button.AutoButtonColor = enabled
 end
 
+-- ────────────────────────────────────────────────────────────────
+-- Killer card
+-- ────────────────────────────────────────────────────────────────
+
+local function _setCardLabel(label: TextLabel?, text: string)
+	if label then
+		label.Text = text
+	end
+end
+
+local function _populateCard(refs: Refs, killer: KillerInfo?)
+	if killer then
+		_setCardLabel(refs.cardName, killer.name)
+		_setCardLabel(refs.cardKills, tostring(killer.kills))
+		_setCardLabel(refs.cardLevel, tostring(killer.level))
+	else
+		_setCardLabel(refs.cardName, "")
+		_setCardLabel(refs.cardKills, "0")
+		_setCardLabel(refs.cardLevel, "0")
+	end
+end
+
+-- ────────────────────────────────────────────────────────────────
+-- Killer viewport
+-- ────────────────────────────────────────────────────────────────
+
+local function _stripUnsafeDescendants(model: Model)
+	for _, desc in model:GetDescendants() do
+		-- Estos no aportan nada en un ViewportFrame y pueden errar / pintarse mal:
+		-- scripts (no corren), Highlights (replican el rojo enemigo), BillboardGuis
+		-- (nombre/HP del personaje original).
+		if desc:IsA("Script") or desc:IsA("LocalScript") then
+			desc:Destroy()
+		elseif desc:IsA("BillboardGui") or desc:IsA("Highlight") then
+			desc:Destroy()
+		end
+	end
+end
+
+local function _clearViewport(viewportFrame: ViewportFrame)
+	for _, child in viewportFrame:GetChildren() do
+		if child:IsA("WorldModel") or child:IsA("Camera") then
+			child:Destroy()
+		end
+	end
+end
+
+local function _renderKillerInViewport(viewportFrame: ViewportFrame, characterModel: Model?): AnimationTrack?
+	_clearViewport(viewportFrame)
+
+	if not characterModel then
+		return nil
+	end
+
+	local worldModel = Instance.new("WorldModel")
+	worldModel.Parent = viewportFrame
+
+	local clone = characterModel:Clone()
+	_stripUnsafeDescendants(clone)
+	clone.Parent = worldModel
+	clone:PivotTo(clone:GetPivot() * CFrame.Angles(-0.4, math.rad(210), 0))
+
+	local cam = Instance.new("Camera")
+	cam.FieldOfView = 30
+	viewportFrame.CurrentCamera = cam
+	cam.Parent = viewportFrame
+
+	local rootPart = clone:FindFirstChild("HumanoidRootPart")
+	if rootPart and rootPart:IsA("BasePart") then
+		local rp = rootPart :: BasePart
+		cam.CFrame = CFrame.new(rp.Position + Vector3.new(0, 5, 16), rp.Position)
+	end
+
+	local humanoid = clone:FindFirstChildOfClass("Humanoid")
+	if not humanoid then
+		return nil
+	end
+
+	local animator = humanoid:FindFirstChildOfClass("Animator")
+	if not animator then
+		animator = Instance.new("Animator")
+		animator.Parent = humanoid
+	end
+
+	local anim = Instance.new("Animation")
+	anim.AnimationId = KILLER_VIEWPORT_ANIM_ID
+	local ok, track = pcall(function()
+		return (animator :: Animator):LoadAnimation(anim)
+	end)
+	anim:Destroy()
+
+	if ok and track then
+		local t = track :: AnimationTrack
+		t.Looped = true
+		t:Play()
+		return t
+	end
+	return nil
+end
+
+-- ────────────────────────────────────────────────────────────────
+-- DeathScreenView
+-- ────────────────────────────────────────────────────────────────
+
 function DeathScreenView.new(gui: ScreenGui): any
 	local refs = _resolveRefs(gui)
 	if not refs then
@@ -105,6 +236,8 @@ function DeathScreenView.new(gui: ScreenGui): any
 	self._onRespawn = nil :: (() -> ())?
 	self._onMenu = nil :: (() -> ())?
 	self._baseTransparency = refs.container.BackgroundTransparency
+	self._respawnReady = false
+	self._viewportTrack = nil :: AnimationTrack?
 
 	refs.root.Enabled = false
 	refs.root.ResetOnSpawn = false
@@ -114,15 +247,22 @@ function DeathScreenView.new(gui: ScreenGui): any
 	return self
 end
 
+function DeathScreenView:_tryRespawn()
+	if not self._respawnReady then
+		return
+	end
+	if self._onRespawn then
+		self._onRespawn()
+	end
+end
+
 function DeathScreenView:bind(onRespawn: () -> (), onMenu: () -> ())
 	self._onRespawn = onRespawn
 	self._onMenu = onMenu
 
 	if self._refs.respawnButton then
 		table.insert(self._connections, self._refs.respawnButton.MouseButton1Click:Connect(function()
-			if self._onRespawn then
-				self._onRespawn()
-			end
+			self:_tryRespawn()
 		end))
 	end
 
@@ -147,14 +287,12 @@ function DeathScreenView:bind(onRespawn: () -> (), onMenu: () -> ())
 		end
 
 		if input.KeyCode == Enum.KeyCode.Space then
-			if self._onRespawn then
-				self._onRespawn()
-			end
+			self:_tryRespawn()
 		end
 	end))
 end
 
-function DeathScreenView:show(respawnCooldown: number)
+function DeathScreenView:show(respawnCooldown: number, killer: KillerInfo?)
 	self._countdownToken += 1
 	local token = self._countdownToken
 	_setPcHintsVisible(self._refs)
@@ -164,46 +302,53 @@ function DeathScreenView:show(respawnCooldown: number)
 		BackgroundTransparency = self._baseTransparency,
 	}):Play()
 
+	-- Menu siempre disponible. Respawn arranca DESHABILITADO y se habilita
+	-- cuando la barra llega al 100%.
 	_setButtonEnabled(self._refs.menuButton, true)
-	-- Respawn button enabled immediately so the player can skip the killcam at any time.
-	_setButtonEnabled(self._refs.respawnButton, true)
+	_setButtonEnabled(self._refs.respawnButton, false)
+	self._respawnReady = false
 
-	-- Reset fill bar to 0
+	-- Reset barra
 	if self._refs.barFill then
 		self._refs.barFill.Size = UDim2.new(0, 0, 1, 0)
+	end
+
+	-- Card del killer
+	_populateCard(self._refs, killer)
+
+	-- Viewport con clon del killer + animación
+	if self._viewportTrack then
+		pcall(function()
+			(self._viewportTrack :: AnimationTrack):Stop()
+		end)
+		self._viewportTrack = nil
+	end
+	if self._refs.viewportFrame then
+		self._viewportTrack = _renderKillerInViewport(
+			self._refs.viewportFrame,
+			if killer then killer.character else nil
+		)
 	end
 
 	task.spawn(function()
 		local duration = math.max(0, respawnCooldown)
 		local startAt = time()
-		local endAt = startAt + duration
 
 		while self._countdownToken == token do
 			local elapsed = time() - startAt
 			local progress = math.clamp(if duration > 0 then elapsed / duration else 1, 0, 1)
 
-			-- Update fill bar
 			if self._refs.barFill then
 				self._refs.barFill.Size = UDim2.new(progress, 0, 1, 0)
 			end
 
-			-- Update timer text
-			if self._refs.timerLabel then
-				local left = math.ceil(math.max(0, endAt - time()))
-				self._refs.timerLabel.Text = tostring(left)
-			end
-
-			-- Auto-respawn when timer completes
 			if progress >= 1 then
 				if self._refs.barFill then
 					self._refs.barFill.Size = UDim2.new(1, 0, 1, 0)
 				end
-				if self._refs.timerLabel then
-					self._refs.timerLabel.Text = "0"
-				end
-				-- Trigger auto-respawn
-				if self._countdownToken == token and self._onRespawn then
-					self._onRespawn()
+				if self._countdownToken == token then
+					self._respawnReady = true
+					_setButtonEnabled(self._refs.respawnButton, true)
 				end
 				return
 			end
@@ -215,12 +360,20 @@ end
 
 function DeathScreenView:hide()
 	self._countdownToken += 1
+	self._respawnReady = false
 	_setButtonEnabled(self._refs.respawnButton, false)
-	if self._refs.timerLabel then
-		self._refs.timerLabel.Text = "0"
-	end
 	if self._refs.barFill then
 		self._refs.barFill.Size = UDim2.new(0, 0, 1, 0)
+	end
+
+	if self._viewportTrack then
+		pcall(function()
+			(self._viewportTrack :: AnimationTrack):Stop()
+		end)
+		self._viewportTrack = nil
+	end
+	if self._refs.viewportFrame then
+		_clearViewport(self._refs.viewportFrame)
 	end
 
 	local tween = TweenService:Create(self._refs.container, STYLE.hideTween, {
@@ -238,6 +391,15 @@ function DeathScreenView:Destroy()
 		connection:Disconnect()
 	end
 	table.clear(self._connections)
+	if self._viewportTrack then
+		pcall(function()
+			(self._viewportTrack :: AnimationTrack):Stop()
+		end)
+		self._viewportTrack = nil
+	end
+	if self._refs.viewportFrame then
+		_clearViewport(self._refs.viewportFrame)
+	end
 	self._refs.root.Enabled = false
 end
 

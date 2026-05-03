@@ -125,6 +125,18 @@ function IrisTransition.close(self: IrisTransition, onBlack: (() -> ())?): ()
 	end)
 end
 
+-- Resetea el iris al estado abierto sin animación (para cleanup).
+function IrisTransition.reset(self: IrisTransition): ()
+	if self._activeTween then
+		self._activeTween:Cancel()
+		self._activeTween = nil
+	end
+	self._opId += 1
+	local circle = self._circle
+	circle.Size = SIZE_SMALL
+	circle.Visible = false
+end
+
 -- Abre el iris (revela la pantalla). Llama onDone cuando está completamente abierta.
 function IrisTransition.open(self: IrisTransition, onDone: (() -> ())?): ()
 	task.spawn(function()

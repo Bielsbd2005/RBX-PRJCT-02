@@ -5,7 +5,7 @@ local TweenService = game:GetService("TweenService")
 local GuiAnimator = {}
 GuiAnimator.__index = GuiAnimator
 
-function GuiAnimator.new(gui: ScreenGui, container: Frame)
+function GuiAnimator.new(gui: ScreenGui?, container: Frame)
 	local self = setmetatable({}, GuiAnimator)
 	self._gui = gui
 	self._container = container
@@ -54,7 +54,11 @@ end
 function GuiAnimator:open(): ()
 	self:_clearTween()
 
-	self._gui.Enabled = true
+	if self._gui then
+		self._gui.Enabled = true
+	else
+		self._container.Visible = true
+	end
 	self._uiScale.Scale = 0
 
 	self._currentTween = TweenService:Create(
@@ -81,8 +85,12 @@ function GuiAnimator:close(): ()
 		end
 
 		if playbackState == Enum.PlaybackState.Completed then
-			self._gui.Enabled = false
-		end
+				if self._gui then
+					self._gui.Enabled = false
+				else
+					self._container.Visible = false
+				end
+			end
 
 		self:_clearTween()
 	end)

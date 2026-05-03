@@ -2,16 +2,19 @@
 -- BotAI: loop completo de comportamiento para un bot individual.
 -- Se instancia por bot desde AIService. Portado del EJEMPLO/AI.
 
+local CollectionService = game:GetService("CollectionService")
 local PathfindingService = game:GetService("PathfindingService")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local NPCWeaponFX = require(script.Parent:WaitForChild("NPCWeaponFX"))
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local TeamUtils = require(Shared.utils.TeamUtils)
 
+local WEAPON_TAG = "WeaponsSystemWeapon"
+
 local _weaponDataRemote: RemoteEvent? = nil
+local _weaponFiredRemote: RemoteEvent? = nil
 do
 	local wsFolder = ReplicatedStorage:FindFirstChild("WeaponsSystem")
 	if wsFolder then
@@ -20,6 +23,20 @@ do
 			_weaponDataRemote = remote
 		end
 	end
+end
+
+local function _getWeaponFiredRemote(): RemoteEvent?
+	if _weaponFiredRemote and _weaponFiredRemote.Parent then
+		return _weaponFiredRemote
+	end
+	local wsFolder = ReplicatedStorage:FindFirstChild("WeaponsSystem")
+	local network = wsFolder and wsFolder:FindFirstChild("Network")
+	local fired = network and network:FindFirstChild("WeaponFired")
+	if fired and fired:IsA("RemoteEvent") then
+		_weaponFiredRemote = fired
+		return fired
+	end
+	return nil
 end
 
 -- ────────────────────────────────────────────────────────────────
@@ -81,6 +98,7 @@ export type BotAIInstance = typeof(setmetatable({} :: {
 	_alive: boolean,
 	_mapRoot: Instance?,
 	_connections: { RBXScriptConnection },
+	_nextShotId: number,
 }, BotAI))
 
 function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?): BotAIInstance
@@ -97,6 +115,7 @@ function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?): BotAI
 		_alive = true,
 		_mapRoot = nil :: Instance?,
 		_connections = {} :: { RBXScriptConnection },
+		_nextShotId = 1,
 	}, BotAI) :: BotAIInstance
 
 	return self
@@ -116,8 +135,11 @@ function BotAI:_setupTool()
 	if toolTemplate and toolTemplate:IsA("Tool") then
 		local tool = toolTemplate:Clone()
 		tool.Parent = self._dummy
-		NPCWeaponFX.SetupWeapon(tool)
+		if not CollectionService:HasTag(tool, WEAPON_TAG) then
+			CollectionService:AddTag(tool, WEAPON_TAG)
+		end
 		self._humanoid:EquipTool(tool)
+		self._nextShotId = 1
 	end
 end
 
@@ -499,10 +521,27 @@ function BotAI:Start(mapRoot: Instance?)
 								end
 							end
 
-							-- Efectos visuales del disparo
+							-- Efectos visuales del disparo: usar el mismo pipeline que humanos
+							-- (broadcast WeaponFired → cada cliente corre BulletWeapon:simulateFire).
 							local fxTargetRoot = currentTarget:FindFirstChild("HumanoidRootPart")
-							if weapon and fxTargetRoot then
-								NPCWeaponFX.Fire(weapon, (fxTargetRoot :: BasePart).Position, self._dummy)
+							local firedRemote = _getWeaponFiredRemote()
+							if weapon and fxTargetRoot and firedRemote then
+								local tipAttach = weapon:FindFirstChild("TipAttachment", true)
+								local origin: Vector3
+								if tipAttach and tipAttach:IsA("Attachment") then
+									origin = (tipAttach :: Attachment).WorldPosition
+								else
+									origin = rootPart.Position + Vector3.new(0, 1.5, 0)
+								end
+								local dir = ((fxTargetRoot :: BasePart).Position - origin).Unit
+								local fireInfo = {
+									origin = origin,
+									dir = dir,
+									charge = 1,
+									id = self._nextShotId,
+								}
+								self._nextShotId += 1
+								firedRemote:FireAllClients(nil, weapon, fireInfo)
 							end
 						end
 					end

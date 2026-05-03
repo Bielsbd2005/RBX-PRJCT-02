@@ -1,32 +1,41 @@
 --!strict
 --[[
 	MatchMenu.luau
-	Gestión centralizada del menú principal y el label de fase en el botón Play.
+	Gestión del menú principal y del label de fase en el botón Play.
+	Instancia por feature (no singleton) — usar MatchMenu.new(...).
 ]]
 
-local MatchMenu = {}
 local UserInputService = game:GetService("UserInputService")
 
-local _menuController: any = nil
-local _playerGui: PlayerGui = nil :: any
-local _menuGui: ScreenGui = nil :: any
-local _shouldKeepHiddenFn: (() -> boolean)? = nil
-local _currentPhaseLabel = "DEPLOY"
+local MatchMenu = {}
+MatchMenu.__index = MatchMenu
 
--- ── Helpers de resolución de Play button ──────────────────────
+export type MatchMenu = {
+	_menuController: any,
+	_playerGui: PlayerGui,
+	_menuGui: ScreenGui,
+	_shouldKeepHiddenFn: () -> boolean,
+	_currentPhaseLabel: string,
+	getCurrentGui: (self: MatchMenu) -> ScreenGui?,
+	shouldKeepHidden: (self: MatchMenu) -> boolean,
+	enforceHidden: (self: MatchMenu) -> (),
+	forceShow: (self: MatchMenu) -> (),
+	setPhaseLabel: (self: MatchMenu, phase: string) -> (),
+	applyPhaseLabelToNewGui: (self: MatchMenu, gui: ScreenGui) -> (),
+	hasOpenLobbyPanel: (self: MatchMenu) -> boolean,
+	getPlayButton: (self: MatchMenu) -> GuiButton?,
+}
+
+-- ── Helpers de resolución ──────────────────────────────────────
 
 local function _findPlayButton(menuGui: ScreenGui): GuiButton?
 	local bottom = menuGui:FindFirstChild("BottomContainer")
-	if not bottom then
-		return nil
-	end
+	if not bottom then return nil end
 
 	local footer = bottom:FindFirstChild("Footer")
-	if not footer then
-		return nil
-	end
+	if not footer then return nil end
 
-	local playNode = footer:FindFirstChild("Play") or footer:FindFirstChild("play")
+	local playNode = footer:FindFirstChild("play")
 	if playNode and playNode:IsA("GuiButton") then
 		return playNode
 	end
@@ -36,42 +45,23 @@ end
 
 local function _findPlayStatusLabel(playButton: GuiButton): TextLabel?
 	local contentNode = playButton:FindFirstChild("Content")
-	if contentNode then
-		local statusNode = contentNode:FindFirstChild("Status")
-		if statusNode and statusNode:IsA("TextLabel") then
-			return statusNode
-		end
+	if not contentNode then return nil end
 
-		local recursiveStatusNode = contentNode:FindFirstChild("Status", true)
-		if recursiveStatusNode and recursiveStatusNode:IsA("TextLabel") then
-			return recursiveStatusNode
-		end
+	local statusNode = contentNode:FindFirstChild("Status")
+	if statusNode and statusNode:IsA("TextLabel") then
+		return statusNode
 	end
-
-	local directStatusNode = playButton:FindFirstChild("Status", true)
-	if directStatusNode and directStatusNode:IsA("TextLabel") then
-		return directStatusNode
-	end
-
 	return nil
 end
 
 local function _findPlayPcNode(playButton: GuiButton): GuiObject?
 	local contentNode = playButton:FindFirstChild("Content")
-	if not contentNode then
-		return nil
-	end
+	if not contentNode then return nil end
 
 	local pcNode = contentNode:FindFirstChild("PC")
 	if pcNode and pcNode:IsA("GuiObject") then
 		return pcNode
 	end
-
-	local recursivePcNode = contentNode:FindFirstChild("PC", true)
-	if recursivePcNode and recursivePcNode:IsA("GuiObject") then
-		return recursivePcNode
-	end
-
 	return nil
 end
 
@@ -80,141 +70,111 @@ local function _isDesktopPlatform(): boolean
 end
 
 local function _applyPlatformVisibilityToButton(button: GuiButton?)
-	if not button then
-		return
-	end
-
+	if not button then return end
 	local pcNode = _findPlayPcNode(button)
 	if pcNode then
 		pcNode.Visible = _isDesktopPlatform()
 	end
 end
 
-local function _applyPhaseLabelToButton(button: GuiButton?)
-	if not button then
-		return
-	end
+-- ── API ────────────────────────────────────────────────────────
 
-	local statusLabel = _findPlayStatusLabel(button)
-	if statusLabel then
-		statusLabel.Text = _currentPhaseLabel
-	end
-end
-
--- ── API pública ──────────────────────────────────────────────
-
-function MatchMenu.init(
+function MatchMenu.new(
 	menuController: any,
 	playerGui: PlayerGui,
 	menuGui: ScreenGui,
 	shouldKeepHiddenFn: () -> boolean
-)
-	_menuController = menuController
-	_playerGui = playerGui
-	_menuGui = menuGui
-	_shouldKeepHiddenFn = shouldKeepHiddenFn
+): MatchMenu
+	local self = setmetatable({}, MatchMenu) :: any
+	self._menuController = menuController
+	self._playerGui = playerGui
+	self._menuGui = menuGui
+	self._shouldKeepHiddenFn = shouldKeepHiddenFn
+	self._currentPhaseLabel = "DEPLOY"
 
 	menuGui.ResetOnSpawn = false
 
 	local playButton = _findPlayButton(menuGui)
-	_applyPhaseLabelToButton(playButton)
+	self:_applyPhaseLabelToButton(playButton)
 	_applyPlatformVisibilityToButton(playButton)
+
+	return self
 end
 
-function MatchMenu.getCurrentGui(): ScreenGui?
-	local current = _playerGui:FindFirstChild("Menu")
+function MatchMenu:_applyPhaseLabelToButton(button: GuiButton?)
+	if not button then return end
+	local statusLabel = _findPlayStatusLabel(button)
+	if statusLabel then
+		statusLabel.Text = self._currentPhaseLabel
+	end
+end
+
+function MatchMenu:getCurrentGui(): ScreenGui?
+	local current = self._playerGui:FindFirstChild("Menu")
 	if current and current:IsA("ScreenGui") then
 		return current
 	end
 
-	if _menuGui and _menuGui.Parent then
-		return _menuGui
+	if self._menuGui and self._menuGui.Parent then
+		return self._menuGui
 	end
 
 	return nil
 end
 
-function MatchMenu.shouldKeepHidden(): boolean
-	if _shouldKeepHiddenFn then
-		return _shouldKeepHiddenFn()
-	end
-	return false
+function MatchMenu:shouldKeepHidden(): boolean
+	return self._shouldKeepHiddenFn()
 end
 
-function MatchMenu.enforceHidden()
-	local currentGui = MatchMenu.getCurrentGui()
-	if not currentGui then
-		return
-	end
+function MatchMenu:enforceHidden()
+	local currentGui = self:getCurrentGui()
+	if not currentGui then return end
 
 	currentGui.ResetOnSpawn = false
-	if MatchMenu.shouldKeepHidden() and currentGui.Enabled then
+	if self:shouldKeepHidden() and currentGui.Enabled then
 		currentGui.Enabled = false
 	end
 end
 
---- Hard-reset: muestra el menú forzosamente con re-check en delay.
-function MatchMenu.forceShow()
-	local currentGui = MatchMenu.getCurrentGui() or _menuGui
+function MatchMenu:forceShow()
+	local currentGui = self:getCurrentGui() or self._menuGui
 	currentGui.ResetOnSpawn = false
 	currentGui.Enabled = true
-	_menuController:show()
+	self._menuController:show()
 
 	task.delay(0.2, function()
-		if MatchMenu.shouldKeepHidden() then
-			return
-		end
-		local lateMenu = MatchMenu.getCurrentGui()
+		if self:shouldKeepHidden() then return end
+		local lateMenu = self:getCurrentGui()
 		if lateMenu then
 			lateMenu.Enabled = true
 		end
 	end)
 end
 
---- Actualiza el texto de fase en el botón Play ("DEPLOY" / "VOTING" / "ENDING").
-function MatchMenu.setPhaseLabel(phase: string)
-	_currentPhaseLabel = phase
-
-	local currentGui = MatchMenu.getCurrentGui()
+function MatchMenu:setPhaseLabel(phase: string)
+	self._currentPhaseLabel = phase
+	local currentGui = self:getCurrentGui()
 	if currentGui then
-		local playButton = _findPlayButton(currentGui)
-		_applyPhaseLabelToButton(playButton)
+		self:_applyPhaseLabelToButton(_findPlayButton(currentGui))
 	end
 end
 
---- Aplica el label de fase a un nuevo ScreenGui de menú (para ChildAdded).
-function MatchMenu.applyPhaseLabelToNewGui(gui: ScreenGui)
+function MatchMenu:applyPhaseLabelToNewGui(gui: ScreenGui)
 	local playButton = _findPlayButton(gui)
-	_applyPhaseLabelToButton(playButton)
+	self:_applyPhaseLabelToButton(playButton)
 	_applyPlatformVisibilityToButton(playButton)
 end
 
---- Detecta si hay algún panel de lobby abierto (Locker, Settings, Store, etc.).
-function MatchMenu.hasOpenLobbyPanel(): boolean
-	local panelNames = {
-		"LockerGui",
-		"SettingsGui",
-		"Store",
-		"Cases",
-		"Rewards",
-	}
-
-	for _, panelName in panelNames do
-		local panel = _playerGui:FindFirstChild(panelName)
-		if panel and panel:IsA("ScreenGui") and panel.Enabled then
-			return true
-		end
+function MatchMenu:hasOpenLobbyPanel(): boolean
+	if self._menuController and self._menuController.hasOpenPanel then
+		return self._menuController:hasOpenPanel()
 	end
-
 	return false
 end
 
---- Devuelve el botón Play del menú actual (para binding externo).
-function MatchMenu.getPlayButton(): GuiButton?
-	local currentGui = MatchMenu.getCurrentGui()
-	if not currentGui then
-		return nil
-	end
+function MatchMenu:getPlayButton(): GuiButton?
+	local currentGui = self:getCurrentGui()
+	if not currentGui then return nil end
 	return _findPlayButton(currentGui)
 end
 

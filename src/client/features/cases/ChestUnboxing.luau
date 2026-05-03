@@ -177,6 +177,8 @@ function ChestUnboxing.play(skinId: string, weaponCategory: string, weaponId: st
     -- ── Fase 1: Vibración AAA (Orgánica) ────────────────────
     local vibrateStart = os.clock()
     while os.clock() - vibrateStart < VIBRATION_DURATION do
+        if not chest or not chest.Parent then break end
+
         local elapsed = os.clock() - vibrateStart
         local progress = elapsed / VIBRATION_DURATION
 
@@ -270,13 +272,24 @@ function ChestUnboxing.play(skinId: string, weaponCategory: string, weaponId: st
         cframeValue.Value = startSpawnCFrame
         cframeValue.Parent = clonedWrap
 
-        cframeValue.Changed:Connect(function(newCFrame)
+        -- GetPropertyChangedSignal("Value") en vez de .Changed: este último
+        -- también se dispara con cambios de Name/Parent/etc. Disconnect al
+        -- terminar el tween para liberarlo aunque el CFrameValue siga vivo.
+        local pivotConn: RBXScriptConnection? = nil
+        pivotConn = cframeValue:GetPropertyChangedSignal("Value"):Connect(function()
             if clonedWrap and clonedWrap.Parent then
-                clonedWrap:PivotTo(newCFrame)
+                clonedWrap:PivotTo(cframeValue.Value)
             end
         end)
 
-        table.insert(tweensToPlay, TweenService:Create(cframeValue, WEAPON_APPEAR_TWEEN_INFO, {Value = spawnCFrame}))
+        local pivotTween = TweenService:Create(cframeValue, WEAPON_APPEAR_TWEEN_INFO, {Value = spawnCFrame})
+        pivotTween.Completed:Connect(function()
+            if pivotConn then
+                pivotConn:Disconnect()
+                pivotConn = nil
+            end
+        end)
+        table.insert(tweensToPlay, pivotTween)
     elseif clonedWrap:IsA("BasePart") then
         -- Si es solo una parte, hacemos tween directo
         table.insert(tweensToPlay, TweenService:Create(clonedWrap, WEAPON_APPEAR_TWEEN_INFO, {CFrame = spawnCFrame}))

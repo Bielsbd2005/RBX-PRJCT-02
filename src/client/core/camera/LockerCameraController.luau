@@ -175,15 +175,19 @@ end
 function LockerCameraController:zoomOnPosition(targetPosition: Vector3)
 	if not self._isApplied then return end
 
+	self:_cancelActiveTweens()
+	-- Parar parallax ANTES de cambiar la base, para evitar que un ultimo frame
+	-- de RenderStepped escriba `camera.CFrame = newBase * angles` y produzca
+	-- un salto antes de que arranque el tween de aproximacion.
+	self._mouseParallax:stop(true)
+
 	local currentBase = self._targetPart.CFrame
 	local lookCFrame = CFrame.lookAt(currentBase.Position, targetPosition)
 	local distance = (currentBase.Position - targetPosition).Magnitude
 	local zoomCFrame = lookCFrame + lookCFrame.LookVector * (distance * 0.3)
 	zoomCFrame = zoomCFrame + lookCFrame.RightVector * 2
 
-	self:_cancelActiveTweens()
 	self:_setParallaxBaseCFrame(zoomCFrame)
-	self._mouseParallax:stop(true)
 
 	self._cameraApproachTween = TweenService:Create(self._camera, WRAP_ZOOM_TWEEN_INFO, {
 		CFrame = zoomCFrame

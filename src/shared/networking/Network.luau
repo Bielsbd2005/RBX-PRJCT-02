@@ -45,6 +45,26 @@ local SettingsNamespace = ByteNet.DefineNamespace("Settings", function()
 			}),
 			ReliabilityType = "Reliable",
 		}),
+
+		-- C → S: Actualiza un setting tipo enum (string whitelisted).
+		UpdateChoice = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				key   = ByteNet.String,
+				value = ByteNet.String,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- C → S: Actualiza un color RGB (componentes 0..1).
+		UpdateColor = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				key = ByteNet.String,
+				r   = ByteNet.Float32,
+				g   = ByteNet.Float32,
+				b   = ByteNet.Float32,
+			}),
+			ReliabilityType = "Reliable",
+		}),
 	}
 end)
 
@@ -284,10 +304,9 @@ local MatchNamespace = ByteNet.DefineNamespace("Match", function()
 				respawnCooldown = ByteNet.Int32,
 				killerUserId = ByteNet.String,
 				killerName = ByteNet.String,
+				killerKills = ByteNet.Int32,
+				killerLevel = ByteNet.Int32,
 				weaponName = ByteNet.String,
-				killerPositionX = ByteNet.Float32,
-				killerPositionY = ByteNet.Float32,
-				killerPositionZ = ByteNet.Float32,
 			}),
 			ReliabilityType = "Reliable",
 		}),
@@ -351,6 +370,78 @@ local MatchNamespace = ByteNet.DefineNamespace("Match", function()
 			}),
 			ReliabilityType = "Reliable",
 		}),
+
+		-- C → S: Recoger un pickup (Bullet o Health) generado por una kill.
+		RequestPickup = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				kind = ByteNet.String,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+	}
+end)
+
+-- ────────────────────────────────────────────────────────────
+-- NAMESPACE: Locker
+-- UX del Locker (acciones del cliente que no caben en Shop/Cases).
+-- ────────────────────────────────────────────────────────────
+
+local LockerNamespace = ByteNet.DefineNamespace("Locker", function()
+	return {
+		-- C → S: Quitar el badge "NEW!" de un ítem que el jugador acaba de ver.
+		MarkItemSeen = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				category = ByteNet.String,
+				itemId   = ByteNet.String,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+	}
+end)
+
+-- ────────────────────────────────────────────────────────────
+-- NAMESPACE: BattlePass
+-- Claim de tiers, compra de Premium (Robux developer product) y respuesta
+-- unificada server → client.
+-- ────────────────────────────────────────────────────────────
+
+local BattlePassNamespace = ByteNet.DefineNamespace("BattlePass", function()
+	return {
+		-- C → S: Reclamar la recompensa de un tier en una pista (Free/Premium).
+		-- El servidor valida tier completado, ownership Premium y no-doble-claim.
+		-- Int32 (no UInt16) para mantener consistencia con el resto del codebase.
+		ClaimTier = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				tier  = ByteNet.Int32,
+				track = ByteNet.String, -- "Free" | "Premium"
+			}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- C → S: Iniciar compra del pase Premium. El servidor llama a
+		-- MarketplaceService:PromptProductPurchase con el productId activo.
+		BuyPremium = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- C → S: Iniciar compra del developer product "Skip Tier". El servidor
+		-- promptea Robux; al confirmar el receipt, avanza CurrentTier en 1.
+		BuySkip = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- S → C: Respuesta unificada. tier=0 cuando no aplica (e.g. PremiumGranted).
+		Response = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				success = ByteNet.Bool,
+				message = ByteNet.String,
+				tier    = ByteNet.Int32,
+				track   = ByteNet.String,
+			}),
+			ReliabilityType = "Reliable",
+		}),
 	}
 end)
 
@@ -369,6 +460,8 @@ return {
 	Shop       = ShopNamespace,
 	Combat     = CombatNamespace,
 	Rewards    = RewardsNamespace,
+	Locker     = LockerNamespace,
 	Cases      = CasesNamespace,
 	Match      = MatchNamespace,
+	BattlePass = BattlePassNamespace,
 }

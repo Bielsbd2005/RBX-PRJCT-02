@@ -25,8 +25,11 @@ local Janitor = require(Packages.janitor) :: any
 local Fusion = require(Packages.fusion) :: any
 local LockerCameraController = require(Client.core.camera.LockerCameraController)
 local CameraLock = require(Client.core.camera.CameraLock)
-local MenuHover = require(Client.core.ui.MenuHover)
 local InteractiveScaleTween = require(Client.core.ui.animators.InteractiveScaleTween)
+local FeaturePanelController = require(Client.core.ui.FeaturePanelController)
+local NavTabController = require(Client.core.ui.NavTabController)
+local UIUtils = require(Client.core.ui.UIUtils)
+local UITheme = require(Client.core.ui.UITheme)
 local DataController = require(Client.core.data.DataController)
 local WeaponSkinWrapPreviewer = require(Client.features.locker.Previewers.WeaponSkinWrapPreviewer)
 local CasesConfig = require(Shared.constants.CasesConfig)
@@ -39,31 +42,6 @@ local CasesFeature = {}
 -- ────────────────────────────────────────────────────────────
 -- HELPERS
 -- ────────────────────────────────────────────────────────────
-
-local function findFooterButton(menuGui: ScreenGui, buttonName: string): GuiButton?
-	local bottomContainer = menuGui:FindFirstChild("BottomContainer")
-	if not bottomContainer then return nil end
-
-	local footer = bottomContainer:FindFirstChild("Footer")
-	if not footer then return nil end
-
-	local targetButton = footer:FindFirstChild(buttonName)
-	if targetButton and targetButton:IsA("GuiButton") then
-		return targetButton
-	end
-
-	return nil
-end
-
-local function formatCashAmount(amount: number): string
-	local formatted = tostring(math.max(0, math.floor(amount)))
-	local withSeparators = string.reverse(formatted):gsub("(%d%d%d)", "%1,")
-	withSeparators = string.reverse(withSeparators)
-	if string.sub(withSeparators, 1, 1) == "," then
-		withSeparators = string.sub(withSeparators, 2)
-	end
-	return withSeparators
-end
 
 local function formatChance(weight: number, totalWeight: number): string
 	if totalWeight <= 0 then return "0%" end
@@ -90,7 +68,7 @@ local function applyRarityGradient(cardTemplate: GuiObject, rarity: string?)
 		return
 	end
 
-	local gradientNode = cardTemplate:FindFirstChildWhichIsA("UIGradient", true)
+	local gradientNode = cardTemplate:FindFirstChildOfClass("UIGradient")
 	if gradientNode then
 		gradientNode.Color = ColorSequence.new({
 			ColorSequenceKeypoint.new(0, style.StartColor),
@@ -99,7 +77,7 @@ local function applyRarityGradient(cardTemplate: GuiObject, rarity: string?)
 		gradientNode.Rotation = style.Rotation
 	end
 
-	local strokeNode = cardTemplate:FindFirstChildWhichIsA("UIStroke", true)
+	local strokeNode = cardTemplate:FindFirstChildOfClass("UIStroke")
 	if strokeNode then
 		strokeNode.Color = style.StrokeColor or style.EndColor
 	end
@@ -114,7 +92,7 @@ function CasesFeature.start(menuController: any): any
 	local player = Players.LocalPlayer
 	local playerGui = player:WaitForChild("PlayerGui")
 	local menuGui = menuController:getGui()
-	local casesButton = findFooterButton(menuGui, "cases")
+	local casesButton = UIUtils.findFooterButton(menuGui, "cases")
 	local casesGui = playerGui:FindFirstChild("Cases")
 
 	if not casesButton or not casesGui or not casesGui:IsA("ScreenGui") then
@@ -164,16 +142,12 @@ function CasesFeature.start(menuController: any): any
 	janitor:Add(cameraController, "Destroy")
 
 	-- Estado
-	local isOpen = false
 	local selectedCaseId: string? = nil
 	local dropsJanitor = Janitor.new()
 	janitor:Add(dropsJanitor, "Destroy")
 
 	local canUseHoverAnimations = UserInputService.MouseEnabled
 		and not UserInputService.TouchEnabled
-
-	-- GUI empieza oculta
-	casesGui.Enabled = false
 
 	-- ── Unboxing: estado y UI ────────────────────────────────
 	local UNBOXING_CAMERA_CFRAME = CFrame.new(-267.155, 25.312, -248.177)
@@ -182,19 +156,31 @@ function CasesFeature.start(menuController: any): any
 
 	local unboxingQueue: { { caseId: string, skinId: string, weaponCategory: string, weaponId: string, isPity: boolean, newPity: number } } = {}
 	local isUnboxing = false
+	local unboxingGeneration = 0
+	local function isGenerationCancelled(gen: number): boolean
+		return unboxingGeneration ~= gen
+	end
 
-	-- Overlay negro para fade
-	local fadeOverlay = Instance.new("Frame")
-	fadeOverlay.Name = "FadeOverlay"
-	fadeOverlay.Size = UDim2.new(1, 0, 1, 0)
-	fadeOverlay.Position = UDim2.new(0, 0, 0, 0)
-	fadeOverlay.BackgroundColor3 = Color3.new(0, 0, 0)
-	fadeOverlay.BackgroundTransparency = 1
-	fadeOverlay.BorderSizePixel = 0
-	fadeOverlay.ZIndex = 100
-	fadeOverlay.Visible = false
-	fadeOverlay.Parent = casesGui
-	janitor:Add(fadeOverlay, "Destroy")
+	-- Overlay negro para fade — usa el del editor si existe, si no crea uno
+	local fadeOverlay: Frame
+	local existingOverlay = casesGui:FindFirstChild("FadeOverlay")
+	if existingOverlay and existingOverlay:IsA("Frame") then
+		fadeOverlay = existingOverlay
+		fadeOverlay.BackgroundTransparency = 1
+		fadeOverlay.Visible = false
+	else
+		fadeOverlay = Instance.new("Frame")
+		fadeOverlay.Name = "FadeOverlay"
+		fadeOverlay.Size = UDim2.new(1, 0, 1, 0)
+		fadeOverlay.Position = UDim2.new(0, 0, 0, 0)
+		fadeOverlay.BackgroundColor3 = Color3.new(0, 0, 0)
+		fadeOverlay.BackgroundTransparency = 1
+		fadeOverlay.BorderSizePixel = 0
+		fadeOverlay.ZIndex = 100
+		fadeOverlay.Visible = false
+		fadeOverlay.Parent = casesGui
+		janitor:Add(fadeOverlay, "Destroy")
+	end
 
 	local function fadeToBlack()
 		fadeOverlay.BackgroundTransparency = 1
@@ -217,37 +203,10 @@ function CasesFeature.start(menuController: any): any
 		Fusion.doCleanup(scope)
 	end, true)
 
-	-- ── Nav1: Selección de cases ─────────────────────────────
-	local SELECTED_COLOR = Color3.fromRGB(249, 217, 93)
-	local UNSELECTED_COLOR = Color3.fromRGB(35, 54, 99)
-	local HOVER_STROKE_COLOR = Color3.fromRGB(255, 255, 255)
-	local NAV_TWEEN_INFO = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-
-	local caseNavButtons: { [string]: GuiButton } = {}
-	local defaultStrokeColors: { [GuiButton]: Color3 } = {}
+	-- ── Nav1: Selección de cases (delegado a NavTabController) ─
+	local navTabController = NavTabController.new()
+	janitor:Add(navTabController, "Destroy")
 	local rarityRankByName = buildRarityRankLookup()
-
-	local function updateCaseNavVisuals()
-		for caseId, btn in caseNavButtons do
-			local isSelected = (selectedCaseId == caseId)
-
-			local targetScale = if isSelected then 1.15 else 1.0
-			local targetColor = if isSelected then SELECTED_COLOR else UNSELECTED_COLOR
-
-			local scaleNode = btn:FindFirstChildOfClass("UIScale")
-			if not scaleNode then
-				scaleNode = Instance.new("UIScale")
-				scaleNode.Name = "NavScale"
-				scaleNode.Parent = btn
-			end
-
-			TweenService:Create(scaleNode, NAV_TWEEN_INFO, { Scale = targetScale }):Play()
-
-			if btn:IsA("ImageButton") or btn:IsA("ImageLabel") then
-				TweenService:Create(btn, NAV_TWEEN_INFO, { ImageColor3 = targetColor }):Play()
-			end
-		end
-	end
 
 	-- ── Poblar drops del case seleccionado ────────────────────
 	local function populateDrops(caseId: string)
@@ -296,27 +255,17 @@ function CasesFeature.start(menuController: any): any
 
 			applyRarityGradient(clone, if type(skinConfig.Rarity) == "string" then skinConfig.Rarity else nil)
 
-			-- Nombre
-			local itemNameLabel = clone:FindFirstChild("ItemName", true)
-			if itemNameLabel and itemNameLabel:IsA("TextLabel") then
-				itemNameLabel.Text = skinConfig.Name or drop.SkinId
-			end
+			local itemNameLabel = clone:WaitForChild("ItemName") :: TextLabel
+			itemNameLabel.Text = skinConfig.Name or drop.SkinId
 
-			-- Chance normal
-			local chanceLabel = clone:FindFirstChild("Chance", true)
-			if chanceLabel and chanceLabel:IsA("TextLabel") then
-				chanceLabel.Text = formatChance(drop.Weight, totalWeight)
-			end
+			local chanceLabel = clone:WaitForChild("Chance") :: TextLabel
+			chanceLabel.Text = formatChance(drop.Weight, totalWeight)
 
-			-- Chance con lucky
-			local luckyChanceLabel = clone:FindFirstChild("LuckyChance", true)
-			if luckyChanceLabel and luckyChanceLabel:IsA("TextLabel") then
-				luckyChanceLabel.Text = formatChance(drop.LuckyWeight, totalLuckyWeight)
-			end
+			local luckyChanceLabel = clone:WaitForChild("LuckyChance") :: TextLabel
+			luckyChanceLabel.Text = formatChance(drop.LuckyWeight, totalLuckyWeight)
 
-			-- ViewportFrame con preview de la skin (wrap)
-			local viewportFrame = clone:FindFirstChild("ViewportFrame", true)
-			if viewportFrame and viewportFrame:IsA("ViewportFrame") then
+			local viewportFrame = clone:WaitForChild("ViewportFrame") :: ViewportFrame
+			do
 				local previewItem = {
 					TextureID = skinConfig.TextureID,
 					BaseColor = skinConfig.BaseColor,
@@ -331,6 +280,14 @@ function CasesFeature.start(menuController: any): any
 	end
 
 	-- ── Pity bar ──────────────────────────────────────────────
+	local activePityBarTween: Tween? = nil
+	janitor:Add(function()
+		if activePityBarTween then
+			activePityBarTween:Cancel()
+			activePityBarTween = nil
+		end
+	end, true)
+
 	local function updatePityBar(caseId: string)
 		if not pityContainer then return end
 
@@ -346,30 +303,19 @@ function CasesFeature.start(menuController: any): any
 		local threshold = caseDef.PityThreshold
 		local currentPity = math.clamp(rawPity, 0, math.max(1, threshold))
 
-		local barNode = pityContainer:FindFirstChild("Bar", true)
-		if barNode then
-			local fill = barNode:FindFirstChild("Fill", true)
-			if fill and fill:IsA("GuiObject") then
-				local fillRatio = math.clamp(currentPity / math.max(1, threshold), 0, 1)
-				TweenService:Create(fill, TweenInfo.new(0.3, Enum.EasingStyle.Quad), {
-					Size = UDim2.new(fillRatio, 0, 1, 0),
-				}):Play()
-			end
+		local fill = pityContainer.Bar.Fill :: GuiObject
+		local fillRatio = math.clamp(currentPity / math.max(1, threshold), 0, 1)
+		if activePityBarTween then
+			activePityBarTween:Cancel()
 		end
+		activePityBarTween = TweenService:Create(fill, TweenInfo.new(0.3, Enum.EasingStyle.Quad), {
+			Size = UDim2.new(fillRatio, 0, 1, 0),
+		})
+		activePityBarTween:Play()
 
 		local progressText = tostring(currentPity) .. "/" .. tostring(threshold)
-
-		local leftLabel = pityContainer:FindFirstChild("Left", true)
-		if leftLabel and leftLabel:IsA("TextLabel") then
-			leftLabel.Text = progressText
-		end
-
-		-- Fallbacks por si el layout usa nombres previos.
-		local counterLabel = pityContainer:FindFirstChild("Counter", true)
-			or pityContainer:FindFirstChild("Label", true)
-		if counterLabel and counterLabel:IsA("TextLabel") then
-			counterLabel.Text = progressText
-		end
+		local leftLabel = pityContainer.Left :: TextLabel
+		leftLabel.Text = progressText
 	end
 
 	-- ── Actualizar precios de summon ──────────────────────────
@@ -377,30 +323,17 @@ function CasesFeature.start(menuController: any): any
 		local caseDef = CasesConfig.Cases[caseId]
 		if not caseDef then return end
 
-		if nav2:FindFirstChild("Summon1") then
-			local node = nav2:FindFirstChild("Summon1")
-			if node then
-				local priceLabel = node:FindFirstChild("Price", true)
-				if priceLabel and priceLabel:IsA("TextLabel") then
-					priceLabel.Text = formatCashAmount(caseDef.Price)
-				end
-			end
-		end
-
-		local summon4Node = nav2:FindFirstChild("Summon4")
-		if summon4Node then
-			local priceLabel = summon4Node:FindFirstChild("Price", true)
-			if priceLabel and priceLabel:IsA("TextLabel") then
-				priceLabel.Text = formatCashAmount(caseDef.PriceMulti)
-			end
-		end
+		local summon1Price = nav2.Summon1.Price :: TextLabel
+		local summon4Price = nav2.Summon4.Price :: TextLabel
+		summon1Price.Text = UIUtils.formatCashAmount(caseDef.Price)
+		summon4Price.Text = UIUtils.formatCashAmount(caseDef.PriceMulti)
 	end
 
 	-- ── Seleccionar un case ───────────────────────────────────
 	local function selectCase(caseId: string)
 		if selectedCaseId == caseId then return end
 		selectedCaseId = caseId
-		updateCaseNavVisuals()
+		navTabController:setActive(caseId)
 		populateDrops(caseId)
 		updatePityBar(caseId)
 		refreshSummonPrices(caseId)
@@ -408,6 +341,20 @@ function CasesFeature.start(menuController: any): any
 
 	-- ── Registrar botones de Nav1 como selectores de cases ────
 	local closeButton: GuiButton? = nil
+	local strokeTweens = {} :: { [GuiButton]: Tween }
+	local function tweenStroke(button: GuiButton, stroke: UIStroke, color: Color3)
+		local existing = strokeTweens[button]
+		if existing then existing:Cancel() end
+		local tween = TweenService:Create(stroke, UITheme.NavTweenInfo, { Color = color })
+		strokeTweens[button] = tween
+		tween:Play()
+	end
+	janitor:Add(function()
+		for _, tween in strokeTweens do tween:Cancel() end
+		table.clear(strokeTweens)
+	end, true)
+
+	local registeredCaseIds = {} :: { [string]: boolean }
 	for _, child in nav1:GetChildren() do
 		if child:IsA("GuiButton") then
 			if child.Name == "CloseBtn" or child.Name == "Close" then
@@ -417,27 +364,28 @@ function CasesFeature.start(menuController: any): any
 
 			local caseId = child.Name
 			local btn = child :: GuiButton
-			caseNavButtons[caseId] = btn
+			navTabController:register(caseId, btn)
+			registeredCaseIds[caseId] = true
 
 			local stroke = btn:FindFirstChildOfClass("UIStroke")
 			if stroke then
-				defaultStrokeColors[btn] = stroke.Color
+				local defaultColor = stroke.Color
 
 				janitor:Add(btn.MouseEnter:Connect(function()
 					if canUseHoverAnimations then
-						TweenService:Create(stroke, NAV_TWEEN_INFO, { Color = HOVER_STROKE_COLOR }):Play()
+						tweenStroke(btn, stroke, UITheme.StrokeHover)
 					end
 				end), "Disconnect")
 
 				janitor:Add(btn.MouseLeave:Connect(function()
-					TweenService:Create(stroke, NAV_TWEEN_INFO, { Color = defaultStrokeColors[btn] }):Play()
+					tweenStroke(btn, stroke, defaultColor)
 				end), "Disconnect")
 			end
 
 			InteractiveScaleTween.bindButton(btn, janitor, {
 				enableHover = canUseHoverAnimations,
-				hoverScale = 1.04,
-				clickScale = 0.96,
+				hoverScale = UITheme.ButtonHoverScale,
+				clickScale = UITheme.ButtonClickScale,
 			})
 
 			janitor:Add(btn.Activated:Connect(function()
@@ -452,7 +400,7 @@ function CasesFeature.start(menuController: any): any
 		else nil
 
 	if not defaultCaseId then
-		for caseId in caseNavButtons do
+		for caseId in registeredCaseIds do
 			defaultCaseId = caseId
 			break
 		end
@@ -469,8 +417,8 @@ function CasesFeature.start(menuController: any): any
 	if summon1Node and summon1Node:IsA("GuiButton") then
 		InteractiveScaleTween.bindButton(summon1Node, janitor, {
 			enableHover = canUseHoverAnimations,
-			hoverScale = 1.04,
-			clickScale = 0.96,
+			hoverScale = UITheme.ButtonHoverScale,
+			clickScale = UITheme.ButtonClickScale,
 		})
 
 		janitor:Add(summon1Node.Activated:Connect(function()
@@ -484,8 +432,8 @@ function CasesFeature.start(menuController: any): any
 	if summon4Node and summon4Node:IsA("GuiButton") then
 		InteractiveScaleTween.bindButton(summon4Node, janitor, {
 			enableHover = canUseHoverAnimations,
-			hoverScale = 1.04,
-			clickScale = 0.96,
+			hoverScale = UITheme.ButtonHoverScale,
+			clickScale = UITheme.ButtonClickScale,
 		})
 
 		janitor:Add(summon4Node.Activated:Connect(function()
@@ -499,8 +447,8 @@ function CasesFeature.start(menuController: any): any
 	if luck1Node and luck1Node:IsA("GuiButton") then
 		InteractiveScaleTween.bindButton(luck1Node, janitor, {
 			enableHover = canUseHoverAnimations,
-			hoverScale = 1.04,
-			clickScale = 0.96,
+			hoverScale = UITheme.ButtonHoverScale,
+			clickScale = UITheme.ButtonClickScale,
 		})
 
 		janitor:Add(luck1Node.Activated:Connect(function()
@@ -536,94 +484,106 @@ function CasesFeature.start(menuController: any): any
 	local function processUnboxingQueue()
 		if isUnboxing or #unboxingQueue == 0 then return end
 		isUnboxing = true
+		unboxingGeneration += 1
+		local gen = unboxingGeneration
 		CameraLock.acquire("cases_unboxing")
-		local isScreenBlack = false
 
 		local savedCameraCFrame = Workspace.CurrentCamera.CFrame
 
-		-- Ocultar UI del menú de cajas
-		nav1.Visible = false
-		nav2.Visible = false
-		dropsFrame.Visible = false
+		local ok, err = pcall(function()
+			-- Ocultar UI del menú de cajas
+			nav1.Visible = false
+			nav2.Visible = false
+			dropsFrame.Visible = false
 
-		-- Fade a negro y mover cámara
-		fadeToBlack()
-		isScreenBlack = true
-		Workspace.CurrentCamera.CFrame = UNBOXING_CAMERA_CFRAME
-		fadeFromBlack()
-		isScreenBlack = false
+			-- Fade a negro y mover cámara
+			fadeToBlack()
+			if isGenerationCancelled(gen) then return end
+			Workspace.CurrentCamera.CFrame = UNBOXING_CAMERA_CFRAME
+			fadeFromBlack()
+			if isGenerationCancelled(gen) then return end
 
-		-- Procesar cada resultado en la cola
-		while #unboxingQueue > 0 do
-			local result = table.remove(unboxingQueue, 1)
+			-- Procesar cada resultado en la cola
+			while #unboxingQueue > 0 do
+				if isGenerationCancelled(gen) then return end
+				local result = table.remove(unboxingQueue, 1)
 
-			-- Animación de cofre (bloquea hasta completar)
-			local cleanup = ChestUnboxing.play(result.skinId, result.weaponCategory, result.weaponId)
+				local cleanup
+				local playOk, playErr = pcall(function()
+					cleanup = ChestUnboxing.play(result.skinId, result.weaponCategory, result.weaponId)
+				end)
+				if not playOk then
+					warn("[CasesFeature] ChestUnboxing.play error:", playErr)
+					if cleanup then pcall(cleanup) end
+					continue
+				end
 
-			-- Mostrar acciones de unboxing
-			unboxingFrame.Visible = true
+				unboxingFrame.Visible = true
 
-			local actionEvent = Instance.new("BindableEvent")
-			local actionChosen: string? = nil
-			local acceptConnection = acceptButton.Activated:Connect(function()
-				if actionChosen ~= nil then return end
-				actionChosen = "accept"
-				actionEvent:Fire(actionChosen)
-			end)
-			local equipConnection = equipButton.Activated:Connect(function()
-				if actionChosen ~= nil then return end
-				actionChosen = "equip"
-				actionEvent:Fire(actionChosen)
-			end)
+				local actionEvent = Instance.new("BindableEvent")
+				local actionChosen: string? = nil
+				local acceptConnection = acceptButton.Activated:Connect(function()
+					if actionChosen ~= nil then return end
+					actionChosen = "accept"
+					actionEvent:Fire(actionChosen)
+				end)
+				local equipConnection = equipButton.Activated:Connect(function()
+					if actionChosen ~= nil then return end
+					actionChosen = "equip"
+					actionEvent:Fire(actionChosen)
+				end)
 
-			local chosenAction = actionEvent.Event:Wait()
-			acceptConnection:Disconnect()
-			equipConnection:Disconnect()
-			actionEvent:Destroy()
+				local chosenAction = actionEvent.Event:Wait()
+				acceptConnection:Disconnect()
+				equipConnection:Disconnect()
+				actionEvent:Destroy()
 
-			if chosenAction == "equip" then
-				Network.Shop.EquipItem.Send({
-					category = "WeaponSkins",
-					itemId = result.skinId,
-					weaponCategory = result.weaponCategory,
-					weaponId = result.weaponId,
-				})
+				if chosenAction == "equip" then
+					Network.Shop.EquipItem.Send({
+						category = "WeaponSkins",
+						itemId = result.skinId,
+						weaponCategory = result.weaponCategory,
+						weaponId = result.weaponId,
+					})
+				end
+
+				unboxingFrame.Visible = false
+
+				fadeToBlack()
+				if cleanup then pcall(cleanup) end
+
+				if selectedCaseId then
+					updatePityBar(selectedCaseId)
+				end
+
+				if #unboxingQueue > 0 then
+					fadeFromBlack()
+				end
 			end
+		end)
 
+		if not ok then
+			warn("[CasesFeature] processUnboxingQueue error:", err)
+		end
+
+		-- Restaurar vista de cajas (siempre, incluso tras error)
+		pcall(function()
+			Workspace.CurrentCamera.CFrame = savedCameraCFrame
+			nav1.Visible = true
+			nav2.Visible = true
+			dropsFrame.Visible = true
 			unboxingFrame.Visible = false
-
-			-- Cerrar/limpiar cofre justo con pantalla negra
-			fadeToBlack()
-			isScreenBlack = true
-			cleanup()
-
-			-- Actualizar pity
-			if selectedCaseId then
-				updatePityBar(selectedCaseId)
-			end
-
-			-- Si hay más resultados, volvemos a mostrar para el siguiente unboxing.
-			if #unboxingQueue > 0 then
-				fadeFromBlack()
-				isScreenBlack = false
-			end
-		end
-
-		-- Restaurar vista de cajas
-		if not isScreenBlack then
-			fadeToBlack()
-			isScreenBlack = true
-		end
-		Workspace.CurrentCamera.CFrame = savedCameraCFrame
-		nav1.Visible = true
-		nav2.Visible = true
-		dropsFrame.Visible = true
-		unboxingFrame.Visible = false
-		fadeFromBlack()
-		isScreenBlack = false
+			fadeOverlay.BackgroundTransparency = 1
+			fadeOverlay.Visible = false
+		end)
 
 		CameraLock.release("cases_unboxing")
 		isUnboxing = false
+
+		-- Si llegaron más eventos durante el error, intenta procesarlos
+		if #unboxingQueue > 0 then
+			task.spawn(processUnboxingQueue)
+		end
 	end
 
 	-- ── Escuchar resultado de summon ──────────────────────────
@@ -639,60 +599,25 @@ function CasesFeature.start(menuController: any): any
 		task.spawn(processUnboxingQueue)
 	end), true)
 
-	-- ── Abrir / cerrar GUI ───────────────────────────────────
-
-	local function setMenuVisible(visible: boolean)
-		menuGui.Enabled = visible
-	end
-
-	local function openCasesGui()
-		if isOpen then return end
-		isOpen = true
-		cameraController:apply()
-		casesGui.Enabled = true
-		setMenuVisible(false)
-
-		-- Refrescar pity al abrir
-		if selectedCaseId then
-			updatePityBar(selectedCaseId)
-		end
-	end
-
-	local function closeCasesGui()
-		if not isOpen then return end
-		isOpen = false
-		cameraController:restore()
-		casesGui.Enabled = false
-		setMenuVisible(true)
-	end
-
-	janitor:Add(casesButton.MouseButton1Click:Connect(openCasesGui), "Disconnect")
-
-	-- Close button en Nav1
-	if closeButton then
-		local resetClose = MenuHover.bindButton(closeButton, janitor)
-		janitor:Add(closeButton.MouseButton1Click:Connect(function()
-			resetClose()
-			closeCasesGui()
-		end), "Disconnect")
-	end
-
-	-- Sync external close
-	janitor:Add(casesGui:GetPropertyChangedSignal("Enabled"):Connect(function()
-		if casesGui.Enabled == false and isOpen then
-			isOpen = false
-			cameraController:restore()
-			setMenuVisible(true)
-		end
-	end), "Disconnect")
-
-	-- Cleanup
-	janitor:Add(function()
-		if isOpen then
-			cameraController:restore()
-			setMenuVisible(true)
-		end
-	end, true)
+	-- ── Abrir / cerrar GUI (vía FeaturePanelController) ───────
+	local panel = FeaturePanelController.new({
+		menuController = menuController,
+		screenGui = casesGui,
+		openButton = casesButton,
+		closeButton = closeButton,
+		cameraController = cameraController,
+		onOpen = function()
+			if selectedCaseId then
+				updatePityBar(selectedCaseId)
+			end
+		end,
+		onClose = function()
+			-- Cancela cualquier unboxing en curso al cerrar la GUI
+			unboxingGeneration += 1
+			table.clear(unboxingQueue)
+		end,
+	})
+	janitor:Add(panel, "Destroy")
 
 	return janitor
 end

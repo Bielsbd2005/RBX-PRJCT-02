@@ -32,6 +32,7 @@ local Sift = require(Packages.sift) :: any
 local Network     = require(Shared.networking.Network)
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
 local LockerConfig = require(Shared.constants.LockerConfig)
+local BattlePassConfig = require(Shared.constants.BattlePassConfig)
 
 local CATEGORY_TO_LOADOUT_SLOT = LockerConfig.CategoryToLoadoutSlot :: { [string]: string }
 local WEAPON_WRAPS_PATH_BY_CATEGORY = {
@@ -57,6 +58,19 @@ local function _resolveWeaponId(rawWeaponId: string?, fallbackWeaponId: string?)
 	end
 
 	return "Default"
+end
+
+-- True si el jugador posee el arma target. La "Default" siempre se considera poseída
+-- porque viene en el DataTemplate inicial.
+local function _ownsTargetWeapon(profileData: any, weaponCategory: string, weaponId: string): boolean
+	if weaponId == "Default" then
+		return true
+	end
+	local categoryInventory = profileData.Inventory and profileData.Inventory[weaponCategory]
+	if type(categoryInventory) ~= "table" then
+		return false
+	end
+	return categoryInventory[weaponId] == true
 end
 
 local function _getOwnedWeaponWrap(profileData: any, weaponCategory: string, weaponId: string, skinId: string): boolean
@@ -104,20 +118,24 @@ local _started = false
 -- HELPERS
 -- ────────────────────────────────────────────────────────────
 
-local function _checkCooldown(player: Player, action: string): boolean
+-- Devuelve true si la acción está fuera de cooldown (no muta state).
+local function _isCooldownReady(player: Player, action: string): boolean
+	local playerCooldowns = _cooldowns[player.UserId]
+	if not playerCooldowns then
+		return true
+	end
+	local last = playerCooldowns[action] or 0
+	return time() - last >= COOLDOWN
+end
+
+-- Marca el cooldown como activo. Llamar tras validación exitosa.
+local function _markCooldown(player: Player, action: string)
 	local playerCooldowns = _cooldowns[player.UserId]
 	if not playerCooldowns then
 		playerCooldowns = {}
 		_cooldowns[player.UserId] = playerCooldowns
 	end
-
-	local last = playerCooldowns[action] or 0
-	if time() - last < COOLDOWN then
-		return false
-	end
-
 	playerCooldowns[action] = time()
-	return true
 end
 
 --[[
@@ -140,17 +158,42 @@ end
 -- ────────────────────────────────────────────────────────────
 
 local function _onBuyItem(data: { itemId: string, category: string, weaponCategory: string, weaponId: string }, player: Player): ()
-	-- Validación 1: cooldown
-	if not _checkCooldown(player, "buy") then
+	-- Validación 0: tipos del payload. ByteNet ya tipa, pero defensivo
+	-- contra payloads malformados / clientes manipulados.
+	if type(data) ~= "table"
+		or type(data.category) ~= "string"
+		or type(data.itemId) ~= "string"
+		or data.itemId == ""
+	then
+		Network.Shop.Response.SendTo({ success = false, message = "Payload inválido." }, player)
+		return
+	end
+
+	-- Validación 1: cooldown (sin marcar; se marca tras éxito real)
+	if not _isCooldownReady(player, "buy") then
 		Network.Shop.Response.SendTo({ success = false, message = "Demasiadas peticiones." }, player)
 		return
 	end
 
-	-- Validación 2: ítem existe en cache
+	-- Validación 2: ítem existe en cache (la categoría queda implícitamente
+	-- whitelisted: solo claves de _itemCache son válidas).
 	local categoryCache = _itemCache[data.category]
 	local itemConfig = categoryCache and categoryCache[data.itemId]
 	if not itemConfig then
 		Network.Shop.Response.SendTo({ success = false, message = "Ítem no encontrado." }, player)
+		return
+	end
+
+	-- Validación 2.5: items exclusivos del Battle Pass no se venden.
+	-- Defense in depth: el Locker ya los oculta a quien no los posee, pero un
+	-- cliente malicioso podría reconstruir el packet con el itemId conocido.
+	-- BP-exclusive si lo flagea ItemsConfig manualmente O si aparece como
+	-- reward en cualquier season del BattlePass (single source of truth).
+	if itemConfig.BPExclusive == true or BattlePassConfig.IsBPExclusive(data.category, data.itemId) then
+		Network.Shop.Response.SendTo({
+			success = false,
+			message = "Este ítem solo se obtiene en el Battle Pass.",
+		}, player)
 		return
 	end
 
@@ -175,6 +218,12 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 		local weaponSlot = CATEGORY_TO_LOADOUT_SLOT[weaponCategoryForWraps]
 		local equippedWeaponId = if weaponSlot then profile.Data.Loadout[weaponSlot] else nil
 		weaponIdForWraps = _resolveWeaponId(data.weaponId, equippedWeaponId)
+
+		-- Bloquea comprar wraps para armas que el jugador no posee.
+		if not _ownsTargetWeapon(profile.Data, weaponCategoryForWraps, weaponIdForWraps) then
+			Network.Shop.Response.SendTo({ success = false, message = "No posees el arma objetivo." }, player)
+			return
+		end
 
 		if _getOwnedWeaponWrap(profile.Data, weaponCategoryForWraps, weaponIdForWraps, data.itemId) then
 			Network.Shop.Response.SendTo({ success = false, message = "Ya posees esta skin para esa arma." }, player)
@@ -212,8 +261,10 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 	-- ── Transacción atómica ──────────────────────────────────
 	-- Si la categoría es equipable, la compra actualiza también el Loadout
 	-- en la misma operación para evitar un segundo request del cliente.
+	-- Cash se descuenta con delta para evitar TOCTOU si otro flujo (kill,
+	-- claim, otra compra) muta Stats.Cash entre la lectura y el write.
 	local updates = {
-		{ path = { "Stats", "Cash" }, value = currentCash - price },
+		{ path = { "Stats", "Cash" }, delta = -price },
 	}
 
 	if data.category == "WeaponSkins" then
@@ -221,6 +272,15 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 		local resolvedWeaponId = weaponIdForWraps :: string
 		table.insert(updates, {
 			path = { "Inventory", "WeaponSkinsByWeapon", resolvedWeaponCategory, resolvedWeaponId, data.itemId },
+			value = true,
+		})
+		-- Marcar metadata + NEW! flag para el wrap.
+		table.insert(updates, {
+			path = { "InventoryMeta", "WeaponSkins", data.itemId },
+			value = { AcquiredAt = os.time(), Source = "Shop" },
+		})
+		table.insert(updates, {
+			path = { "NewItemFlags", "WeaponSkins", data.itemId },
 			value = true,
 		})
 
@@ -232,13 +292,21 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 			})
 		end
 	else
+		-- Categoría estándar: Inventory + InventoryMeta + NewItemFlags atómicos.
 		table.insert(updates, { path = { "Inventory", data.category, data.itemId }, value = true })
+		table.insert(updates, {
+			path = { "InventoryMeta", data.category, data.itemId },
+			value = { AcquiredAt = os.time(), Source = "Shop" },
+		})
+		table.insert(updates, {
+			path = { "NewItemFlags", data.category, data.itemId },
+			value = true,
+		})
 	end
 
+	-- WeaponSkins NO está en CATEGORY_TO_LOADOUT_SLOT (la skin equipada es
+	-- por-arma vía MainWeaponWraps/SpecialWeaponWraps, ya gestionado arriba).
 	local loadoutSlot = CATEGORY_TO_LOADOUT_SLOT[data.category]
-	if data.category == "WeaponSkins" then
-		loadoutSlot = nil
-	end
 	if loadoutSlot then
 		table.insert(updates, { path = { "Loadout", loadoutSlot }, value = data.itemId })
 	end
@@ -253,6 +321,7 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 	local success = _dataService:BatchUpdate(player, updates)
 
 	if success then
+		_markCooldown(player, "buy")
 		Network.Shop.Response.SendTo({
 			success = true,
 			message = if data.category == "WeaponSkins"
@@ -270,13 +339,23 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 end
 
 local function _onEquipItem(data: { category: string, itemId: string, weaponCategory: string, weaponId: string }, player: Player): ()
-	-- Validación 1: cooldown
-	if not _checkCooldown(player, "equip") then
+	-- Validación 0: tipos del payload.
+	if type(data) ~= "table"
+		or type(data.category) ~= "string"
+		or type(data.itemId) ~= "string"
+		or data.itemId == ""
+	then
+		Network.Shop.Response.SendTo({ success = false, message = "Payload inválido." }, player)
+		return
+	end
+
+	-- Validación 1: cooldown (sin marcar; se marca tras éxito real)
+	if not _isCooldownReady(player, "equip") then
 		Network.Shop.Response.SendTo({ success = false, message = "Demasiadas peticiones." }, player)
 		return
 	end
 
-	-- Validación 2: ítem existe en cache
+	-- Validación 2: ítem existe en cache (whitelist implícita de category).
 	local categoryCache = _itemCache[data.category]
 	local itemConfig = categoryCache and categoryCache[data.itemId]
 	if not itemConfig then
@@ -314,6 +393,12 @@ local function _onEquipItem(data: { category: string, itemId: string, weaponCate
 		local equippedWeaponId = profile.Data.Loadout[weaponSlot]
 		local targetWeaponId = _resolveWeaponId(data.weaponId, equippedWeaponId)
 
+		-- Re-validar ownership del arma objetivo y del wrap.
+		if not _ownsTargetWeapon(profile.Data, weaponCategory, targetWeaponId) then
+			Network.Shop.Response.SendTo({ success = false, message = "No posees el arma objetivo." }, player)
+			return
+		end
+
 		if not _getOwnedWeaponWrap(profile.Data, weaponCategory, targetWeaponId, data.itemId) then
 			Network.Shop.Response.SendTo({ success = false, message = "No posees esta skin para esa arma." }, player)
 			return
@@ -340,6 +425,7 @@ local function _onEquipItem(data: { category: string, itemId: string, weaponCate
 	end
 
 	if ok then
+		_markCooldown(player, "equip")
 		Network.Shop.Response.SendTo({
 			success = true,
 			message = itemConfig.Name .. " equipado.",

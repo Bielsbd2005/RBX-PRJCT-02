@@ -1,5 +1,8 @@
 --!strict
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local BattlePassConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("BattlePassConfig"))
+
 type LockerCategoryKey = "Style" | "Arsenal" | "Effects"
 
 export type LockerCatalogItem = {
@@ -12,6 +15,7 @@ export type LockerCatalogItem = {
 	Rarity: string,
 	Image: string,
 	CanPurchase: boolean,
+	BPExclusive: boolean,
 	TextureID: string?,
 	BaseColor: Color3?,
 	Animated: boolean?,
@@ -19,6 +23,8 @@ export type LockerCatalogItem = {
 	PreviewWeaponCategory: string?,
 	PreviewWeaponKey: string?,
 	PreviewWeaponName: string?,
+	KillGoal: number?,
+	KillProgress: number?,
 }
 
 type CatalogCacheEntry = {
@@ -116,6 +122,17 @@ function LockerCatalog:_getTemplateItems(categoryKey: LockerCategoryKey, navKey:
 	local catalogItems = {} :: { LockerCatalogItem }
 	for itemId, definition in sourceItems do
 		if type(definition) == "table" then
+			local killGoalValue: number? = nil
+			local killChallenge = definition.KillChallenge
+			if type(killChallenge) == "table" then
+				local kills = tonumber((killChallenge :: any).Kills)
+				if kills and kills > 0 then
+					killGoalValue = math.floor(kills)
+				end
+			elseif tonumber(definition.KillGoal) and (tonumber(definition.KillGoal) :: number) > 0 then
+				killGoalValue = math.floor(tonumber(definition.KillGoal) :: number)
+			end
+
 			table.insert(catalogItems, {
 				Id = tostring(sourceCategory) .. "." .. tostring(itemId),
 				Category = tostring(sourceCategory),
@@ -126,10 +143,15 @@ function LockerCatalog:_getTemplateItems(categoryKey: LockerCategoryKey, navKey:
 				Rarity = tostring(definition.Rarity or "Common"),
 				Image = normalizeImageId(definition.Image, self._defaultThumbnail),
 				CanPurchase = definition.CanPurchase == true,
+				-- BP-exclusive si lo flagea ItemsConfig manualmente O si aparece como
+				-- reward en cualquier season del BattlePass (single source of truth).
+				BPExclusive = definition.BPExclusive == true
+					or BattlePassConfig.IsBPExclusive(tostring(sourceCategory), tostring(itemId)),
 				TextureID = if type(definition.TextureID) == "string" then definition.TextureID else nil,
 				BaseColor = if typeof(definition.BaseColor) == "Color3" then definition.BaseColor else nil,
 				Animated = definition.Animated == true,
 				StudsPerTile = tonumber(definition.StudsPerTile),
+				KillGoal = killGoalValue,
 			})
 		end
 	end
@@ -155,7 +177,16 @@ function LockerCatalog:GetItems(categoryKey: LockerCategoryKey, navKey: string):
 		return EMPTY_CATALOG_ITEMS
 	end
 
-	local catalogItems = table.clone(templateItems)
+	-- Items exclusivos del Battle Pass: ocultos hasta poseerlos. La invalidación
+	-- de _sortedCache vía InvalidateSorted() (al cambiar Inventory) reconstruye
+	-- la lista cuando un item BP entra al inventario.
+	local catalogItems = {} :: { LockerCatalogItem }
+	for _, item in templateItems do
+		if item.BPExclusive and not self._isItemOwned(item) then
+			continue
+		end
+		table.insert(catalogItems, item)
+	end
 
 	table.sort(catalogItems, function(a, b)
 		if a.LevelRequired ~= b.LevelRequired then

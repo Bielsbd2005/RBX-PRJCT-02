@@ -15,6 +15,9 @@ local Network = require(Shared.networking.Network)
 local SpawnSelector = require(script.Parent:WaitForChild("SpawnSelector"))
 local LoadoutService = require(script.Parent:WaitForChild("LoadoutService"))
 local KillEffectsRegistry = require(Shared.locker.killEffects.KillEffectsRegistry)
+local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
+local ActionRewards = require(Shared.constants.ActionRewards)
+local DailyTasksService = require(script.Parent.Parent.dailyTasks.DailyTasksService)
 
 type MapDefinition = {
 	Name: string,
@@ -71,6 +74,10 @@ local _lastMapLoadStateBroadcastKey: string? = nil
 local _lastRoundStateBroadcastKey: string? = nil
 local _lastBotRosterJsonBroadcast: string? = nil
 local _lastBroadcastStreakKeyByUserId: { [number]: string } = {}
+-- Timestamp de la última muerte registrada en cada spawn point. Usado por
+-- SpawnSelector para penalizar respawnear donde alguien acaba de morir y evitar
+-- spawn-trap loops. Se limpia en cada round restart.
+local _recentDeathBySpawn: { [BasePart]: number } = {}
 
 local _teamA: Team? = nil
 local _teamB: Team? = nil
@@ -79,7 +86,12 @@ local _AIService: any = nil
 local _dataService: any = nil
 local _tieBreakToA = false
 
-local VOTE_CHANGE_COOLDOWN = 0.15
+-- Cooldown entre cambios de voto del mismo jugador. 0.5s permite ~2 cambios/seg
+-- — suficiente para UX responsive sin permitir spam que sature broadcasts.
+local VOTE_CHANGE_COOLDOWN = 0.5
+-- Ventana máxima entre el último daño y la muerte para acreditar el kill.
+-- Más allá de este tiempo, el kill se considera "muerte natural" / no atribuible.
+local KILL_ATTRIBUTION_WINDOW = 2
 local DEFAULT_PLACEHOLDER_IMAGE = "rbxasset://textures/ui/GuiImagePlaceholder.png"
 
 local function _log(message: string)
@@ -259,43 +271,6 @@ local function _resolveBotKillerName(attackerUserId: number): string
 	return ""
 end
 
-local function _resolveKillerPosition(attackerUserId: number?): Vector3
-	if not attackerUserId then
-		return Vector3.zero
-	end
-
-	-- Real player
-	if attackerUserId > 0 then
-		local attackerPlayer = Players:GetPlayerByUserId(attackerUserId)
-		if attackerPlayer and attackerPlayer.Character then
-			local root = attackerPlayer.Character:FindFirstChild("HumanoidRootPart")
-			if root and root:IsA("BasePart") then
-				return root.Position
-			end
-		end
-		return Vector3.zero
-	end
-
-	-- Bot (negative fakeUserId): search in map's Bots folder
-	if _activeMapModel then
-		local botsFolder = (_activeMapModel :: Instance):FindFirstChild("Bots")
-		if botsFolder then
-			for _, child in botsFolder:GetChildren() do
-				if child:IsA("Model") and child:GetAttribute("FakeUserId") == attackerUserId then
-					local root = child:FindFirstChild("HumanoidRootPart")
-					if root and root:IsA("BasePart") then
-						return root.Position
-					end
-					-- Model exists but root removed (ragdoll) — use model pivot
-					return child:GetPivot().Position
-				end
-			end
-		end
-	end
-
-	return Vector3.zero
-end
-
 local function _resetAllPlayerStreakState()
 	table.clear(_matchKillsByUserId)
 	table.clear(_killStreakByUserId)
@@ -320,7 +295,179 @@ local function _resetAllPlayerStreakState()
 	end
 end
 
-local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?)
+local function _resolveWeaponItem(weaponName: string?): (string?, string?)
+	if type(weaponName) ~= "string" or weaponName == "" then
+		return nil, nil
+	end
+
+	for _, category in { "Main", "Special" } do
+		local categoryConfig = ItemsConfig[category]
+		if type(categoryConfig) == "table" then
+			if type(categoryConfig[weaponName]) == "table" then
+				return category, weaponName
+			end
+			for itemKey, definition in categoryConfig do
+				if type(definition) == "table" and definition.Name == weaponName then
+					return category, itemKey
+				end
+			end
+		end
+	end
+
+	return nil, nil
+end
+
+local function _grantActionRewardsToAttacker(attackerUserId: number?, action: string)
+	if not _dataService or not attackerUserId or attackerUserId <= 0 then
+		return
+	end
+
+	local attackerPlayer = Players:GetPlayerByUserId(attackerUserId)
+	if not attackerPlayer then
+		return
+	end
+
+	local xpAmount = ActionRewards.GetXP(action)
+	local cashAmount = ActionRewards.GetCash(action)
+
+	if xpAmount > 0 and type((_dataService :: any).AddXP) == "function" then
+		local ok, err = pcall((_dataService :: any).AddXP, _dataService, attackerPlayer, xpAmount)
+		if not ok then
+			warn("[MatchService] AddXP error: " .. tostring(err))
+		end
+	end
+
+	if cashAmount > 0 and type((_dataService :: any).Increment) == "function" then
+		local ok, err = pcall((_dataService :: any).Increment, _dataService, attackerPlayer, { "Stats", "Cash" }, cashAmount)
+		if not ok then
+			warn("[MatchService] Cash Increment error: " .. tostring(err))
+		end
+	end
+end
+
+local function _grantMasteryWrapsIfEligible(player: Player, weaponCategory: string, weaponKey: string, newKillCount: number)
+	if not _dataService or newKillCount <= 0 then
+		return
+	end
+
+	local weaponSkinsConfig = ItemsConfig.WeaponSkins
+	if type(weaponSkinsConfig) ~= "table" then
+		return
+	end
+
+	local profile = (_dataService :: any).GetProfile and _dataService:GetProfile(player)
+	if not profile or not profile.Data then
+		return
+	end
+
+	local inventory = profile.Data.Inventory
+	local byWeapon = if type(inventory) == "table" then inventory.WeaponSkinsByWeapon else nil
+	local categoryMap = if type(byWeapon) == "table" then byWeapon[weaponCategory] else nil
+	local weaponMap = if type(categoryMap) == "table" then categoryMap[weaponKey] else nil
+
+	-- Acumular todos los wraps elegibles en un solo BatchUpdate. Antes hacíamos
+	-- N SetValues separados → N mensajes de red al cliente y N entradas dirty.
+	local updates: { { path: { string }, value: any } } = {}
+	for skinKey, definition in weaponSkinsConfig do
+		if type(definition) == "table" then
+			local challenge = (definition :: any).KillChallenge
+			local kills: number? = nil
+			if type(challenge) == "table" then
+				kills = tonumber((challenge :: any).Kills)
+			end
+			if kills and kills > 0 and newKillCount >= kills then
+				local alreadyOwned = type(weaponMap) == "table" and weaponMap[skinKey] == true
+				if not alreadyOwned then
+					table.insert(updates, {
+						path = { "Inventory", "WeaponSkinsByWeapon", weaponCategory, weaponKey, skinKey },
+						value = true,
+					})
+				end
+			end
+		end
+	end
+
+	if #updates == 0 then
+		return
+	end
+
+	local ok, err = pcall(function()
+		_dataService:BatchUpdate(player, updates)
+	end)
+	if not ok then
+		warn("[MatchService] Mastery wraps BatchUpdate error: " .. tostring(err))
+	end
+end
+
+local function _registerWeaponKillForAttacker(attackerUserId: number?, weaponName: string?)
+	if not _dataService or not attackerUserId or attackerUserId <= 0 then
+		return
+	end
+
+	local attackerPlayer = Players:GetPlayerByUserId(attackerUserId)
+	if not attackerPlayer then
+		return
+	end
+
+	local weaponCategory, weaponKey = _resolveWeaponItem(weaponName)
+	if not weaponCategory or not weaponKey then
+		return
+	end
+
+	local incrementFn = (_dataService :: any).IncrementWeaponKills
+	if type(incrementFn) ~= "function" then
+		return
+	end
+
+	local ok, success, newCount = pcall(incrementFn, _dataService, attackerPlayer, weaponCategory, weaponKey, 1)
+	if not ok then
+		warn("[MatchService] IncrementWeaponKills error: " .. tostring(success))
+		return
+	end
+
+	if success and type(newCount) == "number" then
+		_grantMasteryWrapsIfEligible(attackerPlayer, weaponCategory, weaponKey, newCount)
+	end
+end
+
+--[[
+	Persiste Stats lifetime del atacante en UN BatchUpdate atómico:
+	  • Stats.Kills += 1
+	  • Stats.Headshots += 1 si headshot
+	  • Stats.KillStreakBest = newStreak si mejora
+
+	Llamado desde el path PvP (_registerKillEvent) y PvE (onBotDied) para que
+	las kills lifetime se acumulen igual sea la víctima jugador o bot.
+]]
+local function _persistAttackerKillStats(attacker: Player, wasHeadshot: boolean, newStreak: number)
+	if not _dataService then
+		return
+	end
+	local updates = {
+		{ path = { "Stats", "Kills" }, delta = 1 },
+	}
+	if wasHeadshot then
+		table.insert(updates, { path = { "Stats", "Headshots" }, delta = 1 })
+	end
+
+	local profile = _dataService:GetProfile(attacker)
+	local lifetimeBest = if profile and profile.Data.Stats
+		then (profile.Data.Stats.KillStreakBest or 0)
+		else 0
+	if newStreak > lifetimeBest then
+		-- Solo añadimos el update si mejora — evita writes redundantes.
+		-- La race residual entre kills concurrentes se mitiga porque newStreak
+		-- refleja _killStreakByUserId, que se incrementa síncronamente; la kill
+		-- posterior siempre tendrá newStreak > la anterior.
+		table.insert(updates, { path = { "Stats", "KillStreakBest" }, value = newStreak })
+	end
+
+	pcall(function()
+		_dataService:BatchUpdate(attacker, updates)
+	end)
+end
+
+local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?, attackerWeaponName: string?, attackerWasHeadshot: boolean?)
 	_killStreakByUserId[deadPlayer.UserId] = 0
 	_resetStreakTimeout(deadPlayer.UserId)
 	if _matchKillsByUserId[deadPlayer.UserId] == nil then
@@ -328,6 +475,11 @@ local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?)
 	end
 	_matchDeathsByUserId[deadPlayer.UserId] = (_matchDeathsByUserId[deadPlayer.UserId] or 0) + 1
 	_sendPlayerStreakToAll(deadPlayer.UserId)
+
+	-- Persistir Stats.Deaths lifetime del que muere (siempre que sea jugador).
+	if _dataService and (_dataService :: any).Increment then
+		pcall((_dataService :: any).Increment, _dataService, deadPlayer, { "Stats", "Deaths" }, 1)
+	end
 
 	if not attackerUserId or attackerUserId == deadPlayer.UserId then
 		return
@@ -351,6 +503,19 @@ local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?)
 	_killStreakByUserId[attackerUserId] = (_killStreakByUserId[attackerUserId] or 0) + 1
 	_setupStreakTimeout(attackerUserId)
 	_sendPlayerStreakToAll(attackerUserId)
+	_registerWeaponKillForAttacker(attackerUserId, attackerWeaponName)
+	_grantActionRewardsToAttacker(attackerUserId, "Kill")
+	if attackerWasHeadshot then
+		_grantActionRewardsToAttacker(attackerUserId, "Headshot")
+	end
+	local newStreak = _killStreakByUserId[attackerUserId] or 0
+	if newStreak == 3 then
+		_grantActionRewardsToAttacker(attackerUserId, "Streak3")
+	elseif newStreak == 5 then
+		_grantActionRewardsToAttacker(attackerUserId, "Streak5")
+	end
+
+	_persistAttackerKillStats(attacker, attackerWasHeadshot == true, newStreak)
 end
 
 local function _ensureTeams()
@@ -479,26 +644,43 @@ local function _rebalanceBotsForCurrentRound(reason: string)
 	task.defer(_broadcastBotRoster)
 end
 
-local function _collectSpawnPointsForTeam(activeMapRoot: Instance, side: "A" | "B"): { BasePart }
+local function _collectSharedSpawnPoints(activeMapRoot: Instance): { BasePart }
 	local spawnsRoot = activeMapRoot:FindFirstChild("Spawns", true)
 	if not spawnsRoot then
 		return {}
 	end
 
-	local teamFolderName = if side == "A" then "TeamA" else "TeamB"
-	local teamFolder = spawnsRoot:FindFirstChild(teamFolderName)
-	if not teamFolder then
-		return {}
-	end
-
 	local points = {} :: { BasePart }
-	for _, node in teamFolder:GetDescendants() do
+	for _, node in spawnsRoot:GetDescendants() do
 		if node:IsA("BasePart") then
 			table.insert(points, node)
 		end
 	end
 
 	return points
+end
+
+local function _findNearestSpawnToPosition(position: Vector3): BasePart?
+	if not _activeMapModel then
+		return nil
+	end
+
+	local spawns = _collectSharedSpawnPoints(_activeMapModel :: Instance)
+	if #spawns == 0 then
+		return nil
+	end
+
+	local nearest: BasePart? = nil
+	local nearestDistance = math.huge
+	for _, spawn in spawns do
+		local distance = (spawn.Position - position).Magnitude
+		if distance < nearestDistance then
+			nearestDistance = distance
+			nearest = spawn
+		end
+	end
+
+	return nearest
 end
 
 local function _getMapDefinitionByName(mapName: string): MapDefinition?
@@ -511,7 +693,7 @@ local function _getMapDefinitionByName(mapName: string): MapDefinition?
 	return nil
 end
 
-local function _extractCharacterRootPosition(character: Model): Vector3?
+local function _extractCharacterRootPart(character: Model): BasePart?
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	if not humanoid or humanoid.Health <= 0 then
 		return nil
@@ -522,7 +704,12 @@ local function _extractCharacterRootPosition(character: Model): Vector3?
 		return nil
 	end
 
-	return root.Position
+	return root
+end
+
+local function _extractCharacterRootPosition(character: Model): Vector3?
+	local root = _extractCharacterRootPart(character)
+	return if root then root.Position else nil
 end
 
 local TeamUtils = require(Shared.utils.TeamUtils)
@@ -531,16 +718,20 @@ local function _resolveNpcSide(character: Model): "A" | "B"?
 	return TeamUtils.getSide(character) :: any
 end
 
-local function _collectEnemyPositionsForSide(side: "A" | "B", requestingPlayer: Player): { Vector3 }
-	local enemyPositions = {} :: { Vector3 }
+-- Recolecta posiciones + lookVectors de combatientes vivos en un lado determinado
+-- (excluyendo opcionalmente al jugador que pide el respawn). Combina jugadores
+-- humanos y NPCs en una sola pasada por el mapa.
+local function _collectCombatantDataForSide(side: "A" | "B", excludePlayer: Player?): ({ Vector3 }, { Vector3 })
+	local positions = {} :: { Vector3 }
+	local lookVectors = {} :: { Vector3 }
 
 	for _, candidatePlayer in Players:GetPlayers() do
-		if candidatePlayer == requestingPlayer then
+		if candidatePlayer == excludePlayer then
 			continue
 		end
 
 		local candidateSide = _teamByUserId[candidatePlayer.UserId]
-		if not candidateSide or candidateSide == side then
+		if not candidateSide or candidateSide ~= side then
 			continue
 		end
 
@@ -549,14 +740,15 @@ local function _collectEnemyPositionsForSide(side: "A" | "B", requestingPlayer: 
 			continue
 		end
 
-		local position = _extractCharacterRootPosition(character)
-		if position then
-			table.insert(enemyPositions, position)
+		local root = _extractCharacterRootPart(character)
+		if root then
+			table.insert(positions, root.Position)
+			table.insert(lookVectors, root.CFrame.LookVector)
 		end
 	end
 
 	if not _activeMapModel then
-		return enemyPositions
+		return positions, lookVectors
 	end
 
 	for _, node in (_activeMapModel :: Instance):GetDescendants() do
@@ -569,20 +761,21 @@ local function _collectEnemyPositionsForSide(side: "A" | "B", requestingPlayer: 
 			continue
 		end
 
-		local position = _extractCharacterRootPosition(node)
-		if not position then
-			continue
-		end
-
+		-- Ignorar NPCs muertos/ragdollados — no son amenaza, no deben influir en la
+		-- elección de spawn point.
 		local npcSide = _resolveNpcSide(node)
-		if npcSide and npcSide == side then
+		if not npcSide or npcSide ~= side then
 			continue
 		end
 
-		table.insert(enemyPositions, position)
+		local root = _extractCharacterRootPart(node)
+		if root then
+			table.insert(positions, root.Position)
+			table.insert(lookVectors, root.CFrame.LookVector)
+		end
 	end
 
-	return enemyPositions
+	return positions, lookVectors
 end
 
 local function _disconnectDeathConnection(userId: number)
@@ -645,13 +838,27 @@ local function _registerDeathListener(player: Player, character: Model)
 
 		_deathAtByUserId[player.UserId] = time()
 		_respawnDebounceByUserId[player.UserId] = nil
+
+		local deathRoot = character:FindFirstChild("HumanoidRootPart")
+		if deathRoot and deathRoot:IsA("BasePart") then
+			local nearestSpawn = _findNearestSpawnToPosition(deathRoot.Position)
+			if nearestSpawn then
+				_recentDeathBySpawn[nearestSpawn] = time()
+			end
+		end
 		local attackerUserIdAttr = humanoid:GetAttribute("LastAttackerUserId")
 		local attackerAtAttr = humanoid:GetAttribute("LastAttackerAt")
 		local attackerWeaponNameAttr = humanoid:GetAttribute("LastAttackerWeaponName")
+		local attackerHeadshotAttr = humanoid:GetAttribute("LastAttackerHeadshot")
 		local attackerUserId = if type(attackerUserIdAttr) == "number" then attackerUserIdAttr else nil
 		local attackerAt = if type(attackerAtAttr) == "number" then attackerAtAttr else 0
 		local attackerWeaponName = if type(attackerWeaponNameAttr) == "string" then attackerWeaponNameAttr else ""
-		if attackerAt > 0 and math.abs(time() - attackerAt) > 4 then
+		local attackerWasHeadshot = attackerHeadshotAttr == true
+		if attackerAt > 0 and time() - attackerAt > KILL_ATTRIBUTION_WINDOW then
+			attackerUserId = nil
+		end
+		-- Atacante humano: descartar si no sigue in-match.
+		if attackerUserId and attackerUserId > 0 and _isInMenuByUserId[attackerUserId] then
 			attackerUserId = nil
 		end
 		local attackerPlayer = if attackerUserId then Players:GetPlayerByUserId(attackerUserId) else nil
@@ -663,7 +870,7 @@ local function _registerDeathListener(player: Player, character: Model)
 		else
 			killerName = ""
 		end
-		_registerKillEvent(player, attackerUserId)
+		_registerKillEvent(player, attackerUserId, attackerWeaponName, attackerWasHeadshot)
 
 		-- Aplicar kill effect del asesino (ragdoll visible para todos)
 		_applyKillEffect(attackerUserId, character)
@@ -685,15 +892,24 @@ local function _registerDeathListener(player: Player, character: Model)
 		end
 
 		if player.Parent == Players then
-			local killerPos = _resolveKillerPosition(attackerUserId)
+			local killerKills = if attackerUserId then (_matchKillsByUserId[attackerUserId] or 0) else 0
+			local killerLevel = 0
+			if attackerPlayer and _dataService and _dataService.GetProfile then
+				local killerProfile = _dataService:GetProfile(attackerPlayer)
+				if killerProfile and killerProfile.Data and killerProfile.Data.Stats then
+					local lvl = killerProfile.Data.Stats.Level
+					if type(lvl) == "number" then
+						killerLevel = math.floor(lvl)
+					end
+				end
+			end
 			Network.Match.DeathScreenShow.SendTo({
 				respawnCooldown = GameConfig.RespawnCooldown,
 				killerUserId = if attackerUserId then tostring(attackerUserId) else "",
 				killerName = killerName,
+				killerKills = killerKills,
+				killerLevel = killerLevel,
 				weaponName = attackerWeaponName,
-				killerPositionX = killerPos.X,
-				killerPositionY = killerPos.Y,
-				killerPositionZ = killerPos.Z,
 			}, player)
 		end
 	end)
@@ -750,15 +966,23 @@ local function _spawnPlayerOnAssignedTeam(player: Player): boolean
 		player.Team = team
 	end
 
-	local spawnPoints = _collectSpawnPointsForTeam(_activeMapModel :: Instance, side)
+	local spawnPoints = _collectSharedSpawnPoints(_activeMapModel :: Instance)
 	if #spawnPoints == 0 then
 		return false
 	end
 
 	local mapDefinition = _getMapDefinitionByName(_activeMapName)
 	local useIntelligentSpawning = mapDefinition ~= nil and mapDefinition.UseIntelligentSpawning == true
-	local enemyPositions = _collectEnemyPositionsForSide(side, player)
-	local chosenSpawn = SpawnSelector.select(spawnPoints, enemyPositions, useIntelligentSpawning)
+	local enemySide: "A" | "B" = if side == "A" then "B" else "A"
+	local enemyPositions, enemyLookVectors = _collectCombatantDataForSide(enemySide, nil)
+	local allyPositions, _allyLooks = _collectCombatantDataForSide(side, player)
+	local chosenSpawn = SpawnSelector.select(spawnPoints, {
+		enemyPositions = enemyPositions,
+		enemyLookVectors = enemyLookVectors,
+		allyPositions = allyPositions,
+		recentDeaths = _recentDeathBySpawn,
+		now = time(),
+	}, useIntelligentSpawning)
 	if not chosenSpawn then
 		return false
 	end
@@ -859,9 +1083,27 @@ local function _buildVoteStatePacket(vote: ActiveVoteState, timeLeft: number)
 	}
 end
 
+-- Dedupe key del último broadcast de voto. Solo enviamos si cambió alguno
+-- de los conteos o el segundo de timeLeft. Evita el spam de broadcasts cuando
+-- jugadores spamean cambios de voto sin alterar el resultado.
+local _lastVoteBroadcastKey: string? = nil
+
 local function _broadcastVoteState(vote: ActiveVoteState)
 	local timeLeft = math.ceil(math.max(0, vote.endAt - time()))
-	Network.Match.VoteState.SendToAll(_buildVoteStatePacket(vote, timeLeft))
+	local packet = _buildVoteStatePacket(vote, timeLeft)
+	-- Key compuesta: name|votes|name|votes|name|votes|timeLeft.
+	local key = string.format(
+		"%s|%d|%s|%d|%s|%d|%d",
+		tostring(packet.optionAName), packet.optionAVotes,
+		tostring(packet.optionBName), packet.optionBVotes,
+		tostring(packet.optionCName), packet.optionCVotes,
+		packet.timeLeft
+	)
+	if key == _lastVoteBroadcastKey then
+		return
+	end
+	_lastVoteBroadcastKey = key
+	Network.Match.VoteState.SendToAll(packet)
 end
 
 local function _sendActiveVoteToPlayer(player: Player)
@@ -1019,6 +1261,7 @@ local function _endRoundAndRestartVoting(reason: string)
 	table.clear(_respawnDebounceByUserId)
 	table.clear(_roundEndEligibleByUserId)
 	table.clear(_matchKillsByUserId)
+	table.clear(_matchDeathsByUserId)
 	table.clear(_killStreakByUserId)
 	table.clear(_lastBroadcastStreakKeyByUserId)
 
@@ -1068,6 +1311,51 @@ function _finishRoundAndScheduleRestart(reason: string, winnerTeam: string)
 			scoreB = _roundScoreB,
 		}, player)
 	end
+
+	-- Daily task: WinMatches — solo jugadores elegibles (que jugaron la ronda)
+	-- y que estaban en el equipo ganador. Empate ("Tie") no cuenta.
+	-- Persistir Stats.MatchesPlayed para todos los elegibles + Wins/Losses
+	-- para el equipo correspondiente.
+	-- task.defer para que los N BatchUpdates no compitan por el mismo frame
+	-- que el broadcast de RoundEnded; UX percibida más fluida en partidas
+	-- llenas (16 BatchUpdates secuenciales = ~16 SetValues).
+	local eligibleSnapshot: { number } = {}
+	for userId in _roundEndEligibleByUserId do
+		table.insert(eligibleSnapshot, userId)
+	end
+	local snapshotTeamByUserId: { [number]: string } = {}
+	for _, userId in eligibleSnapshot do
+		snapshotTeamByUserId[userId] = _teamByUserId[userId] or ""
+	end
+
+	task.defer(function()
+		for _, userId in eligibleSnapshot do
+			local player = Players:GetPlayerByUserId(userId)
+			if not player then
+				continue
+			end
+
+			local updates = {
+				{ path = { "Stats", "MatchesPlayed" }, delta = 1 },
+			}
+			if winnerTeam == "A" or winnerTeam == "B" then
+				if snapshotTeamByUserId[userId] == winnerTeam then
+					table.insert(updates, { path = { "Stats", "Wins" }, delta = 1 })
+					pcall(function()
+						DailyTasksService:OnMatchWon(player)
+					end)
+				else
+					table.insert(updates, { path = { "Stats", "Losses" }, delta = 1 })
+				end
+			end
+
+			if _dataService then
+				pcall(function()
+					_dataService:BatchUpdate(player, updates)
+				end)
+			end
+		end
+	end)
 
 	-- Devolver jugadores elegibles al menú inmediatamente.
 	-- El cliente maneja la vuelta al menú al recibir RoundEnded.
@@ -1135,6 +1423,11 @@ local function _startMapLoadFlow(winnerMapName: string)
 	_isMapLoading = false
 	_isPlayEnabled = true
 	_isRoundActive = true
+	-- C3 fix: bumpear _roundId ANTES de cualquier task.spawn que lo capture.
+	-- Si el AI service o cualquier callback dispara _finishRoundAndScheduleRestart
+	-- en el mismo frame que iniciamos la ronda, la guard `roundId == _roundId`
+	-- en _runRoundTimer previene timers huérfanos.
+	_roundId += 1
 	_roundScoreA = 0
 	_roundScoreB = 0
 	_roundEndAt = time() + GameConfig.MaxRoundDuration
@@ -1153,14 +1446,12 @@ local function _startMapLoadFlow(winnerMapName: string)
 	_sendMapLoadStateToAll()
 	_broadcastRoundState()
 
-	-- Spawnear bots de IA en ambos equipos
 	if _AIService then
-		local spawnPointsA = _collectSpawnPointsForTeam(_activeMapModel :: Instance, "A")
-		local spawnPointsB = _collectSpawnPointsForTeam(_activeMapModel :: Instance, "B")
+		local sharedSpawnPoints = _collectSharedSpawnPoints(_activeMapModel :: Instance)
+		_recentDeathBySpawn = {}
 		local ok, err = pcall(function()
 			_AIService:OnRoundStart({
-				spawnPointsA = spawnPointsA,
-				spawnPointsB = spawnPointsB,
+				spawnPoints = sharedSpawnPoints,
 				mapRoot = _activeMapModel,
 				onBotDied = function(botTeam: string, _botName: string, botHumanoid: Humanoid, botFakeUserId: number)
 					if not _isRoundActive then
@@ -1170,18 +1461,46 @@ local function _startMapLoadFlow(winnerMapName: string)
 					-- Credit the kill to whoever killed this bot
 					local attackerUserIdAttr = botHumanoid:GetAttribute("LastAttackerUserId")
 					local attackerAtAttr = botHumanoid:GetAttribute("LastAttackerAt")
+					local attackerWeaponNameAttr = botHumanoid:GetAttribute("LastAttackerWeaponName")
+					local attackerHeadshotAttr = botHumanoid:GetAttribute("LastAttackerHeadshot")
 					local attackerUserId = if type(attackerUserIdAttr) == "number" then attackerUserIdAttr else nil
 					local attackerAt = if type(attackerAtAttr) == "number" then attackerAtAttr else 0
-					if attackerAt > 0 and math.abs(time() - attackerAt) > 4 then
+					local attackerWeaponName = if type(attackerWeaponNameAttr) == "string" then attackerWeaponNameAttr else ""
+					local attackerWasHeadshot = attackerHeadshotAttr == true
+					if attackerAt > 0 and time() - attackerAt > KILL_ATTRIBUTION_WINDOW then
 						attackerUserId = nil
 					end
-						if attackerUserId and attackerUserId ~= botFakeUserId then
+					-- H5 fix: NO descartamos por _isInMenuByUserId aquí. La
+					-- ventana KILL_ATTRIBUTION_WINDOW (2s) ya filtra daño viejo
+					-- de cuando el jugador estaba in-match. Si el daño es
+					-- reciente y el bot muere justo cuando vuelve al menú,
+					-- la kill es legítima — no robarla.
+
+					if attackerUserId and attackerUserId ~= botFakeUserId then
 						_matchKillsByUserId[attackerUserId] = (_matchKillsByUserId[attackerUserId] or 0) + 1
-							-- Solo los jugadores humanos acumulan streak/timer.
-							if attackerUserId > 0 then
+						-- Solo los jugadores humanos acumulan streak/timer/stats.
+						if attackerUserId > 0 then
+							local attackerPlayer = Players:GetPlayerByUserId(attackerUserId)
+							if attackerPlayer then
 								_killStreakByUserId[attackerUserId] = (_killStreakByUserId[attackerUserId] or 0) + 1
 								_setupStreakTimeout(attackerUserId)
+								_registerWeaponKillForAttacker(attackerUserId, attackerWeaponName)
+								_grantActionRewardsToAttacker(attackerUserId, "Kill")
+								if attackerWasHeadshot then
+									_grantActionRewardsToAttacker(attackerUserId, "Headshot")
+								end
+								local newStreak = _killStreakByUserId[attackerUserId] or 0
+								if newStreak == 3 then
+									_grantActionRewardsToAttacker(attackerUserId, "Streak3")
+								elseif newStreak == 5 then
+									_grantActionRewardsToAttacker(attackerUserId, "Streak5")
+								end
+								-- C1 fix: persistir Stats.Kills/Headshots/KillStreakBest
+								-- lifetime también para kills vs bots. Antes el path PvE
+								-- solo actualizaba contadores en memoria.
+								_persistAttackerKillStats(attackerPlayer, attackerWasHeadshot, newStreak)
 							end
+						end
 						_sendPlayerStreakToAll(attackerUserId)
 					end
 
@@ -1218,7 +1537,7 @@ local function _startMapLoadFlow(winnerMapName: string)
 		end
 	end
 
-	_roundId += 1
+	-- _roundId ya bumpeado más arriba; aquí solo arrancamos el timer con el id actual.
 	task.spawn(_runRoundTimer, _roundId)
 end
 
@@ -1445,6 +1764,12 @@ function _startVoteIfPossible()
 	}
 
 	_activeVote = voteState
+	-- Reset del dedupe key — el nuevo vote tiene otras opciones, debemos
+	-- broadcastear el primer estado aunque numéricamente coincida con basura.
+	_lastVoteBroadcastKey = nil
+	-- Limpiar cooldowns viejos del voto anterior para que el primer voto del nuevo
+	-- ciclo no quede bloqueado.
+	table.clear(_voteCooldownsByUserId)
 	_log(string.format("Vote started with maps: '%s', '%s', '%s'.", optionNames[1], optionNames[2], optionNames[3]))
 
 	Network.Match.StartVote.SendToAll({
@@ -1519,6 +1844,15 @@ local function _onRequestJoinMatch(_: {}, player: Player)
 			return
 		end
 
+		-- Si la ronda terminó entre el RequestJoinMatch y este defer, abortamos
+		-- para no spawnear al jugador en una ronda terminada (causa desync de phase).
+		if not _isRoundActive then
+			_isInMenuByUserId[player.UserId] = true
+			_pendingSpawnByUserId[player.UserId] = nil
+			_joinDebounceByUserId[player.UserId] = nil
+			return
+		end
+
 		local team = if _teamByUserId[player.UserId] == "A" then _teamA else _teamB
 		if not team then
 			warn("[MatchService] Teams no inicializados.")
@@ -1543,6 +1877,11 @@ local function _onRequestJoinMatch(_: {}, player: Player)
 		_deathAtByUserId[player.UserId] = 0
 		Network.Match.DeathScreenHide.SendTo({}, player)
 
+		-- Daily task: PlayMatches (cuenta una vez por entrada al match).
+		pcall(function()
+			DailyTasksService:OnMatchPlayed(player)
+		end)
+
 		if player.Parent == Players then
 			Network.Match.JoinMatchSpawned.SendTo({}, player)
 			_log(string.format("Player %s joined and spawned.", player.Name))
@@ -1560,7 +1899,7 @@ local function _onRequestRespawn(_: {}, player: Player)
 	end
 
 	local deathAt = _deathAtByUserId[player.UserId] or 0
-	-- Minimum anti-spam cooldown (0.5s); the full KillCam duration is enforced client-side.
+	-- Minimum anti-spam cooldown (0.5s); the full respawn cooldown is enforced client-side via the death screen bar.
 	if time() - deathAt < 0.5 then
 		return
 	end
@@ -1577,6 +1916,44 @@ local function _onRequestRespawn(_: {}, player: Player)
 			Network.Match.DeathScreenHide.SendTo({}, player)
 		end
 	end)
+end
+
+local PICKUP_HEAL_AMOUNT = 30
+local PICKUP_REQUEST_COOLDOWN = 0.2
+local _pickupRequestCooldownAt: { [number]: number } = {}
+
+local function _applyHealthPickup(character: Model): boolean
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid or humanoid.Health <= 0 then
+		return false
+	end
+	humanoid.Health = math.min(humanoid.MaxHealth, humanoid.Health + PICKUP_HEAL_AMOUNT)
+	return true
+end
+
+local function _onRequestPickup(data: { kind: string }, player: Player)
+	-- Whitelist estricta. Solo "Health" se dropea actualmente; cualquier
+	-- otro kind se ignora (no consume cooldown, no expone la API).
+	if not data or type(data.kind) ~= "string" or data.kind ~= "Health" then
+		return
+	end
+	if not _isRoundActive or _isInMenuByUserId[player.UserId] then
+		return
+	end
+
+	local now = time()
+	local cooldownAt = _pickupRequestCooldownAt[player.UserId] or 0
+	if now < cooldownAt then
+		return
+	end
+	_pickupRequestCooldownAt[player.UserId] = now + PICKUP_REQUEST_COOLDOWN
+
+	local character = player.Character
+	if not character then
+		return
+	end
+
+	_applyHealthPickup(character)
 end
 
 local function _onRequestReturnToMenu(_: {}, player: Player)
@@ -1689,7 +2066,9 @@ function MatchService:Start(dataService: any): ()
 		_deathAtByUserId[player.UserId] = nil
 		_respawnDebounceByUserId[player.UserId] = nil
 		_matchKillsByUserId[player.UserId] = nil
+		_matchDeathsByUserId[player.UserId] = nil
 		_killStreakByUserId[player.UserId] = nil
+		_pickupRequestCooldownAt[player.UserId] = nil
 		_resetStreakTimeout(player.UserId)
 		_log(string.format("Player removing: %s (%d).", player.Name, player.UserId))
 		_disconnectVoteForPlayer(player.UserId)
@@ -1719,6 +2098,7 @@ function MatchService:Start(dataService: any): ()
 	Network.Match.RequestJoinMatch.Listen(_onRequestJoinMatch)
 	Network.Match.RequestRespawn.Listen(_onRequestRespawn)
 	Network.Match.RequestReturnToMenu.Listen(_onRequestReturnToMenu)
+	Network.Match.RequestPickup.Listen(_onRequestPickup)
 
 	for _, player in Players:GetPlayers() do
 		_isInMenuByUserId[player.UserId] = true

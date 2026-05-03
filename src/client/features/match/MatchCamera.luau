@@ -70,12 +70,4 @@ function MatchCamera.forceLobbyWithRetries(guardFn: (() -> boolean)?)
 	end
 end
 
---- Fuerza la cámara a Scriptable (para kill cam o transiciones).
-function MatchCamera.forceScriptable()
-	local cam = workspace.CurrentCamera
-	if cam then
-		cam.CameraType = Enum.CameraType.Scriptable
-	end
-end
-
 return MatchCamera

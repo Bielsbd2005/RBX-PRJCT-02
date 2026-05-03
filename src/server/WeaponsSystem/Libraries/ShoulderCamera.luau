@@ -236,6 +236,13 @@ function ShoulderCamera.new(weaponsSystem)
 	self.currentCharacter = nil
 	self.currentHumanoid = nil
 	self.currentRootPart = nil
+
+	-- Transparencias del personaje: dirty flag — handlePartTransparencies se
+	-- llama en cada renderstep, pero el resultado solo cambia con zoom,
+	-- hasScope, hideToolWhileZoomed, character, o cuando el character gana/pierde
+	-- hijos (Tool/Accoutrement). Saltamos el O(N·M) cuando no hay nada que hacer.
+	self._transparencyDirty = true
+	self._transparencyChildConns = {} :: { RBXScriptConnection }
 	self.controlModule = nil -- used to get player's touch input for moving character
 	self.random = Random.new()
 	self.shakeSeed = self.random:NextInteger(1, 10000)
@@ -706,6 +713,19 @@ end
 
 function ShoulderCamera:onCurrentCharacterChanged(character)
 	self.currentCharacter = character
+	-- Resetear listeners de transparencia para el character nuevo
+	for _, conn in self._transparencyChildConns do
+		conn:Disconnect()
+	end
+	table.clear(self._transparencyChildConns)
+	self._transparencyDirty = true
+	if character then
+		local function _markDirty()
+			self._transparencyDirty = true
+		end
+		table.insert(self._transparencyChildConns, character.ChildAdded:Connect(_markDirty))
+		table.insert(self._transparencyChildConns, character.ChildRemoved:Connect(_markDirty))
+	end
 	if self.currentCharacter then
 		self.raycastIgnoreList[1] = self.currentCharacter
 		self.currentHumanoid = character:WaitForChild("Humanoid")
@@ -850,14 +870,16 @@ function ShoulderCamera:getCollisionRadius()
 	return cornerPos.Magnitude
 end
 
+local PENETRATE_MAX_TRIES = 8
+
 function ShoulderCamera:penetrateCast(ray, ignoreList)
-	local tries = 0
+	-- Clonar para evitar mutar el ignoreList del caller (contamina entre frames).
+	local localIgnore = table.clone(ignoreList)
 	local hitPart, hitPoint, hitNormal, hitMaterial = nil, ray.Origin + ray.Direction, Vector3.new(0, 1, 0), Enum.Material.Air
-	while tries < 50 do
-		tries = tries + 1
-		hitPart, hitPoint, hitNormal, hitMaterial = workspace:FindPartOnRayWithIgnoreList(ray, ignoreList, false, true)
+	for _ = 1, PENETRATE_MAX_TRIES do
+		hitPart, hitPoint, hitNormal, hitMaterial = workspace:FindPartOnRayWithIgnoreList(ray, localIgnore, false, true)
 		if hitPart and not hitPart.CanCollide then
-			table.insert(ignoreList, hitPart)
+			table.insert(localIgnore, hitPart)
 		else
 			break
 		end
@@ -886,6 +908,10 @@ function ShoulderCamera:getCurrentFieldOfView()
 end
 
 function ShoulderCamera:handlePartTransparencies()
+	if not self._transparencyDirty then return end
+	if not self.currentCharacter then return end
+	self._transparencyDirty = false
+
 	local partsLookup = {}
 	local accoutrementsLookup = {}
 
@@ -939,6 +965,7 @@ function ShoulderCamera:setHasScope(hasScope)
 	end
 
 	self.hasScope = hasScope
+	self._transparencyDirty = true
 	self:updateZoomState()
 end
 
@@ -954,6 +981,9 @@ function ShoulderCamera:isZoomed()
 end
 
 function ShoulderCamera:setHideToolWhileZoomed(hide)
+	if self.hideToolWhileZoomed ~= hide then
+		self._transparencyDirty = true
+	end
 	self.hideToolWhileZoomed = hide
 end
 
@@ -995,6 +1025,9 @@ function ShoulderCamera:updateZoomState()
 		isZoomed = false
 	end
 
+	if self.zoomState ~= isZoomed then
+		self._transparencyDirty = true
+	end
 	self.zoomState = isZoomed
 
 	self.currentMouseRadsPerPixel = isZoomed and self.zoomedMouseRadsPerPixel or self.mouseRadsPerPixel

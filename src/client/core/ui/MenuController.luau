@@ -12,6 +12,7 @@ local Fusion = require(Packages.fusion) :: any
 
 local MenuAnimator = require(script.Parent.animators.MenuAnimator)
 local MenuHover = require(script.Parent.MenuHover)
+local UIUtils = require(script.Parent.UIUtils)
 local DataController = require(script.Parent.Parent.data.DataController)
 type StatsData = {
 	Level: number,
@@ -25,6 +26,7 @@ type HudRefs = {
 	level: TextLabel?,
 	next: TextLabel?,
 	barFill: Frame?,
+	barValue: TextLabel?,
 }
 
 export type MenuController = {
@@ -34,9 +36,13 @@ export type MenuController = {
 	_janitor: any,
 	_fusionScope: any,
 	_hudRefs: HudRefs,
+	_openPanels: { [Instance]: boolean },
 	getGui: (self: MenuController) -> ScreenGui,
 	hide: (self: MenuController) -> (),
 	show: (self: MenuController) -> (),
+	registerPanel: (self: MenuController, panel: Instance) -> (),
+	unregisterPanel: (self: MenuController, panel: Instance) -> (),
+	hasOpenPanel: (self: MenuController) -> boolean,
 	Destroy: (self: MenuController) -> (),
 }
 
@@ -78,6 +84,7 @@ local function resolveHudRefs(menuGui: ScreenGui): HudRefs
 			level = nil,
 			next = nil,
 			barFill = nil,
+			barValue = nil,
 		}
 	end
 
@@ -92,30 +99,34 @@ local function resolveHudRefs(menuGui: ScreenGui): HudRefs
 
 	local barNode = upper:FindFirstChild("Bar")
 	local barFill = if barNode then (if barNode:FindFirstChild("Fill") then (if barNode.Fill:IsA("Frame") then barNode.Fill else nil) else nil) else nil
+	local barValueNode = if barNode then barNode:FindFirstChild("Value") else nil
+	local barValue = if barValueNode and barValueNode:IsA("TextLabel") then barValueNode else nil
 
 	return {
 		cashValue = cashValue,
 		level = level,
 		next = next,
 		barFill = barFill,
+		barValue = barValue,
 	}
 end
 
 local function updateTopHud(hudRefs: HudRefs, stats: StatsData): ()
-	if not hudRefs.cashValue and not hudRefs.level and not hudRefs.next and not hudRefs.barFill then
+	if not hudRefs.cashValue and not hudRefs.level and not hudRefs.next and not hudRefs.barFill and not hudRefs.barValue then
 		return
 	end
 
-	setText(hudRefs.cashValue, tostring(stats.Cash))
+	setText(hudRefs.cashValue, UIUtils.formatCashAmount(stats.Cash))
+
+	local currentXP = math.max(0, math.floor(stats.XP))
+	local xpToNext = math.max(0, math.floor(stats.XPToNextLevel))
 
 	if hudRefs.barFill then
-		local ratio = 0
-		if stats.XPToNextLevel > 0 then
-			ratio = math.clamp(stats.XP / stats.XPToNextLevel, 0, 1)
-		end
+		local ratio = if xpToNext > 0 then math.clamp(currentXP / xpToNext, 0, 1) else 0
 		hudRefs.barFill.Size = UDim2.new(ratio, 0, 1, 0)
 	end
 
+	setText(hudRefs.barValue, string.format("%d/%d", currentXP, xpToNext))
 	setText(hudRefs.level, "Lvl " .. tostring(stats.Level))
 	setText(hudRefs.next, "Lvl " .. tostring(stats.Level + 1))
 end
@@ -139,6 +150,10 @@ function MenuController.new(): MenuController
 	self._animator = MenuAnimator.new(menuGui)
 	self._hover = MenuHover.new(menuGui)
 	self._hudRefs = resolveHudRefs(menuGui)
+	self._openPanels = {}
+
+	local mapVoteNode = menuGui:FindFirstChild("MapVote")
+	self._mapVote = if mapVoteNode and mapVoteNode:IsA("GuiObject") then mapVoteNode else nil
 
 	self._janitor:Add(self._animator, "Destroy")
 	self._janitor:Add(self._hover, "Destroy")
@@ -163,15 +178,74 @@ function MenuController:getGui(): ScreenGui
 	return self._gui
 end
 
+function MenuController:_applyMapVoteVisibility(): ()
+	if not self._mapVote then return end
+	-- MapVote solo visible cuando: la votación está activa, el menú no está
+	-- oculto (no estamos dentro del match), y no hay otro panel abierto encima
+	-- (locker, settings, etc.).
+	local shouldShow = self._mapVoteShouldBeVisible == true
+		and not self._isHidden
+		and not self:hasOpenPanel()
+	self._mapVote.Visible = shouldShow
+end
+
+function MenuController:setMapVoteVisible(visible: boolean): ()
+	self._mapVoteShouldBeVisible = visible
+	self:_applyMapVoteVisibility()
+end
+
 function MenuController:hide(): ()
+	self._isHidden = true
 	self._animator:hide()
+	self:_applyMapVoteVisibility()
 end
 
 function MenuController:show(): ()
+	self._isHidden = false
 	self._animator:show()
+	self:_applyMapVoteVisibility()
+end
+
+function MenuController:registerPanel(panel: Instance): ()
+	if self._openPanels[panel] then return end
+	-- Reaccionar también cuando el panel se abre/cierra (.Enabled/.Visible).
+	-- Sin esto, abrir el locker después de que arranque la votación no
+	-- recalculaba la visibilidad de MapVote.
+	local prop = if panel:IsA("ScreenGui") then "Enabled" else "Visible"
+	local conn = panel:GetPropertyChangedSignal(prop):Connect(function()
+		self:_applyMapVoteVisibility()
+	end)
+	self._openPanels[panel] = conn
+	self:_applyMapVoteVisibility()
+end
+
+function MenuController:unregisterPanel(panel: Instance): ()
+	local conn = self._openPanels[panel]
+	if typeof(conn) == "RBXScriptConnection" then
+		conn:Disconnect()
+	end
+	self._openPanels[panel] = nil
+	self:_applyMapVoteVisibility()
+end
+
+function MenuController:hasOpenPanel(): boolean
+	for panel in self._openPanels do
+		if panel:IsA("ScreenGui") and panel.Enabled then
+			return true
+		elseif panel:IsA("GuiObject") and panel.Visible then
+			return true
+		end
+	end
+	return false
 end
 
 function MenuController:Destroy(): ()
+	for _, conn in self._openPanels do
+		if typeof(conn) == "RBXScriptConnection" then
+			conn:Disconnect()
+		end
+	end
+	table.clear(self._openPanels)
 	self._janitor:Destroy()
 end
 
