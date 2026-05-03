@@ -9,7 +9,12 @@ local AnimationsFolder = WeaponsSystemFolder:WaitForChild("Assets"):WaitForChild
 local AutoAimSystem = require(script.Parent:WaitForChild("AutoAimSystem"))
 local WeaponsNetwork = require(script.Parent:WaitForChild("WeaponsNetwork"))
 
+-- DEBUG: forzar comportamiento de autoshoot de movil tambien en PC.
+-- Poner en false para volver al gating normal por plataforma.
+local DEBUG_FORCE_AUTOSHOOT_ON_PC = true
+
 local function _isTouchPrimaryInput(): boolean
+	if DEBUG_FORCE_AUTOSHOOT_ON_PC then return true end
 	return UserInputService.TouchEnabled and not UserInputService.MouseEnabled
 end
 
@@ -347,11 +352,11 @@ function BaseWeapon:fire(origin, dir, charge)
 		return
 	end
 
-	local fireRate = self:getConfigValue("FireRate", 0)
-	local cooldown = fireRate > 0 and (60 / fireRate) or AutoAimSystem.FIRE_COOLDOWN
-	local now = tick()
-
-	if (now - self.lastFireTime) < cooldown then
+	-- Cadencia real: BulletWeapon.onFired actualiza nextFireTime con ShotCooldown
+	-- (y BurstShotCooldown). Antes esto usaba FireRate, una clave que no existe
+	-- en las armas, por lo que el AutoShoot quedaba clavado al fallback de 0.15s
+	-- e ignoraba la cadencia configurada por arma.
+	if tick() < (self.nextFireTime or 0) then
 		return
 	end
 
@@ -655,11 +660,21 @@ function BaseWeapon:onStepped(dt)
 		)
 	end
 
-	-- Auto-fire cooldown check
-	local now = tick()
-	local fireRate = self:getConfigValue("FireRate", 0)
-	local cooldown = fireRate > 0 and (60 / fireRate) or AutoAimSystem.FIRE_COOLDOWN
-	if (now - self.lastFireTime) < cooldown then return end
+	-- Shotgun: no auto-disparar si el target esta fuera del rango optimo.
+	-- El aim assist de arriba sigue corriendo (mantener el suave tirón) pero el
+	-- disparo se inhibe para que no malgaste balas a distancia inutil.
+	if self.instance and self.instance:GetAttribute("Shotgun") == true then
+		local optimalRange = self.instance:GetAttribute("OptimalRange")
+		if type(optimalRange) ~= "number" or optimalRange <= 0 then
+			optimalRange = 30
+		end
+		if (targetPos - cameraOrigin).Magnitude > optimalRange then return end
+	end
+
+	-- Auto-fire respeta la cadencia real del arma. BulletWeapon.onFired actualiza
+	-- nextFireTime con ShotCooldown / BurstShotCooldown tras cada disparo, igual
+	-- que el flujo manual de fuego (ver BulletWeapon.onActivatedChanged).
+	if tick() < (self.nextFireTime or 0) then return end
 	if not _isTouchPrimaryInput() then return end
 
 	-- Determine weapon muzzle origin matching BulletWeapon's self.tipAttach precisely.

@@ -16,6 +16,7 @@ local Libraries = WeaponsSystemFolder:WaitForChild("Libraries")
 local SpringService = require(Libraries:WaitForChild("SpringService"))
 local DirectionalIndicatorGuiManager = require(Libraries:WaitForChild("DirectionalIndicatorGuiManager"))
 local DamageBillboardHandler = require(Libraries:WaitForChild("DamageBillboardHandler"))
+local AutoAimSystem = require(Libraries:WaitForChild("AutoAimSystem"))
 local WeaponsSystemGuiTemplate = WeaponsSystemFolder:WaitForChild("Assets"):WaitForChild("WeaponsSystemGui")
 
 local ACTIVE_BUTTON_COLOR = Color3.fromRGB(0, 170, 255)
@@ -750,6 +751,12 @@ function WeaponsGui.new(weaponsSystem)
 	self.crosshairShotgunBottomLeft = nil
 	self.crosshairShotgunBottomRight = nil
 
+	self.outOfRangeFrame = nil
+	self.outOfRangeDistanceLabel = nil
+	self._lastOutOfRangeDistanceText = nil
+	self._isOutOfRange = false
+	self._shotgunDefaultOptimalRange = 30 -- fallback en studs si el Tool no define OptimalRange
+
 	self.crosshairSpread = 0
 	self.crosshairSpreadTarget = 0
 	self.crosshairSpreadBase = 30
@@ -783,6 +790,12 @@ function WeaponsGui.new(weaponsSystem)
 			self.crosshairShotgunBottomLeft = self.crosshairShotgunFrame:WaitForChild("BottomLeft")
 			self.crosshairShotgunBottomRight = self.crosshairShotgunFrame:WaitForChild("BottomRight")
 			self.crosshairShotgunFrame.Visible = false
+		end
+
+		self.outOfRangeFrame = self.scalingElementsFolder:FindFirstChild("OutOfRange")
+		if self.outOfRangeFrame then
+			self.outOfRangeFrame.Visible = false
+			self.outOfRangeDistanceLabel = self.outOfRangeFrame:FindFirstChild("Distance", true)
 		end
 
 		self.hitMarker = self.scalingElementsFolder:WaitForChild("HitMarker"):WaitForChild("HitMarkerImage")
@@ -1178,8 +1191,12 @@ function WeaponsGui:_refreshCrosshairVisibility()
 	if self.crosshairFrame then
 		self.crosshairFrame.Visible = shouldShow and not self._isShotgun
 	end
+	local shotgunInRange = self._isShotgun and not self._isOutOfRange
 	if self.crosshairShotgunFrame then
-		self.crosshairShotgunFrame.Visible = shouldShow and self._isShotgun
+		self.crosshairShotgunFrame.Visible = shouldShow and shotgunInRange
+	end
+	if self.outOfRangeFrame then
+		self.outOfRangeFrame.Visible = shouldShow and self._isShotgun and self._isOutOfRange
 	end
 end
 
@@ -1245,6 +1262,9 @@ end
 
 function WeaponsGui:_setCrosshairVariant(isShotgun)
 	self._isShotgun = isShotgun and true or false
+	-- Reset out-of-range state al cambiar de variant: si volvemos a un arma no
+	-- shotgun, OutOfRange debe ocultarse hasta que vuelva a aplicarse la lógica.
+	self._isOutOfRange = false
 	self:_refreshCrosshairVisibility()
 	if self._isShotgun then
 		self.crosshairWeaponScale = 1
@@ -1253,6 +1273,57 @@ function WeaponsGui:_setCrosshairVariant(isShotgun)
 		self.crosshairSpreadTarget = 0
 	end
 	SpringService:Target(self, self.crosshairDampingRatio, self.crosshairFrequency, { crosshairSpread = self.crosshairSpreadTarget })
+end
+
+function WeaponsGui:_updateShotgunRangeState()
+	if not self._isShotgun then return end
+	if not self.outOfRangeFrame then return end -- sin frame OutOfRange no hay nada que togglear
+
+	local camera = workspace.CurrentCamera
+	if not camera then return end
+
+	local weapon = self.weaponsSystem.currentWeapon
+	local tool = weapon and weapon.instance
+	local optimalRange = self._shotgunDefaultOptimalRange
+	if tool then
+		local attr = tool:GetAttribute("OptimalRange")
+		if type(attr) == "number" and attr > 0 then
+			optimalRange = attr
+		end
+	end
+
+	-- OutOfRange solo cuando el AutoAim ha enganchado a un enemigo VISIBLE y queda
+	-- lejos. Sin enemigo en el centro, o detras de pared, mostramos el crosshair
+	-- shotgun normal (no queremos OutOfRange parpadeando al mirar al cielo, a una
+	-- pared, o cuando el enemigo aun no esta a la vista).
+	local outOfRange = false
+	local distance: number? = nil
+	local targetPart, targetPos = AutoAimSystem.findBestTarget(self.weaponsSystem)
+	if targetPart and targetPos then
+		local cameraOrigin = camera.CFrame.Position
+		if AutoAimSystem.isTargetVisible(cameraOrigin, targetPart) then
+			distance = (targetPos - cameraOrigin).Magnitude
+			outOfRange = distance > optimalRange
+		end
+	end
+
+	if outOfRange ~= self._isOutOfRange then
+		self._isOutOfRange = outOfRange
+		self:_refreshCrosshairVisibility()
+	end
+
+	if outOfRange and distance and self.outOfRangeDistanceLabel then
+		-- Studs que faltan por acercarse para entrar en el rango optimo.
+		local remaining = math.max(0, distance - optimalRange)
+		local text = tostring(math.floor(remaining + 0.5))
+		if text ~= self._lastOutOfRangeDistanceText then
+			self._lastOutOfRangeDistanceText = text
+			local label = self.outOfRangeDistanceLabel
+			if label:IsA("TextLabel") or label:IsA("TextButton") or label:IsA("TextBox") then
+				label.Text = text
+			end
+		end
+	end
 end
 
 function WeaponsGui:_applyCrosshairByWeapon()
@@ -1389,6 +1460,7 @@ function WeaponsGui:onRenderStepped(dt)
 		if self.crosshairShotgunFrame and self.crosshairEnabled then
 			self:_layoutShotgunCrosshairCorners()
 		end
+		self:_updateShotgunRangeState()
 	else
 		if self.crosshairFrame and self.crosshairEnabled then
 			local crosshairSize = self.crosshairNormalSize * self.crosshairScale * self.crosshairWeaponScale

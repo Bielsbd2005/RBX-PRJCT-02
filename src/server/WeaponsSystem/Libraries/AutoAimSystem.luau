@@ -16,7 +16,6 @@ local AutoAimSystem = {}
 -- Configuration
 AutoAimSystem.SCREEN_RADIUS_THRESHOLD = 80		-- Pixels from screen center to consider a target
 AutoAimSystem.MAX_DISTANCE = 300				-- Max studs distance to detect enemies
-AutoAimSystem.FIRE_COOLDOWN = 0.15				-- Min seconds between auto-fire shots
 
 -- Raycast params for visibility check (reused to avoid GC pressure)
 local raycastParams = RaycastParams.new()
@@ -68,12 +67,25 @@ function AutoAimSystem.findBestTarget(weaponsSystem)
 	-- Add NPCs: una sola pasada por workspace:GetChildren(); cada hijo cuenta
 	-- como NPC potencial Y se inspecciona su carpeta "Bots" directa (sin
 	-- FindFirstChild recursivo, que escanearía subárboles enteros).
-	for _, child in ipairs(workspace:GetChildren()) do
-		addNpcModelIfEnemy(child)
-		local botsFolder = if child.Name == "Bots" then child else child:FindFirstChild("Bots")
+	local function scanBotsIn(container: Instance)
+		local botsFolder = if container.Name == "Bots" then container else container:FindFirstChild("Bots")
 		if botsFolder and (botsFolder:IsA("Folder") or botsFolder:IsA("Model")) then
 			for _, botModel in ipairs(botsFolder:GetChildren()) do
 				addNpcModelIfEnemy(botModel)
+			end
+		end
+	end
+
+	for _, child in ipairs(workspace:GetChildren()) do
+		addNpcModelIfEnemy(child)
+		scanBotsIn(child)
+		-- Los bots reales viven en workspace.ActiveMap.<mapModel>.Bots (MatchService
+		-- clona el mapa dentro del contenedor ActiveMap), así que necesitamos un
+		-- nivel extra de profundidad solo dentro de ese contenedor — barato porque
+		-- ActiveMap suele tener un único hijo (el mapModel cargado).
+		if child.Name == "ActiveMap" then
+			for _, sub in ipairs(child:GetChildren()) do
+				scanBotsIn(sub)
 			end
 		end
 	end
