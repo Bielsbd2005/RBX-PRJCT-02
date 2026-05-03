@@ -11,7 +11,7 @@ local WeaponsNetwork = require(script.Parent:WaitForChild("WeaponsNetwork"))
 
 -- DEBUG: forzar comportamiento de autoshoot de movil tambien en PC.
 -- Poner en false para volver al gating normal por plataforma.
-local DEBUG_FORCE_AUTOSHOOT_ON_PC = true
+local DEBUG_FORCE_AUTOSHOOT_ON_PC = false
 
 local function _isTouchPrimaryInput(): boolean
 	if DEBUG_FORCE_AUTOSHOOT_ON_PC then return true end
