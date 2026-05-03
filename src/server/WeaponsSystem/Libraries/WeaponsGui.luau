@@ -9,6 +9,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer = Players.LocalPlayer
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ItemsConfig = require(Shared.constants.ItemsConfig)
+local TeamUtils = require(Shared:WaitForChild("utils"):WaitForChild("TeamUtils"))
 
 local WeaponsSystemFolder = script.Parent.Parent
 local WeaponData = WeaponsSystemFolder:WaitForChild("WeaponData")
@@ -1279,6 +1280,17 @@ function WeaponsGui:_updateShotgunRangeState()
 	if not self._isShotgun then return end
 	if not self.outOfRangeFrame then return end -- sin frame OutOfRange no hay nada que togglear
 
+	-- OutOfRange solo en dispositivos tactiles: en movil el AutoShoot decide por
+	-- el jugador y avisar es util; en PC el jugador controla el disparo
+	-- manualmente y la advertencia es ruido innecesario.
+	if not (UserInputService.TouchEnabled and not UserInputService.MouseEnabled) then
+		if self._isOutOfRange then
+			self._isOutOfRange = false
+			self:_refreshCrosshairVisibility()
+		end
+		return
+	end
+
 	local camera = workspace.CurrentCamera
 	if not camera then return end
 
@@ -1292,18 +1304,40 @@ function WeaponsGui:_updateShotgunRangeState()
 		end
 	end
 
-	-- OutOfRange solo cuando el AutoAim ha enganchado a un enemigo VISIBLE y queda
-	-- lejos. Sin enemigo en el centro, o detras de pared, mostramos el crosshair
-	-- shotgun normal (no queremos OutOfRange parpadeando al mirar al cielo, a una
-	-- pared, o cuando el enemigo aun no esta a la vista).
+	-- OutOfRange aplica cuando estamos APUNTANDO a un enemigo (raycast desde el
+	-- centro de camara). No usamos AutoAim.findBestTarget porque su threshold de
+	-- 80px solo se cumple cuando el aim assist fuerte de movil engancha la mira;
+	-- en PC el usuario apunta manualmente y rara vez cae dentro de ese radio,
+	-- asi que OutOfRange no aparecia nunca.
 	local outOfRange = false
 	local distance: number? = nil
-	local targetPart, targetPos = AutoAimSystem.findBestTarget(self.weaponsSystem)
-	if targetPart and targetPos then
-		local cameraOrigin = camera.CFrame.Position
-		if AutoAimSystem.isTargetVisible(cameraOrigin, targetPart) then
-			distance = (targetPos - cameraOrigin).Magnitude
-			outOfRange = distance > optimalRange
+
+	local cameraOrigin = camera.CFrame.Position
+	local cameraRay = camera:ViewportPointToRay(camera.ViewportSize.X * 0.5, camera.ViewportSize.Y * 0.5)
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+	local filter = {}
+	if LocalPlayer and LocalPlayer.Character then
+		table.insert(filter, LocalPlayer.Character)
+	end
+	if tool then
+		table.insert(filter, tool)
+	end
+	rayParams.FilterDescendantsInstances = filter
+	rayParams.IgnoreWater = true
+
+	local maxRay = AutoAimSystem.MAX_DISTANCE or 300
+	local result = workspace:Raycast(cameraRay.Origin, cameraRay.Direction * maxRay, rayParams)
+	if result and result.Instance then
+		local hitChar = result.Instance:FindFirstAncestorOfClass("Model")
+		if hitChar and hitChar:FindFirstChildOfClass("Humanoid") then
+			local hum = hitChar:FindFirstChildOfClass("Humanoid")
+			local localChar = LocalPlayer and LocalPlayer.Character
+			local sameTeam = localChar and TeamUtils.isSameTeam(localChar, hitChar) or false
+			if hum and hum.Health > 0 and not sameTeam and hitChar ~= localChar then
+				distance = (result.Position - cameraOrigin).Magnitude
+				outOfRange = distance > optimalRange
+			end
 		end
 	end
 
