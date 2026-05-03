@@ -327,6 +327,29 @@ function MatchFeature.start(menuController: any): any
 
 	-- ── CharacterAdded ───────────────────────────────────────
 	janitor:Add(Players.LocalPlayer.CharacterAdded:Connect(function(character)
+		-- Si Espacio sigue pulsado al respawnear (p. ej. el jugador lo usó
+		-- para confirmar respawn o entrar a la partida), bloquea el primer
+		-- salto hasta que suelte la tecla.
+		if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+			task.spawn(function()
+				local humanoid = character:WaitForChild("Humanoid", 2)
+				if not humanoid or not humanoid:IsA("Humanoid") then
+					return
+				end
+				humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
+				local releaseConn: RBXScriptConnection
+				releaseConn = UserInputService.InputEnded:Connect(function(input)
+					if input.KeyCode ~= Enum.KeyCode.Space then
+						return
+					end
+					releaseConn:Disconnect()
+					if humanoid.Parent then
+						humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, true)
+					end
+				end)
+			end)
+		end
+
 		local phase = MatchState.getPhase()
 
 		-- Durante resultados, el jugador fue teleportado al lobby:
