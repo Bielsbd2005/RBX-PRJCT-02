@@ -29,6 +29,7 @@ local MatchHud = require(script.MatchHud)
 
 local DeathScreenView = require(script.DeathScreenView)
 local EndResultsView = require(script.EndResultsView)
+local KillCamController = require(script.KillCamController)
 local NPCHighlightController = require(script.NPCHighlightController)
 local HealthBillboardController = require(script.HealthBillboardController)
 local MapVoteView = require(script.MapVoteView)
@@ -143,6 +144,9 @@ function MatchFeature.start(menuController: any): any
 	local deathView = if deathScreenGui and deathScreenGui:IsA("ScreenGui")
 		then DeathScreenView.new(deathScreenGui)
 		else nil
+
+	local killCam = KillCamController.new(playerGui)
+	janitor:Add(killCam, "Destroy")
 
 	NPCHighlightController:Start()
 	HealthBillboardController:Start()
@@ -372,6 +376,7 @@ function MatchFeature.start(menuController: any): any
 	-- ── Network: JoinMatchSpawned ────────────────────────────
 	janitor:Add(Network.Match.JoinMatchSpawned.Listen(function(_: {})
 		MatchState.setPhase("InMatch")
+		killCam:stop()
 		hud:resetMatchState()
 		menuController:hide()
 		matchMenu:enforceHidden()
@@ -457,6 +462,12 @@ function MatchFeature.start(menuController: any): any
 		respawnRequestSent = false
 		hud:setEnabled(false)
 
+		killCam:start({
+			killerUserId = data.killerUserId,
+			killerName = data.killerName,
+			weaponName = data.weaponName,
+		})
+
 		local killerCharacter = _resolveKillerCharacter(data.killerUserId)
 		deathView:show(data.respawnCooldown, {
 			name = data.killerName,
@@ -469,6 +480,7 @@ function MatchFeature.start(menuController: any): any
 	-- ── Network: DeathScreenHide ─────────────────────────────
 	janitor:Add(Network.Match.DeathScreenHide.Listen(function(_: {})
 		respawnRequestSent = false
+		killCam:stop()
 		if deathView then
 			deathView:hide()
 		end
@@ -486,6 +498,7 @@ function MatchFeature.start(menuController: any): any
 	-- ── Network: ReturnToMenuDone ────────────────────────────
 	janitor:Add(Network.Match.ReturnToMenuDone.Listen(function(_: {})
 		MatchState.setPhase("Lobby")
+		killCam:stop()
 		hud:resetMatchState()
 		if deathView then
 			deathView:hide()
@@ -521,6 +534,7 @@ function MatchFeature.start(menuController: any): any
 		-- Limpiar estado inmediatamente.
 		MatchState.setPhase("Lobby")
 		matchMenu:setPhaseLabel("ENDING")
+		killCam:stop()
 		setPlayEnabled(false)
 		hud:setEnabled(false)
 		if deathView then
@@ -820,6 +834,7 @@ function MatchFeature.start(menuController: any): any
 		if deathView then
 			deathView:hide()
 		end
+		killCam:stop()
 		menuController:setMapVoteVisible(false)
 		hud:setEnabled(false)
 		if endResultsGui then
