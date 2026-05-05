@@ -15,7 +15,6 @@ local MarketplaceService = game:GetService("MarketplaceService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Workspace = game:GetService("Workspace")
 
 local Client = script.Parent.Parent
 local Packages = ReplicatedStorage:WaitForChild("Packages")
@@ -25,6 +24,7 @@ local Janitor = require(Packages.janitor) :: any
 local Fusion = require(Packages.fusion) :: any
 local LockerCameraController = require(Client.core.camera.LockerCameraController)
 local CameraLock = require(Client.core.camera.CameraLock)
+local BlurController = require(Client.core.ui.BlurController)
 local InteractiveScaleTween = require(Client.core.ui.animators.InteractiveScaleTween)
 local FeaturePanelController = require(Client.core.ui.FeaturePanelController)
 local NavTabController = require(Client.core.ui.NavTabController)
@@ -35,7 +35,7 @@ local WeaponSkinWrapPreviewer = require(Client.features.locker.Previewers.Weapon
 local CasesConfig = require(Shared.constants.CasesConfig)
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
 local Network = require(Shared.networking.Network)
-local ChestUnboxing = require(script.ChestUnboxing)
+local SlotUnboxing = require(script.SlotUnboxing)
 
 local CasesFeature = {}
 
@@ -108,7 +108,7 @@ function CasesFeature.start(menuController: any): any
 	local nav1 = container:FindFirstChild("Nav1")
 	local nav2 = container:FindFirstChild("Nav2")
 	local dropsFrame = container:FindFirstChild("DropsFrame")
-	local unboxingFrame = container:FindFirstChild("Unboxing")
+	local unboxingFrame = casesGui:FindFirstChild("Unboxing")
 
 	if not nav1 or not nav2 or not dropsFrame then
 		warn("[CasesFeature] Nav1, Nav2 o DropsFrame no encontrados")
@@ -116,14 +116,14 @@ function CasesFeature.start(menuController: any): any
 	end
 
 	if not unboxingFrame or not unboxingFrame:IsA("GuiObject") then
-		warn("[CasesFeature] Container.Unboxing no encontrado")
+		warn("[CasesFeature] Cases.Unboxing no encontrado")
 		return janitor
 	end
 
-	local acceptButton = unboxingFrame:FindFirstChild("Accept")
+	local collectButton = unboxingFrame:FindFirstChild("Collect")
 	local equipButton = unboxingFrame:FindFirstChild("Equip")
-	if not acceptButton or not acceptButton:IsA("GuiButton") or not equipButton or not equipButton:IsA("GuiButton") then
-		warn("[CasesFeature] Unboxing.Accept o Unboxing.Equip no encontrado")
+	if not collectButton or not collectButton:IsA("GuiButton") or not equipButton or not equipButton:IsA("GuiButton") then
+		warn("[CasesFeature] Unboxing.Collect o Unboxing.Equip no encontrado")
 		return janitor
 	end
 
@@ -150,8 +150,6 @@ function CasesFeature.start(menuController: any): any
 		and not UserInputService.TouchEnabled
 
 	-- ── Unboxing: estado y UI ────────────────────────────────
-	local UNBOXING_CAMERA_CFRAME = CFrame.new(-267.155, 25.312, -248.177)
-		* CFrame.fromEulerAnglesYXZ(math.rad(-3.707), math.rad(178.78), math.rad(0))
 	local FADE_TWEEN_INFO = TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut)
 
 	local unboxingQueue: { { caseId: string, skinId: string, weaponCategory: string, weaponId: string, isPity: boolean, newPity: number } } = {}
@@ -275,6 +273,7 @@ function CasesFeature.start(menuController: any): any
 				local previewJanitor = Janitor.new()
 				dropsJanitor:Add(previewJanitor, "Destroy")
 				WeaponSkinWrapPreviewer.Render(viewportFrame, previewItem, previewJanitor)
+				SlotUnboxing.reframeWrap(viewportFrame)
 			end
 		end
 	end
@@ -480,6 +479,28 @@ function CasesFeature.start(menuController: any): any
 		end
 	end), true)
 
+	-- ── Recolectar armas poseídas (para Lane1 del slot machine) ─
+	local function collectOwnedWeapons(): { { category: string, weaponId: string } }
+		local owned = {}
+		local inventory = Fusion.peek(DataController.Inventory)
+		if type(inventory) == "table" then
+			for _, categoryName in { "Main", "Special" } do
+				local cat = inventory[categoryName]
+				if type(cat) == "table" then
+					for weaponId, isOwned in cat do
+						if isOwned == true and type(weaponId) == "string" and weaponId ~= "" then
+							table.insert(owned, { category = categoryName, weaponId = weaponId })
+						end
+					end
+				end
+			end
+		end
+		if #owned == 0 then
+			table.insert(owned, { category = "Main", weaponId = "Default" })
+		end
+		return owned
+	end
+
 	-- ── Procesamiento de cola de unboxing ─────────────────────
 	local function processUnboxingQueue()
 		if isUnboxing or #unboxingQueue == 0 then return end
@@ -487,8 +508,7 @@ function CasesFeature.start(menuController: any): any
 		unboxingGeneration += 1
 		local gen = unboxingGeneration
 		CameraLock.acquire("cases_unboxing")
-
-		local savedCameraCFrame = Workspace.CurrentCamera.CFrame
+		BlurController.acquire("cases_unboxing")
 
 		local ok, err = pcall(function()
 			-- Ocultar UI del menú de cajas
@@ -496,10 +516,9 @@ function CasesFeature.start(menuController: any): any
 			nav2.Visible = false
 			dropsFrame.Visible = false
 
-			-- Fade a negro y mover cámara
+			-- Fade a negro para tapar el cambio de UI (la cámara se mantiene en la de "cases")
 			fadeToBlack()
 			if isGenerationCancelled(gen) then return end
-			Workspace.CurrentCamera.CFrame = UNBOXING_CAMERA_CFRAME
 			fadeFromBlack()
 			if isGenerationCancelled(gen) then return end
 
@@ -509,22 +528,22 @@ function CasesFeature.start(menuController: any): any
 				local result = table.remove(unboxingQueue, 1)
 
 				local cleanup
+				unboxingFrame.Visible = true
+				local ownedWeapons = collectOwnedWeapons()
 				local playOk, playErr = pcall(function()
-					cleanup = ChestUnboxing.play(result.skinId, result.weaponCategory, result.weaponId)
+					cleanup = SlotUnboxing.play(result, ownedWeapons, unboxingFrame)
 				end)
 				if not playOk then
-					warn("[CasesFeature] ChestUnboxing.play error:", playErr)
+					warn("[CasesFeature] SlotUnboxing.play error:", playErr)
 					if cleanup then pcall(cleanup) end
 					continue
 				end
 
-				unboxingFrame.Visible = true
-
 				local actionEvent = Instance.new("BindableEvent")
 				local actionChosen: string? = nil
-				local acceptConnection = acceptButton.Activated:Connect(function()
+				local collectConnection = collectButton.Activated:Connect(function()
 					if actionChosen ~= nil then return end
-					actionChosen = "accept"
+					actionChosen = "collect"
 					actionEvent:Fire(actionChosen)
 				end)
 				local equipConnection = equipButton.Activated:Connect(function()
@@ -534,7 +553,7 @@ function CasesFeature.start(menuController: any): any
 				end)
 
 				local chosenAction = actionEvent.Event:Wait()
-				acceptConnection:Disconnect()
+				collectConnection:Disconnect()
 				equipConnection:Disconnect()
 				actionEvent:Destroy()
 
@@ -568,7 +587,6 @@ function CasesFeature.start(menuController: any): any
 
 		-- Restaurar vista de cajas (siempre, incluso tras error)
 		pcall(function()
-			Workspace.CurrentCamera.CFrame = savedCameraCFrame
 			nav1.Visible = true
 			nav2.Visible = true
 			dropsFrame.Visible = true
@@ -577,6 +595,7 @@ function CasesFeature.start(menuController: any): any
 			fadeOverlay.Visible = false
 		end)
 
+		BlurController.release("cases_unboxing")
 		CameraLock.release("cases_unboxing")
 		isUnboxing = false
 

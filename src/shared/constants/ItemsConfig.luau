@@ -54,15 +54,23 @@ end
 
 local ItemsConfig: ItemsConfigType = {
 
-	Main = {
-		AR       = { Name = "AR",  		 Price = 0,    LevelRequired = 0,  Rarity = "Common",    Image = asset(136728627576131), CanPurchase = false },
-		Sniper   = { Name = "Sniper",         Price = 2,  LevelRequired = 1,  Rarity = "Uncommon",  Image = asset(122930463834964), CanPurchase = false },
-		Groza   = { Name = "Groza",         Price = 1000, LevelRequired = 0, Rarity = "Rare",      Image = asset(114523558287606), CanPurchase = false },
-	},
+Main = {
+    -- Primary (rango medio, daño sostenido)
+    AK      = { Name = "AK",      Price = 0,    LevelRequired = 0,  Rarity = "Common",    Image = asset(100246140710694), CanPurchase = false },
+    Groza   = { Name = "Groza",   Price = 2,    LevelRequired = 1,  Rarity = "Uncommon",  Image = asset(133051760713810), CanPurchase = false },
+    Default = { Name = "Default", Price = 1000, LevelRequired = 0,  Rarity = "Rare",      Image = asset(115787466520426), CanPurchase = false },
+    Tommy   = { Name = "Tommy",   Price = 1000, LevelRequired = 0,  Rarity = "Rare",      Image = asset(111814750317784), CanPurchase = false },
+    Sniper  = { Name = "Sniper",  Price = 1000, LevelRequired = 0,  Rarity = "Rare",      Image = asset(86261275288637),  CanPurchase = false },
+    Large   = { Name = "Large",   Price = 1000, LevelRequired = 0,  Rarity = "Rare",      Image = asset(90736156284730),  CanPurchase = false },
+},
 
-	Special = {
-		Shotgun   = { Name = "Shotgun",  		 Price = 0,    LevelRequired = 0,  Rarity = "Common",    Image = asset(94351975111962), CanPurchase = false },
-	},
+Special = {
+    -- Secondary/Special (corto rango o alto impacto)
+    Short   = { Name = "Short",   Price = 1000, LevelRequired = 0,  Rarity = "Rare",      Image = asset(118462878872416), CanPurchase = false },
+    UZI     = { Name = "UZI",     Price = 1000, LevelRequired = 0,  Rarity = "Rare",      Image = asset(109948875778066), CanPurchase = false },
+    Laser   = { Name = "Laser",   Price = 1000, LevelRequired = 0,  Rarity = "Rare",      Image = asset(80482264427643),  CanPurchase = false },
+    RPG     = { Name = "RPG",     Price = 1000, LevelRequired = 0,  Rarity = "Rare",      Image = asset(139650368086109), CanPurchase = false },
+},
 
 	WeaponSkins = {
 		Default   = {
