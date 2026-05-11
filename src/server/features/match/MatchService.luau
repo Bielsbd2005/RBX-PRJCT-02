@@ -1,5 +1,6 @@
 --!strict
 
+local Debris = game:GetService("Debris")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
@@ -12,12 +13,17 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 
 local GameConfig = require(Shared:WaitForChild("GameConfig"))
 local Network = require(Shared.networking.Network)
+local NetGuards = require(Shared.networking.NetGuards)
 local SpawnSelector = require(script.Parent:WaitForChild("SpawnSelector"))
 local LoadoutService = require(script.Parent:WaitForChild("LoadoutService"))
+local HealthPickupService = require(script.Parent:WaitForChild("HealthPickupService"))
 local KillEffectsRegistry = require(Shared.locker.killEffects.KillEffectsRegistry)
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
 local ActionRewards = require(Shared.constants.ActionRewards)
 local DailyTasksService = require(script.Parent.Parent.dailyTasks.DailyTasksService)
+
+local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
+type DataService = DataServiceMod.DataServiceModule
 
 type MapDefinition = {
 	Name: string,
@@ -83,7 +89,7 @@ local _teamA: Team? = nil
 local _teamB: Team? = nil
 local _finishRoundAndScheduleRestart: any = nil
 local _AIService: any = nil
-local _dataService: any = nil
+local _dataService: DataService = nil :: any
 local _tieBreakToA = false
 
 -- Cooldown entre cambios de voto del mismo jugador. 0.5s permite ~2 cambios/seg
@@ -317,6 +323,31 @@ local function _resolveWeaponItem(weaponName: string?): (string?, string?)
 	return nil, nil
 end
 
+--[[
+	Cola de acciones diferidas por player a la espera de que el profile cargue.
+	C2: Sin esto, kills/deaths/XP en la window inicial (antes de que el profile
+	esté listo) se pierden silenciosamente — _dataService:GetProfile() devuelve
+	nil y :Increment/:AddXP/:BatchUpdate retornan early.
+
+	Cualquier helper de persistencia llama a _deferUntilProfile(player, fn) si
+	el profile aún no está. ProfileLoaded handler hace flush en orden FIFO.
+]]
+local _pendingProfileActionsByUserId: { [number]: { () -> () } } = {}
+
+local function _deferUntilProfile(player: Player, fn: () -> ()): ()
+	local userId = player.UserId
+	local queue = _pendingProfileActionsByUserId[userId]
+	if not queue then
+		queue = {}
+		_pendingProfileActionsByUserId[userId] = queue
+	end
+	table.insert(queue, fn)
+end
+
+local function _hasProfile(player: Player): boolean
+	return _dataService ~= nil and _dataService:GetProfile(player) ~= nil
+end
+
 local function _grantActionRewardsToAttacker(attackerUserId: number?, action: string)
 	if not _dataService or not attackerUserId or attackerUserId <= 0 then
 		return
@@ -324,6 +355,14 @@ local function _grantActionRewardsToAttacker(attackerUserId: number?, action: st
 
 	local attackerPlayer = Players:GetPlayerByUserId(attackerUserId)
 	if not attackerPlayer then
+		return
+	end
+
+	-- C2: si el profile aún no cargó, encolar y reintentar tras ProfileLoaded.
+	if not _hasProfile(attackerPlayer) then
+		_deferUntilProfile(attackerPlayer, function()
+			_grantActionRewardsToAttacker(attackerUserId, action)
+		end)
 		return
 	end
 
@@ -409,6 +448,14 @@ local function _registerWeaponKillForAttacker(attackerUserId: number?, weaponNam
 		return
 	end
 
+	-- C2: si el profile aún no cargó, encolar y reintentar tras ProfileLoaded.
+	if not _hasProfile(attackerPlayer) then
+		_deferUntilProfile(attackerPlayer, function()
+			_registerWeaponKillForAttacker(attackerUserId, weaponName)
+		end)
+		return
+	end
+
 	local weaponCategory, weaponKey = _resolveWeaponItem(weaponName)
 	if not weaponCategory or not weaponKey then
 		return
@@ -443,6 +490,15 @@ local function _persistAttackerKillStats(attacker: Player, wasHeadshot: boolean,
 	if not _dataService then
 		return
 	end
+
+	-- C2: si el profile aún no cargó, encolar y reintentar tras ProfileLoaded.
+	if not _hasProfile(attacker) then
+		_deferUntilProfile(attacker, function()
+			_persistAttackerKillStats(attacker, wasHeadshot, newStreak)
+		end)
+		return
+	end
+
 	local updates = {
 		{ path = { "Stats", "Kills" }, delta = 1 },
 	}
@@ -477,8 +533,15 @@ local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?, a
 	_sendPlayerStreakToAll(deadPlayer.UserId)
 
 	-- Persistir Stats.Deaths lifetime del que muere (siempre que sea jugador).
+	-- C2: si el profile aún no cargó, encolar para flush en ProfileLoaded.
 	if _dataService and (_dataService :: any).Increment then
-		pcall((_dataService :: any).Increment, _dataService, deadPlayer, { "Stats", "Deaths" }, 1)
+		if _hasProfile(deadPlayer) then
+			pcall((_dataService :: any).Increment, _dataService, deadPlayer, { "Stats", "Deaths" }, 1)
+		else
+			_deferUntilProfile(deadPlayer, function()
+				pcall((_dataService :: any).Increment, _dataService, deadPlayer, { "Stats", "Deaths" }, 1)
+			end)
+		end
 	end
 
 	if not attackerUserId or attackerUserId == deadPlayer.UserId then
@@ -990,6 +1053,17 @@ local function _spawnPlayerOnAssignedTeam(player: Player): boolean
 	local spawnedCharacter = _teleportCharacterToSpawn(player, chosenSpawn)
 	if not spawnedCharacter then
 		return false
+	end
+
+	-- Inmunidad al spawn: ForceField nativo bloquea Humanoid:TakeDamage (que es
+	-- la ruta que usan WeaponsSystem y BotAI), así que no toca cambiar nada en
+	-- el pipeline de daño. Duración configurada en GameConfig; el shield no se
+	-- rompe al disparar — expira solo por tiempo vía Debris.
+	if GameConfig.SpawnProtectionDuration > 0 then
+		local forceField = Instance.new("ForceField")
+		forceField.Visible = true
+		forceField.Parent = spawnedCharacter
+		Debris:AddItem(forceField, GameConfig.SpawnProtectionDuration)
 	end
 
 	LoadoutService.applyCosmetics(player, spawnedCharacter, _dataService)
@@ -1590,6 +1664,12 @@ local function _isValidOption(vote: ActiveVoteState, mapName: string): boolean
 end
 
 local function _onCastVote(data: { mapName: string }, player: Player)
+	-- Cap longitud antes de cualquier processing — protege contra payloads
+	-- arbitrariamente grandes que harían trabajo en _isValidOption / format.
+	if not NetGuards.validate(data, { mapName = NetGuards.MAX.MapName }) then
+		return
+	end
+
 	local vote = _activeVote
 	if not vote then
 		_log(string.format("Ignored vote from %s: no active vote.", player.Name))
@@ -1918,43 +1998,8 @@ local function _onRequestRespawn(_: {}, player: Player)
 	end)
 end
 
-local PICKUP_HEAL_AMOUNT = 30
-local PICKUP_REQUEST_COOLDOWN = 0.2
-local _pickupRequestCooldownAt: { [number]: number } = {}
-
-local function _applyHealthPickup(character: Model): boolean
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	if not humanoid or humanoid.Health <= 0 then
-		return false
-	end
-	humanoid.Health = math.min(humanoid.MaxHealth, humanoid.Health + PICKUP_HEAL_AMOUNT)
-	return true
-end
-
-local function _onRequestPickup(data: { kind: string }, player: Player)
-	-- Whitelist estricta. Solo "Health" se dropea actualmente; cualquier
-	-- otro kind se ignora (no consume cooldown, no expone la API).
-	if not data or type(data.kind) ~= "string" or data.kind ~= "Health" then
-		return
-	end
-	if not _isRoundActive or _isInMenuByUserId[player.UserId] then
-		return
-	end
-
-	local now = time()
-	local cooldownAt = _pickupRequestCooldownAt[player.UserId] or 0
-	if now < cooldownAt then
-		return
-	end
-	_pickupRequestCooldownAt[player.UserId] = now + PICKUP_REQUEST_COOLDOWN
-
-	local character = player.Character
-	if not character then
-		return
-	end
-
-	_applyHealthPickup(character)
-end
+-- HealthPickup logic extraída a HealthPickupService.luau (Sprint 4 P2 #17).
+-- Se inicia desde MatchService:Start con predicates inyectados — ver allá.
 
 local function _onRequestReturnToMenu(_: {}, player: Player)
 	_isInMenuByUserId[player.UserId] = true
@@ -1988,7 +2033,7 @@ function MatchService:GetPlayerKillStreak(playerOrUserId: Player | number): numb
 	return _killStreakByUserId[userId] or 0
 end
 
-function MatchService:Start(dataService: any): ()
+function MatchService:Start(dataService: DataService): ()
 	if _started then
 		_log("Start ignored: service already started.")
 		return
@@ -2035,6 +2080,24 @@ function MatchService:Start(dataService: any): ()
 		end
 	end
 
+	-- C2: flush de acciones diferidas cuando el profile termine de cargar.
+	-- Hooks compatibles tanto con Signal-style (ProfileLoaded) como con
+	-- BindableEvent.Event. Si DataService no expone la signal, se ignora —
+	-- el código sigue funcionando con la pérdida silenciosa preexistente.
+	if _dataService and _dataService.ProfileLoaded then
+		_dataService.ProfileLoaded:Connect(function(player: Player)
+			local queue = _pendingProfileActionsByUserId[player.UserId]
+			if not queue then return end
+			_pendingProfileActionsByUserId[player.UserId] = nil
+			for _, fn in queue do
+				local ok, err = pcall(fn)
+				if not ok then
+					warn("[MatchService] Pending profile action error:", err)
+				end
+			end
+		end)
+	end
+
 	_setPhase("Idle", "service started")
 	_log("MatchService started. Waiting for conditions to begin map vote.")
 
@@ -2068,7 +2131,8 @@ function MatchService:Start(dataService: any): ()
 		_matchKillsByUserId[player.UserId] = nil
 		_matchDeathsByUserId[player.UserId] = nil
 		_killStreakByUserId[player.UserId] = nil
-		_pickupRequestCooldownAt[player.UserId] = nil
+		_lastBroadcastStreakKeyByUserId[player.UserId] = nil
+		_pendingProfileActionsByUserId[player.UserId] = nil
 		_resetStreakTimeout(player.UserId)
 		_log(string.format("Player removing: %s (%d).", player.Name, player.UserId))
 		_disconnectVoteForPlayer(player.UserId)
@@ -2098,7 +2162,15 @@ function MatchService:Start(dataService: any): ()
 	Network.Match.RequestJoinMatch.Listen(_onRequestJoinMatch)
 	Network.Match.RequestRespawn.Listen(_onRequestRespawn)
 	Network.Match.RequestReturnToMenu.Listen(_onRequestReturnToMenu)
-	Network.Match.RequestPickup.Listen(_onRequestPickup)
+
+	-- HealthPickup extraído (Sprint 4 P2 #17). Inyectamos predicates para
+	-- que el service no se acople a state interno de MatchService.
+	HealthPickupService:Start({
+		isRoundActive = function() return _isRoundActive end,
+		isPlayerInMenu = function(userId: number): boolean
+			return _isInMenuByUserId[userId] == true
+		end,
+	})
 
 	for _, player in Players:GetPlayers() do
 		_isInMenuByUserId[player.UserId] = true

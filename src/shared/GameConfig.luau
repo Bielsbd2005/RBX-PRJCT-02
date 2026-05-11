@@ -25,6 +25,7 @@ export type GameConfigType = {
 	PregameCountdown: number,
 	EndResultsDuration: number,
 	RespawnCooldown: number,
+	SpawnProtectionDuration: number,
 	MinPlayersToStart: number,
 	RealPlayerCapPerServer: number,
 	TeamSizeTarget: number,
@@ -41,6 +42,9 @@ local GameConfig: GameConfigType = {
 	PregameCountdown = 5,
 	EndResultsDuration = 10,
 	RespawnCooldown = 1,
+	-- Segundos de inmunidad (ForceField) tras spawn — aplica a jugadores y bots.
+	-- El shield NO se rompe al disparar; expira solo por tiempo.
+	SpawnProtectionDuration = 3,
 	MinPlayersToStart = 1,
 	RealPlayerCapPerServer = 6,
 	TeamSizeTarget = 4,

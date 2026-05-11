@@ -5,7 +5,6 @@
 local CollectionService = game:GetService("CollectionService")
 local PathfindingService = game:GetService("PathfindingService")
 local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
@@ -49,7 +48,6 @@ local DETECT_RANGE = 35
 local DISTANCIA_SUAVIDAD = 4
 local FIRE_RATE = 0.1        -- igual que ShotCooldown del arma real
 local PRECISION = 40         -- 40% de balas hacen daño
-local REGEN_RATE = 0
 local WALK_SPEED = 16        -- igual que jugadores reales
 
 local PLAYER_AGGRESSION = {
@@ -99,6 +97,15 @@ export type BotAIInstance = typeof(setmetatable({} :: {
 	_mapRoot: Instance?,
 	_connections: { RBXScriptConnection },
 	_nextShotId: number,
+	-- Sprint 3: cache de target + path persistente.
+	_aliveTargets: { Model },
+	_currentTarget: Model?,
+	_currentTargetVisible: boolean,
+	_lastTargetEvalAt: number,
+	_path: Path?,
+	_lastPathComputeAt: number,
+	_lastPathTargetPos: Vector3?,
+	_moveReached: boolean,
 }, BotAI))
 
 function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?): BotAIInstance
@@ -116,6 +123,14 @@ function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?): BotAI
 		_mapRoot = nil :: Instance?,
 		_connections = {} :: { RBXScriptConnection },
 		_nextShotId = 1,
+		_aliveTargets = {},
+		_currentTarget = nil,
+		_currentTargetVisible = false,
+		_lastTargetEvalAt = 0,
+		_path = nil,
+		_lastPathComputeAt = 0,
+		_lastPathTargetPos = nil,
+		_moveReached = false,
 	}, BotAI) :: BotAIInstance
 
 	return self
@@ -226,50 +241,58 @@ function BotAI:_canSeeTarget(target: Model): boolean
 	return false
 end
 
-function BotAI:_getBestTarget(): Model?
-	local closest: Model? = nil
-	local minDist = math.huge
+--[[
+	Sprint 3: target selection en dos pasos.
 
-	local function _checkCandidate(char: Instance)
-		if not char:IsA("Model") or char == self._dummy then
-			return
-		end
+	Antes: iterar workspace:GetChildren() + mapRoot/Bots por tick (60Hz × 8 bots
+	= ~480 iteraciones/seg de cientos de instancias) y raycastear cada candidato
+	cuya `d < minDist` (orden no determinista — múltiples raycasts en peleas
+	clústerizadas).
+
+	Ahora:
+	  • La lista de candidatos viene pre-filtrada (`self._aliveTargets`,
+	    actualizada por AIService vía signals).
+	  • Pass 1: filtrar por equipo + distancia + salud, recolectando candidatos
+	    válidos en un buffer junto con su distancia.
+	  • Pass 2: ordenar por distancia ASC y raycastear desde el más cercano
+	    con early-exit en cuanto haya LoS (típico = 1 raycast/llamada).
+]]
+function BotAI:_getBestTarget(): (Model?, boolean)
+	local rootPos = self._rootPart.Position
+	local myTeam = TeamUtils.normalize(self._team)
+
+	-- Pass 1: filtrado liviano (sin raycast).
+	local candidates = {} :: { { char: Model, d: number } }
+	for _, char in self._aliveTargets do
+		if char == self._dummy then continue end
 
 		local hum = char:FindFirstChildOfClass("Humanoid")
 		local root = char:FindFirstChild("HumanoidRootPart")
-		if not hum or not root or (hum :: Humanoid).Health <= 0 then
-			return
-		end
+		if not hum or not root or (hum :: Humanoid).Health <= 0 then continue end
 
-		local charTeam = TeamUtils.getSide(char :: Model)
-		local myTeam = TeamUtils.normalize(self._team)
-		if charTeam and myTeam and charTeam == myTeam then
-			return
-		end
+		local charTeam = TeamUtils.getSide(char)
+		if charTeam and myTeam and charTeam == myTeam then continue end
 
-		local d = (self._rootPart.Position - (root :: BasePart).Position).Magnitude
-		if d < minDist and self:_canSeeTarget(char :: Model) then
-			minDist = d
-			closest = char :: Model
+		local d = (rootPos - (root :: BasePart).Position).Magnitude
+		if d > DETECT_RANGE then continue end
+
+		table.insert(candidates, { char = char, d = d })
+	end
+
+	if #candidates == 0 then
+		return nil, false
+	end
+
+	-- Pass 2: ordenar por distancia, raycastear desde el más cercano.
+	table.sort(candidates, function(a, b) return a.d < b.d end)
+
+	for _, c in candidates do
+		if self:_canSeeTarget(c.char) then
+			return c.char, true
 		end
 	end
 
-	-- Jugadores reales (sus personajes son hijos directos de workspace)
-	for _, char in workspace:GetChildren() do
-		_checkCandidate(char)
-	end
-
-	-- Bots enemigos (están dentro de mapRoot/Bots)
-	if self._mapRoot then
-		local botsFolder = (self._mapRoot :: Instance):FindFirstChild("Bots")
-		if botsFolder then
-			for _, char in botsFolder:GetChildren() do
-				_checkCandidate(char)
-			end
-		end
-	end
-
-	return closest
+	return nil, false
 end
 
 function BotAI:_refreshWaypoints(mapRoot: Instance?): { BasePart }
@@ -301,13 +324,26 @@ function BotAI:_refreshWaypoints(mapRoot: Instance?): { BasePart }
 	return list
 end
 
+--[[
+	Sprint 3: usa el Path persistente (`self._path`) y una conexión única a
+	MoveToFinished (`self._moveReached`) en lugar de crear/destruir ambos
+	por cada llamada.
+
+	Antes: cada `_moveToLocation` hacía CreatePath+ComputeAsync (decenas de ms)
+	y conectaba/desconectaba MoveToFinished por waypoint (10-20 conexiones por
+	patrullaje). En CHASE sin LoS, este coste se pagaba a 10Hz.
+]]
 function BotAI:_moveToLocation(location: Vector3, stopCondition: () -> boolean)
-	local path = PathfindingService:CreatePath(AGENT_PARAMS)
-	pcall(function()
+	local path = self._path
+	if not path then
+		return
+	end
+
+	local ok = pcall(function()
 		path:ComputeAsync(self._rootPart.Position, location)
 	end)
 
-	if path.Status ~= Enum.PathStatus.Success then
+	if not ok or path.Status ~= Enum.PathStatus.Success then
 		return
 	end
 
@@ -322,24 +358,18 @@ function BotAI:_moveToLocation(location: Vector3, stopCondition: () -> boolean)
 			self._humanoid.Jump = true
 		end
 
+		self._moveReached = false
 		self._humanoid:MoveTo(wp.Position)
 
-		local reached = false
-		local conn = self._humanoid.MoveToFinished:Connect(function()
-			reached = true
-		end)
-
-		while not reached do
+		while not self._moveReached do
 			if i < #waypoints and (self._rootPart.Position - wp.Position).Magnitude < DISTANCIA_SUAVIDAD then
 				break
 			end
 			if stopCondition() then
-				conn:Disconnect()
 				return
 			end
 			task.wait()
 		end
-		conn:Disconnect()
 	end
 end
 
@@ -355,11 +385,16 @@ function BotAI:_addHighlight()
 	highlight.Parent = self._dummy
 end
 
-function BotAI:Start(mapRoot: Instance?)
+function BotAI:Start(mapRoot: Instance?, aliveTargets: { Model }?)
 	self._mapRoot = mapRoot
+	self._aliveTargets = aliveTargets or {}
 	self:_setupNetworkOwnership()
 	self:_setupTool()
 	self:_addHighlight()
+
+	-- Sprint 3: Path persistente. Una sola allocation por bot — el ComputeAsync
+	-- es lo costoso, no el CreatePath, pero reusarlo limita allocations.
+	self._path = PathfindingService:CreatePath(AGENT_PARAMS)
 
 	local humanoid = self._humanoid
 	local rootPart = self._rootPart
@@ -396,43 +431,50 @@ function BotAI:Start(mapRoot: Instance?)
 	table.insert(self._connections, connRun)
 	table.insert(self._connections, connJump)
 
-	-- Heartbeat: regeneracion y rotacion
-	local connHB = RunService.Heartbeat:Connect(function(dt: number)
-		if not self._alive or humanoid.Health <= 0 then
-			return
-		end
-
-		-- Regeneracion en patrulla
-		if humanoid.Health < humanoid.MaxHealth then
-			humanoid.Health = math.min(humanoid.MaxHealth, humanoid.Health + REGEN_RATE * dt)
-		end
-
-		-- Rotacion en ataque
-		if alignOrientation then
-			local target = self:_getBestTarget()
-			if target then
-				local targetRoot = target:FindFirstChild("HumanoidRootPart")
-				if targetRoot then
-					local targetPos = (targetRoot :: BasePart).Position
-					local lookPos = Vector3.new(targetPos.X, rootPart.Position.Y, targetPos.Z)
-					alignOrientation.Enabled = true
-					alignOrientation.CFrame = CFrame.lookAt(rootPart.Position, lookPos)
-				end
-			else
-				alignOrientation.Enabled = false
-			end
-		end
+	-- Sprint 3: una sola conexión MoveToFinished compartida en lugar de
+	-- connect/disconnect por waypoint en _moveToLocation.
+	local connMoveDone = humanoid.MoveToFinished:Connect(function()
+		self._moveReached = true
 	end)
-	table.insert(self._connections, connHB)
+	table.insert(self._connections, connMoveDone)
+
+	-- Sprint 3: Heartbeat eliminado.
+	-- Antes hacía dos cosas:
+	--   (a) regen — REGEN_RATE = 0, era no-op caro.
+	--   (b) rotation — duplicaba el _getBestTarget que el coroutine ya hacía,
+	--       a 60Hz contra los 10Hz del coroutine.
+	-- Ahora la rotación se aplica desde el coroutine principal cada tick
+	-- usando self._currentTarget (cacheado).
 
 	-- Bucle principal en coroutine independiente
 	task.spawn(function()
 		local currentState = STATES.PATROL
-		local currentTarget: Model? = nil
 
 		while self._alive and humanoid.Health > 0 do
-			local potentialTarget = self:_getBestTarget()
+			-- Sprint 3: una sola llamada a _getBestTarget por tick. El resultado
+			-- (target + visibility) se cachea en self para que ATTACK lo reuse
+			-- sin un raycast extra.
+			local potentialTarget, isVisible = self:_getBestTarget()
+			self._currentTarget = potentialTarget
+			self._currentTargetVisible = isVisible
+			self._lastTargetEvalAt = os.clock()
 
+			-- Aplicar rotación al target cacheado (movido desde el Heartbeat).
+			if alignOrientation then
+				if potentialTarget then
+					local targetRoot = potentialTarget:FindFirstChild("HumanoidRootPart")
+					if targetRoot then
+						local targetPos = (targetRoot :: BasePart).Position
+						local lookPos = Vector3.new(targetPos.X, rootPart.Position.Y, targetPos.Z)
+						alignOrientation.Enabled = true
+						alignOrientation.CFrame = CFrame.lookAt(rootPart.Position, lookPos)
+					end
+				else
+					alignOrientation.Enabled = false
+				end
+			end
+
+			local currentTarget: Model? = potentialTarget
 			if potentialTarget then
 				local targetRoot = potentialTarget:FindFirstChild("HumanoidRootPart")
 				local dist = if targetRoot
@@ -444,10 +486,8 @@ function BotAI:Start(mapRoot: Instance?)
 				else
 					currentState = STATES.CHASE
 				end
-				currentTarget = potentialTarget
 			else
 				currentState = STATES.PATROL
-				currentTarget = nil
 				humanoid.AutoRotate = true
 			end
 
@@ -495,7 +535,9 @@ function BotAI:Start(mapRoot: Instance?)
 				local fireRate = if isPlayer then PLAYER_AGGRESSION.FIRE_RATE else FIRE_RATE
 				local precision = if isPlayer then PLAYER_AGGRESSION.PRECISION else PRECISION
 
-				if os.clock() - lastShotTime > fireRate and self:_canSeeTarget(currentTarget) then
+				-- Sprint 3: reusar la visibility del _getBestTarget de este tick.
+				-- Antes esto hacía un tercer raycast por tick en ATTACK.
+				if os.clock() - lastShotTime > fireRate and isVisible then
 					lastShotTime = os.clock()
 
 					if math.random(1, 100) <= precision then
@@ -555,23 +597,42 @@ function BotAI:Start(mapRoot: Instance?)
 				local targetRoot = currentTarget:FindFirstChild("HumanoidRootPart")
 
 				if targetRoot then
-					if self:_canSeeTarget(currentTarget) then
+					-- Sprint 3: reusar `isVisible` del _getBestTarget de este tick
+					-- en lugar de llamar _canSeeTarget de nuevo (raycast extra).
+					if isVisible then
 						humanoid:MoveTo((targetRoot :: BasePart).Position)
 						if math.random() < 0.05 then
 							humanoid.Jump = true
 						end
 					else
-						local path = PathfindingService:CreatePath(AGENT_PARAMS)
-						pcall(function()
-							path:ComputeAsync(rootPart.Position, (targetRoot :: BasePart).Position)
-						end)
-						if path.Status == Enum.PathStatus.Success then
+						-- Sprint 3: throttle de ComputeAsync. Antes se hacía cada tick
+						-- (10Hz) — ComputeAsync es síncrono y costoso. Recompute solo
+						-- cuando pasaron ≥0.5s O el target se movió >5 studs.
+						local targetPos = (targetRoot :: BasePart).Position
+						local now = os.clock()
+						local lastPos = self._lastPathTargetPos
+						local needRecompute = (now - self._lastPathComputeAt) > 0.5
+							or lastPos == nil
+							or ((lastPos :: Vector3) - targetPos).Magnitude > 5
+
+						if needRecompute and self._path then
+							local ok = pcall(function()
+								(self._path :: Path):ComputeAsync(rootPart.Position, targetPos)
+							end)
+							if ok then
+								self._lastPathComputeAt = now
+								self._lastPathTargetPos = targetPos
+							end
+						end
+
+						local path = self._path
+						if path and path.Status == Enum.PathStatus.Success then
 							local wps = path:GetWaypoints()
 							if wps and #wps >= 2 then
 								humanoid:MoveTo(wps[2].Position)
 							end
 						else
-							humanoid:MoveTo((targetRoot :: BasePart).Position)
+							humanoid:MoveTo(targetPos)
 						end
 					end
 				end
@@ -596,8 +657,11 @@ function BotAI:Start(mapRoot: Instance?)
 					dest = rootPart.Position + randomVec
 				end
 
+				-- Sprint 3: stopCondition reusa la cache de target en lugar de
+				-- ejecutar _getBestTarget en cada `task.wait()` interno (varios
+				-- raycasts/seg por bot solo en patrullaje).
 				self:_moveToLocation(dest, function()
-					return self:_getBestTarget() ~= nil or not self._alive
+					return self._currentTarget ~= nil or not self._alive
 				end)
 
 				task.wait()

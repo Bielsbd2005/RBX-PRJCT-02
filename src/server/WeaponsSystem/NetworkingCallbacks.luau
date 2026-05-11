@@ -112,7 +112,7 @@ function NetworkingCallbacks.WeaponHit(player, instance, hitInfo)
 	local weaponType = getmetatable(weapon)
 	if weapon then
 		if weapon.instance == instance and weaponType.CanHit then
-			if IsServer then
+			if IsServer and WeaponSecurity then
 				if not WeaponSecurity.ownsWeapon(player, instance) then
 					return
 				end

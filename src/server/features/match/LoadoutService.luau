@@ -13,6 +13,7 @@ local CollectionService = game:GetService("CollectionService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ItemsConfig = require(Shared.constants.ItemsConfig)
+local InventoryRepository = require(Shared.data.InventoryRepository)
 
 local LoadoutService = {}
 
@@ -52,6 +53,13 @@ local function _getOptionalString(value: any): string?
 	end
 	return nil
 end
+
+-- Defense-in-depth: aunque ShopService valide ownership en la compra/equip,
+-- si una sola capa upstream falla (typo en path, race en BatchUpdate, exploit
+-- de mutación directa de Loadout), aquí se rechaza al equipar. Delegamos en
+-- InventoryRepository para consistencia con el resto de los services.
+local _ownsWeapon = InventoryRepository.ownsWeapon
+local _ownsWeaponWrap = InventoryRepository.ownsWeaponWrap
 
 local function _getWeaponToolsRoot(): Folder?
 	local root = ServerStorage:FindFirstChild(WEAPON_TOOLS_ROOT_NAME)
@@ -136,7 +144,12 @@ local function _clearMatchLoadoutHat(character: Model)
 	end
 end
 
-local function _resolveWeaponWrapForLoadout(loadout: any, loadoutCategory: "Main" | "Special", weaponId: string): string
+local function _resolveWeaponWrapForLoadout(profileData: any, loadoutCategory: "Main" | "Special", weaponId: string): string
+	local loadout = profileData.Loadout
+	if type(loadout) ~= "table" then
+		return DEFAULT_WEAPON_SKIN_ID
+	end
+
 	local wrapsTableKey = if loadoutCategory == "Main" then "MainWeaponWraps" else "SpecialWeaponWraps"
 	local wrapsTableAny = loadout[wrapsTableKey]
 	if type(wrapsTableAny) ~= "table" then
@@ -145,12 +158,12 @@ local function _resolveWeaponWrapForLoadout(loadout: any, loadoutCategory: "Main
 
 	local wrapsTable = wrapsTableAny :: { [string]: any }
 	local resolvedByWeapon = _getOptionalString(wrapsTable[weaponId])
-	if resolvedByWeapon then
+	if resolvedByWeapon and _ownsWeaponWrap(profileData, loadoutCategory, weaponId, resolvedByWeapon) then
 		return resolvedByWeapon
 	end
 
 	local resolvedDefault = _getOptionalString(wrapsTable.Default)
-	if resolvedDefault then
+	if resolvedDefault and _ownsWeaponWrap(profileData, loadoutCategory, weaponId, resolvedDefault) then
 		return resolvedDefault
 	end
 
@@ -250,11 +263,26 @@ local function _grantMatchLoadoutTools(player: Player, dataService: any): (boole
 		return false, true, nil
 	end
 
-	local loadout = profile.Data.Loadout
+	local profileData = profile.Data
+	local loadout = profileData.Loadout
 	local mainWeaponId = if type(loadout.MainWeapon) == "string" and loadout.MainWeapon ~= "" then loadout.MainWeapon else "Default"
 	local specialWeaponId = if type(loadout.SpecialWeapon) == "string" and loadout.SpecialWeapon ~= "" then loadout.SpecialWeapon else "Default"
-	local mainWrapId = _resolveWeaponWrapForLoadout(loadout, "Main", mainWeaponId)
-	local specialWrapId = _resolveWeaponWrapForLoadout(loadout, "Special", specialWeaponId)
+
+	-- Defense-in-depth: rechazar weapon ID que no esté en el inventario.
+	-- Mantiene al jugador con la weapon "Default" en lugar de equiparle algo
+	-- que no compró, si ShopService o el flujo de equip dejaron el Loadout
+	-- en un estado inválido (race, exploit, profile corrupto).
+	if not _ownsWeapon(profileData, "Main", mainWeaponId) then
+		warn(string.format("[LoadoutService] %s tiene Loadout.MainWeapon=%s pero no lo posee — fallback a Default.", player.Name, mainWeaponId))
+		mainWeaponId = "Default"
+	end
+	if not _ownsWeapon(profileData, "Special", specialWeaponId) then
+		warn(string.format("[LoadoutService] %s tiene Loadout.SpecialWeapon=%s pero no lo posee — fallback a Default.", player.Name, specialWeaponId))
+		specialWeaponId = "Default"
+	end
+
+	local mainWrapId = _resolveWeaponWrapForLoadout(profileData, "Main", mainWeaponId)
+	local specialWrapId = _resolveWeaponWrapForLoadout(profileData, "Special", specialWeaponId)
 
 	local backpackNode = player:FindFirstChild("Backpack") or player:WaitForChild("Backpack", 1)
 	local backpack = if backpackNode and backpackNode:IsA("Backpack") then backpackNode else nil

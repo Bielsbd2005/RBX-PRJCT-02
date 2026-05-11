@@ -60,6 +60,64 @@ function ServerBootstrap.start(serverRoot: Script): ()
 		else
 			warn("[ServerBootstrap] WeaponsSystem.injectServices no disponible — usando autoload")
 		end
+
+		-- Sprint 4 (P2 #21): cross-cutting concerns del PvP kill flow viven aquí
+		-- en lugar de hardcoded en WeaponsSystem._defaultDamageCallback.
+		-- WeaponsSystem queda agnóstico al juego; el bootstrap es el único punto
+		-- que sabe qué services existen en este modo.
+		if type(WeaponsSystem) == "table" then
+			-- killHook: sincronía. Computa rewards data necesaria para el
+			-- payload del PlayerEliminated remote (UI del killer la consume
+			-- en el mismo frame: streak count, coinAmount).
+			local CashBonusSystem: any = nil  -- placeholder hasta que se cree el módulo
+			WeaponsSystem.killHook = function(killer: Player, _victimHum: Humanoid, _weaponName: string, wasHeadshot: boolean)
+				local streakAfterKill = 1
+				if MatchService and (MatchService :: any).GetPlayerKillStreak then
+					local ok, currentStreak = pcall(function()
+						return (MatchService :: any):GetPlayerKillStreak(killer)
+					end)
+					if ok and typeof(currentStreak) == "number" then
+						streakAfterKill = math.max(1, currentStreak + 1)
+					end
+				end
+
+				local coinAmount: number? = nil
+				if CashBonusSystem and CashBonusSystem.CalculateKillReward then
+					local reward = CashBonusSystem.CalculateKillReward(wasHeadshot, streakAfterKill)
+					if reward then
+						coinAmount = reward.coinAmount
+						if reward.totalCash and reward.totalCash > 0 then
+							local okIncrement = pcall(function()
+								(DataService :: any):Increment(killer, { "Stats", "Cash" }, reward.totalCash)
+							end)
+							if not okIncrement then
+								warn("[ServerBootstrap] Failed to grant kill cash to " .. killer.Name)
+							end
+						end
+					end
+				end
+
+				return {
+					streakAfterKill = streakAfterKill,
+					coinAmount = coinAmount,
+					xpGained = wasHeadshot and 150 or 100,
+				}
+			end
+
+			-- Killed signal: notificaciones async para services side-effect.
+			-- Cualquier service futuro (Achievements, Quests, etc.) puede
+			-- subscribirse aquí sin tocar WeaponsSystem.luau.
+			if WeaponsSystem.Killed and WeaponsSystem.Killed.Event then
+				WeaponsSystem.Killed.Event:Connect(function(killer: Player, _victimHum: Humanoid, _weaponName: string, _wasHeadshot: boolean)
+					if (DailyTasksService :: any).OnKill then
+						pcall(function() (DailyTasksService :: any):OnKill(killer) end)
+					end
+					if (BattlePassService :: any).OnKill then
+						pcall(function() (BattlePassService :: any):OnKill(killer) end)
+					end
+				end)
+			end
+		end
 	else
 		warn("[ServerBootstrap] WeaponsSystem no encontrado tras 10s — kills no recompensarán cash")
 	end

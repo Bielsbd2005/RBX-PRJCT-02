@@ -8,6 +8,20 @@
 --   server recibe WeaponHit   → validateHit(player, weapon, hitInfo)
 --                                 (true, _) → aplicar daño
 --                                 (false, reason) → descartar
+--
+-- Validación: cone (dot del dir esperado vs el del hit) + range (distancia
+-- desde origin hasta hitInfo.p ≤ MaxDistance + tolerancia). Esto bloquea
+-- exploits triviales (auto-aim genérico, hits a >maxRange, hits con sid no
+-- registrado) que cubren la gran mayoría de cheaters casuales.
+--
+-- DELIBERADAMENTE NO incluye:
+--   • Server-side raycast canónico (anti-wallhack/headshot bypass).
+--   • Rate-limit de ROF server-side.
+--   • Lag compensation.
+-- Esos refactors están planificados en docs/REFACTORS.md "Anti-cheat AAA".
+-- Se implementarán cuando aparezcan reportes de exploit en producción —
+-- añadirlos antes de tener un threat model real introduce friction de
+-- gameplay (ver Sprint 1 commit + revert) sin beneficio comprobado.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")

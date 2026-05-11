@@ -12,6 +12,8 @@ local Fusion = require(Packages.fusion) :: any
 
 local MenuAnimator = require(script.Parent.animators.MenuAnimator)
 local MenuHover = require(script.Parent.MenuHover)
+local InteractiveScaleTween = require(script.Parent.animators.InteractiveScaleTween)
+local UITheme = require(script.Parent.UITheme)
 local UIUtils = require(script.Parent.UIUtils)
 local DataController = require(script.Parent.Parent.data.DataController)
 type StatsData = {
@@ -40,9 +42,11 @@ export type MenuController = {
 	getGui: (self: MenuController) -> ScreenGui,
 	hide: (self: MenuController) -> (),
 	show: (self: MenuController) -> (),
+	isHidden: (self: MenuController) -> boolean,
 	registerPanel: (self: MenuController, panel: Instance) -> (),
 	unregisterPanel: (self: MenuController, panel: Instance) -> (),
 	hasOpenPanel: (self: MenuController) -> boolean,
+	onStateChanged: (self: MenuController, callback: () -> ()) -> (() -> ()),
 	Destroy: (self: MenuController) -> (),
 }
 
@@ -77,8 +81,8 @@ local function findTextLabel(root: Instance, names: { string }): TextLabel?
 end
 
 local function resolveHudRefs(menuGui: ScreenGui): HudRefs
-	local upper = menuGui:FindFirstChild("UpperContainer")
-	if not upper then
+	local top = menuGui:FindFirstChild("Top")
+	if not top then
 		return {
 			cashValue = nil,
 			level = nil,
@@ -88,16 +92,16 @@ local function resolveHudRefs(menuGui: ScreenGui): HudRefs
 		}
 	end
 
-	local cashNode = upper:FindFirstChild("Cash")
+	local cashNode = top:FindFirstChild("Cash")
 	local cashValue = if cashNode and cashNode:FindFirstChild("Value") then (if cashNode.Value:IsA("TextLabel") then cashNode.Value else nil) else nil
 
-	local levelNode = upper:FindFirstChild("Level")
+	local levelNode = top:FindFirstChild("Level")
 	local level = if levelNode and levelNode:IsA("TextLabel") then levelNode else nil
 
-	local nextNode = upper:FindFirstChild("Next")
+	local nextNode = top:FindFirstChild("Next")
 	local next = if nextNode and nextNode:IsA("TextLabel") then nextNode else nil
 
-	local barNode = upper:FindFirstChild("Bar")
+	local barNode = top:FindFirstChild("Bar")
 	local barFill = if barNode then (if barNode:FindFirstChild("Fill") then (if barNode.Fill:IsA("Frame") then barNode.Fill else nil) else nil) else nil
 	local barValueNode = if barNode then barNode:FindFirstChild("Value") else nil
 	local barValue = if barValueNode and barValueNode:IsA("TextLabel") then barValueNode else nil
@@ -131,6 +135,40 @@ local function updateTopHud(hudRefs: HudRefs, stats: StatsData): ()
 	setText(hudRefs.next, "Lvl " .. tostring(stats.Level + 1))
 end
 
+-- Hover animations específicas por botón. Los listados con liftOffset > 0
+-- suben además de crecer; el resto solo escala. Botones no listados conservan
+-- su comportamiento por defecto (solo el stroke tween de MenuHover).
+local MENU_BUTTON_HOVER_BINDINGS: { { path: { string }, lift: number } } = {
+	{ path = { "Top", "settings" }, lift = 0 },
+	{ path = { "Top", "rewards" }, lift = 0 },
+	{ path = { "Bottom", "Play" }, lift = 0 },
+	{ path = { "Bottom", "BattlePass" }, lift = 0 },
+	{ path = { "Bottom", "Store" }, lift = 8 },
+	{ path = { "Bottom", "Locker" }, lift = 8 },
+}
+
+local function resolveDescendant(root: Instance, path: { string }): Instance?
+	local node: Instance? = root
+	for _, name in path do
+		if not node then return nil end
+		node = node:FindFirstChild(name)
+	end
+	return node
+end
+
+local function bindMenuButtonHovers(menuGui: ScreenGui, janitor: any): ()
+	for _, binding in MENU_BUTTON_HOVER_BINDINGS do
+		local node = resolveDescendant(menuGui, binding.path)
+		if node and node:IsA("GuiButton") then
+			InteractiveScaleTween.bindButton(node, janitor, {
+				hoverScale = UITheme.ButtonHoverScale,
+				clickScale = UITheme.ButtonClickScale,
+				liftOffset = binding.lift,
+			})
+		end
+	end
+end
+
 function MenuController.new(): MenuController
 	local player = Players.LocalPlayer
 	local playerGui = player:WaitForChild("PlayerGui")
@@ -151,6 +189,9 @@ function MenuController.new(): MenuController
 	self._hover = MenuHover.new(menuGui)
 	self._hudRefs = resolveHudRefs(menuGui)
 	self._openPanels = {}
+	self._stateChangeListeners = {} :: { () -> () }
+
+	bindMenuButtonHovers(menuGui, self._janitor)
 
 	local mapVoteNode = menuGui:FindFirstChild("MapVote")
 	self._mapVote = if mapVoteNode and mapVoteNode:IsA("GuiObject") then mapVoteNode else nil
@@ -179,14 +220,45 @@ function MenuController:getGui(): ScreenGui
 end
 
 function MenuController:_applyMapVoteVisibility(): ()
-	if not self._mapVote then return end
-	-- MapVote solo visible cuando: la votación está activa, el menú no está
-	-- oculto (no estamos dentro del match), y no hay otro panel abierto encima
-	-- (locker, settings, etc.).
-	local shouldShow = self._mapVoteShouldBeVisible == true
-		and not self._isHidden
-		and not self:hasOpenPanel()
-	self._mapVote.Visible = shouldShow
+	if self._mapVote then
+		-- MapVote solo visible cuando: la votación está activa, el menú no está
+		-- oculto (no estamos dentro del match), y no hay otro panel abierto encima
+		-- (locker, settings, etc.).
+		local shouldShow = self._mapVoteShouldBeVisible == true
+			and not self._isHidden
+			and not self:hasOpenPanel()
+		self._mapVote.Visible = shouldShow
+	end
+
+	self:_fireStateChanged()
+end
+
+function MenuController:_fireStateChanged(): ()
+	-- Snapshot defensivo: una callback puede unsubscribirse durante su propia
+	-- ejecución (mutaría la lista mientras iteramos).
+	local snapshot = table.clone(self._stateChangeListeners)
+	for _, fn in snapshot do
+		local ok, err = pcall(fn)
+		if not ok then
+			warn("[MenuController] state listener error:", err)
+		end
+	end
+end
+
+function MenuController:onStateChanged(callback: () -> ()): (() -> ())
+	table.insert(self._stateChangeListeners, callback)
+	return function()
+		for i, fn in self._stateChangeListeners do
+			if fn == callback then
+				table.remove(self._stateChangeListeners, i)
+				return
+			end
+		end
+	end
+end
+
+function MenuController:isHidden(): boolean
+	return self._isHidden == true
 end
 
 function MenuController:setMapVoteVisible(visible: boolean): ()
@@ -246,6 +318,7 @@ function MenuController:Destroy(): ()
 		end
 	end
 	table.clear(self._openPanels)
+	table.clear(self._stateChangeListeners)
 	self._janitor:Destroy()
 end
 

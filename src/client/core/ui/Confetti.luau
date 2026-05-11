@@ -23,6 +23,47 @@ local DEFAULT_COLORS = {
 	Color3.fromRGB(255, 130, 220),
 }
 
+-- ────────────────────────────────────────────────────────────────
+-- Sprint 3: pool de Frames.
+--
+-- Antes cada Burst (32) y Rain (80) hacía Instance.new + Destroy. Triggered
+-- desde MatchHud (level-up + bp-level-up + challenge-complete = 3×60 frames),
+-- Locker on buy, Rewards confetti, etc. — fácilmente cientos de instancias
+-- por minuto en momentos de actividad.
+--
+-- Ahora: pool con Parent=nil para piezas en reposo. Al acquire se reparenta
+-- al container; al complete del tween, _releaseFrame las devuelve al pool.
+-- POOL_CAP limita la huella en memoria (256 × ~Frame ≈ pocos KB).
+-- ────────────────────────────────────────────────────────────────
+
+local POOL_CAP = 256
+local _pool: { Frame } = {}
+
+local function _acquireFrame(): Frame
+	local n = #_pool
+	if n > 0 then
+		local piece = _pool[n]
+		_pool[n] = nil
+		return piece
+	end
+	local piece = Instance.new("Frame")
+	piece.BorderSizePixel = 0
+	piece.AnchorPoint = Vector2.new(0.5, 0.5)
+	return piece
+end
+
+local function _releaseFrame(piece: Frame)
+	-- Si el pool está lleno, destroy en lugar de stashear (limita la huella).
+	if #_pool >= POOL_CAP then
+		piece:Destroy()
+		return
+	end
+	piece.Parent = nil
+	piece.BackgroundTransparency = 0
+	piece.Visible = true
+	table.insert(_pool, piece)
+end
+
 export type ConfettiOptions = {
 	count: number?,
 	colors: { Color3 }?,
@@ -57,10 +98,9 @@ function Confetti.Burst(parent: Instance, originAbsolutePosition: Vector2, optio
 	local container = resolveScreenContainer(parent)
 
 	for i = 1, count do
-		local piece = Instance.new("Frame")
+		local piece = _acquireFrame()
 		piece.BackgroundColor3 = colors[((i - 1) % #colors) + 1]
-		piece.BorderSizePixel = 0
-		piece.AnchorPoint = Vector2.new(0.5, 0.5)
+		piece.BackgroundTransparency = 0
 		piece.Size = UDim2.fromOffset(math.random(8, 14), math.random(4, 8))
 		piece.Position = UDim2.fromOffset(originAbsolutePosition.X, originAbsolutePosition.Y)
 		piece.Rotation = math.random(0, 360)
@@ -81,7 +121,7 @@ function Confetti.Burst(parent: Instance, originAbsolutePosition: Vector2, optio
 		})
 		tween:Play()
 		tween.Completed:Connect(function()
-			piece:Destroy()
+			_releaseFrame(piece)
 		end)
 	end
 end
@@ -135,10 +175,9 @@ function Confetti.Rain(parent: Instance, options: RainOptions?)
 				return
 			end
 
-			local piece = Instance.new("Frame")
+			local piece = _acquireFrame()
 			piece.BackgroundColor3 = colors[((i - 1) % #colors) + 1]
-			piece.BorderSizePixel = 0
-			piece.AnchorPoint = Vector2.new(0.5, 0.5)
+			piece.BackgroundTransparency = 0
 			piece.Size = UDim2.fromOffset(math.random(8, 14), math.random(4, 8))
 			local startX = math.random(0, math.floor(screenWidth))
 			local startY = math.random(-80, -20)
@@ -159,7 +198,7 @@ function Confetti.Rain(parent: Instance, options: RainOptions?)
 			})
 			tween:Play()
 			tween.Completed:Connect(function()
-				piece:Destroy()
+				_releaseFrame(piece)
 			end)
 		end)
 	end

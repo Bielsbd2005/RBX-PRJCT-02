@@ -27,12 +27,19 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Packages = ReplicatedStorage:WaitForChild("Packages")
 local Shared   = ReplicatedStorage:WaitForChild("Shared")
 
+local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
+type DataService = DataServiceMod.DataServiceModule
+
 local Sift = require(Packages.sift) :: any
 
 local Network     = require(Shared.networking.Network)
+local NetGuards   = require(Shared.networking.NetGuards)
+local InventoryRepository = require(Shared.data.InventoryRepository)
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
 local LockerConfig = require(Shared.constants.LockerConfig)
 local BattlePassConfig = require(Shared.constants.BattlePassConfig)
+
+local M = NetGuards.MAX
 
 local CATEGORY_TO_LOADOUT_SLOT = LockerConfig.CategoryToLoadoutSlot :: { [string]: string }
 local WEAPON_WRAPS_PATH_BY_CATEGORY = {
@@ -60,41 +67,19 @@ local function _resolveWeaponId(rawWeaponId: string?, fallbackWeaponId: string?)
 	return "Default"
 end
 
--- True si el jugador posee el arma target. La "Default" siempre se considera poseída
--- porque viene en el DataTemplate inicial.
+-- Helpers de ownership delegan a InventoryRepository (single source of truth).
 local function _ownsTargetWeapon(profileData: any, weaponCategory: string, weaponId: string): boolean
-	if weaponId == "Default" then
-		return true
-	end
-	local categoryInventory = profileData.Inventory and profileData.Inventory[weaponCategory]
-	if type(categoryInventory) ~= "table" then
+	if weaponCategory ~= "Main" and weaponCategory ~= "Special" then
 		return false
 	end
-	return categoryInventory[weaponId] == true
+	return InventoryRepository.ownsWeapon(profileData, weaponCategory :: "Main" | "Special", weaponId)
 end
 
 local function _getOwnedWeaponWrap(profileData: any, weaponCategory: string, weaponId: string, skinId: string): boolean
-	local wrapsByWeapon = profileData.Inventory and profileData.Inventory.WeaponSkinsByWeapon
-	if type(wrapsByWeapon) ~= "table" then
+	if weaponCategory ~= "Main" and weaponCategory ~= "Special" then
 		return false
 	end
-
-	local categoryWraps = wrapsByWeapon[weaponCategory]
-	if type(categoryWraps) ~= "table" then
-		return false
-	end
-
-	local weaponWraps = categoryWraps[weaponId]
-	if type(weaponWraps) ~= "table" then
-		return false
-	end
-
-	local ownedValue = weaponWraps[skinId]
-	if ownedValue == true then
-		return true
-	end
-
-	return type(ownedValue) == "number" and ownedValue > 0
+	return InventoryRepository.ownsWeaponWrap(profileData, weaponCategory :: "Main" | "Special", weaponId, skinId)
 end
 
 -- Cooldown por acción (segundos)
@@ -110,8 +95,11 @@ local _itemCache: { [string]: { [string]: any } } = {}
 -- Cooldowns agrupados por jugador.
 local _cooldowns: { [number]: { [string]: number } } = {}
 
--- DataService inyectado en Start()
-local _dataService: any = nil
+-- DataService inyectado en Start() — typed para que :GetProfile/:BatchUpdate
+-- etc. se chequeen en compile-time (el `:: any` previo perdía toda la safety).
+-- Cast a `any` al init: en runtime es nil hasta Start(), pero los call sites
+-- siempre corren después (Start es la primera llamada del bootstrap).
+local _dataService: DataService = nil :: any
 local _started = false
 
 -- ────────────────────────────────────────────────────────────
@@ -158,13 +146,15 @@ end
 -- ────────────────────────────────────────────────────────────
 
 local function _onBuyItem(data: { itemId: string, category: string, weaponCategory: string, weaponId: string }, player: Player): ()
-	-- Validación 0: tipos del payload. ByteNet ya tipa, pero defensivo
-	-- contra payloads malformados / clientes manipulados.
-	if type(data) ~= "table"
-		or type(data.category) ~= "string"
-		or type(data.itemId) ~= "string"
-		or data.itemId == ""
-	then
+	-- Validación 0: tipos + caps de longitud. ByteNet no impone maxLength en
+	-- strings, así que rechazamos payloads con strings excesivos antes de hacer
+	-- gsub/concat/lookup (DoS asimétrico — cliente paga poco, server paga O(n)).
+	if not NetGuards.validate(data, {
+		itemId         = M.Id,
+		category       = M.Category,
+		weaponCategory = M.Category,
+		weaponId       = M.Id,
+	}) or data.itemId == "" then
 		Network.Shop.Response.SendTo({ success = false, message = "Payload inválido." }, player)
 		return
 	end
@@ -339,12 +329,13 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 end
 
 local function _onEquipItem(data: { category: string, itemId: string, weaponCategory: string, weaponId: string }, player: Player): ()
-	-- Validación 0: tipos del payload.
-	if type(data) ~= "table"
-		or type(data.category) ~= "string"
-		or type(data.itemId) ~= "string"
-		or data.itemId == ""
-	then
+	-- Validación 0: tipos + caps de longitud (ver _onBuyItem).
+	if not NetGuards.validate(data, {
+		category       = M.Category,
+		itemId         = M.Id,
+		weaponCategory = M.Category,
+		weaponId       = M.Id,
+	}) or data.itemId == "" then
 		Network.Shop.Response.SendTo({ success = false, message = "Payload inválido." }, player)
 		return
 	end
@@ -450,7 +441,7 @@ ShopService.__index = ShopService
 	  dataService  — instancia de DataService (inyección de dependencia,
 	                 evita require circular entre servicios)
 ]]
-function ShopService:Start(dataService: any): ()
+function ShopService:Start(dataService: DataService): ()
 	if _started then
 		return
 	end

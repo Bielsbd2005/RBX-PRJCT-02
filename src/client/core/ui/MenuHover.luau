@@ -7,10 +7,14 @@ local Packages = ReplicatedStorage:WaitForChild("Packages")
 
 local Janitor = require(Packages.janitor) :: any
 
-local STROKE_DEFAULT = Color3.fromRGB(38, 38, 38)
-local STROKE_HOVER   = Color3.fromRGB(255, 255, 255)
+local UITheme = require(script.Parent.UITheme)
 
-local TWEEN_INFO = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+-- Constantes locales delegan a UITheme — single source of truth para colores
+-- de stroke y la curva de hover. Antes este archivo tenía duplicación con
+-- UITheme.NavTweenInfo (mismo 0.15 Quad Out).
+local STROKE_DEFAULT = UITheme.StrokeDefault
+local STROKE_HOVER   = UITheme.StrokeHover
+local TWEEN_INFO     = UITheme.NavTweenInfo
 
 local MenuHover = {}
 MenuHover.__index = MenuHover
@@ -62,8 +66,7 @@ function MenuHover.new(menuGui: ScreenGui)
 	local self = setmetatable({}, MenuHover)
 	self._janitor = Janitor.new()
 
-	local bottomContainer = menuGui:FindFirstChild("BottomContainer")
-	local footer = bottomContainer and bottomContainer:FindFirstChild("Footer")
+	local bottom = menuGui:FindFirstChild("Bottom")
 
 	local function bindContainer(container: Instance)
 		for _, descendant in ipairs(container:GetDescendants()) do
@@ -73,8 +76,8 @@ function MenuHover.new(menuGui: ScreenGui)
 		end
 	end
 
-	if footer then
-		bindContainer(footer)
+	if bottom then
+		bindContainer(bottom)
 	end
 
 	return self

@@ -19,7 +19,10 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 
-local Network = require(Shared.networking.Network)
+local Network   = require(Shared.networking.Network)
+local NetGuards = require(Shared.networking.NetGuards)
+
+local M = NetGuards.MAX
 
 local LockerService = {}
 LockerService.__index = LockerService
@@ -31,9 +34,8 @@ local RATE_LIMIT_SECONDS = 0.05
 local _lastSeenAt: { [number]: number } = {}
 
 local function _onMarkItemSeen(data: { category: string, itemId: string }, player: Player): ()
-	if type(data) ~= "table"
-		or type(data.category) ~= "string" or data.category == ""
-		or type(data.itemId) ~= "string" or data.itemId == ""
+	if not NetGuards.validate(data, { category = M.Category, itemId = M.Id })
+		or data.category == "" or data.itemId == ""
 	then
 		return
 	end

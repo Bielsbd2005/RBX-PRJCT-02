@@ -4,7 +4,9 @@
 	Catálogo de tareas diarias. De momento la lista es estática (las mismas
 	tres tareas todos los días); el progreso por jugador se refresca cada día.
 
-	Mapea 1:1 con los slots de UI: Menu.LeftContainer.TaskFrame.Task1/Task2/Task3.
+	Mapea 1:1 con los slots de UI:
+	  MatchHud.LeftContainer.TaskFrame.Task1/Task2/Task3
+	  Workspace.Lobby.Daily.Board.SurfaceGui.Container.TaskFrame.Task1/Task2/Task3
 	Cada slot consume:
 		.Title         — TextLabel
 		.Value         — TextLabel "<progress>/<objective>"

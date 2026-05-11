@@ -1,10 +1,12 @@
 --!strict
 --[[
 	DailyTasksFeature  (Client)
-	Pinta los slots Task1/Task2/Task3 en DOS sitios — el menú y el HUD de
-	partida — usando la misma fuente de datos:
-	  Menu.LeftContainer.TaskFrame.Task1/2/3       (lobby)
-	  MatchHud.LeftContainer.TaskFrame.Task1/2/3   (durante la partida)
+	Pinta los slots Task1/Task2/Task3 en dos sitios:
+	  MatchHud.LeftContainer.TaskFrame.Task<N>             (HUD de partida)
+	  Workspace.Lobby.Daily.Board.SurfaceGui.Container.Task<N>  (board del lobby)
+	El SurfaceGui está en Workspace, pero los cambios desde un LocalScript no
+	replican: cada cliente pinta el board con sus propias tasks, así cada
+	jugador ve su progreso local.
 	Reactivo a cambios en DataController.DailyTasks (replicado desde server).
 
 	Per-slot UI esperada:
@@ -17,6 +19,7 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
 
 local Client = script.Parent.Parent
 local Shared = ReplicatedStorage:WaitForChild("Shared")
@@ -115,51 +118,60 @@ local function _paintSlot(slot: Slot, def: any, progress: number, claimed: boole
 	end
 end
 
--- Resuelve los 3 slots dentro de un GUI dado (Menu o MatchHud).
-local function _resolveSlotsForGui(rootGui: Instance?, label: string): { Slot }
+-- Resuelve los 3 slots dentro de un nodo que contiene Task1/Task2/Task3.
+local function _resolveSlotsFromTaskFrame(taskFrame: Instance?, label: string): { Slot }
 	local result: { Slot } = {}
-	if not rootGui then return result end
-
-	local leftContainer = rootGui:FindFirstChild("LeftContainer")
-	local taskFrame = leftContainer and leftContainer:FindFirstChild("TaskFrame")
-	if not taskFrame then
-		-- No es un error: el HUD puede no tener TaskFrame; el Menu suele tenerlo.
-		-- Solo avisamos si el GUI existe pero le falta el contenedor.
-		warn(string.format("[DailyTasks] No se encontró %s.LeftContainer.TaskFrame", label))
-		return result
-	end
+	if not taskFrame then return result end
 
 	for _, def in DailyTasks.Tasks do
 		local slot = _resolveSlot(taskFrame, def.Id)
 		if slot then
 			table.insert(result, slot)
 		else
-			warn(string.format("[DailyTasks] Slot %s no encontrado en %s.TaskFrame", def.Id, label))
+			warn(string.format("[DailyTasks] Slot %s no encontrado en %s", def.Id, label))
 		end
 	end
 	return result
 end
 
-local DailyTasksFeature = {}
-
-function DailyTasksFeature.start(menuController: any): any
-	local janitor = Janitor.new()
-
-	local menuGui = menuController:getGui()
+local function _resolveMatchHudTaskFrame(): Instance?
 	local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui")
 	local matchHudGui = playerGui:FindFirstChild("MatchHud")
+	if not matchHudGui then return nil end
+	local leftContainer = matchHudGui:FindFirstChild("LeftContainer")
+	return leftContainer and leftContainer:FindFirstChild("TaskFrame")
+end
 
-	-- Slots de ambos sitios. Cada lista es independiente; si uno falta, el
-	-- otro sigue funcionando.
-	local menuSlots = _resolveSlotsForGui(menuGui, "Menu")
-	local hudSlots = _resolveSlotsForGui(matchHudGui, "MatchHud")
+-- Workspace.Lobby.Daily.Board.SurfaceGui.Container.TaskFrame — board físico del lobby.
+-- Las mutaciones desde el cliente no replican, así cada jugador pinta sus
+-- propios datos sobre el mismo SurfaceGui sin afectar al resto.
+local function _resolveLobbyBoardTaskFrame(): Instance?
+	local lobby = Workspace:FindFirstChild("Lobby")
+	local daily = lobby and lobby:FindFirstChild("Daily")
+	local board = daily and daily:FindFirstChild("Board")
+	local surfaceGui = board and board:FindFirstChild("SurfaceGui")
+	local container = surfaceGui and surfaceGui:FindFirstChild("Container")
+	return container and container:FindFirstChild("TaskFrame")
+end
 
-	if #menuSlots == 0 and #hudSlots == 0 then
+local DailyTasksFeature = {}
+
+function DailyTasksFeature.start(_menuController: any): any
+	local janitor = Janitor.new()
+
+	local hudSlots = _resolveSlotsFromTaskFrame(
+		_resolveMatchHudTaskFrame(),
+		"MatchHud.LeftContainer.TaskFrame"
+	)
+	local lobbySlots = _resolveSlotsFromTaskFrame(
+		_resolveLobbyBoardTaskFrame(),
+		"Workspace.Lobby.Daily.Board.SurfaceGui.Container.TaskFrame"
+	)
+
+	if #hudSlots == 0 and #lobbySlots == 0 then
 		return janitor
 	end
 
-	-- Suscripción reactiva a DataController.DailyTasks. Cada cambio del
-	-- replicador (incremento de progreso o reset diario) re-pinta ambos sets.
 	local function _paintAll(slots: { Slot }, progress: any, claimed: any)
 		for _, slot in slots do
 			local def = DailyTasks.GetById(slot.id)
@@ -175,8 +187,8 @@ function DailyTasksFeature.start(menuController: any): any
 		local state = Fusion.peek(DataController.DailyTasks)
 		local progress = state and state.Progress or {}
 		local claimed = state and state.Claimed or {}
-		_paintAll(menuSlots, progress, claimed)
 		_paintAll(hudSlots, progress, claimed)
+		_paintAll(lobbySlots, progress, claimed)
 	end
 
 	DataController:WhenReady():andThen(function()

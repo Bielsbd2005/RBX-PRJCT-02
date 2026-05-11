@@ -30,10 +30,49 @@ local Janitor         = require(Packages.janitor)        :: any
 local Promise         = require(Packages["typed-promise"]) :: any
 local Sift            = require(Packages.sift)           :: any
 
-local DataTemplate = require(Shared.constants.DataTemplate) :: any
+local DataTemplateModule = require(Shared.constants.DataTemplate)
+local DataTemplate = DataTemplateModule :: any
 local LevelingConfig = require(Shared.constants.LevelingConfig)
 local DataMigrations = require(script.Parent.DataMigrations)
-type PlayerProfile = typeof(DataTemplate)
+
+-- Type re-export del schema canónico — los consumers leen esto en lugar de
+-- DataTemplate directo para evitar acoplarse a la representación interna.
+export type PlayerProfile = DataTemplateModule.PlayerProfile
+
+-- Profile/Replica: shape mínima que los consumers usan. Los packages externos
+-- (ProfileStore, ReplicaService) tienen muchos más métodos; aquí solo se
+-- expone lo que la API pública garantiza.
+export type Profile = { Data: PlayerProfile }
+export type Replica = { Data: PlayerProfile }
+
+-- Entry de un BatchUpdate. `value` o `delta` (no ambos) deben venir set.
+export type BatchUpdateEntry = {
+	path: { string },
+	value: any?,
+	delta: number?,
+}
+
+-- Interface pública de DataService. Los services consumidores tipan
+-- `_dataService: DataServiceModule` en lugar de `:: any`. Cualquier typo
+-- (e.g. :GteProfile) ahora falla en compile-time.
+export type DataServiceModule = {
+	Start: (self: DataServiceModule) -> (),
+	GetProfile: (self: DataServiceModule, player: Player) -> Profile?,
+	GetReplica: (self: DataServiceModule, player: Player) -> Replica?,
+	SetValue: (self: DataServiceModule, player: Player, path: { string }, value: any) -> boolean,
+	Increment: (self: DataServiceModule, player: Player, path: { string }, amount: number) -> (boolean, number),
+	IncrementWeaponKills: (self: DataServiceModule, player: Player, weaponCategory: string, weaponKey: string, amount: number?) -> (boolean, number),
+	AddXP: (self: DataServiceModule, player: Player, amount: number) -> (boolean, number, number, number),
+	BatchUpdate: (self: DataServiceModule, player: Player, updates: { BatchUpdateEntry }) -> boolean,
+	IsReceiptProcessed: (self: DataServiceModule, player: Player, purchaseId: string) -> boolean,
+	MarkReceiptProcessed: (self: DataServiceModule, player: Player, purchaseId: string) -> boolean,
+	GrantItem: (self: DataServiceModule, player: Player, category: string, itemId: string, source: string) -> boolean,
+	MarkItemSeen: (self: DataServiceModule, player: Player, category: string, itemId: string) -> boolean,
+	ResetProfile: (self: DataServiceModule, player: Player) -> boolean,
+	Destroy: (self: DataServiceModule) -> (),
+	ProfileLoaded: RBXScriptSignal,
+	ProfileUnloading: RBXScriptSignal,
+}
 
 local AUTO_SAVE_INTERVAL_SECONDS = 30
 local MAX_SAVES_PER_CYCLE = 8

@@ -14,6 +14,7 @@ local Network = require(Shared.networking.Network)
 local DataController = require(Client.core.data.DataController)
 local PanelController = require(Client.core.ui.PanelController)
 local BlurController = require(Client.core.ui.BlurController)
+local CameraFovEffect = require(Client.core.ui.CameraFovEffect)
 
 local BLUR_KEY = "Settings"
 
@@ -155,7 +156,7 @@ function SettingsFeature.start(menuController: any): any
 	local player = Players.LocalPlayer
 	local playerGui = player:WaitForChild("PlayerGui")
 	local menuGui = menuController:getGui()
-	local settingsBtn = menuGui.UpperContainer:WaitForChild("settings") :: GuiButton
+	local settingsBtn = menuGui.Top:WaitForChild("settings") :: GuiButton
 
 	local uiGui = playerGui:WaitForChild("UserInterface") :: ScreenGui
 	local frame = uiGui:WaitForChild("Settings") :: Frame
@@ -170,12 +171,17 @@ function SettingsFeature.start(menuController: any): any
 	local vibSetting = settingsList:WaitForChild("Vibration")
 	local aimSetting = settingsList:WaitForChild("AimAssist")
 
+	local fovEffect = CameraFovEffect.new()
+	janitor:Add(fovEffect, "Destroy")
+
 	local panel = PanelController.new(menuController, frame, settingsBtn, closeBtn, {
 		onOpen = function()
 			BlurController.acquire(BLUR_KEY)
+			fovEffect:expand()
 		end,
 		onClose = function()
 			BlurController.release(BLUR_KEY)
+			fovEffect:restore()
 		end,
 	})
 	janitor:Add(panel, "Destroy")

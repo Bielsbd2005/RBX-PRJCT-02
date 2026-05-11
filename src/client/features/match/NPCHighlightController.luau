@@ -93,16 +93,38 @@ end
 
 local NPCHighlightController = {}
 
+-- D2: tracking explícito de listeners. Sin esto, cada Start() (e.g. hot
+-- reload de MatchFeature) duplicaba conexiones DescendantAdded y Team.
+local _moduleConns: { RBXScriptConnection } = {}
+local _started = false
+
 function NPCHighlightController:Start()
+	if _started then
+		return
+	end
+	_started = true
+
 	_scanExisting()
 
 	-- DescendantAdded: filtro IsA("Model") + name match descarta de inmediato
 	-- la mayoría de adds (BaseParts, attachments, partículas, beams, etc.).
-	workspace.DescendantAdded:Connect(_onDescendantAdded)
+	table.insert(_moduleConns, workspace.DescendantAdded:Connect(_onDescendantAdded))
 
 	-- Cuando el jugador local cambia de equipo, re-evaluar todos los bots
 	-- (sustituye el rescan periódico que corría cada 2s).
-	localPlayer:GetPropertyChangedSignal("Team"):Connect(_onTeamChanged)
+	table.insert(_moduleConns, localPlayer:GetPropertyChangedSignal("Team"):Connect(_onTeamChanged))
+end
+
+function NPCHighlightController:Stop()
+	if not _started then
+		return
+	end
+	_started = false
+
+	for _, conn in _moduleConns do
+		conn:Disconnect()
+	end
+	table.clear(_moduleConns)
 end
 
 return NPCHighlightController

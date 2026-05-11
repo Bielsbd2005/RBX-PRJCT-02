@@ -92,7 +92,7 @@ function CasesFeature.start(menuController: any): any
 	local player = Players.LocalPlayer
 	local playerGui = player:WaitForChild("PlayerGui")
 	local menuGui = menuController:getGui()
-	local casesButton = UIUtils.findFooterButton(menuGui, "cases")
+	local casesButton = UIUtils.findBottomButton(menuGui, "Cases")
 	local casesGui = playerGui:FindFirstChild("Cases")
 
 	if not casesButton or not casesGui or not casesGui:IsA("ScreenGui") then
@@ -155,6 +155,11 @@ function CasesFeature.start(menuController: any): any
 	local unboxingQueue: { { caseId: string, skinId: string, weaponCategory: string, weaponId: string, isPity: boolean, newPity: number } } = {}
 	local isUnboxing = false
 	local unboxingGeneration = 0
+	-- D3: BindableEvent en vuelo del unboxing actual. Si el panel se cierra
+	-- mid-unbox, onClose lo Fire con sentinel "cancel" para desbloquear el
+	-- :Wait() — sin esto, la task quedaba colgada para siempre y las
+	-- conexiones Collect/Equip nunca se desconectaban (leak por unbox cancelado).
+	local pendingUnboxActionEvent: BindableEvent? = nil
 	local function isGenerationCancelled(gen: number): boolean
 		return unboxingGeneration ~= gen
 	end
@@ -540,6 +545,7 @@ function CasesFeature.start(menuController: any): any
 				end
 
 				local actionEvent = Instance.new("BindableEvent")
+				pendingUnboxActionEvent = actionEvent
 				local actionChosen: string? = nil
 				local collectConnection = collectButton.Activated:Connect(function()
 					if actionChosen ~= nil then return end
@@ -556,6 +562,15 @@ function CasesFeature.start(menuController: any): any
 				collectConnection:Disconnect()
 				equipConnection:Disconnect()
 				actionEvent:Destroy()
+				pendingUnboxActionEvent = nil
+
+				-- onClose dispara "cancel" para desbloquear el :Wait sin que
+				-- el usuario haya elegido. El generation check abajo cierra
+				-- el flujo limpiamente.
+				if chosenAction == "cancel" or isGenerationCancelled(gen) then
+					if cleanup then pcall(cleanup) end
+					return
+				end
 
 				if chosenAction == "equip" then
 					Network.Shop.EquipItem.Send({
@@ -634,6 +649,14 @@ function CasesFeature.start(menuController: any): any
 			-- Cancela cualquier unboxing en curso al cerrar la GUI
 			unboxingGeneration += 1
 			table.clear(unboxingQueue)
+			-- D3: si la task de unboxing está bloqueada en :Wait(), liberarla
+			-- con un sentinel — sin esto la task queda zombie con conexiones
+			-- Collect/Equip vivas hasta el unload del feature.
+			local pending = pendingUnboxActionEvent
+			if pending then
+				pendingUnboxActionEvent = nil
+				pcall(function() pending:Fire("cancel") end)
+			end
 		end,
 	})
 	janitor:Add(panel, "Destroy")

@@ -4,7 +4,6 @@ local Players = game:GetService("Players")
 local MarketplaceService = game:GetService("MarketplaceService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
-local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Client = script.Parent.Parent
@@ -18,16 +17,12 @@ local NavTabController = require(Client.core.ui.NavTabController)
 local UIUtils = require(Client.core.ui.UIUtils)
 local UITheme = require(Client.core.ui.UITheme)
 local BlurController = require(Client.core.ui.BlurController)
+local CameraFovEffect = require(Client.core.ui.CameraFovEffect)
 local StoreProducts = require(Shared.constants.StoreProducts)
 
 local BLUR_KEY = "Store"
 
 local StoreFeature = {}
-
-local FOV_OPEN_TWEEN_INFO = TweenInfo.new(0.28, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-local FOV_CLOSE_TWEEN_INFO = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
-local FOV_EXPAND_DELTA = 10
-local FOV_MAX = 90
 
 type StoreProductDefinition = StoreProducts.StoreProductDefinition
 
@@ -36,7 +31,7 @@ function StoreFeature.start(menuController: any): any
 	local player = Players.LocalPlayer
 	local playerGui = player:WaitForChild("PlayerGui")
 	local menuGui = menuController:getGui()
-	local storeButton = UIUtils.findFooterButton(menuGui, "store")
+	local storeButton = UIUtils.findBottomButton(menuGui, "Store")
 	local storeGui = playerGui:FindFirstChild("Store")
 
 	if not storeButton or not storeGui or not storeGui:IsA("ScreenGui") then
@@ -55,8 +50,8 @@ function StoreFeature.start(menuController: any): any
 
 	local cashContainer = container:WaitForChild("Cash") :: GuiObject
 
-	local activeFovTween: Tween? = nil
-	local savedFov: number? = nil
+	local fovEffect = CameraFovEffect.new()
+	janitor:Add(fovEffect, "Destroy")
 	local canUseHoverAnimations = UserInputService.MouseEnabled and not UserInputService.TouchEnabled
 
 	local function applyProductToButton(button: GuiButton, product: StoreProductDefinition)
@@ -172,40 +167,6 @@ function StoreFeature.start(menuController: any): any
 		navTabController:setActive(activeNavTab)
 	end
 
-	-- ── FOV camera ────────────────────────────────────────────
-	local function tweenCameraFov(targetFov: number, tweenInfo: TweenInfo)
-		local camera = Workspace.CurrentCamera
-		if not camera then
-			return
-		end
-
-		if activeFovTween then
-			activeFovTween:Cancel()
-			activeFovTween = nil
-		end
-
-		local tween = TweenService:Create(camera, tweenInfo, {
-			FieldOfView = targetFov,
-		})
-		activeFovTween = tween
-		tween.Completed:Connect(function()
-			if activeFovTween == tween then
-				activeFovTween = nil
-			end
-		end)
-		tween:Play()
-	end
-
-	local function restoreFov()
-		local fov = savedFov
-		if fov == nil then
-			return
-		end
-
-		tweenCameraFov(fov, FOV_CLOSE_TWEEN_INFO)
-		savedFov = nil
-	end
-
 	-- ── Panel controller ──────────────────────────────────────
 	local panel = FeaturePanelController.new({
 		menuController = menuController,
@@ -214,26 +175,14 @@ function StoreFeature.start(menuController: any): any
 		closeButton = closeButton,
 		onOpen = function()
 			BlurController.acquire(BLUR_KEY)
-			local camera = Workspace.CurrentCamera
-			local fov = if camera then camera.FieldOfView else nil
-			if camera and fov and savedFov == nil then
-				savedFov = fov
-				tweenCameraFov(math.min(fov + FOV_EXPAND_DELTA, FOV_MAX), FOV_OPEN_TWEEN_INFO)
-			end
+			fovEffect:expand()
 		end,
 		onClose = function()
 			BlurController.release(BLUR_KEY)
-			restoreFov()
+			fovEffect:restore()
 		end,
 	})
 	janitor:Add(panel, "Destroy")
-
-	janitor:Add(function()
-		if activeFovTween then
-			activeFovTween:Cancel()
-			activeFovTween = nil
-		end
-	end, true)
 
 	return janitor
 end

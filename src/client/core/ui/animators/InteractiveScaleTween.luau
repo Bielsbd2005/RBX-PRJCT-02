@@ -2,8 +2,13 @@
 
 local TweenService = game:GetService("TweenService")
 
-local HOVER_TWEEN_INFO = TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-local CLICK_TWEEN_INFO = TweenInfo.new(0.07, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local UITheme = require(script.Parent.Parent.UITheme)
+
+-- Hover/Click TweenInfos delegan a UITheme (eran duplicados literales de
+-- UITheme.HoverTweenInfo / UITheme.ClickTweenInfo). Si el caller pasa su
+-- propio tweenInfo en BindOptions, ese override sigue funcionando.
+local HOVER_TWEEN_INFO = UITheme.HoverTweenInfo
+local CLICK_TWEEN_INFO = UITheme.ClickTweenInfo
 
 export type BindOptions = {
 	defaultScale: number?,
@@ -13,10 +18,15 @@ export type BindOptions = {
 	clickTweenInfo: TweenInfo?,
 	enableHover: boolean?,
 	scaleTarget: GuiObject?,
+	-- Si se define, en hover el botón sube `liftOffset` px (Position Y -= liftOffset)
+	-- y vuelve a su posición original al salir del hover. Solo aplica al `button`
+	-- (no al scaleTarget) — el lift y el scale viven en nodos distintos.
+	liftOffset: number?,
 }
 
 type TweenState = {
 	activeTweens: { [GuiObject]: Tween },
+	activePositionTweens: { [GuiObject]: Tween },
 }
 
 local InteractiveScaleTween = {}
@@ -52,6 +62,23 @@ local function tweenScale(state: TweenState, target: GuiObject, toScale: number,
 	tween:Play()
 end
 
+local function tweenPosition(state: TweenState, target: GuiObject, toPosition: UDim2, tweenInfo: TweenInfo)
+	local current = state.activePositionTweens[target]
+	if current then
+		current:Cancel()
+		state.activePositionTweens[target] = nil
+	end
+
+	local tween = TweenService:Create(target, tweenInfo, { Position = toPosition })
+	state.activePositionTweens[target] = tween
+	tween.Completed:Connect(function()
+		if state.activePositionTweens[target] == tween then
+			state.activePositionTweens[target] = nil
+		end
+	end)
+	tween:Play()
+end
+
 function InteractiveScaleTween.bindButton(button: GuiButton, janitor: any, options: BindOptions?): ()
 	local defaultScale = if options and options.defaultScale then options.defaultScale else 1
 	local hoverScale = if options and options.hoverScale then options.hoverScale else 1.04
@@ -60,11 +87,22 @@ function InteractiveScaleTween.bindButton(button: GuiButton, janitor: any, optio
 	local clickTweenInfo = if options and options.clickTweenInfo then options.clickTweenInfo else CLICK_TWEEN_INFO
 	local enableHover = if options and options.enableHover ~= nil then options.enableHover else true
 	local scaleTarget = if options and options.scaleTarget then options.scaleTarget else button
+	local liftOffset = if options and options.liftOffset then options.liftOffset else 0
 
 	local state: TweenState = {
 		activeTweens = {},
+		activePositionTweens = {},
 	}
 	local hovered = false
+
+	-- Cachear la Position default antes del primer hover para poder restaurarla
+	-- al MouseLeave. Si otro animador la cambia más adelante el lift seguirá
+	-- volviendo a este valor — el caso esperado es Position estática asignada
+	-- en Studio.
+	local defaultPosition = button.Position
+	local liftedPosition = if liftOffset ~= 0
+		then UDim2.new(defaultPosition.X.Scale, defaultPosition.X.Offset, defaultPosition.Y.Scale, defaultPosition.Y.Offset - liftOffset)
+		else defaultPosition
 
 	tweenScale(state, scaleTarget, defaultScale, hoverTweenInfo)
 
@@ -72,11 +110,17 @@ function InteractiveScaleTween.bindButton(button: GuiButton, janitor: any, optio
 		janitor:Add(button.MouseEnter:Connect(function()
 			hovered = true
 			tweenScale(state, scaleTarget, hoverScale, hoverTweenInfo)
+			if liftOffset ~= 0 then
+				tweenPosition(state, button, liftedPosition, hoverTweenInfo)
+			end
 		end), "Disconnect")
 
 		janitor:Add(button.MouseLeave:Connect(function()
 			hovered = false
 			tweenScale(state, scaleTarget, defaultScale, hoverTweenInfo)
+			if liftOffset ~= 0 then
+				tweenPosition(state, button, defaultPosition, hoverTweenInfo)
+			end
 		end), "Disconnect")
 	end
 
@@ -94,6 +138,10 @@ function InteractiveScaleTween.bindButton(button: GuiButton, janitor: any, optio
 			tween:Cancel()
 		end
 		table.clear(state.activeTweens)
+		for _, tween in state.activePositionTweens do
+			tween:Cancel()
+		end
+		table.clear(state.activePositionTweens)
 	end, true)
 end
 

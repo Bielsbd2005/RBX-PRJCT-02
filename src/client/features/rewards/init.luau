@@ -14,6 +14,7 @@ local Network = require(Shared.networking.Network)
 local DataController = require(Client.core.data.DataController)
 local PanelController = require(Client.core.ui.PanelController)
 local BlurController = require(Client.core.ui.BlurController)
+local CameraFovEffect = require(Client.core.ui.CameraFovEffect)
 
 local BLUR_KEY = "Rewards"
 
@@ -102,7 +103,7 @@ function RewardsFeature.start(menuController: any): any
 	local playerGui = player:WaitForChild("PlayerGui")
 	local menuGui = menuController:getGui()
 
-	local menuBtn = menuGui:WaitForChild("UpperContainer"):WaitForChild("rewards") :: GuiButton
+	local menuBtn = menuGui:WaitForChild("Top"):WaitForChild("rewards") :: GuiButton
 
 	local uiGui = playerGui:WaitForChild("UserInterface") :: ScreenGui
 	local frame = uiGui:WaitForChild("Rewards") :: Frame
@@ -116,12 +117,17 @@ function RewardsFeature.start(menuController: any): any
 	local claimCodeBtn = claimCodesNode:WaitForChild("Claim") :: ImageButton
 	local codeTextBox = claimCodesNode:WaitForChild("TextBox") :: TextBox
 
+	local fovEffect = CameraFovEffect.new()
+	janitor:Add(fovEffect, "Destroy")
+
 	local panel = PanelController.new(menuController, frame, menuBtn, closeBtn, {
 		onOpen = function()
 			BlurController.acquire(BLUR_KEY)
+			fovEffect:expand()
 		end,
 		onClose = function()
 			BlurController.release(BLUR_KEY)
+			fovEffect:restore()
 		end,
 	})
 	janitor:Add(panel, "Destroy")

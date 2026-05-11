@@ -2,18 +2,13 @@
 
 local UIUtils = {}
 
-function UIUtils.findFooterButton(menuGui: ScreenGui, buttonName: string): GuiButton?
-	local bottomContainer = menuGui:FindFirstChild("BottomContainer")
-	if not bottomContainer then
+function UIUtils.findBottomButton(menuGui: ScreenGui, buttonName: string): GuiButton?
+	local bottom = menuGui:FindFirstChild("Bottom")
+	if not bottom then
 		return nil
 	end
 
-	local footer = bottomContainer:FindFirstChild("Footer")
-	if not footer then
-		return nil
-	end
-
-	local target = footer:FindFirstChild(buttonName)
+	local target = bottom:FindFirstChild(buttonName)
 	if target and target:IsA("GuiButton") then
 		return target
 	end

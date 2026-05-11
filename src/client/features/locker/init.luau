@@ -16,6 +16,7 @@ local Janitor = require(Packages.janitor) :: any
 local Fusion = require(Packages.fusion) :: any
 local LockerCameraController = require(Client.core.camera.LockerCameraController)
 local CameraLock = require(Client.core.camera.CameraLock)
+local LightingPresetController = require(Client.core.lighting.LightingPresetController)
 local LockerCatalog = require(script:WaitForChild("LockerCatalog"))
 local LockerGrid = require(script:WaitForChild("LockerGrid"))
 local WeaponPreviewController = require(script:WaitForChild("WeaponPreviewController"))
@@ -145,8 +146,18 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local mainIndicator = lockerWeaponsFolder:FindFirstChild("MainIndicator")
 	local specialIndicator = lockerWeaponsFolder:FindFirstChild("SpecialIndicator")
 
-	local lockerBtn = menuGui.BottomContainer.Footer:WaitForChild("locker") :: GuiButton
+	local lockerBtn = menuGui.Bottom:WaitForChild("Locker") :: GuiButton
 	local lockerGui = playerGui:WaitForChild("LockerGui") :: ScreenGui
+
+	-- Registrar el LockerGui como panel del MenuController para que
+	-- hasOpenPanel() lo cuente — afecta a MapVote (auto-hide cuando hay panel
+	-- encima) y al estado MUFFLED de la música del lobby. El Locker oculta
+	-- el menú via :hide()/:show() pero antes no se registraba: la música caía
+	-- en STOP creyendo que estábamos en match.
+	menuController:registerPanel(lockerGui)
+	janitor:Add(function()
+		menuController:unregisterPanel(lockerGui)
+	end, true)
 	local root = lockerGui:WaitForChild("Root")
 	local nav = root:WaitForChild("Nav2")
 	local navTemplate = nav:WaitForChild("Template") :: GuiButton
@@ -1547,6 +1558,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		cameraController:apply()
 		lockerGui.Enabled = true
 		setMenuVisibleInstant(false)
+		LightingPresetController.apply("Locker")
 	end
 
 	local function closeLockerGui()
@@ -1562,6 +1574,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		restoreLockerSceneState()
 		setWrapsMode(false)
 		lockerGui.Enabled = false
+		LightingPresetController.apply("Lobby")
 	end
 
 	janitor:Add(lockerBtn.MouseButton1Click:Connect(openLockerGui), "Disconnect")
@@ -1594,6 +1607,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		if lockerGui.Enabled == false and isOpen then
 			isOpen = false
 			restoreLockerSceneState()
+			LightingPresetController.apply("Lobby")
 		end
 	end), "Disconnect")
 

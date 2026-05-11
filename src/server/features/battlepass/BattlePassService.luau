@@ -27,14 +27,44 @@ local MarketplaceService = game:GetService("MarketplaceService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
-local Network = require(Shared.networking.Network)
+local Network   = require(Shared.networking.Network)
+local NetGuards = require(Shared.networking.NetGuards)
 local BattlePassConfig = require(Shared.constants.BattlePassConfig)
+
+local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
+type DataService = DataServiceMod.DataServiceModule
+
+local M = NetGuards.MAX
 
 local MAX_LEVELUP_ITERATIONS = 200 -- guard contra loops infinitos por XP descomunal
 
+-- Rate-limit anti-spam para todos los handlers C→S. Aunque la lógica interna
+-- es idempotente (claim del mismo tier dos veces no duplica recompensa), un
+-- atacante puede spammear ClaimTier para forzar trabajo costoso (lookup de
+-- season + GetProfile + BatchUpdate por cada request) o para pedir prompts
+-- Robux en bucle. 0.3s por acción es generoso para UX y suficiente anti-spam.
+local ACTION_COOLDOWN = 0.3
+local _cooldowns: { [number]: { [string]: number } } = {}
+
+local function _checkActionCooldown(player: Player, action: string): boolean
+	local playerCooldowns = _cooldowns[player.UserId]
+	if not playerCooldowns then
+		playerCooldowns = {}
+		_cooldowns[player.UserId] = playerCooldowns
+	end
+
+	local last = playerCooldowns[action] or 0
+	if time() - last < ACTION_COOLDOWN then
+		return false
+	end
+
+	playerCooldowns[action] = time()
+	return true
+end
+
 local BattlePassService = {}
 
-local _dataService: any = nil
+local _dataService: DataService = nil :: any
 local _started = false
 
 -- ────────────────────────────────────────────────────────────
@@ -505,7 +535,7 @@ end
 -- LIFECYCLE
 -- ────────────────────────────────────────────────────────────
 
-function BattlePassService:Start(dataService: any): ()
+function BattlePassService:Start(dataService: DataService): ()
 	if _started then return end
 	_started = true
 	_dataService = dataService
@@ -531,17 +561,27 @@ function BattlePassService:Start(dataService: any): ()
 		end)
 	end)
 
-	-- Listeners de red
+	-- Cleanup de cooldowns.
+	Players.PlayerRemoving:Connect(function(player: Player)
+		_cooldowns[player.UserId] = nil
+	end)
+
+	-- Listeners de red. Cada handler aplica:
+	--   1) NetGuards: cap longitud de strings (ByteNet no impone maxLength).
+	--   2) ACTION_COOLDOWN: rate-limit por player+acción (anti-spam).
 	Network.BattlePass.ClaimTier.Listen(function(data: any, player: Player)
-		if type(data) ~= "table" then return end
+		if not NetGuards.validate(data, { track = M.Track }) then return end
+		if not _checkActionCooldown(player, "claim") then return end
 		BattlePassService:ClaimTier(player, data.tier, data.track)
 	end)
 
 	Network.BattlePass.BuyPremium.Listen(function(_data: any, player: Player)
+		if not _checkActionCooldown(player, "premium") then return end
 		BattlePassService:PromptPremium(player)
 	end)
 
 	Network.BattlePass.BuySkip.Listen(function(_data: any, player: Player)
+		if not _checkActionCooldown(player, "skip") then return end
 		BattlePassService:PromptSkip(player)
 	end)
 end

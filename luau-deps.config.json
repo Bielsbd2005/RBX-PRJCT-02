@@ -1,0 +1,10 @@
+{
+  "rootAliases": {
+    "serverRoot": "ServerScriptService.Server",
+    "Server": "ServerScriptService.Server",
+    "clientRoot": "StarterPlayer.StarterPlayerScripts.Client",
+    "Client": "StarterPlayer.StarterPlayerScripts.Client",
+    "Shared": "ReplicatedStorage.Shared",
+    "Packages": "ReplicatedStorage.Packages"
+  }
+}

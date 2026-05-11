@@ -10,9 +10,8 @@ local HIDE_INFO = TweenInfo.new(HIDE_TIME, Enum.EasingStyle.Quart, Enum.EasingDi
 local SHOW_INFO = TweenInfo.new(SHOW_TIME, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 
 local OFFSCREEN = {
-	UpperContainer = UDim2.new(0, 0, -0.25, 0),
-	LeftContainer = UDim2.new(-0.25, 0, 0, 0),
-	BottomContainer = UDim2.new(0, 0, 1.25, 0),
+	Top = UDim2.new(0, 0, -0.25, 0),
+	Bottom = UDim2.new(0, 0, 1.25, 0),
 }
 
 type ContainerData = {
@@ -32,7 +31,7 @@ function MenuAnimator.new(menuGui: ScreenGui)
 	self._scheduledThreads = {} :: { thread }
 	self._generation = 0
 
-	local priority = { "UpperContainer", "LeftContainer", "BottomContainer" }
+	local priority = { "Top", "Bottom" }
 
 	for _, name in ipairs(priority) do
 		local container = menuGui:FindFirstChild(name)

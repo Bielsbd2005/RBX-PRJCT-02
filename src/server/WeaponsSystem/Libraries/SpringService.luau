@@ -34,8 +34,31 @@ local LinearSpring = {} do
 		self.g = goal
 	end
 
-	function LinearSpring:canSleep()
-		return false -- @todo add sleeping
+	-- Sprint 3 (Sleep implementation):
+	-- Antes devolvía siempre `false` → el RenderStepped global iteraba TODOS
+	-- los springs aunque ya hubieran alcanzado el goal. UIs con muchos
+	-- elementos animados pagaban update perpetuo (post-anim).
+	--
+	-- Ahora: spring duerme cuando ‖p - g‖² + ‖v‖² < SLEEP_THRESHOLD².
+	-- El loop sale del state, evitando trabajo redundante en el resto del frame.
+	-- Threshold pequeño (1e-4) elige seguridad sobre eagerness — un nuevo
+	-- :Target() despierta el spring inmediatamente al re-insertarse en springStates.
+	local SLEEP_THRESHOLD_SQ = 1e-4 * 1e-4
+
+	function LinearSpring:canSleep(p)
+		if not p then return false end
+		local g = self.g
+		local v = self.v
+		local sumSq = 0
+		for i = 1, #v do
+			local dp = p[i] - g[i]
+			local dv = v[i]
+			sumSq += dp * dp + dv * dv
+			if sumSq >= SLEEP_THRESHOLD_SQ then
+				return false
+			end
+		end
+		return true
 	end
 
 	function LinearSpring:step(dt, p0)
@@ -230,7 +253,10 @@ steppedEvent:Connect(function(dt)
 			local oldIntermediate = meta.toIntermediate(oldValue)
 			local newIntermediate = spring:step(dt, oldIntermediate)
 
-			if spring:canSleep() then
+			-- Sprint 3: pasar `newIntermediate` (posición canónica post-step) a
+			-- canSleep. Sin esta posición el spring no podía evaluar si la
+			-- distancia al goal era suficientemente pequeña para dormir.
+			if spring:canSleep(newIntermediate) then
 				state[name] = nil
 			end
 

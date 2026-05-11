@@ -196,6 +196,24 @@ WeaponsSystem._hotbarFallbackTarget = nil
 
 WeaponsSystem.CurrentWeaponChanged = Instance.new("BindableEvent")
 
+-- Sprint 4 (P2 #21): hook + signal para desacoplar la lógica de rewards del
+-- WeaponsSystem. Antes _defaultDamageCallback hardcodeaba calls a 5 services
+-- (DataService, MatchService, DailyTasksService, BattlePassService,
+-- CashBonusSystem) — el módulo era inreusable en otro modo.
+--
+-- killHook (sincronía):
+--   Bootstrap registra una función que recibe (killer, victimHumanoid,
+--   weaponName, wasHeadshot) y devuelve { coinAmount, streakAfterKill,
+--   xpGained } para el payload del PlayerEliminated remote (UI del killer
+--   los necesita en el mismo frame). Si nadie registra el hook, valores
+--   default (xpGained = 150/100, streakAfterKill = 1, coinAmount = nil).
+--
+-- Killed.Event (asíncrono):
+--   Se Fire después de aplicar damage + flush assists. Bootstrap conecta
+--   listeners para DailyTasks/BattlePass/etc. WeaponsSystem solo notifica.
+WeaponsSystem.Killed = Instance.new("BindableEvent")
+WeaponsSystem.killHook = (nil :: any) :: ((killer: Player, victimHum: Humanoid, weaponName: string, wasHeadshot: boolean) -> { coinAmount: number?, streakAfterKill: number?, xpGained: number? })?
+
 -- Inyección explícita de servicios. Llama a esto desde ServerBootstrap antes
 -- de WeaponsSystem.setup() para evitar el autoload por nombre y para tests.
 -- Las claves son opcionales: solo se sobrescriben las pasadas.
@@ -916,54 +934,38 @@ local function _defaultDamageCallback(system, target, amount, damageType, dealer
 			if dealerPlayer then
 				local eliminatedEvent = WeaponsSystem.remoteEvents["PlayerEliminated"]
 				if eliminatedEvent then
-					local xpGained = wasHeadshot and 150 or 100
 					local targetHrp = targetCharacter:FindFirstChild("HumanoidRootPart")
 					local victimPos = targetHrp and targetHrp.Position or targetCharacter:GetPivot().Position
 
-					local streakAfterKill = 1
-					if MatchService and MatchService.GetPlayerKillStreak then
-						local ok, currentStreak = pcall(function()
-							return MatchService:GetPlayerKillStreak(dealerPlayer)
-						end)
-						if ok and typeof(currentStreak) == "number" then
-							streakAfterKill = math.max(1, currentStreak + 1)
+					-- Hook sincrono — el bootstrap puede registrarlo para
+					-- computar streak/cash/xp. Si nadie registra, defaults.
+					local rewards: { coinAmount: number?, streakAfterKill: number?, xpGained: number? }? = nil
+					local hook = WeaponsSystem.killHook
+					if hook then
+						local ok, result = pcall(hook, dealerPlayer, target, weaponName, wasHeadshot)
+						if ok and type(result) == "table" then
+							rewards = result
+						else
+							warn("WeaponsSystem: killHook error: " .. tostring(result))
 						end
 					end
 
-					local coinAmount = nil
-					if CashBonusSystem and CashBonusSystem.CalculateKillReward then
-						local reward = CashBonusSystem.CalculateKillReward(wasHeadshot, streakAfterKill)
-						if reward then
-							coinAmount = reward.coinAmount
-							if DataService and DataService.Increment and reward.totalCash > 0 then
-								local okIncrement = DataService:Increment(dealerPlayer, { "Stats", "Cash" }, reward.totalCash)
-								if not okIncrement then
-									warn("WeaponsSystem: Failed to grant kill cash to " .. dealerPlayer.Name)
-								end
-							end
-						end
-					end
+					local xpGained = (rewards and rewards.xpGained) or (wasHeadshot and 150 or 100)
+					local streakAfterKill = (rewards and rewards.streakAfterKill) or 1
+					local coinAmount = rewards and rewards.coinAmount
 
 					eliminatedEvent:FireClient(dealerPlayer, victimName, xpGained, wasHeadshot, victimPos, coinAmount, streakAfterKill)
-
-					-- Daily task: Eliminations
-					if DailyTasksService and DailyTasksService.OnKill then
-						pcall(function()
-							DailyTasksService:OnKill(dealerPlayer)
-						end)
-					end
-
-					-- Battle Pass XP por kill
-					if BattlePassService and BattlePassService.OnKill then
-						pcall(function()
-							BattlePassService:OnKill(dealerPlayer)
-						end)
-					end
 				end
 			end
 
 			-- Flush assists immediately (cancels the deferred Died listener)
 			flushAssists(target, dealerPlayer)
+
+			-- Sprint 4: notificar listeners async (DailyTasks, BattlePass, etc.).
+			-- Antes hardcoded inline arriba; ahora bootstrap conecta los services.
+			if dealerPlayer then
+				WeaponsSystem.Killed:Fire(dealerPlayer, target, weaponName, wasHeadshot)
+			end
 		end
 	end
 end

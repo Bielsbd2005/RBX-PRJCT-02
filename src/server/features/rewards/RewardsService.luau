@@ -2,11 +2,13 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local HttpService = game:GetService("HttpService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 
-local Network = require(Shared.networking.Network)
+local Network   = require(Shared.networking.Network)
+local NetGuards = require(Shared.networking.NetGuards)
+
+local M = NetGuards.MAX
 
 local RewardsService = {}
 RewardsService.__index = RewardsService
@@ -31,11 +33,6 @@ local CODE_REWARDS: { [string]: number } = {
 local MAX_CODE_REWARD = 10000
 
 local _cooldowns: { [number]: { [string]: number } } = {}
-local _sessionTokens: { [number]: string } = {}
-
-local function _newSessionToken(player: Player): string
-	return HttpService:GenerateGUID(false) .. ":" .. tostring(player.UserId)
-end
 
 local function _currentGroupId(): number
 	if game.CreatorType == Enum.CreatorType.Group then
@@ -87,6 +84,25 @@ local function _send(player: Player, success: boolean, message: string, claimTyp
 	}, player)
 end
 
+--[[
+	Like&Join: source of truth = `Rewards.GroupClaimed` (boolean persistente).
+
+	Flujo simplificado (C4):
+	  1. Cooldown.
+	  2. Profile cargado.
+	  3. Ya reclamado (GroupClaimed=true) → reject.
+	  4. _isPlayerInGameGroup → false: mensaje instructivo, sin grabar nada.
+	  5. _isPlayerInGameGroup → true: BatchUpdate atómico + GroupClaimed=true.
+
+	Por qué se eliminó la state machine LikeState/LikePendingSessionToken:
+	  - Bypassable por reconnects (sessionTokens rotaban en cada Start).
+	  - Roblox no expone Like-state vía API → no podíamos verificar el "Like";
+	    la state machine era teatro (delay-tactic, no enforcement).
+	  - Idempotencia + validación de grupo son suficientes anti-exploit.
+
+	Los fields legacy LikeState/LikePendingSessionToken siguen en DataTemplate
+	por compat de profiles antiguos pero ya no se leen ni escriben aquí.
+]]
 local function _onClaimLikeJoin(_: {}, player: Player): ()
 	if not _checkCooldown(player, "likeJoin") then
 		_send(player, false, "Demasiadas peticiones.", "LikeJoin", 0)
@@ -99,48 +115,20 @@ local function _onClaimLikeJoin(_: {}, player: Player): ()
 		return
 	end
 
-	if not _isPlayerInGameGroup(player) then
-		_send(player, false, "Debes unirte al grupo para reclamar esta recompensa.", "LikeJoin", 0)
-		return
-	end
-
-	local rewards = profile.Data.Rewards
-	if rewards.LikeState == "Claimed" then
+	if profile.Data.Rewards.GroupClaimed == true then
 		_send(player, false, "Like&Join ya reclamado.", "LikeJoin", 0)
 		return
 	end
 
-	local currentSessionToken = _sessionTokens[player.UserId] or ""
-	if rewards.LikeState == "None" then
-		local ok = _dataService:BatchUpdate(player, {
-			{ path = { "Rewards", "LikeState" }, value = "PendingRelog" },
-			{ path = { "Rewards", "LikePendingSessionToken" }, value = currentSessionToken },
-		})
-
-		if ok then
-			_send(player, false, "Primero sal del juego, dale a Like y vuelve a entrar para reclamar.", "LikeJoin", 0)
-		else
-			_send(player, false, "No se pudo preparar el claim.", "LikeJoin", 0)
-		end
-		return
-	end
-
-	if rewards.LikeState == "PendingRelog" and rewards.LikePendingSessionToken == currentSessionToken then
-		_send(player, false, "Aun en la misma sesion. Debes salir y volver a entrar.", "LikeJoin", 0)
-		return
-	end
-
-	if rewards.LikeState ~= "PendingRelog" then
-		_send(player, false, "Estado de claim invalido. Intentalo de nuevo.", "LikeJoin", 0)
+	if not _isPlayerInGameGroup(player) then
+		_send(player, false, "Debes unirte al grupo para reclamar esta recompensa.", "LikeJoin", 0)
 		return
 	end
 
 	local rewardCash = CLAIM_CASH_REWARD.LikeJoin
 	local ok = _dataService:BatchUpdate(player, {
 		{ path = { "Stats", "Cash" }, delta = rewardCash },
-		{ path = { "Rewards", "LikeState" }, value = "Claimed" },
 		{ path = { "Rewards", "GroupClaimed" }, value = true },
-		{ path = { "Rewards", "LikePendingSessionToken" }, value = "" },
 	})
 
 	if ok then
@@ -181,6 +169,13 @@ local function _onClaimNotifications(_: {}, player: Player): ()
 end
 
 local function _onRedeemCode(data: { code: string }, player: Player): ()
+	-- Cap longitud antes de gsub/upper para evitar DoS asimétrico (cliente
+	-- podría mandar un code de cientos de KB que el server procesaría O(n)).
+	if not NetGuards.validate(data, { code = M.Code }) then
+		_send(player, false, "Codigo invalido.", "Code", 0)
+		return
+	end
+
 	if not _checkCooldown(player, "code") then
 		_send(player, false, "Demasiadas peticiones.", "Code", 0)
 		return
@@ -192,7 +187,7 @@ local function _onRedeemCode(data: { code: string }, player: Player): ()
 		return
 	end
 
-	local normalizedCode = string.upper(_trim(data.code or ""))
+	local normalizedCode = string.upper(_trim(data.code))
 	if normalizedCode == "" then
 		_send(player, false, "Debes escribir un codigo.", "Code", 0)
 		return
@@ -235,18 +230,9 @@ function RewardsService:Start(dataService: any): ()
 	_started = true
 	_dataService = dataService
 
-	Players.PlayerAdded:Connect(function(player: Player)
-		_sessionTokens[player.UserId] = _newSessionToken(player)
-	end)
-
 	Players.PlayerRemoving:Connect(function(player: Player)
 		_cooldowns[player.UserId] = nil
-		_sessionTokens[player.UserId] = nil
 	end)
-
-	for _, player in Players:GetPlayers() do
-		_sessionTokens[player.UserId] = _newSessionToken(player)
-	end
 
 	Network.Rewards.ClaimLikeJoin.Listen(_onClaimLikeJoin)
 	Network.Rewards.ClaimNotifications.Listen(_onClaimNotifications)

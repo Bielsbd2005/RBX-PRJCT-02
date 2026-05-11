@@ -23,10 +23,17 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 
+local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
+type DataService = DataServiceMod.DataServiceModule
+
 local Network = require(Shared.networking.Network)
+local NetGuards = require(Shared.networking.NetGuards)
+local InventoryRepository = require(Shared.data.InventoryRepository)
 local CasesConfig = require(Shared.constants.CasesConfig)
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
 local StoreProducts = require(Shared.constants.StoreProducts)
+
+local M = NetGuards.MAX
 
 local BattlePassService = require(script.Parent.Parent.battlepass.BattlePassService)
 
@@ -43,9 +50,14 @@ type OwnedWeaponEntry = {
 -- ESTADO
 -- ────────────────────────────────────────────────────────────
 
-local _dataService: any = nil
+local _dataService: DataService = nil :: any
 local _started = false
 local _cooldowns: { [number]: { [string]: number } } = {}
+-- Lock per-player para evitar TOCTOU en runningPity/Cash con summons
+-- concurrentes. ByteNet podría despachar handlers en coroutines paralelas;
+-- el lock garantiza que solo una transacción de cajas esté en vuelo por
+-- jugador hasta que el BatchUpdate termine.
+local _processingByUserId: { [number]: boolean } = {}
 
 local CasesService = {}
 
@@ -96,34 +108,11 @@ local function weightedRandomPick(drops: { CasesConfig.CaseDrop }, useLucky: boo
 	return drops[#drops]
 end
 
+-- Delega en InventoryRepository (single source of truth para schema de inventario).
+-- El cast es seguro porque OwnedWeapon de la repo y OwnedWeaponEntry local
+-- son estructuralmente idénticos.
 local function collectOwnedWeapons(profileData: any): { OwnedWeaponEntry }
-	local ownedWeapons = {} :: { OwnedWeaponEntry }
-	local inventory = profileData.Inventory
-	if type(inventory) ~= "table" then
-		return {
-			{ category = "Main", weaponId = "Default" },
-		}
-	end
-
-	for _, categoryName in { "Main", "Special" } do
-		local categoryInventory = inventory[categoryName]
-		if type(categoryInventory) == "table" then
-			for weaponId, isOwned in categoryInventory do
-				if isOwned == true and type(weaponId) == "string" and weaponId ~= "" then
-					table.insert(ownedWeapons, {
-						category = categoryName :: WeaponCategory,
-						weaponId = weaponId,
-					})
-				end
-			end
-		end
-	end
-
-	if #ownedWeapons == 0 then
-		table.insert(ownedWeapons, { category = "Main", weaponId = "Default" })
-	end
-
-	return ownedWeapons
+	return InventoryRepository.listOwnedWeapons(profileData) :: any
 end
 
 local function pickRandomOwnedWeapon(ownedWeapons: { OwnedWeaponEntry }): OwnedWeaponEntry
@@ -135,17 +124,7 @@ end
 -- SUMMON HANDLER
 -- ────────────────────────────────────────────────────────────
 
-local function onSummon(data: { caseId: string, multi: boolean }, player: Player): ()
-	-- Validación de payload (defensiva sobre ByteNet).
-	if type(data) ~= "table" or type(data.caseId) ~= "string" or data.caseId == "" then
-		Network.Cases.Response.SendTo({ success = false, message = "Payload inválido." }, player)
-		return
-	end
-
-	if not checkCooldown(player, "summon") then
-		Network.Cases.Response.SendTo({ success = false, message = "Demasiadas peticiones." }, player)
-		return
-	end
+local function _processSummon(data: { caseId: string, multi: boolean }, player: Player): ()
 
 	local caseId = data.caseId
 	local caseDef = CasesConfig.Cases[caseId]
@@ -284,6 +263,36 @@ local function onSummon(data: { caseId: string, multi: boolean }, player: Player
 	end
 end
 
+-- Wrapper con lock + cooldown + cleanup ante errores.
+-- ByteNet handlers pueden ser concurrentes; el lock garantiza que solo una
+-- transacción esté en vuelo por jugador (TOCTOU-safe para runningPity).
+local function onSummon(data: { caseId: string, multi: boolean }, player: Player): ()
+	-- Validación de payload + cap de longitud (ByteNet no impone maxLength).
+	if not NetGuards.validate(data, { caseId = M.Id }) or data.caseId == "" then
+		Network.Cases.Response.SendTo({ success = false, message = "Payload inválido." }, player)
+		return
+	end
+
+	if not checkCooldown(player, "summon") then
+		Network.Cases.Response.SendTo({ success = false, message = "Demasiadas peticiones." }, player)
+		return
+	end
+
+	if _processingByUserId[player.UserId] then
+		Network.Cases.Response.SendTo({ success = false, message = "Procesando caja anterior." }, player)
+		return
+	end
+	_processingByUserId[player.UserId] = true
+
+	local ok, err = pcall(_processSummon, data, player)
+	_processingByUserId[player.UserId] = nil
+
+	if not ok then
+		warn("[CasesService] onSummon error:", err)
+		Network.Cases.Response.SendTo({ success = false, message = "Error inesperado." }, player)
+	end
+end
+
 -- ────────────────────────────────────────────────────────────
 -- LUCKY BOOST (DevProduct)
 -- ────────────────────────────────────────────────────────────
@@ -344,7 +353,7 @@ end
 -- LIFECYCLE
 -- ────────────────────────────────────────────────────────────
 
-function CasesService:Start(dataService: any): ()
+function CasesService:Start(dataService: DataService): ()
 	if _started then return end
 	_started = true
 	_dataService = dataService
@@ -396,9 +405,10 @@ function CasesService:Start(dataService: any): ()
 		return Enum.ProductPurchaseDecision.NotProcessedYet
 	end
 
-	-- Limpiar cooldowns al salir
+	-- Limpiar cooldowns + lock al salir
 	Players.PlayerRemoving:Connect(function(player: Player)
 		_cooldowns[player.UserId] = nil
+		_processingByUserId[player.UserId] = nil
 	end)
 end
 

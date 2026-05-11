@@ -8,6 +8,7 @@ local WeaponsSystemFolder = script.Parent.Parent
 local AnimationsFolder = WeaponsSystemFolder:WaitForChild("Assets"):WaitForChild("Animations")
 local AutoAimSystem = require(script.Parent:WaitForChild("AutoAimSystem"))
 local WeaponsNetwork = require(script.Parent:WaitForChild("WeaponsNetwork"))
+local PewEffect = require(script.Parent:WaitForChild("PewEffect"))
 
 -- DEBUG: forzar comportamiento de autoshoot de movil tambien en PC.
 -- Poner en false para volver al gating normal por plataforma.
@@ -388,6 +389,13 @@ function BaseWeapon:onFired(firingPlayer, fireInfo, fromNetwork)
 		end
 
 		self:simulateFire(firingPlayer, fireInfo)
+		-- Solo el LocalPlayer ve su propio PewEffect — para otros jugadores
+		-- y NPCs no se reproduce. (firingPlayer==LocalPlayer + fromNetwork
+		-- ya retornó arriba, así que aquí esa combinación es: tu disparo
+		-- local fresh.)
+		if firingPlayer == Players.LocalPlayer then
+			PewEffect.play(self.instance)
+		end
 	else
 		if self:useAmmo(1) <= 0 then
 			return
@@ -405,27 +413,66 @@ function BaseWeapon:getConfigValue(valueName, defaultValue)
 	end
 end
 
+--[[
+	Sprint 3: pool de Sound clones por weapon × soundName (round-robin de 5).
+
+	Antes cada disparo hacía Sound:Clone() + coroutine wait(TimeLength) +
+	Destroy. Para una arma automática (ShotCooldown 0.05-0.1s) eso era 10-20
+	clones/seg/jugador, todos con el mismo overhead de Instance.new + GC.
+
+	Patrón idéntico al de DamageBillboardHandler.luau:177-196 — round-robin
+	pre-clonado de 5 items. Si firerate × duración > 5 overlaps, el sound más
+	viejo se reinicia (ya inaudible). Las clones viven en el mismo parent
+	que el template y se destruyen junto con el Tool al unequip.
+]]
+
+local POOL_PER_SOUND = 5
+
+function BaseWeapon:_getPooledSound(soundName: string): Sound?
+	if not self.soundPools then
+		self.soundPools = {}
+	end
+
+	local pool = self.soundPools[soundName]
+	if pool then
+		local sound = pool.items[pool.idx]
+		pool.idx = (pool.idx % #pool.items) + 1
+		return sound
+	end
+
+	local template = self.sounds[soundName]
+	if not template then
+		template = self.instance:FindFirstChild(soundName, true)
+		self.sounds[soundName] = template
+	end
+	if not template then
+		return nil
+	end
+
+	pool = { items = {} :: { Sound }, idx = 1 }
+	for i = 1, POOL_PER_SOUND do
+		local clone = (template :: Sound):Clone()
+		clone.Parent = (template :: Sound).Parent
+		pool.items[i] = clone
+	end
+	self.soundPools[soundName] = pool
+
+	pool.idx = 2 -- siguiente acquire devolverá items[2]
+	return pool.items[1]
+end
+
 function BaseWeapon:tryPlaySound(soundName, playbackSpeedRange)
 	playbackSpeedRange = playbackSpeedRange or 0
 
-	local soundTemplate = self.sounds[soundName]
-	if not soundTemplate then
-		soundTemplate = self.instance:FindFirstChild(soundName, true)
-		self.sounds[soundName] = soundTemplate
-	end
-
-	if not soundTemplate then
+	local sound = self:_getPooledSound(soundName)
+	if not sound then
 		return
 	end
 
-	local sound = soundTemplate:Clone()
+	-- Si la sound estaba sonando (overlap con firerate alto), reiniciar.
+	sound.TimePosition = 0
 	sound.PlaybackSpeed = sound.PlaybackSpeed + localRandom:NextNumber(-playbackSpeedRange * 0.5, playbackSpeedRange * 0.5)
-	sound.Parent = soundTemplate.Parent
 	sound:Play()
-	coroutine.wrap(function()
-		wait(sound.TimeLength / sound.PlaybackSpeed)
-		sound:Destroy()
-	end)()
 
 	return sound
 end
@@ -466,6 +513,18 @@ function BaseWeapon:onDestroyed()
 	-- Clear sound template cache (don't destroy — they live in the instance tree)
 	if self.sounds then
 		table.clear(self.sounds)
+	end
+
+	-- Sprint 3: destroy pooled sound clones. Si el Tool aún existe (unequip
+	-- sin destruir), el pool sigue vivo bajo el Parent del template — sin
+	-- limpieza acumularían N×POOL_PER_SOUND clones por re-equip.
+	if self.soundPools then
+		for _, pool in self.soundPools do
+			for _, sound in pool.items do
+				pcall(function() sound:Destroy() end)
+			end
+		end
+		table.clear(self.soundPools)
 	end
 end
 

@@ -288,44 +288,53 @@ end
 -- ── Modulo publico ──────────────────────────────────────────────
 local HealthBillboardController = {}
 
+-- Conexiones a nivel de módulo (PlayerAdded, DescendantAdded, etc.) y
+-- watchers efímeros de bots aún sin Humanoid. Sin tracking explícito, los
+-- listeners se duplicaban en cada Start() (re-entrar al menú de match) y
+-- nunca se limpiaban en Stop().
+local _moduleConns: { RBXScriptConnection } = {}
+local _pendingWatchers: { () -> () } = {}
+local _started = false
+
+local function _wireCharacterAddedFor(player: Player)
+	table.insert(_moduleConns, player.CharacterAdded:Connect(function(character)
+		-- Esperar a que Head y Humanoid existan.
+		if not character:FindFirstChild("Head") then
+			character:WaitForChild("Head", 5)
+		end
+		if not character:FindFirstChildOfClass("Humanoid") then
+			character:WaitForChild("Humanoid", 5)
+		end
+		tryTrack(character)
+	end))
+end
+
 function HealthBillboardController:Start()
+	if _started then
+		return
+	end
+	_started = true
+
 	-- Jugadores existentes
 	for _, player in Players:GetPlayers() do
 		if player.Character then
 			tryTrack(player.Character)
 		end
-		player.CharacterAdded:Connect(function(character)
-			-- Esperar a que Head y Humanoid existan
-			if not character:FindFirstChild("Head") then
-				character:WaitForChild("Head", 5)
-			end
-			if not character:FindFirstChildOfClass("Humanoid") then
-				character:WaitForChild("Humanoid", 5)
-			end
-			tryTrack(character)
-		end)
+		_wireCharacterAddedFor(player)
 	end
 
 	-- Nuevos jugadores
-	Players.PlayerAdded:Connect(function(player)
-		player.CharacterAdded:Connect(function(character)
-			if not character:FindFirstChild("Head") then
-				character:WaitForChild("Head", 5)
-			end
-			if not character:FindFirstChildOfClass("Humanoid") then
-				character:WaitForChild("Humanoid", 5)
-			end
-			tryTrack(character)
-		end)
+	table.insert(_moduleConns, Players.PlayerAdded:Connect(function(player)
+		_wireCharacterAddedFor(player)
 		if player.Character then
 			tryTrack(player.Character)
 		end
-	end)
+	end))
 
 	-- Bots que aparecen como descendants de workspace (típicamente en
 	-- mapRoot/Bots, dentro de ActiveMap). El filtro IsA("Model") descarta de
 	-- inmediato la enorme mayoría de adds (partes, attachments, partículas).
-	workspace.DescendantAdded:Connect(function(instance)
+	table.insert(_moduleConns, workspace.DescendantAdded:Connect(function(instance)
 		if not instance:IsA("Model") then return end
 		-- Heurística rápida: si el padre es un Model, NO es un character.
 		if instance.Parent and instance.Parent:IsA("Model") then return end
@@ -347,6 +356,7 @@ function HealthBillboardController:Start()
 			if ancestryConn then ancestryConn:Disconnect() ancestryConn = nil end
 			if childConn then childConn:Disconnect() childConn = nil end
 		end
+		table.insert(_pendingWatchers, cleanup)
 		ancestryConn = instance.AncestryChanged:Connect(function()
 			if not instance:IsDescendantOf(game) then cleanup() end
 		end)
@@ -359,14 +369,14 @@ function HealthBillboardController:Start()
 			end
 		end)
 		task.delay(5, function() if not resolved then cleanup() end end)
-	end)
+	end))
 
 	-- Cuando cambia el equipo local, refrescar todos
-	localPlayer:GetPropertyChangedSignal("Team"):Connect(function()
+	table.insert(_moduleConns, localPlayer:GetPropertyChangedSignal("Team"):Connect(function()
 		for _, state in tracked do
 			updateState(state)
 		end
-	end)
+	end))
 
 	-- Scan inicial: una sola pasada al arrancar, costo aceptable porque no se
 	-- repite (lo que era caro era el rescan periódico cada 2s, eliminado).
@@ -374,6 +384,30 @@ function HealthBillboardController:Start()
 		if desc:IsA("Model") then
 			tryTrack(desc)
 		end
+	end
+end
+
+-- Limpia listeners de módulo, watchers pendientes y todos los billboards
+-- activos. Permite que MatchFeature vuelva a hacer Start() después sin que
+-- los listeners se dupliquen (D1 — connection leak por reload del feature).
+function HealthBillboardController:Stop()
+	if not _started then
+		return
+	end
+	_started = false
+
+	for _, conn in _moduleConns do
+		conn:Disconnect()
+	end
+	table.clear(_moduleConns)
+
+	for _, cleanup in _pendingWatchers do
+		pcall(cleanup)
+	end
+	table.clear(_pendingWatchers)
+
+	for model, _ in tracked do
+		untrackModel(model)
 	end
 end
 

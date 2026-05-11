@@ -33,6 +33,7 @@ local KillCamController = require(script.KillCamController)
 local NPCHighlightController = require(script.NPCHighlightController)
 local HealthBillboardController = require(script.HealthBillboardController)
 local MapVoteView = require(script.MapVoteView)
+local LightingPresetController = require(Client.core.lighting.LightingPresetController)
 
 
 local MatchFeature = {}
@@ -41,6 +42,14 @@ local LOCAL_VOTE_COOLDOWN = 0.12
 local JOIN_CONFIRM_TIMEOUT = 8
 local RESPAWN_REQUEST_TIMEOUT = 5
 local RETURN_TO_MENU_TIMEOUT = 8
+
+-- Mapeo mapName (GameConfig.Maps) → preset de LightingPresets. Mapas sin
+-- entrada caen al preset genérico "Match".
+local MAP_TO_LIGHTING_PRESET: { [string]: string } = {
+	Canyon = "Match_Canyon",
+	Factory = "Match_Factory",
+	Rooftops = "Match_Rooftops",
+}
 
 -- ── Helpers de resolución de GUI ──
 
@@ -121,13 +130,43 @@ function MatchFeature.start(menuController: any): any
 		return janitor
 	end
 
+	-- D4: flag de vida del feature. Cualquier task.delay scheduled en
+	-- handlers de red o callbacks chequea `featureAlive` antes de mutar
+	-- estado — sin esto, una task disparada tras destroy() tocaría objetos
+	-- (matchMenu, hud, iris) ya destruidos por el janitor.
+	local featureAlive = true
+	janitor:Add(function()
+		featureAlive = false
+	end, true)
+
 	-- ── Inicializar sub-módulos ──────────────────────────────
 	MatchState.reset()
+
+	-- Lighting: aplicar preset Lobby al arrancar (sin tween) y alternar
+	-- entre Match/Lobby según la fase. El Locker se controla en su feature.
+	-- `activeMapName` lo actualiza el listener de MapLoadState más abajo;
+	-- al entrar a una fase de match se mapea a un preset específico del mapa
+	-- (MAP_TO_LIGHTING_PRESET) o se cae al genérico "Match".
+	local activeMapName = ""
+	LightingPresetController.applyImmediate("Lobby")
+	MatchState.setOnPhaseChanged(function(_prev, nextPhase)
+		if nextPhase == "Lobby" or nextPhase == "ReturningToMenu" then
+			LightingPresetController.apply("Lobby")
+		else
+			-- Joining/InMatch/Dying/ShowingResults usan el look del mapa actual.
+			local presetName = MAP_TO_LIGHTING_PRESET[activeMapName] or "Match"
+			LightingPresetController.apply(presetName)
+		end
+	end)
+	janitor:Add(function()
+		MatchState.setOnPhaseChanged(nil)
+	end, true)
+
 	local matchMenu = MatchMenu.new(menuController, playerGui, menuGui, MatchState.shouldKeepMenuHidden)
 
 	local playButton = matchMenu:getPlayButton()
 	if not playButton then
-		warn("[MatchFeature] No se encontro Menu.BottomContainer.Footer.Play")
+		warn("[MatchFeature] No se encontro Menu.Bottom.Play")
 		return janitor
 	end
 
@@ -150,6 +189,13 @@ function MatchFeature.start(menuController: any): any
 
 	NPCHighlightController:Start()
 	HealthBillboardController:Start()
+	-- D1+D2: registrar Stop() en el janitor para que un teardown del feature
+	-- (e.g. hot reload) desconecte los PlayerAdded/DescendantAdded/Team
+	-- listeners que de otra forma se duplicarían en el siguiente Start().
+	janitor:Add(function()
+		NPCHighlightController:Stop()
+		HealthBillboardController:Stop()
+	end, true)
 	if deathView then
 		janitor:Add(deathView, "Destroy")
 	end
@@ -183,12 +229,10 @@ function MatchFeature.start(menuController: any): any
 	local respawnRequestSent = false
 
 	playButton.Active = false
-	playButton.AutoButtonColor = false
 
 	local function setPlayEnabled(enabled: boolean)
 		playEnabled = enabled
 		playButton.Active = enabled
-		playButton.AutoButtonColor = enabled
 	end
 
 	local function tryJoinMatchFromLobby()
@@ -202,6 +246,7 @@ function MatchFeature.start(menuController: any): any
 			if MatchState.getPhase() == "Joining" then
 				Network.Match.RequestJoinMatch.Send({})
 				task.delay(JOIN_CONFIRM_TIMEOUT, function()
+					if not featureAlive then return end
 					if MatchState.getPhase() ~= "Joining" then
 						return
 					end
@@ -228,6 +273,7 @@ function MatchFeature.start(menuController: any): any
 			respawnRequestSent = true
 			Network.Match.RequestRespawn.Send({})
 			task.delay(RESPAWN_REQUEST_TIMEOUT, function()
+				if not featureAlive then return end
 				if respawnRequestSent and MatchState.getPhase() ~= "ReturningToMenu" then
 					respawnRequestSent = false
 				end
@@ -241,6 +287,7 @@ function MatchFeature.start(menuController: any): any
 				if MatchState.getPhase() == "ReturningToMenu" then
 					Network.Match.RequestReturnToMenu.Send({})
 					task.delay(RETURN_TO_MENU_TIMEOUT, function()
+						if not featureAlive then return end
 						if MatchState.getPhase() == "ReturningToMenu" then
 							MatchState.setPhase("Lobby")
 							matchMenu:forceShow()
@@ -301,6 +348,9 @@ function MatchFeature.start(menuController: any): any
 		playEnabled: boolean,
 		mapName: string,
 	})
+		-- Capturado para que el handler de fase pueda elegir el preset de
+		-- iluminación específico del mapa (ver MAP_TO_LIGHTING_PRESET arriba).
+		activeMapName = data.mapName
 		if isVoting then
 			matchMenu:setPhaseLabel("VOTING")
 		else
@@ -362,6 +412,7 @@ function MatchFeature.start(menuController: any): any
 			MatchCamera.forceLobbyWithRetries(guard)
 			for _, delaySec in { 0, 0.1, 0.2, 0.5 } do
 				task.delay(delaySec, function()
+					if not featureAlive then return end
 					if guard() then
 						MatchWeapons.clearGui(playerGui)
 					end

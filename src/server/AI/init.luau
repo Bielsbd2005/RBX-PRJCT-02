@@ -1,10 +1,12 @@
 --!strict
 
+local Debris = game:GetService("Debris")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
 local Players = game:GetService("Players")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
+local GameConfig = require(Shared:WaitForChild("GameConfig"))
 local KillEffectsRegistry = require(Shared.locker.killEffects.KillEffectsRegistry)
 local BotNames = require(Shared.constants.BotNames)
 
@@ -78,6 +80,77 @@ local _recycledByTeam: { A: { { identity: BotIdentity, fakeUserId: number } }, B
 local _identityByFakeUserId: { [number]: BotIdentity } = {}
 local _teamByFakeUserId: { [number]: string } = {}
 local _botFakeUserIdByName: { [string]: number } = {}
+
+-- ────────────────────────────────────────────────────────────────
+-- ALIVE TARGETS CACHE (compartido entre todos los BotAI)
+--
+-- Mantiene una lista de Models vivos (chars de jugadores reales + bots)
+-- que pueden ser objetivos de los bots. Se actualiza vía signals
+-- (PlayerAdded/CharacterAdded/Died/AncestryChanged) — sin polling.
+--
+-- Antes cada bot iteraba `workspace:GetChildren()` + `mapRoot/Bots:GetChildren()`
+-- en cada tick (60Hz Heartbeat × 8 bots = ~5760 raycasts/seg en peor caso).
+-- Esta cache global elimina la iteración masiva — el bot solo pasea sobre
+-- los ~16 candidatos relevantes.
+-- ────────────────────────────────────────────────────────────────
+
+local _aliveTargets: { Model } = {}
+local _aliveTargetIndex: { [Model]: number } = {}
+
+local function _addAliveTarget(model: Model)
+	if _aliveTargetIndex[model] then return end
+	table.insert(_aliveTargets, model)
+	_aliveTargetIndex[model] = #_aliveTargets
+end
+
+local function _removeAliveTarget(model: Model)
+	local idx = _aliveTargetIndex[model]
+	if not idx then return end
+	_aliveTargetIndex[model] = nil
+	-- Swap-remove O(1): mover el último al hueco si no es el mismo.
+	local last = #_aliveTargets
+	if idx ~= last then
+		local moved = _aliveTargets[last]
+		_aliveTargets[idx] = moved
+		_aliveTargetIndex[moved] = idx
+	end
+	_aliveTargets[last] = nil
+end
+
+local function _wirePlayerAliveTracking(player: Player)
+	local function onChar(char: Model)
+		_addAliveTarget(char)
+		-- El char puede ser destruido sin Died (respawn instantáneo, kick, etc.).
+		-- AncestryChanged lo cubre todos los casos sin duplicar lógica.
+		char.AncestryChanged:Connect(function(_, parent)
+			if parent == nil then
+				_removeAliveTarget(char)
+			end
+		end)
+		local hum = char:WaitForChild("Humanoid", 5)
+		if hum and hum:IsA("Humanoid") then
+			(hum :: Humanoid).Died:Connect(function()
+				_removeAliveTarget(char)
+			end)
+		end
+	end
+
+	if player.Character then
+		onChar(player.Character)
+	end
+	player.CharacterAdded:Connect(onChar)
+end
+
+Players.PlayerAdded:Connect(_wirePlayerAliveTracking)
+for _, p in Players:GetPlayers() do
+	_wirePlayerAliveTracking(p)
+end
+
+Players.PlayerRemoving:Connect(function(player)
+	if player.Character then
+		_removeAliveTarget(player.Character)
+	end
+end)
 
 local function _assignIdentity(): (BotIdentity, number)
 	_fakeUserIdCounter -= 1
@@ -229,6 +302,7 @@ local function _removeBotByName(botName: string)
 	end
 
 	bot.ai:Stop()
+	_removeAliveTarget(bot.model)
 
 	if bot.deathConnection then
 		bot.deathConnection:Disconnect()
@@ -344,6 +418,19 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 	humanoid.Health = humanoid.MaxHealth
 	humanoid.BreakJointsOnDeath = false
 
+	-- Misma inmunidad al spawn que los jugadores (ver MatchService). ForceField
+	-- nativo, no se rompe al disparar, expira por tiempo vía Debris.
+	if GameConfig.SpawnProtectionDuration > 0 then
+		local forceField = Instance.new("ForceField")
+		forceField.Visible = true
+		forceField.Parent = botModel
+		Debris:AddItem(forceField, GameConfig.SpawnProtectionDuration)
+	end
+
+	-- Registrar el bot en la cache global de targets para que otros bots
+	-- puedan elegirlo sin iterar workspace.
+	_addAliveTarget(botModel)
+
 	local record: BotRecord = {
 		model = botModel,
 		humanoid = humanoid,
@@ -353,13 +440,18 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 		ai = botAIInstance,
 	}
 
-	botAIInstance:Start(mapRoot)
+	botAIInstance:Start(mapRoot, _aliveTargets)
 
 	record.deathConnection = humanoid.Died:Connect(function()
 		if record.deathReported then
 			return
 		end
 		record.deathReported = true
+
+		-- 0. Quitar el bot de la cache de targets vivos antes que cualquier
+		-- otra cosa: si _onBotDied o el ragdoll yieldan, los demás bots no
+		-- deben seguir apuntando al cadáver.
+		_removeAliveTarget(botModel)
 
 		-- 1. Aplicar kill effect del asesino (ragdoll visible para todos)
 		local effectId = _getKillEffectForBotAttacker(humanoid)

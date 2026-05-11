@@ -11,16 +11,23 @@ local _started = false
 
 local ENABLE_CLEAR_COMMAND = RunService:IsStudio()
 local COMMAND = "/clear"
+
+-- Si OPEN_TO_ALL_IN_STUDIO=true, cualquier player en Studio (team test, team
+-- create) puede ejecutar /clear sobre su propio profile. Útil en dev local.
+-- En cualquier otro caso, solo userIds en ALLOWED_USER_IDS pueden hacerlo.
+-- IMPORTANTE: la semántica es opt-in (no "vacío = todos") — evita el footgun
+-- de que un copy-paste de este servicio a un endpoint no-Studio quede abierto.
+local OPEN_TO_ALL_IN_STUDIO = true
 local ALLOWED_USER_IDS: { [number]: boolean } = {
 	-- [123456789] = true,
 }
 
 local function _isAuthorized(player: Player): boolean
-	if next(ALLOWED_USER_IDS) == nil then
+	if ALLOWED_USER_IDS[player.UserId] == true then
 		return true
 	end
 
-	return ALLOWED_USER_IDS[player.UserId] == true
+	return OPEN_TO_ALL_IN_STUDIO and RunService:IsStudio()
 end
 
 local function _normalizeMessage(message: string): string

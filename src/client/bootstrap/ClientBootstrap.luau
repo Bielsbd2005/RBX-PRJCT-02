@@ -42,17 +42,12 @@ local function disableDefaultCoreGui(): ()
 end
 
 local function findLockerButton(menuGui: ScreenGui): GuiButton?
-	local bottomContainer = menuGui:FindFirstChild("BottomContainer")
-	if not bottomContainer then
+	local bottom = menuGui:FindFirstChild("Bottom")
+	if not bottom then
 		return nil
 	end
 
-	local footer = bottomContainer:FindFirstChild("Footer")
-	if not footer then
-		return nil
-	end
-
-	local lockerButton = footer:FindFirstChild("locker")
+	local lockerButton = bottom:FindFirstChild("Locker")
 	if lockerButton and lockerButton:IsA("GuiButton") then
 		return lockerButton
 	end
@@ -74,6 +69,7 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 
 	local DataController = require(clientRoot.core.data.DataController)
 	local MenuController = require(clientRoot.core.ui.MenuController)
+	local PulseAlert = require(clientRoot.core.ui.animators.PulseAlert)
 	local WeaponWrapAnimator = require(clientRoot.core.visuals.WeaponWrapAnimator)
 	local StoreFeature = require(clientRoot.features.store)
 	local SettingsFeature = require(clientRoot.features.settings)
@@ -81,6 +77,8 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 	local CasesFeature = require(clientRoot.features.cases)
 	local DailyTasksFeature = require(clientRoot.features.dailyTasks)
 	local BattlePassFeature = require(clientRoot.features.battlepass)
+	local LobbyFeature = require(clientRoot.features.lobby)
+	local LobbyMusicFeature = require(clientRoot.features.music)
 	local MatchFeature = require(clientRoot.features.match)
 
 	DataController:Start()
@@ -104,6 +102,21 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 	local menuController = MenuController.new()
 	_janitor:Add(menuController, "Destroy")
 
+	-- Pulso de alerta en Menu.Bottom.Indicator: crece 15% mientras se desvanece,
+	-- al hacerse transparente reinicia el ciclo. Si el nodo no existe, no pasa
+	-- nada (el feature/menu puede no tenerlo en algunas builds).
+	do
+		local menuGui = menuController:getGui()
+		local bottom = menuGui:FindFirstChild("Bottom")
+		local indicatorNode = if bottom then bottom:FindFirstChild("Indicator") else nil
+		if indicatorNode and indicatorNode:IsA("GuiObject") then
+			local handle = PulseAlert.bind(indicatorNode)
+			_janitor:Add(function()
+				handle:Destroy()
+			end, true)
+		end
+	end
+
 	local deferredFeatures = {
 		{ label = "store", start = StoreFeature.start },
 		{ label = "settings", start = SettingsFeature.start },
@@ -111,6 +124,8 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 		{ label = "cases", start = CasesFeature.start },
 		{ label = "dailyTasks", start = DailyTasksFeature.start },
 		{ label = "battlepass", start = BattlePassFeature.start },
+		{ label = "lobby", start = LobbyFeature.start },
+		{ label = "music", start = LobbyMusicFeature.start },
 		{ label = "match", start = MatchFeature.start },
 	} :: { DeferredFeatureEntry }
 

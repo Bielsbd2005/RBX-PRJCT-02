@@ -195,16 +195,43 @@ function BattlePassFeature.start(menuController: any): any
 	local playerGui = player:WaitForChild("PlayerGui")
 	local menuGui = menuController:getGui()
 
-	local battlepassButton = UIUtils.findFooterButton(menuGui, "battlepass")
+	local battlepassButton = UIUtils.findBottomButton(menuGui, "BattlePass")
 	local battlepassGui = playerGui:FindFirstChild("BattlePass")
 
 	if not battlepassButton then
-		warn("[BattlePassFeature] No se encontró el botón 'battlepass' en BottomContainer.Footer")
+		warn("[BattlePassFeature] No se encontró el botón 'BattlePass' en Menu.Bottom")
 		return janitor
 	end
 	if not battlepassGui or not battlepassGui:IsA("ScreenGui") then
 		warn("[BattlePassFeature] No se encontró ScreenGui 'BattlePass' en PlayerGui")
 		return janitor
+	end
+
+	-- Bottom bar UI (Menu.Bottom.BattlePass.*): mirror compacto del estado del
+	-- pass. Todos los nodos son opcionales — si el UI author no los pone, se
+	-- ignoran silenciosamente. Driven por el mismo Fusion observer que el panel.
+	local bottomNotification: TextLabel? = nil
+	local bottomBarFill: GuiObject? = nil
+	local bottomNextLevel: TextLabel? = nil
+	local bottomTimeLeft: TextLabel? = nil
+	do
+		local notif = battlepassButton:FindFirstChild("Notification")
+		if notif and notif:IsA("TextLabel") then
+			bottomNotification = notif
+		end
+		local bar = battlepassButton:FindFirstChild("Bar")
+		local fill = if bar then bar:FindFirstChild("Fill") else nil
+		if fill and fill:IsA("GuiObject") then
+			bottomBarFill = fill
+		end
+		local nextLevelNode = battlepassButton:FindFirstChild("NextLevel")
+		if nextLevelNode and nextLevelNode:IsA("TextLabel") then
+			bottomNextLevel = nextLevelNode
+		end
+		local tlNode = battlepassButton:FindFirstChild("TimeLeft")
+		if tlNode and tlNode:IsA("TextLabel") then
+			bottomTimeLeft = tlNode
+		end
 	end
 
 	local container = battlepassGui:FindFirstChild("Container")
@@ -309,23 +336,31 @@ function BattlePassFeature.start(menuController: any): any
 	-- Si EndsAt no está configurado (=0) o ya pasó, oculta el label.
 	local timeLeftRunning = true
 	local function updateTimeLeft(): number
-		if not timeLeftLabel then return 3600 end
+		if not timeLeftLabel and not bottomTimeLeft then return 3600 end
 		if season.EndsAt <= 0 then
-			timeLeftLabel.Visible = false
+			if timeLeftLabel then timeLeftLabel.Visible = false end
+			if bottomTimeLeft then bottomTimeLeft.Visible = false end
 			return 3600
 		end
 		local remaining = season.EndsAt - os.time()
 		local text = _formatTimeLeft(remaining)
 		if text == "" then
-			timeLeftLabel.Visible = false
+			if timeLeftLabel then timeLeftLabel.Visible = false end
+			if bottomTimeLeft then bottomTimeLeft.Visible = false end
 			return 3600
 		end
-		timeLeftLabel.Visible = true
-		timeLeftLabel.Text = text
+		if timeLeftLabel then
+			timeLeftLabel.Visible = true
+			timeLeftLabel.Text = text
+		end
+		if bottomTimeLeft then
+			bottomTimeLeft.Visible = true
+			bottomTimeLeft.Text = text
+		end
 		return if remaining > 3600 then 3600 else 60
 	end
 	updateTimeLeft()
-	if timeLeftLabel and season.EndsAt > 0 then
+	if (timeLeftLabel or bottomTimeLeft) and season.EndsAt > 0 then
 		task.spawn(function()
 			while timeLeftRunning do
 				local nextWait = updateTimeLeft()
@@ -696,16 +731,61 @@ function BattlePassFeature.start(menuController: any): any
 			local displayedLevel = math.clamp(currentTier - 1, 0, maxTier)
 			levelLabel.Text = "Lvl. " .. tostring(displayedLevel)
 		end
-		if barFill then
+		-- Cache de progreso del tier actual: lo usan tanto el barFill del panel
+		-- como el bottom bar (Menu.Bottom.BattlePass.Bar.Fill). Mismo cálculo —
+		-- si difieren, es solo el destino del Size.X.
+		local progressScale: number
+		do
 			local activeTier = BattlePassConfig.GetTier(season, math.min(currentTier, maxTier))
 			local needed = if activeTier then activeTier.XPRequired else 100
-			local scale: number
 			if currentTier > maxTier then
-				scale = 1
+				progressScale = 1
 			else
-				scale = math.clamp(xp / math.max(1, needed), 0, 1)
+				progressScale = math.clamp(xp / math.max(1, needed), 0, 1)
 			end
-			barFill.Size = UDim2.new(scale, 0, barFill.Size.Y.Scale, barFill.Size.Y.Offset)
+		end
+		if barFill then
+			barFill.Size = UDim2.new(progressScale, 0, barFill.Size.Y.Scale, barFill.Size.Y.Offset)
+		end
+
+		-- Bottom bar (Menu.Bottom.BattlePass.*) ────────────────────
+		if bottomBarFill then
+			bottomBarFill.Size = UDim2.new(progressScale, 0, bottomBarFill.Size.Y.Scale, bottomBarFill.Size.Y.Offset)
+		end
+		if bottomNextLevel then
+			-- `currentTier` en el modelo = tier hacia el que se progresa, que es
+			-- exactamente el "siguiente nivel" desde la perspectiva del jugador.
+			-- Si ya está MAX (currentTier > maxTier), no hay next → "MAX".
+			if currentTier > maxTier then
+				bottomNextLevel.Text = "MAX"
+			else
+				bottomNextLevel.Text = "Lvl " .. tostring(currentTier)
+			end
+		end
+		if bottomNotification then
+			-- Recuento de claims pendientes: por cada tier ya completado
+			-- (level < currentTier), suma free no-reclamado y premium no-reclamado
+			-- (este último solo si el jugador posee Premium). Igual criterio que
+			-- el backIndicator del panel (ver más abajo) pero global, no por página.
+			local pending = 0
+			local lastCompletedTier = math.min(currentTier - 1, maxTier)
+			for level = 1, lastCompletedTier do
+				local tierDef = BattlePassConfig.GetTier(season, level)
+				if not tierDef then continue end
+				local key = tostring(level)
+				if tierDef.Free and claimedFree[key] ~= true then
+					pending += 1
+				end
+				if premiumOwned and tierDef.Premium and claimedPremium[key] ~= true then
+					pending += 1
+				end
+			end
+			if pending > 0 then
+				bottomNotification.Visible = true
+				bottomNotification.Text = tostring(pending)
+			else
+				bottomNotification.Visible = false
+			end
 		end
 
 		-- Slots de la página actual

@@ -29,13 +29,10 @@ export type MatchMenu = {
 -- ── Helpers de resolución ──────────────────────────────────────
 
 local function _findPlayButton(menuGui: ScreenGui): GuiButton?
-	local bottom = menuGui:FindFirstChild("BottomContainer")
+	local bottom = menuGui:FindFirstChild("Bottom")
 	if not bottom then return nil end
 
-	local footer = bottom:FindFirstChild("Footer")
-	if not footer then return nil end
-
-	local playNode = footer:FindFirstChild("play")
+	local playNode = bottom:FindFirstChild("Play")
 	if playNode and playNode:IsA("GuiButton") then
 		return playNode
 	end

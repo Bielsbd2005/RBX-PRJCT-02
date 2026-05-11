@@ -22,14 +22,20 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 
-local Network = require(Shared.networking.Network)
+local Network   = require(Shared.networking.Network)
+local NetGuards = require(Shared.networking.NetGuards)
+
+local M = NetGuards.MAX
 
 local SettingsService = {}
 SettingsService.__index = SettingsService
 
 local _dataService: any = nil
 local _started = false
-local _cooldowns: { [number]: { [string]: number } } = {}
+-- Cooldown global por player (no por-key) para evitar spam por rotación de keys.
+-- Un usuario que mueva un slider Y cambie un toggle dentro de 100ms verá el
+-- segundo action descartado — UX impact despreciable, anti-spam asegurado.
+local _cooldowns: { [number]: number } = {}
 
 local RATE_LIMIT_SECONDS = 0.1
 
@@ -69,19 +75,13 @@ local COLOR_SETTINGS = {
 	CrosshairColor = true,
 }
 
-local function _checkCooldown(player: Player, action: string): boolean
-	local playerCooldowns = _cooldowns[player.UserId]
-	if not playerCooldowns then
-		playerCooldowns = {}
-		_cooldowns[player.UserId] = playerCooldowns
-	end
-
-	local last = playerCooldowns[action] or 0
+local function _checkCooldown(player: Player): boolean
+	local last = _cooldowns[player.UserId] or 0
 	if time() - last < RATE_LIMIT_SECONDS then
 		return false
 	end
 
-	playerCooldowns[action] = time()
+	_cooldowns[player.UserId] = time()
 	return true
 end
 
@@ -100,14 +100,14 @@ local function _canUpdate(player: Player, key: string): boolean
 end
 
 local function _onUpdateSlider(data: { key: string, value: number }, player: Player): ()
-	if type(data) ~= "table" or type(data.key) ~= "string" then
+	if not NetGuards.validate(data, { key = M.SettingKey }) then
 		return
 	end
 	if type(data.value) ~= "number" or data.value ~= data.value then -- NaN check
 		return
 	end
 
-	if not _checkCooldown(player, "slider:" .. data.key) then
+	if not _checkCooldown(player) then
 		return
 	end
 
@@ -120,11 +120,14 @@ local function _onUpdateSlider(data: { key: string, value: number }, player: Pla
 end
 
 local function _onUpdateToggle(data: { key: string, value: boolean }, player: Player): ()
-	if type(data) ~= "table" or type(data.key) ~= "string" or type(data.value) ~= "boolean" then
+	if not NetGuards.validate(data, { key = M.SettingKey }) then
+		return
+	end
+	if type(data.value) ~= "boolean" then
 		return
 	end
 
-	if not _checkCooldown(player, "toggle:" .. data.key) then
+	if not _checkCooldown(player) then
 		return
 	end
 
@@ -136,11 +139,11 @@ local function _onUpdateToggle(data: { key: string, value: boolean }, player: Pl
 end
 
 local function _onUpdateChoice(data: { key: string, value: string }, player: Player): ()
-	if type(data) ~= "table" or type(data.key) ~= "string" or type(data.value) ~= "string" then
+	if not NetGuards.validate(data, { key = M.SettingKey, value = M.SettingChoice }) then
 		return
 	end
 
-	if not _checkCooldown(player, "choice:" .. data.key) then
+	if not _checkCooldown(player) then
 		return
 	end
 
@@ -158,7 +161,7 @@ local function _onUpdateChoice(data: { key: string, value: string }, player: Pla
 end
 
 local function _onUpdateColor(data: { key: string, r: number, g: number, b: number }, player: Player): ()
-	if type(data) ~= "table" or type(data.key) ~= "string" then
+	if not NetGuards.validate(data, { key = M.SettingKey }) then
 		return
 	end
 	if type(data.r) ~= "number" or type(data.g) ~= "number" or type(data.b) ~= "number" then
@@ -168,7 +171,7 @@ local function _onUpdateColor(data: { key: string, r: number, g: number, b: numb
 		return
 	end
 
-	if not _checkCooldown(player, "color:" .. data.key) then
+	if not _checkCooldown(player) then
 		return
 	end
 
