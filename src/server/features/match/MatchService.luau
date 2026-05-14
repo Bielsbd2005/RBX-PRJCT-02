@@ -643,6 +643,7 @@ local function _pickTeamByScoreTieBreak(): "A" | "B"
 	return if _tieBreakToA then "A" else "B"
 end
 
+-- INVARIANT: debe permanecer yield-free — es la sección crítica del debounce de _onRequestJoinMatch (un yield aquí permite doble-spawn).
 local function _pickBalancedTeam(userId: number): ("A" | "B")?
 	local assigned = _teamByUserId[userId]
 	local countA, countB = _countActiveRealAssignments()
