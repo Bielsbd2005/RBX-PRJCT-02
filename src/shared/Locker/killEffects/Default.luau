@@ -118,8 +118,4 @@ function RagdollModule.apply(char: Model): boolean
 	return true
 end
 
-function RagdollModule.applyDefaultRagdoll(char: Model)
-	RagdollModule.apply(char)
-end
-
 return RagdollModule
