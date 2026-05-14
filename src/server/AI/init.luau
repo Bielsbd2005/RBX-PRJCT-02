@@ -602,22 +602,6 @@ function AIService:OnRoundEnd()
 	table.clear(_teamByFakeUserId)
 end
 
-function AIService:DisarmAllBots()
-	for _, bot in _botsByName do
-		bot.ai:Stop()
-		if bot.humanoid then
-			pcall(function()
-				bot.humanoid:UnequipTools()
-			end)
-		end
-		for _, child in bot.model:GetChildren() do
-			if child:IsA("Tool") then
-				child.Parent = nil
-			end
-		end
-	end
-end
-
 function AIService:GetBotRoster(): { { fakeUserId: number, displayName: string, team: string, image: string } }
 	local roster = {}
 	for fakeUserId, identity in _identityByFakeUserId do
