@@ -143,15 +143,6 @@ function BattlePassConfig.GetActiveSeason(): Season
 	return BattlePassConfig.Seasons[1]
 end
 
-function BattlePassConfig.GetSeason(id: string): Season?
-	for _, season in BattlePassConfig.Seasons do
-		if season.Id == id then
-			return season
-		end
-	end
-	return nil
-end
-
 function BattlePassConfig.GetTier(season: Season, level: number): Tier?
 	if level < 1 or level > #season.Tiers then
 		return nil
@@ -161,18 +152,6 @@ end
 
 function BattlePassConfig.GetMaxTier(season: Season): number
 	return #season.Tiers
-end
-
-function BattlePassConfig.GetSeasonByProductId(productId: number): Season?
-	if productId == 0 then
-		return nil
-	end
-	for _, season in BattlePassConfig.Seasons do
-		if season.PremiumProductId == productId then
-			return season
-		end
-	end
-	return nil
 end
 
 -- Set de ítems que aparecen como reward en CUALQUIER season/tier/track del BP.
@@ -207,13 +186,6 @@ function BattlePassConfig.IsBPExclusive(category: string, itemId: string): boole
 	end
 	local cat = (_bpExclusiveCache :: any)[category]
 	return cat ~= nil and cat[itemId] == true
-end
-
--- Invalida el cache lazy. Llamar tras mutar `BattlePassConfig.Seasons` en runtime
--- (hot reload, eventos seasonales, parches en caliente). No es necesario en flujo
--- normal porque las seasons son inmutables.
-function BattlePassConfig.InvalidateBPCache()
-	_bpExclusiveCache = nil
 end
 
 -- Resuelve un productId a su (Season, kind). kind ∈ "Premium" | "Skip".
