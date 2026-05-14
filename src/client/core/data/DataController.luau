@@ -284,13 +284,6 @@ function DataController:WhenReady(): any
 end
 
 --[[
-	Devuelve true si la Replica ha llegado y los Values están sembrados.
-]]
-function DataController:IsReady(): boolean
-	return _replica ~= nil
-end
-
---[[
 	Lectura directa del dato (sin reactividad).
 	  path  nil      → devuelve copia profunda de toda la tabla de datos
 	  path  {string} → navega por la ruta y devuelve el valor en la hoja
