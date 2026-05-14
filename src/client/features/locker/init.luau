@@ -41,8 +41,6 @@ local Confetti = require(Client.core.ui.Confetti)
 
 local LockerFeature = {}
 
-local SELECTED_NAV_ITEM_SIZE = UDim2.new(1.257, 0, 0.107, 0)
-local SIZE_TWEEN_INFO = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local STROKE_DEFAULT = UITheme.StrokeDefault
 local STROKE_WHITE = UITheme.StrokeHover
 local PURCHASE_BUTTON_HOVER_TWEEN_INFO = TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
