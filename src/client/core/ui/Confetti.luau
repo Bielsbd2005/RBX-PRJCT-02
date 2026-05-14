@@ -1,12 +1,11 @@
 --!strict
 --[[
 	Confetti.luau
-	Burst de partículas rectangulares (Frames) animadas que se dispersan desde
-	una posición de pantalla y caen mientras se desvanecen.
+	Lluvia fullscreen de partículas rectangulares (Frames) animadas que caen
+	desde fuera de la pantalla y se desvanecen.
 
 	Uso:
-		Confetti.Burst(parentScreenGui, originAbsolutePosition)
-		Confetti.BurstFromGui(targetGuiObject)
+		Confetti.Rain(parentScreenGui)
 ]]
 
 local TweenService = game:GetService("TweenService")
@@ -64,15 +63,6 @@ local function _releaseFrame(piece: Frame)
 	table.insert(_pool, piece)
 end
 
-export type ConfettiOptions = {
-	count: number?,
-	colors: { Color3 }?,
-	lifetime: number?,
-	burstRadius: number?,
-	fallExtra: number?,
-	zIndex: number?,
-}
-
 local function resolveScreenContainer(parent: Instance): Instance
 	if parent:IsA("ScreenGui") then
 		return parent
@@ -84,55 +74,6 @@ local function resolveScreenContainer(parent: Instance): Instance
 	end
 
 	return parent
-end
-
-function Confetti.Burst(parent: Instance, originAbsolutePosition: Vector2, options: ConfettiOptions?)
-	local opts = options or {}
-	local count = opts.count or 32
-	local colors = opts.colors or DEFAULT_COLORS
-	local lifetime = opts.lifetime or 1.2
-	local burstRadius = opts.burstRadius or 220
-	local fallExtra = opts.fallExtra or 200
-	local zIndex = opts.zIndex or 100
-
-	local container = resolveScreenContainer(parent)
-
-	for i = 1, count do
-		local piece = _acquireFrame()
-		piece.BackgroundColor3 = colors[((i - 1) % #colors) + 1]
-		piece.BackgroundTransparency = 0
-		piece.Size = UDim2.fromOffset(math.random(8, 14), math.random(4, 8))
-		piece.Position = UDim2.fromOffset(originAbsolutePosition.X, originAbsolutePosition.Y)
-		piece.Rotation = math.random(0, 360)
-		piece.ZIndex = zIndex
-		piece.Parent = container
-
-		local angle = math.rad(math.random(0, 359) + math.random())
-		local distance = math.random(math.floor(burstRadius * 0.4), burstRadius)
-		local targetX = originAbsolutePosition.X + math.cos(angle) * distance
-		local targetY = originAbsolutePosition.Y + math.sin(angle) * distance + fallExtra
-		local targetRotation = piece.Rotation + math.random(-540, 540)
-		local pieceLifetime = lifetime + (math.random() * 0.4 - 0.2)
-
-		local tween = TweenService:Create(piece, TweenInfo.new(pieceLifetime, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-			Position = UDim2.fromOffset(targetX, targetY),
-			Rotation = targetRotation,
-			BackgroundTransparency = 1,
-		})
-		tween:Play()
-		tween.Completed:Connect(function()
-			_releaseFrame(piece)
-		end)
-	end
-end
-
-function Confetti.BurstFromGui(target: GuiObject, options: ConfettiOptions?)
-	if not target or not target:IsDescendantOf(game) then
-		return
-	end
-
-	local origin = target.AbsolutePosition + target.AbsoluteSize * 0.5
-	Confetti.Burst(target, origin, options)
 end
 
 export type RainOptions = {
