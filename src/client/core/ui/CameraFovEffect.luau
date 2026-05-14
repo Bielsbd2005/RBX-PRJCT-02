@@ -14,8 +14,10 @@
 	Llamar `expand()` mientras ya hay un FOV guardado es no-op (idempotente).
 ]]
 
-local TweenService = game:GetService("TweenService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
+
+local Retween = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("utils"):WaitForChild("Retween"))
 
 local OPEN_TWEEN_INFO = TweenInfo.new(0.28, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local CLOSE_TWEEN_INFO = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
@@ -23,7 +25,7 @@ local DEFAULT_EXPAND_DELTA = 10
 local DEFAULT_FOV_MAX = 90
 
 export type CameraFovEffect = {
-	_activeTween: Tween?,
+	_tweenSlot: Retween.Slot,
 	_savedFov: number?,
 	_expandDelta: number,
 	_fovMax: number,
@@ -37,7 +39,7 @@ CameraFovEffect.__index = CameraFovEffect
 
 function CameraFovEffect.new(options: { expandDelta: number?, fovMax: number? }?): CameraFovEffect
 	local self = setmetatable({}, CameraFovEffect) :: any
-	self._activeTween = nil
+	self._tweenSlot = { current = nil }
 	self._savedFov = nil
 	self._expandDelta = if options and options.expandDelta then options.expandDelta else DEFAULT_EXPAND_DELTA
 	self._fovMax = if options and options.fovMax then options.fovMax else DEFAULT_FOV_MAX
@@ -48,19 +50,7 @@ function CameraFovEffect:_tweenTo(targetFov: number, tweenInfo: TweenInfo)
 	local camera = Workspace.CurrentCamera
 	if not camera then return end
 
-	if self._activeTween then
-		self._activeTween:Cancel()
-		self._activeTween = nil
-	end
-
-	local tween = TweenService:Create(camera, tweenInfo, { FieldOfView = targetFov })
-	self._activeTween = tween
-	tween.Completed:Connect(function()
-		if self._activeTween == tween then
-			self._activeTween = nil
-		end
-	end)
-	tween:Play()
+	Retween.run(self._tweenSlot, camera, tweenInfo, { FieldOfView = targetFov })
 end
 
 function CameraFovEffect:expand()
@@ -80,10 +70,7 @@ function CameraFovEffect:restore()
 end
 
 function CameraFovEffect:Destroy()
-	if self._activeTween then
-		self._activeTween:Cancel()
-		self._activeTween = nil
-	end
+	Retween.cancel(self._tweenSlot)
 end
 
 return CameraFovEffect

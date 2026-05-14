@@ -18,10 +18,10 @@ export type LockerCatalogItem = {
 	Rarity: string,
 	Image: string,
 	CanPurchase: boolean,
-	BPExclusive: boolean,
+	isBPExclusive: boolean,
 	TextureID: string?,
 	BaseColor: Color3?,
-	Animated: boolean?,
+	isAnimated: boolean?,
 	StudsPerTile: number?,
 	PreviewWeaponCategory: string?,
 	PreviewWeaponId: string?,
@@ -148,11 +148,11 @@ function LockerCatalog:_getTemplateItems(categoryKey: LockerCategoryKey, navKey:
 				CanPurchase = definition.CanPurchase == true,
 				-- BP-exclusive si lo flagea ItemsConfig manualmente O si aparece como
 				-- reward en cualquier season del BattlePass (single source of truth).
-				BPExclusive = definition.BPExclusive == true
+				isBPExclusive = definition.isBPExclusive == true
 					or BattlePassConfig.IsBPExclusive(tostring(sourceCategory), tostring(itemId)),
 				TextureID = if type(definition.TextureID) == "string" then definition.TextureID else nil,
 				BaseColor = if typeof(definition.BaseColor) == "Color3" then definition.BaseColor else nil,
-				Animated = definition.Animated == true,
+				isAnimated = definition.isAnimated == true,
 				StudsPerTile = tonumber(definition.StudsPerTile),
 				KillGoal = killGoalValue,
 			})
@@ -185,7 +185,7 @@ function LockerCatalog:GetItems(categoryKey: LockerCategoryKey, navKey: string):
 	-- la lista cuando un item BP entra al inventario.
 	local catalogItems = {} :: { LockerCatalogItem }
 	for _, item in templateItems do
-		if item.BPExclusive and not self._isItemOwned(item) then
+		if item.isBPExclusive and not self._isItemOwned(item) then
 			continue
 		end
 		table.insert(catalogItems, item)

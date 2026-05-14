@@ -26,7 +26,7 @@ type BotRecord = {
 	humanoid: Humanoid,
 	team: "A" | "B",
 	deathConnection: RBXScriptConnection?,
-	deathReported: boolean,
+	hasDeathBeenReported: boolean,
 	ai: typeof(BotAI.new(({} :: any), "A")),
 }
 
@@ -451,17 +451,17 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 		humanoid = humanoid,
 		team = team,
 		deathConnection = nil,
-		deathReported = false,
+		hasDeathBeenReported = false,
 		ai = botAIInstance,
 	}
 
 	botAIInstance:Start(mapRoot, _aliveTargets)
 
 	record.deathConnection = humanoid.Died:Connect(function()
-		if record.deathReported then
+		if record.hasDeathBeenReported then
 			return
 		end
-		record.deathReported = true
+		record.hasDeathBeenReported = true
 
 		-- 0. Quitar el bot de la cache de targets vivos antes que cualquier
 		-- otra cosa: si _onBotDied o el ragdoll yieldan, los demás bots no

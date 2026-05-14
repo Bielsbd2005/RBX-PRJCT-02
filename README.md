@@ -60,3 +60,23 @@ rojo build default.project.json -o /tmp/Shooter.rbxlx
 
 CI runs these same checks on pull requests and protected branches.
 See `docs/engineering/quality-gates.md` for merge policy and release checklist.
+
+## Convenciones de naming
+
+Verbos de prefijo en nombres de función:
+
+- `get*` — accesor de propósito general. Cubre lookups O(1), reads directos
+  de campo, y lookups con fallback trivial (`or default`, nil-check simple).
+  Es el verbo por defecto.
+
+- `resolve*` — compone un valor con lógica no trivial. Úsalo cuando hay
+  fallback chains de varios pasos, decision trees, normalización entre
+  formatos, o cuando quieras comunicar al lector "esta función hace trabajo
+  real, no solo un lookup". Es decisión del autor, no algoritmo.
+
+- `fetch*` — operaciones que tocan IO async (DataStore, red, llamadas que
+  pueden timeout). Actualmente sin uso en el repo; reservar para cuando
+  aparezca el primer caso.
+
+Cuando el caso es ambiguo entre `get` y `resolve`, prefiere `get`. El idiom
+Roblox/Lua trata `get*` como vocabulario amplio.

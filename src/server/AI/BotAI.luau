@@ -93,19 +93,19 @@ export type BotAIInstance = typeof(setmetatable({} :: {
 	_team: string,
 	_fakeUserId: number,
 	_attackRange: number,
-	_alive: boolean,
+	_isAlive: boolean,
 	_mapRoot: Instance?,
 	_connections: { RBXScriptConnection },
 	_nextShotId: number,
 	-- Sprint 3: cache de target + path persistente.
 	_aliveTargets: { Model },
 	_currentTarget: Model?,
-	_currentTargetVisible: boolean,
+	_isCurrentTargetVisible: boolean,
 	_lastTargetEvalAt: number,
 	_path: Path?,
 	_lastPathComputeAt: number,
 	_lastPathTargetPos: Vector3?,
-	_moveReached: boolean,
+	_hasReachedMove: boolean,
 }, BotAI))
 
 function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?): BotAIInstance
@@ -119,18 +119,18 @@ function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?): BotAI
 		_team = team,
 		_fakeUserId = fakeUserId or 0,
 		_attackRange = math.random(10, 30),
-		_alive = true,
+		_isAlive = true,
 		_mapRoot = nil :: Instance?,
 		_connections = {} :: { RBXScriptConnection },
 		_nextShotId = 1,
 		_aliveTargets = {},
 		_currentTarget = nil,
-		_currentTargetVisible = false,
+		_isCurrentTargetVisible = false,
 		_lastTargetEvalAt = 0,
 		_path = nil,
 		_lastPathComputeAt = 0,
 		_lastPathTargetPos = nil,
-		_moveReached = false,
+		_hasReachedMove = false,
 	}, BotAI) :: BotAIInstance
 
 	return self
@@ -326,7 +326,7 @@ end
 
 --[[
 	Sprint 3: usa el Path persistente (`self._path`) y una conexión única a
-	MoveToFinished (`self._moveReached`) en lugar de crear/destruir ambos
+	MoveToFinished (`self._hasReachedMove`) en lugar de crear/destruir ambos
 	por cada llamada.
 
 	Antes: cada `_moveToLocation` hacía CreatePath+ComputeAsync (decenas de ms)
@@ -358,10 +358,10 @@ function BotAI:_moveToLocation(location: Vector3, stopCondition: () -> boolean)
 			self._humanoid.Jump = true
 		end
 
-		self._moveReached = false
+		self._hasReachedMove = false
 		self._humanoid:MoveTo(wp.Position)
 
-		while not self._moveReached do
+		while not self._hasReachedMove do
 			if i < #waypoints and (self._rootPart.Position - wp.Position).Magnitude < DISTANCIA_SUAVIDAD then
 				break
 			end
@@ -434,7 +434,7 @@ function BotAI:Start(mapRoot: Instance?, aliveTargets: { Model }?)
 	-- Sprint 3: una sola conexión MoveToFinished compartida en lugar de
 	-- connect/disconnect por waypoint en _moveToLocation.
 	local connMoveDone = humanoid.MoveToFinished:Connect(function()
-		self._moveReached = true
+		self._hasReachedMove = true
 	end)
 	table.insert(self._connections, connMoveDone)
 
@@ -450,13 +450,13 @@ function BotAI:Start(mapRoot: Instance?, aliveTargets: { Model }?)
 	task.spawn(function()
 		local currentState = STATES.PATROL
 
-		while self._alive and humanoid.Health > 0 do
+		while self._isAlive and humanoid.Health > 0 do
 			-- Sprint 3: una sola llamada a _getBestTarget por tick. El resultado
 			-- (target + visibility) se cachea en self para que ATTACK lo reuse
 			-- sin un raycast extra.
 			local potentialTarget, isVisible = self:_getBestTarget()
 			self._currentTarget = potentialTarget
-			self._currentTargetVisible = isVisible
+			self._isCurrentTargetVisible = isVisible
 			self._lastTargetEvalAt = os.clock()
 
 			-- Aplicar rotación al target cacheado (movido desde el Heartbeat).
@@ -661,7 +661,7 @@ function BotAI:Start(mapRoot: Instance?, aliveTargets: { Model }?)
 				-- ejecutar _getBestTarget en cada `task.wait()` interno (varios
 				-- raycasts/seg por bot solo en patrullaje).
 				self:_moveToLocation(dest, function()
-					return self._currentTarget ~= nil or not self._alive
+					return self._currentTarget ~= nil or not self._isAlive
 				end)
 
 				task.wait()
@@ -680,7 +680,7 @@ function BotAI:Start(mapRoot: Instance?, aliveTargets: { Model }?)
 end
 
 function BotAI:Stop()
-	self._alive = false
+	self._isAlive = false
 	for _, conn in self._connections do
 		conn:Disconnect()
 	end

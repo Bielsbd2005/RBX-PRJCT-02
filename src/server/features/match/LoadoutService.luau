@@ -193,7 +193,7 @@ local function _applyWeaponWrapToTool(tool: Tool, wrapId: string)
 	local studsPerTile = if validDefinition
 		then math.max(0.01, tonumber(wrapDefinition.StudsPerTile) or DEFAULT_WRAP_STUDS_PER_TILE)
 		else DEFAULT_WRAP_STUDS_PER_TILE
-	local animated = validDefinition and wrapDefinition.Animated == true
+	local animated = validDefinition and wrapDefinition.isAnimated == true
 	local scrollSpeedU = if validDefinition then tonumber(wrapDefinition.ScrollSpeedU) or DEFAULT_WRAP_SCROLL_SPEED_U else DEFAULT_WRAP_SCROLL_SPEED_U
 	local scrollSpeedV = if validDefinition then tonumber(wrapDefinition.ScrollSpeedV) or DEFAULT_WRAP_SCROLL_SPEED_V else DEFAULT_WRAP_SCROLL_SPEED_V
 

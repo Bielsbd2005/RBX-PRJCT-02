@@ -844,7 +844,7 @@ function MatchFeature.start(menuController: any): any
 										category = LockerCategory.WEAPON_WRAPS,
 										textureID = if type(def.TextureID) == "string" then def.TextureID else nil,
 										baseColor = if typeof(def.BaseColor) == "Color3" then def.BaseColor else nil,
-										animated = def.Animated == true,
+										animated = def.isAnimated == true,
 										studsPerTile = tonumber(def.StudsPerTile),
 									})
 								end

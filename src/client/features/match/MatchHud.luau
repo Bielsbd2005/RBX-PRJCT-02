@@ -867,7 +867,7 @@ function MatchHud:playChallengeCompletedAnimation(reward: ChallengeCompletedRewa
 					CanPurchase = false,
 					TextureID = reward.textureID,
 					BaseColor = reward.baseColor,
-					Animated = reward.animated,
+					isAnimated = reward.animated,
 					StudsPerTile = reward.studsPerTile,
 					PreviewWeaponCategory = reward.previewWeaponCategory,
 					PreviewWeaponId = reward.previewWeaponId,

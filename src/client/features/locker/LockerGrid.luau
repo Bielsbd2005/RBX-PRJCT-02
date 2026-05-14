@@ -1,7 +1,10 @@
 --!strict
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
+
+local Retween = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("utils"):WaitForChild("Retween"))
 
 local Packages = ReplicatedStorage:WaitForChild("Packages")
 
@@ -25,7 +28,7 @@ export type LockerCatalogItem = {
 	CanPurchase: boolean,
 	TextureID: string?,
 	BaseColor: Color3?,
-	Animated: boolean?,
+	isAnimated: boolean?,
 	StudsPerTile: number?,
 	PreviewWeaponCategory: string?,
 	PreviewWeaponId: string?,
@@ -63,7 +66,7 @@ type ItemGridCardRefs = {
 	barFillDefaultSize: UDim2?,
 	barValueNode: TextLabel?,
 	buttonStroke: UIStroke?,
-	buttonStrokeCached: boolean?,
+	hasButtonStrokeCached: boolean?,
 }
 
 type LockerGridCallbacks = {
@@ -90,7 +93,7 @@ export type LockerGrid = {
 	_gridButtonItems: { [GuiButton]: LockerCatalogItem },
 	_selectedCatalogButton: GuiButton?,
 	_selectedCatalogItem: LockerCatalogItem?,
-	_activeGridScaleTweens: { [GuiButton]: Tween },
+	_activeGridScaleTweens: { [GuiButton]: Retween.Slot },
 	_gridStaggerTweens: { [GuiObject]: Tween },
 	_hoveredGridButtons: { [GuiButton]: boolean },
 	_gridCardByButton: { [GuiButton]: GuiObject },
@@ -182,12 +185,12 @@ function LockerGrid:_getButtonStroke(button: GuiButton): UIStroke?
 	if card then
 		local refs = self._cachedGridCardRefs[card]
 		if refs then
-			if refs.buttonStrokeCached then
+			if refs.hasButtonStrokeCached then
 				return refs.buttonStroke
 			end
 			local stroke = button:FindFirstChildOfClass("UIStroke")
 			refs.buttonStroke = if stroke and stroke:IsA("UIStroke") then stroke else nil
-			refs.buttonStrokeCached = true
+			refs.hasButtonStrokeCached = true
 			return refs.buttonStroke
 		end
 	end
@@ -387,9 +390,9 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 		return
 	end
 
-	local owned = self._callbacks.isItemOwned(item)
-	local itemAmount = if self._callbacks.getItemAmount then self._callbacks.getItemAmount(item) else if owned then 1 else 0
-	local equipped = self._callbacks.isItemEquipped(item)
+	local isOwned = self._callbacks.isItemOwned(item)
+	local itemAmount = if self._callbacks.getItemAmount then self._callbacks.getItemAmount(item) else if isOwned then 1 else 0
+	local isEquipped = self._callbacks.isItemEquipped(item)
 	local isSelectedButton = button == self._selectedCatalogButton
 
 	if refs.templateKey == "wraps" then
@@ -401,14 +404,14 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 		end
 
 		if refs.equippedNode then
-			refs.equippedNode.Visible = equipped
+			refs.equippedNode.Visible = isEquipped
 		end
 
-		local isChallenge = isKillChallengeItem(item) and not owned
+		local isChallenge = isKillChallengeItem(item) and not isOwned
 		local isDefaultWrap = item.id == ItemDefaults.ITEM_ID
 		if refs.titleNode then
 			-- Si esta equipado se muestra solo el badge `Equiped`, sin titulo.
-			refs.titleNode.Visible = not equipped
+			refs.titleNode.Visible = not isEquipped
 			if refs.titleNode:IsA("TextLabel") then
 				if isChallenge then
 					refs.titleNode.Text = refs.titleDefaultText or refs.titleNode.Text
@@ -444,7 +447,7 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 			return
 		end
 
-		if isSelectedButton and not owned then
+		if isSelectedButton and not isOwned then
 			stroke.Enabled = false
 			stroke.Transparency = 1
 			return
@@ -452,12 +455,12 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 
 		stroke.Enabled = true
 		stroke.Transparency = 0
-		stroke.Color = if equipped then STROKE_WHITE else STROKE_DEFAULT
+		stroke.Color = if isEquipped then STROKE_WHITE else STROKE_DEFAULT
 		return
 	end
 
 	local currentLevel = self._cachedLevel
-	local isLevelLocked = not owned and currentLevel < item.LevelRequired
+	local isLevelLocked = not isOwned and currentLevel < item.LevelRequired
 	local shouldBlackoutWeaponImage = shouldUseFullSizeWeaponImage(item) and isLevelLocked
 
 	if refs.itemNode then
@@ -492,15 +495,15 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 	end
 
 	if refs.priceNode then
-		refs.priceNode.Visible = not owned
+		refs.priceNode.Visible = not isOwned
 	end
 
 	if refs.currencyNode then
-		refs.currencyNode.Visible = not owned
+		refs.currencyNode.Visible = not isOwned
 	end
 
 	if refs.ownedNode then
-		refs.ownedNode.Visible = owned and not equipped
+		refs.ownedNode.Visible = isOwned and not isEquipped
 	end
 
 	if refs.amountNode then
@@ -511,7 +514,7 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 	end
 
 	if refs.equippedNode then
-		refs.equippedNode.Visible = equipped
+		refs.equippedNode.Visible = isEquipped
 	end
 
 	local stroke = self:_getButtonStroke(button)
@@ -519,7 +522,7 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 		return
 	end
 
-	if isSelectedButton and not owned then
+	if isSelectedButton and not isOwned then
 		stroke.Enabled = false
 		stroke.Transparency = 1
 		return
@@ -527,7 +530,7 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 
 	stroke.Enabled = true
 	stroke.Transparency = 0
-	stroke.Color = if equipped then STROKE_WHITE else STROKE_DEFAULT
+	stroke.Color = if isEquipped then STROKE_WHITE else STROKE_DEFAULT
 end
 
 function LockerGrid:_setSelectedButton(targetButton: GuiButton)
@@ -558,24 +561,17 @@ end
 
 function LockerGrid:_tweenGridButtonScale(button: GuiButton, targetScale: number, tweenInfo: TweenInfo)
 	local scaleNode = self:_getOrCreateGridButtonScale(button)
-	if math.abs(scaleNode.Scale - targetScale) <= 0.001 and self._activeGridScaleTweens[button] == nil then
+	local slot = self._activeGridScaleTweens[button]
+	if math.abs(scaleNode.Scale - targetScale) <= 0.001 and (slot == nil or slot.current == nil) then
 		return
 	end
 
-	local currentTween = self._activeGridScaleTweens[button]
-	if currentTween then
-		currentTween:Cancel()
-		self._activeGridScaleTweens[button] = nil
+	if slot == nil then
+		slot = { current = nil }
+		self._activeGridScaleTweens[button] = slot
 	end
 
-	local tween = TweenService:Create(scaleNode, tweenInfo, { Scale = targetScale })
-	self._activeGridScaleTweens[button] = tween
-	tween.Completed:Connect(function()
-		if self._activeGridScaleTweens[button] == tween then
-			self._activeGridScaleTweens[button] = nil
-		end
-	end)
-	tween:Play()
+	Retween.run(slot, scaleNode, tweenInfo, { Scale = targetScale })
 end
 
 function LockerGrid:_bindCatalogButtonHover(button: GuiButton)
@@ -726,8 +722,8 @@ function LockerGrid:_resetTransientState(notifySelection: boolean)
 	table.clear(self._gridCardByButton)
 	table.clear(self._gridButtonByQualifiedId)
 
-	for _, tween in self._activeGridScaleTweens do
-		tween:Cancel()
+	for _, slot in self._activeGridScaleTweens do
+		Retween.cancel(slot)
 	end
 	table.clear(self._activeGridScaleTweens)
 	table.clear(self._hoveredGridButtons)
@@ -957,8 +953,8 @@ function LockerGrid:Destroy()
 		previewJanitor:Destroy()
 	end
 	table.clear(self._cardPreviewJanitors)
-	for _, tween in self._activeGridScaleTweens do
-		tween:Cancel()
+	for _, slot in self._activeGridScaleTweens do
+		Retween.cancel(slot)
 	end
 	table.clear(self._activeGridScaleTweens)
 	self:_cancelStaggerTweens()

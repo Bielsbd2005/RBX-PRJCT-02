@@ -22,10 +22,10 @@ export type ItemConfig = {
 	Rarity: string,         -- "Common" | "Uncommon" | "Rare" | "Epic" | "Legendary"
 	Image: string?,         -- Thumbnail para UI (rbxassetid://...)
 	CanPurchase: boolean?,  -- Flag para habilitar compra desde UI
-	BPExclusive: boolean?,  -- Si true, sólo se obtiene vía Battle Pass; oculto en Locker hasta poseerse y rechazado por Shop.
+	isBPExclusive: boolean?,  -- Si true, sólo se obtiene vía Battle Pass; oculto en Locker hasta poseerse y rechazado por Shop.
 	TextureID: string?,
 	BaseColor: Color3?,
-	Animated: boolean?,
+	isAnimated: boolean?,
 	StudsPerTile: number?,
 	ScrollSpeedU: number?,
 	ScrollSpeedV: number?,
@@ -81,7 +81,7 @@ Special = {
 			Image = asset(109044845487335),
 			CanPurchase = false,
 			BaseColor = Color3.fromRGB(255, 255, 255),
-			Animated = false,
+			isAnimated = false,
 			StudsPerTile = 3,
 		},
 		Wrap_Red  = {
@@ -91,7 +91,7 @@ Special = {
 			Rarity = "Epic",
 			CanPurchase = false,
 			TextureID = asset(86966645142772),
-			Animated = true,
+			isAnimated = true,
 			StudsPerTile = 3,
 			ScrollSpeedU = 1,
 			ScrollSpeedV = 0,
@@ -103,7 +103,7 @@ Special = {
 			Rarity = "Common",
 			CanPurchase = false,
 			BaseColor = Color3.fromRGB(57, 110, 207),
-			Animated = false,
+			isAnimated = false,
 			StudsPerTile = 3,
 		},
 		Wrap_Gold = {
@@ -113,7 +113,7 @@ Special = {
 			Rarity = "Legendary",
 			CanPurchase = false,
 			BaseColor = Color3.fromRGB(214, 170, 55),
-			Animated = false,
+			isAnimated = false,
 			StudsPerTile = 3,
 		},
 		Mastery_Bronze = {
@@ -123,7 +123,7 @@ Special = {
 			Rarity = "Rare",
 			CanPurchase = false,
 			BaseColor = Color3.fromRGB(176, 110, 60),
-			Animated = false,
+			isAnimated = false,
 			StudsPerTile = 3,
 			KillChallenge = { Kills = 4 },
 		},
@@ -134,7 +134,7 @@ Special = {
 			Rarity = "Epic",
 			CanPurchase = false,
 			BaseColor = Color3.fromRGB(192, 192, 192),
-			Animated = false,
+			isAnimated = false,
 			StudsPerTile = 3,
 			KillChallenge = { Kills = 500 },
 		},
@@ -145,7 +145,7 @@ Special = {
 			Rarity = "Legendary",
 			CanPurchase = false,
 			BaseColor = Color3.fromRGB(120, 220, 255),
-			Animated = false,
+			isAnimated = false,
 			StudsPerTile = 3,
 			KillChallenge = { Kills = 1500 },
 		},

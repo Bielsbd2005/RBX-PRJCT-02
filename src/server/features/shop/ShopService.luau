@@ -182,7 +182,7 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 	-- cliente malicioso podría reconstruir el packet con el itemId conocido.
 	-- BP-exclusive si lo flagea ItemsConfig manualmente O si aparece como
 	-- reward en cualquier season del BattlePass (single source of truth).
-	if itemConfig.BPExclusive == true or BattlePassConfig.IsBPExclusive(data.category, data.itemId) then
+	if itemConfig.isBPExclusive == true or BattlePassConfig.IsBPExclusive(data.category, data.itemId) then
 		Network.Shop.Response.SendTo({
 			success = false,
 			message = "Este ítem solo se obtiene en el Battle Pass.",
@@ -401,8 +401,8 @@ local function _onEquipItem(data: { category: string, itemId: string, weaponCate
 		ok = _dataService:SetValue(player, { wrapsRootPath[1], wrapsRootPath[2], targetWeaponId }, data.itemId)
 	else
 		-- Validación 4: el jugador posee el ítem
-		local owned = _getPath(profile.Data.Inventory, { data.category, data.itemId })
-		if not owned then
+		local isOwned = _getPath(profile.Data.Inventory, { data.category, data.itemId })
+		if not isOwned then
 			Network.Shop.Response.SendTo({ success = false, message = "No posees este ítem." }, player)
 			return
 		end

@@ -179,7 +179,7 @@ end
 -- Construido lazy y cacheado: la primera llamada a IsBPExclusive recorre todas
 -- las seasons, las siguientes son lookups O(1). Single source of truth: editar
 -- los rewards en `Seasons` automáticamente actualiza el set; no hace falta
--- también flag-ear `BPExclusive = true` en ItemsConfig (aunque ese flag sigue
+-- también flag-ear `isBPExclusive = true` en ItemsConfig (aunque ese flag sigue
 -- funcionando como override manual en LockerCatalog/ShopService).
 local _bpExclusiveCache: { [string]: { [string]: boolean } }? = nil
 local function _buildBPExclusiveCache(): { [string]: { [string]: boolean } }

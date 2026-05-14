@@ -290,7 +290,7 @@ local function applyWrapContent(item: LaneItem, wrapId: string)
     WeaponWrapPreviewer.Render(vp, {
         TextureID = wrapCfg.TextureID,
         BaseColor = wrapCfg.BaseColor,
-        Animated = false,
+        isAnimated = false,
         StudsPerTile = wrapCfg.StudsPerTile,
     }, item.previewJanitor)
     reframeWrapCentered(vp)

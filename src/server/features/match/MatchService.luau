@@ -1240,7 +1240,7 @@ local function _loadMapCloneWithTimeout(mapName: string, timeoutSec: number): (b
 		return false, string.format("No existe ServerStorage/Maps/%s", mapName)
 	end
 
-	local done = false
+	local isDone = false
 	local cancelled = false
 	local cloned: Instance? = nil
 	local cloneError: string? = nil
@@ -1251,22 +1251,22 @@ local function _loadMapCloneWithTimeout(mapName: string, timeoutSec: number): (b
 		end)
 		if not ok then
 			cloneError = tostring(result)
-			done = true
+			isDone = true
 			return
 		end
 
 		if cancelled then
 			(result :: Instance):Destroy()
-			done = true
+			isDone = true
 			return
 		end
 
 		cloned = result :: Instance
-		done = true
+		isDone = true
 	end)
 
 	local startedAt = time()
-	while not done do
+	while not isDone do
 		if time() - startedAt >= timeoutSec then
 			cancelled = true
 			return false, string.format("Map clone timeout (%ds)", timeoutSec)

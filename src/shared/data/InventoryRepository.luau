@@ -66,11 +66,11 @@ function InventoryRepository.ownsWeaponWrap(profileData: any, category: WeaponCa
 	if type(weaponWraps) ~= "table" then
 		return false
 	end
-	local owned = weaponWraps[wrapId]
-	if owned == true then
+	local isOwned = weaponWraps[wrapId]
+	if isOwned == true then
 		return true
 	end
-	return type(owned) == "number" and owned > 0
+	return type(isOwned) == "number" and isOwned > 0
 end
 
 -- Lista todas las armas Main + Special poseídas. Si no hay ninguna,

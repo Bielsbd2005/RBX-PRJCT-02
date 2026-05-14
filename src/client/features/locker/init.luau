@@ -75,7 +75,7 @@ type LockerCatalogItem = {
 	CanPurchase: boolean,
 	TextureID: string?,
 	BaseColor: Color3?,
-	Animated: boolean?,
+	isAnimated: boolean?,
 	StudsPerTile: number?,
 	PreviewWeaponCategory: string?,
 	PreviewWeaponId: string?,
@@ -474,7 +474,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end, true)
 	end
 
-	local function getResolvedKillEffectId(): string
+	local function resolveKillEffectId(): string
 		return getOptionalString(equippedLookup.KillEffects) or getOptionalString(getCurrentLoadout().KillEffect) or ItemDefaults.ITEM_ID
 	end
 
@@ -532,7 +532,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			return
 		end
 
-		local resolvedEffectId = if type(effectId) == "string" and effectId ~= "" then effectId else getResolvedKillEffectId()
+		local resolvedEffectId = if type(effectId) == "string" and effectId ~= "" then effectId else resolveKillEffectId()
 		if not KillEffectsRegistry.apply(resolvedEffectId, dummy) then
 			return
 		end
@@ -639,7 +639,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		wrapsTargetWeaponIdByCategory[weaponCategory] = getOptionalString(weaponId) or ""
 	end
 
-	local function getResolvedWeaponIdForCategory(weaponCategory: WeaponCategory, loadout: LoadoutData?): string
+	local function resolveWeaponIdForCategory(weaponCategory: WeaponCategory, loadout: LoadoutData?): string
 		local storedWeaponId = getStoredWrapsTargetWeaponId(weaponCategory)
 		if storedWeaponId then
 			return storedWeaponId
@@ -656,8 +656,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		return ItemDefaults.ITEM_ID
 	end
 
-	local function getResolvedWrapsTargetWeaponId(loadout: LoadoutData?): string
-		return getResolvedWeaponIdForCategory(wrapsTargetWeaponCategory, loadout)
+	local function resolveWrapsTargetWeaponId(loadout: LoadoutData?): string
+		return resolveWeaponIdForCategory(wrapsTargetWeaponCategory, loadout)
 	end
 
 	local function getWeaponWrapRequestContext(category: string): (string, string)
@@ -665,7 +665,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			return "", ""
 		end
 
-		return wrapsTargetWeaponCategory, getResolvedWrapsTargetWeaponId(getCurrentLoadout())
+		return wrapsTargetWeaponCategory, resolveWrapsTargetWeaponId(getCurrentLoadout())
 	end
 
 	local getWrapAmountForWeapon: (weaponCategory: WeaponCategory, weaponId: string, wrapId: string) -> number
@@ -910,7 +910,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 	local function isItemOwned(item: LockerCatalogItem): boolean
 		if item.Category == LockerCategory.WEAPON_WRAPS then
-			local targetWeaponId = getResolvedWrapsTargetWeaponId(getCurrentLoadout())
+			local targetWeaponId = resolveWrapsTargetWeaponId(getCurrentLoadout())
 			return isWrapOwnedForWeapon(wrapsTargetWeaponCategory, targetWeaponId, item.id)
 		end
 
@@ -931,7 +931,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 		if item.Category == LockerCategory.WEAPON_WRAPS then
 			local loadout = getCurrentLoadout()
-			local targetWeaponId = getResolvedWrapsTargetWeaponId(loadout)
+			local targetWeaponId = resolveWrapsTargetWeaponId(loadout)
 			local equippedWrap = resolveWeaponWrap(loadout, wrapsTargetWeaponCategory, targetWeaponId)
 			return equippedWrap == item.id
 		end
@@ -961,7 +961,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 				return if isItemOwned(item) then 1 else 0
 			end
 
-			local targetWeaponId = getResolvedWrapsTargetWeaponId(getCurrentLoadout())
+			local targetWeaponId = resolveWrapsTargetWeaponId(getCurrentLoadout())
 			return getWrapAmountForWeapon(wrapsTargetWeaponCategory, targetWeaponId, item.id)
 		end,
 		isItemEquipped = isItemEquipped,
@@ -1037,7 +1037,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 		if categoryKey == LockerMainCategory.ARSENAL and navKey == LockerCategory.WEAPON_WRAPS then
 			local loadout = getCurrentLoadout()
-			local weaponId = getResolvedWrapsTargetWeaponId(loadout)
+			local weaponId = resolveWrapsTargetWeaponId(loadout)
 			return LockerConfig.makeQualifiedId(LockerCategory.WEAPON_WRAPS, resolveWeaponWrap(loadout, wrapsTargetWeaponCategory, weaponId))
 		end
 
@@ -1059,7 +1059,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 	local function getWrapItemsForCurrentWeapon(items: { LockerCatalogItem }): { LockerCatalogItem }
 		local loadout = getCurrentLoadout()
-		local targetWeaponId = getResolvedWrapsTargetWeaponId(loadout)
+		local targetWeaponId = resolveWrapsTargetWeaponId(loadout)
 		local targetWeaponCategory = wrapsTargetWeaponCategory
 		local targetCategoryConfig = ItemsConfig[targetWeaponCategory]
 		local targetWeaponDefinition = if type(targetCategoryConfig) == "table"
@@ -1073,14 +1073,14 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		local wrapItems = {} :: { LockerCatalogItem }
 
 		for _, item in items do
-			local owned = isWrapOwnedForWeapon(targetWeaponCategory, targetWeaponId, item.id)
+			local isOwned = isWrapOwnedForWeapon(targetWeaponCategory, targetWeaponId, item.id)
 			local isChallenge = item.KillGoal ~= nil and item.KillGoal > 0
-			if owned or isChallenge then
+			if isOwned or isChallenge then
 				local wrapItem = table.clone(item)
 				wrapItem.PreviewWeaponCategory = targetWeaponCategory
 				wrapItem.PreviewWeaponId = targetWeaponId
 				wrapItem.PreviewWeaponDisplayName = targetWeaponDisplayName
-				if isChallenge and not owned then
+				if isChallenge and not isOwned then
 					wrapItem.KillProgress = getKillProgressForWeaponWrap(targetWeaponCategory, targetWeaponId, item.id)
 				end
 				table.insert(wrapItems, wrapItem)
@@ -1092,9 +1092,9 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		--   2) Default
 		--   3) Resto (owned) por rareza descendente
 		local function groupRank(it: LockerCatalogItem): number
-			local owned = isWrapOwnedForWeapon(targetWeaponCategory, targetWeaponId, it.id)
+			local isOwned = isWrapOwnedForWeapon(targetWeaponCategory, targetWeaponId, it.id)
 			local isChallenge = it.KillGoal ~= nil and it.KillGoal > 0
-			if isChallenge and not owned then
+			if isChallenge and not isOwned then
 				return 1
 			end
 			if it.id == ItemDefaults.ITEM_ID then

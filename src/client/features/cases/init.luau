@@ -37,6 +37,7 @@ local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
 local WeaponCategoryMod = require(Shared.constants.WeaponCategory)
 local ItemDefaults = require(Shared.constants.ItemDefaults)
 local LockerCategory = require(Shared.constants.LockerCategory)
+local Retween = require(Shared.utils.Retween)
 local Network = require(Shared.networking.Network)
 local SlotUnboxing = require(script.SlotUnboxing)
 
@@ -275,7 +276,7 @@ function CasesFeature.start(menuController: any): any
 				local previewItem = {
 					TextureID = wrapConfig.TextureID,
 					BaseColor = wrapConfig.BaseColor,
-					Animated = wrapConfig.Animated,
+					isAnimated = wrapConfig.isAnimated,
 					StudsPerTile = wrapConfig.StudsPerTile,
 				}
 				local previewJanitor = Janitor.new()
@@ -287,12 +288,9 @@ function CasesFeature.start(menuController: any): any
 	end
 
 	-- ── Pity bar ──────────────────────────────────────────────
-	local activePityBarTween: Tween? = nil
+	local pityBarSlot: Retween.Slot = { current = nil }
 	janitor:Add(function()
-		if activePityBarTween then
-			activePityBarTween:Cancel()
-			activePityBarTween = nil
-		end
+		Retween.cancel(pityBarSlot)
 	end, true)
 
 	local function updatePityBar(caseId: string)
@@ -312,13 +310,9 @@ function CasesFeature.start(menuController: any): any
 
 		local fill = pityContainer.Bar.Fill :: GuiObject
 		local fillRatio = math.clamp(currentPity / math.max(1, threshold), 0, 1)
-		if activePityBarTween then
-			activePityBarTween:Cancel()
-		end
-		activePityBarTween = TweenService:Create(fill, TweenInfo.new(0.3, Enum.EasingStyle.Quad), {
+		Retween.run(pityBarSlot, fill, TweenInfo.new(0.3, Enum.EasingStyle.Quad), {
 			Size = UDim2.new(fillRatio, 0, 1, 0),
 		})
-		activePityBarTween:Play()
 
 		local progressText = tostring(currentPity) .. "/" .. tostring(threshold)
 		local leftLabel = pityContainer.Left :: TextLabel

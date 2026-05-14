@@ -813,13 +813,13 @@ function BattlePassFeature.start(menuController: any): any
 			if slot then
 				slot.Visible = tierDef ~= nil
 				if tierDef then
-					local completed = realLevel < currentTier
+					local isCompleted = realLevel < currentTier
 					local levelKey = tostring(realLevel)
 
 					local freeRow = _resolveSlotRow(slot, "free")
 					local freeStateName = if claimedFree[levelKey] == true
 						then "Claimed"
-						elseif completed then "Claimable"
+						elseif isCompleted then "Claimable"
 						else "Locked"
 					applyRow(freeRow, tierDef.Free, "Free", realLevel, state, freeStateName)
 
@@ -827,7 +827,7 @@ function BattlePassFeature.start(menuController: any): any
 					local premiumStateName: string
 					if claimedPremium[levelKey] == true then
 						premiumStateName = "Claimed"
-					elseif not completed then
+					elseif not isCompleted then
 						premiumStateName = "Locked"
 					elseif not premiumOwned then
 						premiumStateName = "PremiumLocked"

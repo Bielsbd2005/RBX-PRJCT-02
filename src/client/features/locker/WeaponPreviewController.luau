@@ -58,7 +58,7 @@ export type LockerCatalogItem = {
 	CanPurchase: boolean,
 	TextureID: string?,
 	BaseColor: Color3?,
-	Animated: boolean?,
+	isAnimated: boolean?,
 	StudsPerTile: number?,
 	PreviewWeaponCategory: string?,
 	PreviewWeaponId: string?,
@@ -284,9 +284,9 @@ function WeaponPreviewController:_getStateId(
 	category: WeaponCategory,
 	itemId: string?,
 	previewId: string,
-	locked: boolean?
+	isLocked: boolean?
 ): string
-	if locked then
+	if isLocked then
 		return previewId .. "::locked"
 	end
 	local resolvedWeaponId = getOptionalString(itemId) or ItemDefaults.ITEM_ID
@@ -327,7 +327,7 @@ function WeaponPreviewController:_applyWrap(previewInstance: Instance, weaponCat
 	local studsPerTile = if validDef
 		then math.max(0.01, tonumber(wrapDefinition.StudsPerTile) or DEFAULT_WRAP_STUDS_PER_TILE)
 		else DEFAULT_WRAP_STUDS_PER_TILE
-	local animated = validDef and wrapDefinition.Animated == true
+	local animated = validDef and wrapDefinition.isAnimated == true
 	local animatedTextures = {} :: { Texture }
 
 	for _, child in primaryPart:GetChildren() do

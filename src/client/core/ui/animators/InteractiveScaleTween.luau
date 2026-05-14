@@ -1,8 +1,9 @@
 --!strict
 
-local TweenService = game:GetService("TweenService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local UITheme = require(script.Parent.Parent.UITheme)
+local Retween = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("utils"):WaitForChild("Retween"))
 
 -- Hover/Click TweenInfos delegan a UITheme (eran duplicados literales de
 -- UITheme.HoverTweenInfo / UITheme.ClickTweenInfo). Si el caller pasa su
@@ -25,8 +26,8 @@ export type BindOptions = {
 }
 
 type TweenState = {
-	activeTweens: { [GuiObject]: Tween },
-	activePositionTweens: { [GuiObject]: Tween },
+	scaleSlot: Retween.Slot,
+	positionSlot: Retween.Slot,
 }
 
 local InteractiveScaleTween = {}
@@ -46,37 +47,11 @@ end
 
 local function tweenScale(state: TweenState, target: GuiObject, toScale: number, tweenInfo: TweenInfo)
 	local scaleNode = getOrCreateScaleNode(target)
-	local currentTween = state.activeTweens[target]
-	if currentTween then
-		currentTween:Cancel()
-		state.activeTweens[target] = nil
-	end
-
-	local tween = TweenService:Create(scaleNode, tweenInfo, { Scale = toScale })
-	state.activeTweens[target] = tween
-	tween.Completed:Connect(function()
-		if state.activeTweens[target] == tween then
-			state.activeTweens[target] = nil
-		end
-	end)
-	tween:Play()
+	Retween.run(state.scaleSlot, scaleNode, tweenInfo, { Scale = toScale })
 end
 
 local function tweenPosition(state: TweenState, target: GuiObject, toPosition: UDim2, tweenInfo: TweenInfo)
-	local current = state.activePositionTweens[target]
-	if current then
-		current:Cancel()
-		state.activePositionTweens[target] = nil
-	end
-
-	local tween = TweenService:Create(target, tweenInfo, { Position = toPosition })
-	state.activePositionTweens[target] = tween
-	tween.Completed:Connect(function()
-		if state.activePositionTweens[target] == tween then
-			state.activePositionTweens[target] = nil
-		end
-	end)
-	tween:Play()
+	Retween.run(state.positionSlot, target, tweenInfo, { Position = toPosition })
 end
 
 function InteractiveScaleTween.bindButton(button: GuiButton, janitor: any, options: BindOptions?): ()
@@ -90,10 +65,10 @@ function InteractiveScaleTween.bindButton(button: GuiButton, janitor: any, optio
 	local liftOffset = if options and options.liftOffset then options.liftOffset else 0
 
 	local state: TweenState = {
-		activeTweens = {},
-		activePositionTweens = {},
+		scaleSlot = { current = nil },
+		positionSlot = { current = nil },
 	}
-	local hovered = false
+	local isHovered = false
 
 	-- Cachear la Position default antes del primer hover para poder restaurarla
 	-- al MouseLeave. Si otro animador la cambia más adelante el lift seguirá
@@ -108,7 +83,7 @@ function InteractiveScaleTween.bindButton(button: GuiButton, janitor: any, optio
 
 	if enableHover then
 		janitor:Add(button.MouseEnter:Connect(function()
-			hovered = true
+			isHovered = true
 			tweenScale(state, scaleTarget, hoverScale, hoverTweenInfo)
 			if liftOffset ~= 0 then
 				tweenPosition(state, button, liftedPosition, hoverTweenInfo)
@@ -116,7 +91,7 @@ function InteractiveScaleTween.bindButton(button: GuiButton, janitor: any, optio
 		end), "Disconnect")
 
 		janitor:Add(button.MouseLeave:Connect(function()
-			hovered = false
+			isHovered = false
 			tweenScale(state, scaleTarget, defaultScale, hoverTweenInfo)
 			if liftOffset ~= 0 then
 				tweenPosition(state, button, defaultPosition, hoverTweenInfo)
@@ -129,19 +104,13 @@ function InteractiveScaleTween.bindButton(button: GuiButton, janitor: any, optio
 	end), "Disconnect")
 
 	janitor:Add(button.MouseButton1Up:Connect(function()
-		local targetScale = if enableHover and hovered then hoverScale else defaultScale
+		local targetScale = if enableHover and isHovered then hoverScale else defaultScale
 		tweenScale(state, scaleTarget, targetScale, hoverTweenInfo)
 	end), "Disconnect")
 
 	janitor:Add(function()
-		for _, tween in state.activeTweens do
-			tween:Cancel()
-		end
-		table.clear(state.activeTweens)
-		for _, tween in state.activePositionTweens do
-			tween:Cancel()
-		end
-		table.clear(state.activePositionTweens)
+		Retween.cancel(state.scaleSlot)
+		Retween.cancel(state.positionSlot)
 	end, true)
 end
 
