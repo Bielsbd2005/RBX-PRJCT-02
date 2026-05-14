@@ -1015,15 +1015,6 @@ local function _spawnPlayerOnAssignedTeam(player: Player): boolean
 		return false
 	end
 
-	-- Defense-in-depth contra doble-spawn: si el humanoid ya vive, otro LoadCharacter destruiría el rig actual.
-	local character = player.Character
-	if character then
-		local humanoid = character:FindFirstChildOfClass("Humanoid")
-		if humanoid and humanoid.Health > 0 then
-			return false
-		end
-	end
-
 	local side = _teamByUserId[player.UserId]
 	if not side then
 		return false
