@@ -43,8 +43,6 @@ local REWARD_STAGGER        = 0.25  -- segundos entre cada ítem de Rewards
 local SUMMARY_TO_REWARDS_DELAY = 0.5
 
 -- ── TweenInfos ───────────────────────────────────────────────
-local TWEEN_SLIDE  = TweenInfo.new(0.5,  Enum.EasingStyle.Back,  Enum.EasingDirection.Out)
-local TWEEN_VALUE  = TweenInfo.new(0.35, Enum.EasingStyle.Quad,  Enum.EasingDirection.Out)
 local TWEEN_REWARD = TweenInfo.new(0.55, Enum.EasingStyle.Back,  Enum.EasingDirection.Out)
 local TWEEN_HIDE   = TweenInfo.new(0.25, Enum.EasingStyle.Quad,  Enum.EasingDirection.In)
 local TWEEN_SUMMARY_DROP = TweenInfo.new(0.55, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
@@ -96,15 +94,6 @@ local function _applyColor(obj: Instance?, color: Color3)
 	end
 end
 
--- Intenta hacer tween de GroupTransparency (CanvasGroup); si falla, solo muestra.
-local function _tweenGroupIn(obj: GuiObject, tweenInfo: TweenInfo)
-	obj.Visible = true
-	pcall(function()
-		(obj :: any).GroupTransparency = 1
-		TweenService:Create(obj, tweenInfo, { GroupTransparency = 0 }):Play()
-	end)
-end
-
 local function _tweenSummaryDropIn(obj: GuiObject)
 	local targetPos = obj.Position
 	obj.Visible = true
@@ -147,30 +136,6 @@ local function _resolveContainer(gui: ScreenGui): GuiObject?
 		return container
 	end
 	return nil
-end
-
--- ── Fase 1: Result ────────────────────────────────────────────
-local function _playResultPhase(canvas: GuiObject, resultColor: Color3, isVictory: boolean)
-	local result = _guiChild(canvas, "Result")
-	if not result then return end
-
-	result.Visible = true
-
-	local up     = _guiChild(result, "Up")
-	local bottom = _guiChild(result, "Bottom")
-	local value  = _label(result, "Value")
-
-	-- Color
-	_applyColor(up,     resultColor)
-	_applyColor(bottom, resultColor)
-	if value then
-		value.TextColor3 = resultColor
-		value.Text = if isVictory then "VICTORY" else "DEFEAT"
-	end
-
-	if up     then up.Visible     = true end
-	if bottom then bottom.Visible = true end
-	if value  then value.TextTransparency = 0 end
 end
 
 -- ── Fase 2: Summary ───────────────────────────────────────────
