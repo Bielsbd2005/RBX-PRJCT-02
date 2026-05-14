@@ -597,6 +597,9 @@ function WeaponsSystem.onCharacterAdded(character)
 
 	-- Make it so players unequip weapons while seated, then reequip weapons when they become unseated
 	local humanoid = character:WaitForChild("Humanoid")
+	if WeaponsSystem.connections.seated then
+		WeaponsSystem.connections.seated:Disconnect()
+	end
 	WeaponsSystem.connections.seated = humanoid.Seated:Connect(function(isSeated)
 		if isSeated then
 			WeaponsSystem.seatedWeapon = character:FindFirstChildOfClass("Tool")
@@ -611,7 +614,10 @@ function WeaponsSystem.onCharacterAdded(character)
 	end)
 	WeaponsSystem.StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, false)
 
-	WeaponsSystem.connections.died = humanoid.Died:Connect(function()
+	if WeaponsSystem.connections.died then
+		WeaponsSystem.connections.died:Disconnect()
+	end
+	WeaponsSystem.connections.died = humanoid.Died:Once(function()
 		WeaponsSystem.resetClientRuntimeState()
 	end)
 end
@@ -894,7 +900,7 @@ local function _defaultDamageCallback(system, target, amount, damageType, dealer
 		if dealerPlayer then
 			target:SetAttribute("LastAttackerUserId", dealerPlayer.UserId)
 			target:SetAttribute("LastAttackerAt", time())
-			target:SetAttribute("LastAttackerWeaponName", weaponName)
+			target:SetAttribute("LastAttackerWeaponId", weaponName)
 			target:SetAttribute("LastAttackerHeadshot", wasHeadshot == true)
 
 			-- Track damage contributor for assists

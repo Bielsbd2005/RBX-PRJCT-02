@@ -551,7 +551,7 @@ function BotAI:Start(mapRoot: Instance?, aliveTargets: { Model }?)
 							;(targetHum :: Humanoid):SetAttribute("LastAttackerUserId", self._fakeUserId)
 							;(targetHum :: Humanoid):SetAttribute("LastAttackerAt", time())
 							local weapon = self._dummy:FindFirstChildOfClass("Tool")
-							;(targetHum :: Humanoid):SetAttribute("LastAttackerWeaponName", if weapon then weapon.Name else "NPC")
+							;(targetHum :: Humanoid):SetAttribute("LastAttackerWeaponId", if weapon then weapon.Name else "NPC")
 
 							;(targetHum :: Humanoid):TakeDamage(dmg)
 

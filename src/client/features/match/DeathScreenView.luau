@@ -237,6 +237,7 @@ function DeathScreenView.new(gui: ScreenGui): any
 	self._onMenu = nil :: (() -> ())?
 	self._baseTransparency = refs.container.BackgroundTransparency
 	self._respawnReady = false
+	self._destroyed = false
 	self._viewportTrack = nil :: AnimationTrack?
 
 	refs.root.Enabled = false
@@ -335,18 +336,24 @@ function DeathScreenView:show(respawnCooldown: number, killer: KillerInfo?)
 		local startAt = time()
 
 		while self._countdownToken == token do
+			-- Defensa adicional: si la view se destruyó o el GUI perdió parent
+			-- (cleanup en cascada), salimos sin tocar referencias muertas.
+			if self._destroyed then
+				return
+			end
+			local barFill = self._refs and self._refs.barFill
+			if not barFill or not barFill.Parent then
+				return
+			end
+
 			local elapsed = time() - startAt
 			local progress = math.clamp(if duration > 0 then elapsed / duration else 1, 0, 1)
 
-			if self._refs.barFill then
-				self._refs.barFill.Size = UDim2.new(progress, 0, 1, 0)
-			end
+			barFill.Size = UDim2.new(progress, 0, 1, 0)
 
 			if progress >= 1 then
-				if self._refs.barFill then
-					self._refs.barFill.Size = UDim2.new(1, 0, 1, 0)
-				end
-				if self._countdownToken == token then
+				barFill.Size = UDim2.new(1, 0, 1, 0)
+				if self._countdownToken == token and not self._destroyed then
 					self._respawnReady = true
 					_setButtonEnabled(self._refs.respawnButton, true)
 				end
@@ -386,6 +393,7 @@ function DeathScreenView:hide()
 end
 
 function DeathScreenView:Destroy()
+	self._destroyed = true
 	self._countdownToken += 1
 	for _, connection in self._connections do
 		connection:Disconnect()

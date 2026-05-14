@@ -17,9 +17,11 @@ local NetGuards = require(Shared.networking.NetGuards)
 local SpawnSelector = require(script.Parent:WaitForChild("SpawnSelector"))
 local LoadoutService = require(script.Parent:WaitForChild("LoadoutService"))
 local HealthPickupService = require(script.Parent:WaitForChild("HealthPickupService"))
-local KillEffectsRegistry = require(Shared.locker.killEffects.KillEffectsRegistry)
+local KillEffectsRegistry = require(Shared.Locker.killEffects.KillEffectsRegistry)
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
 local ActionRewards = require(Shared.constants.ActionRewards)
+local WeaponCategory = require(Shared.constants.WeaponCategory)
+local ItemDefaults = require(Shared.constants.ItemDefaults)
 local DailyTasksService = require(script.Parent.Parent.dailyTasks.DailyTasksService)
 
 local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
@@ -301,20 +303,20 @@ local function _resetAllPlayerStreakState()
 	end
 end
 
-local function _resolveWeaponItem(weaponName: string?): (string?, string?)
-	if type(weaponName) ~= "string" or weaponName == "" then
+local function _resolveWeaponItem(weaponId: string?): (string?, string?)
+	if type(weaponId) ~= "string" or weaponId == "" then
 		return nil, nil
 	end
 
-	for _, category in { "Main", "Special" } do
+	for _, category in WeaponCategory.ALL do
 		local categoryConfig = ItemsConfig[category]
 		if type(categoryConfig) == "table" then
-			if type(categoryConfig[weaponName]) == "table" then
-				return category, weaponName
+			if type(categoryConfig[weaponId]) == "table" then
+				return category, weaponId
 			end
-			for itemKey, definition in categoryConfig do
-				if type(definition) == "table" and definition.Name == weaponName then
-					return category, itemKey
+			for itemId, definition in categoryConfig do
+				if type(definition) == "table" and definition.Name == weaponId then
+					return category, itemId
 				end
 			end
 		end
@@ -384,13 +386,13 @@ local function _grantActionRewardsToAttacker(attackerUserId: number?, action: st
 	end
 end
 
-local function _grantMasteryWrapsIfEligible(player: Player, weaponCategory: string, weaponKey: string, newKillCount: number)
+local function _grantMasteryWrapsIfEligible(player: Player, weaponCategory: string, weaponId: string, newKillCount: number)
 	if not _dataService or newKillCount <= 0 then
 		return
 	end
 
-	local weaponSkinsConfig = ItemsConfig.WeaponSkins
-	if type(weaponSkinsConfig) ~= "table" then
+	local weaponWrapsConfig = ItemsConfig.WeaponWraps
+	if type(weaponWrapsConfig) ~= "table" then
 		return
 	end
 
@@ -400,14 +402,14 @@ local function _grantMasteryWrapsIfEligible(player: Player, weaponCategory: stri
 	end
 
 	local inventory = profile.Data.Inventory
-	local byWeapon = if type(inventory) == "table" then inventory.WeaponSkinsByWeapon else nil
+	local byWeapon = if type(inventory) == "table" then inventory.WeaponWrapsByWeapon else nil
 	local categoryMap = if type(byWeapon) == "table" then byWeapon[weaponCategory] else nil
-	local weaponMap = if type(categoryMap) == "table" then categoryMap[weaponKey] else nil
+	local weaponMap = if type(categoryMap) == "table" then categoryMap[weaponId] else nil
 
 	-- Acumular todos los wraps elegibles en un solo BatchUpdate. Antes hacíamos
 	-- N SetValues separados → N mensajes de red al cliente y N entradas dirty.
 	local updates: { { path: { string }, value: any } } = {}
-	for skinKey, definition in weaponSkinsConfig do
+	for wrapKey, definition in weaponWrapsConfig do
 		if type(definition) == "table" then
 			local challenge = (definition :: any).KillChallenge
 			local kills: number? = nil
@@ -415,10 +417,10 @@ local function _grantMasteryWrapsIfEligible(player: Player, weaponCategory: stri
 				kills = tonumber((challenge :: any).Kills)
 			end
 			if kills and kills > 0 and newKillCount >= kills then
-				local alreadyOwned = type(weaponMap) == "table" and weaponMap[skinKey] == true
+				local alreadyOwned = type(weaponMap) == "table" and weaponMap[wrapKey] == true
 				if not alreadyOwned then
 					table.insert(updates, {
-						path = { "Inventory", "WeaponSkinsByWeapon", weaponCategory, weaponKey, skinKey },
+						path = { "Inventory", "WeaponWrapsByWeapon", weaponCategory, weaponId, wrapKey },
 						value = true,
 					})
 				end
@@ -438,7 +440,7 @@ local function _grantMasteryWrapsIfEligible(player: Player, weaponCategory: stri
 	end
 end
 
-local function _registerWeaponKillForAttacker(attackerUserId: number?, weaponName: string?)
+local function _registerWeaponKillForAttacker(attackerUserId: number?, weaponId: string?)
 	if not _dataService or not attackerUserId or attackerUserId <= 0 then
 		return
 	end
@@ -451,13 +453,13 @@ local function _registerWeaponKillForAttacker(attackerUserId: number?, weaponNam
 	-- C2: si el profile aún no cargó, encolar y reintentar tras ProfileLoaded.
 	if not _hasProfile(attackerPlayer) then
 		_deferUntilProfile(attackerPlayer, function()
-			_registerWeaponKillForAttacker(attackerUserId, weaponName)
+			_registerWeaponKillForAttacker(attackerUserId, weaponId)
 		end)
 		return
 	end
 
-	local weaponCategory, weaponKey = _resolveWeaponItem(weaponName)
-	if not weaponCategory or not weaponKey then
+	local weaponCategory, resolvedWeaponId = _resolveWeaponItem(weaponId)
+	if not weaponCategory or not resolvedWeaponId then
 		return
 	end
 
@@ -466,14 +468,14 @@ local function _registerWeaponKillForAttacker(attackerUserId: number?, weaponNam
 		return
 	end
 
-	local ok, success, newCount = pcall(incrementFn, _dataService, attackerPlayer, weaponCategory, weaponKey, 1)
+	local ok, success, newCount = pcall(incrementFn, _dataService, attackerPlayer, weaponCategory, resolvedWeaponId, 1)
 	if not ok then
 		warn("[MatchService] IncrementWeaponKills error: " .. tostring(success))
 		return
 	end
 
 	if success and type(newCount) == "number" then
-		_grantMasteryWrapsIfEligible(attackerPlayer, weaponCategory, weaponKey, newCount)
+		_grantMasteryWrapsIfEligible(attackerPlayer, weaponCategory, resolvedWeaponId, newCount)
 	end
 end
 
@@ -523,7 +525,7 @@ local function _persistAttackerKillStats(attacker: Player, wasHeadshot: boolean,
 	end)
 end
 
-local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?, attackerWeaponName: string?, attackerWasHeadshot: boolean?)
+local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?, attackerWeaponId: string?, attackerWasHeadshot: boolean?)
 	_killStreakByUserId[deadPlayer.UserId] = 0
 	_resetStreakTimeout(deadPlayer.UserId)
 	if _matchKillsByUserId[deadPlayer.UserId] == nil then
@@ -566,7 +568,7 @@ local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?, a
 	_killStreakByUserId[attackerUserId] = (_killStreakByUserId[attackerUserId] or 0) + 1
 	_setupStreakTimeout(attackerUserId)
 	_sendPlayerStreakToAll(attackerUserId)
-	_registerWeaponKillForAttacker(attackerUserId, attackerWeaponName)
+	_registerWeaponKillForAttacker(attackerUserId, attackerWeaponId)
 	_grantActionRewardsToAttacker(attackerUserId, "Kill")
 	if attackerWasHeadshot then
 		_grantActionRewardsToAttacker(attackerUserId, "Headshot")
@@ -851,11 +853,11 @@ end
 
 local function _getKillEffectIdForAttacker(attackerUserId: number?): string
 	if not attackerUserId then
-		return "Default"
+		return ItemDefaults.ITEM_ID
 	end
 	local attackerPlayer = Players:GetPlayerByUserId(attackerUserId)
 	if not attackerPlayer then
-		return "Default"
+		return ItemDefaults.ITEM_ID
 	end
 	local profile = if _dataService then _dataService:GetProfile(attackerPlayer) else nil
 	if profile and profile.Data and profile.Data.Loadout then
@@ -864,7 +866,7 @@ local function _getKillEffectIdForAttacker(attackerUserId: number?): string
 			return killEffect
 		end
 	end
-	return "Default"
+	return ItemDefaults.ITEM_ID
 end
 
 local function _applyKillEffect(attackerUserId: number?, character: Model)
@@ -911,11 +913,11 @@ local function _registerDeathListener(player: Player, character: Model)
 		end
 		local attackerUserIdAttr = humanoid:GetAttribute("LastAttackerUserId")
 		local attackerAtAttr = humanoid:GetAttribute("LastAttackerAt")
-		local attackerWeaponNameAttr = humanoid:GetAttribute("LastAttackerWeaponName")
+		local attackerWeaponIdAttr = humanoid:GetAttribute("LastAttackerWeaponId")
 		local attackerHeadshotAttr = humanoid:GetAttribute("LastAttackerHeadshot")
 		local attackerUserId = if type(attackerUserIdAttr) == "number" then attackerUserIdAttr else nil
 		local attackerAt = if type(attackerAtAttr) == "number" then attackerAtAttr else 0
-		local attackerWeaponName = if type(attackerWeaponNameAttr) == "string" then attackerWeaponNameAttr else ""
+		local attackerWeaponId = if type(attackerWeaponIdAttr) == "string" then attackerWeaponIdAttr else ""
 		local attackerWasHeadshot = attackerHeadshotAttr == true
 		if attackerAt > 0 and time() - attackerAt > KILL_ATTRIBUTION_WINDOW then
 			attackerUserId = nil
@@ -933,7 +935,7 @@ local function _registerDeathListener(player: Player, character: Model)
 		else
 			killerName = ""
 		end
-		_registerKillEvent(player, attackerUserId, attackerWeaponName, attackerWasHeadshot)
+		_registerKillEvent(player, attackerUserId, attackerWeaponId, attackerWasHeadshot)
 
 		-- Aplicar kill effect del asesino (ragdoll visible para todos)
 		_applyKillEffect(attackerUserId, character)
@@ -972,7 +974,7 @@ local function _registerDeathListener(player: Player, character: Model)
 				killerName = killerName,
 				killerKills = killerKills,
 				killerLevel = killerLevel,
-				weaponName = attackerWeaponName,
+				weaponId = attackerWeaponId,
 			}, player)
 		end
 	end)
@@ -1535,11 +1537,11 @@ local function _startMapLoadFlow(winnerMapName: string)
 					-- Credit the kill to whoever killed this bot
 					local attackerUserIdAttr = botHumanoid:GetAttribute("LastAttackerUserId")
 					local attackerAtAttr = botHumanoid:GetAttribute("LastAttackerAt")
-					local attackerWeaponNameAttr = botHumanoid:GetAttribute("LastAttackerWeaponName")
+					local attackerWeaponIdAttr = botHumanoid:GetAttribute("LastAttackerWeaponId")
 					local attackerHeadshotAttr = botHumanoid:GetAttribute("LastAttackerHeadshot")
 					local attackerUserId = if type(attackerUserIdAttr) == "number" then attackerUserIdAttr else nil
 					local attackerAt = if type(attackerAtAttr) == "number" then attackerAtAttr else 0
-					local attackerWeaponName = if type(attackerWeaponNameAttr) == "string" then attackerWeaponNameAttr else ""
+					local attackerWeaponId = if type(attackerWeaponIdAttr) == "string" then attackerWeaponIdAttr else ""
 					local attackerWasHeadshot = attackerHeadshotAttr == true
 					if attackerAt > 0 and time() - attackerAt > KILL_ATTRIBUTION_WINDOW then
 						attackerUserId = nil
@@ -1558,7 +1560,7 @@ local function _startMapLoadFlow(winnerMapName: string)
 							if attackerPlayer then
 								_killStreakByUserId[attackerUserId] = (_killStreakByUserId[attackerUserId] or 0) + 1
 								_setupStreakTimeout(attackerUserId)
-								_registerWeaponKillForAttacker(attackerUserId, attackerWeaponName)
+								_registerWeaponKillForAttacker(attackerUserId, attackerWeaponId)
 								_grantActionRewardsToAttacker(attackerUserId, "Kill")
 								if attackerWasHeadshot then
 									_grantActionRewardsToAttacker(attackerUserId, "Headshot")
@@ -2133,6 +2135,7 @@ function MatchService:Start(dataService: DataService): ()
 		_killStreakByUserId[player.UserId] = nil
 		_lastBroadcastStreakKeyByUserId[player.UserId] = nil
 		_pendingProfileActionsByUserId[player.UserId] = nil
+		_roundEndEligibleByUserId[player.UserId] = nil
 		_resetStreakTimeout(player.UserId)
 		_log(string.format("Player removing: %s (%d).", player.Name, player.UserId))
 		_disconnectVoteForPlayer(player.UserId)

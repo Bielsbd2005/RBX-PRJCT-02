@@ -7,9 +7,9 @@
 	  1. Cliente envía Network.Cases.Summon { caseId, multi }
 	  2. Validar: cooldown → case existe → cash suficiente
 	  3. Determinar si lucky está activo (LuckyExpiresAt > os.time())
-	  4. Elegir skin con weighted random (pesos lucky o normales)
+	  4. Elegir wrap con weighted random (pesos lucky o normales)
 	  5. Applicar pity: si contador >= threshold → forzar pity drop y resetear
-	  6. DataService:BatchUpdate: cash - precio, skin al inventario, pity counter
+	  6. DataService:BatchUpdate: cash - precio, wrap al inventario, pity counter
 	  7. Enviar Network.Cases.SummonResult al cliente
 
 	Lucky Boost:
@@ -32,6 +32,7 @@ local InventoryRepository = require(Shared.data.InventoryRepository)
 local CasesConfig = require(Shared.constants.CasesConfig)
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
 local StoreProducts = require(Shared.constants.StoreProducts)
+local WeaponCategoryMod = require(Shared.constants.WeaponCategory)
 
 local M = NetGuards.MAX
 
@@ -40,7 +41,7 @@ local BattlePassService = require(script.Parent.Parent.battlepass.BattlePassServ
 local STORE_PRODUCTS_BY_ID = StoreProducts.ProductsByProductId :: { [number]: { CashAmount: number } }
 
 local COOLDOWN = 0.5
-type WeaponCategory = "Main" | "Special"
+type WeaponCategory = WeaponCategoryMod.WeaponCategory
 type OwnedWeaponEntry = {
 	category: WeaponCategory,
 	weaponId: string,
@@ -153,7 +154,7 @@ local function _processSummon(data: { caseId: string, multi: boolean }, player: 
 	end
 
 	-- Procesar cada tirada
-	local results = {} :: { { skinId: string, weaponCategory: WeaponCategory, weaponId: string, isPity: boolean, newPity: number } }
+	local results = {} :: { { wrapId: string, weaponCategory: WeaponCategory, weaponId: string, isPity: boolean, newPity: number } }
 
 	-- Usamos el profile actual para todas las tiradas en secuencia
 	-- El pity se acumula dentro del batch
@@ -170,15 +171,15 @@ local function _processSummon(data: { caseId: string, multi: boolean }, player: 
 
 	for _ = 1, count do
 		local isPity = false
-		local chosenSkinId: string
+		local chosenWrapId: string
 
 		if (runningPity + 1) >= caseDef.PityThreshold then
-			chosenSkinId = caseDef.PityDropSkinId
+			chosenWrapId = caseDef.PityDropWrapId
 			isPity = true
 			runningPity = 0
 		else
 			local chosenDrop = weightedRandomPick(caseDef.Drops, useLucky)
-			chosenSkinId = chosenDrop.SkinId
+			chosenWrapId = chosenDrop.WrapId
 			runningPity = runningPity + 1
 		end
 
@@ -195,10 +196,10 @@ local function _processSummon(data: { caseId: string, multi: boolean }, player: 
 			categoryLookup[targetWeapon.weaponId] = weaponLookup
 		end
 
-		weaponLookup[chosenSkinId] = (weaponLookup[chosenSkinId] or 0) + 1
+		weaponLookup[chosenWrapId] = (weaponLookup[chosenWrapId] or 0) + 1
 
 		table.insert(results, {
-			skinId = chosenSkinId,
+			wrapId = chosenWrapId,
 			weaponCategory = targetWeapon.category,
 			weaponId = targetWeapon.weaponId,
 			isPity = isPity,
@@ -212,27 +213,27 @@ local function _processSummon(data: { caseId: string, multi: boolean }, player: 
 		{ path = { "Cases", "PityCounters", caseId }, value = runningPity },
 	}
 
-	-- Agregar skins al inventario por arma (WeaponSkinsByWeapon).
+	-- Agregar wraps al inventario por arma (WeaponWrapsByWeapon).
 	-- Delta para mantener consistencia con el resto del codebase y resilencia
 	-- ante futuras introducciones de yields entre el read y el write.
 	-- También marcar NEW! flag y metadata para que el Locker pinte badge.
-	local seenSkinIds: { [string]: boolean } = {}
+	local seenWrapIds: { [string]: boolean } = {}
 	for weaponCategory, weaponsLookup in wrapsWonByWeapon do
-		for weaponId, skinsLookup in weaponsLookup do
-			for skinId, amountWon in skinsLookup do
-				if ItemsConfig.WeaponSkins and ItemsConfig.WeaponSkins[skinId] then
+		for weaponId, wrapsLookup in weaponsLookup do
+			for wrapId, amountWon in wrapsLookup do
+				if ItemsConfig.WeaponWraps and ItemsConfig.WeaponWraps[wrapId] then
 					table.insert(updates, {
-						path = { "Inventory", "WeaponSkinsByWeapon", weaponCategory, weaponId, skinId },
+						path = { "Inventory", "WeaponWrapsByWeapon", weaponCategory, weaponId, wrapId },
 						delta = amountWon,
 					})
-					if not seenSkinIds[skinId] then
-						seenSkinIds[skinId] = true
+					if not seenWrapIds[wrapId] then
+						seenWrapIds[wrapId] = true
 						table.insert(updates, {
-							path = { "InventoryMeta", "WeaponSkins", skinId },
+							path = { "InventoryMeta", "WeaponWraps", wrapId },
 							value = { AcquiredAt = os.time(), Source = "Case" },
 						})
 						table.insert(updates, {
-							path = { "NewItemFlags", "WeaponSkins", skinId },
+							path = { "NewItemFlags", "WeaponWraps", wrapId },
 							value = true,
 						})
 					end
@@ -254,7 +255,7 @@ local function _processSummon(data: { caseId: string, multi: boolean }, player: 
 	for _, result in results do
 		Network.Cases.SummonResult.SendTo({
 			caseId = caseId,
-			skinId = result.skinId,
+			wrapId = result.wrapId,
 			weaponCategory = result.weaponCategory,
 			weaponId = result.weaponId,
 			isPity = result.isPity,

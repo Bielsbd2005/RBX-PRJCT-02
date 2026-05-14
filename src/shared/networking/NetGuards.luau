@@ -30,11 +30,10 @@ local NetGuards = {}
 -- Caps por tipo lógico (en bytes — ByteNet escribe strings como UTF-8 raw).
 -- Los valores son intencionalmente generosos para no bloquear UX legítimo.
 NetGuards.MAX = table.freeze({
-	Id            = 32,   -- itemId, weaponId, skinId, caseId
-	Category      = 16,   -- "Main", "Special", "Faces", "Wraps", etc.
+	Id            = 32,   -- itemId, weaponId, wrapId, caseId
+	Category      = 16,   -- "Main", "Special", "Faces", "Hats", "KillEffects", "Outfits", "WeaponWraps"
 	SettingKey    = 32,   -- claves de Settings (whitelisted server-side igualmente)
 	SettingChoice = 32,   -- valores enum de Settings (whitelisted)
-	WeaponName    = 32,
 	Code          = 24,   -- códigos canjeables (típicamente <12 chars)
 	ClaimType     = 16,   -- "LikeJoin" | "Notifications" | "Code"
 	Track         = 16,   -- "Free" | "Premium"
@@ -65,14 +64,6 @@ function NetGuards.validate(data: any, schema: { [string]: number }): boolean
 	end
 
 	return true
-end
-
---[[
-	str(value, max) → boolean
-	Helper para validar un único string sin construir schema.
-]]
-function NetGuards.str(value: any, max: number): boolean
-	return type(value) == "string" and #value <= max
 end
 
 return table.freeze(NetGuards)

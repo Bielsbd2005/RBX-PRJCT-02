@@ -3,25 +3,25 @@
 	BattlePassFeature (Client)
 
 	Controller completo del Battle Pass:
-	  • Open/Close del panel vía FeaturePanelController + Blur.
+	  • Open/Close del panel vía PanelController + Blur.
 	  • Reactivo a DataController.BattlePass (Fusion 0.3 Observer).
 	  • Paginación de 6 slots (Next/Back) sobre los tiers de la season activa.
 	  • Click-to-claim por slot (free/premium); el servidor valida.
 	  • Premium purchase via Robux developer product (botón Purchase).
 	  • Listener de Network.BattlePass.Response para feedback básico.
 
-	Convenciones de UI (autoradas en PlayerGui.BattlePass):
-	  Container.Main."1".."6"          -- slots visibles
+	Convenciones de UI (autoradas en PlayerGui.UserInterface.BattlePass):
+	  Main."1".."6"          -- slots visibles
 	    .free.Icon, .free.Value         -- recompensa free
 	    .premium.Icon, .premium.Value   -- recompensa premium
-	  Container.Main.Premium.Purchase   -- botón compra Premium (Robux)
-	  Container.LevelIndicators."1".."6"
+	  Main.Premium.Purchase   -- botón compra Premium (Robux)
+	  LevelIndicators."1".."6"
 	    .Value, .Indicator              -- número y color del tier
-	  Container.LevelContainer
+	  LevelContainer
 	    .Bar.Fill                       -- progreso XP del tier actual
 	    .Level                          -- número del tier actual ("MAX" si completo)
-	  Container.Next, Container.Back    -- paginación
-	  Container.CloseBtn                -- cerrar panel
+	  Next, Back                        -- paginación
+	  CloseBtn                          -- cerrar panel
 
 	Convención de estado por slot/row (atributo "BPState"):
 	  "Locked"    — tier todavía no completado por el jugador.
@@ -43,9 +43,10 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 
 local Janitor = require(Packages.janitor) :: any
 local Fusion = require(Packages.fusion) :: any
-local FeaturePanelController = require(Client.core.ui.FeaturePanelController)
+local PanelController = require(Client.core.ui.PanelController)
 local UIUtils = require(Client.core.ui.UIUtils)
 local BlurController = require(Client.core.ui.BlurController)
+local CameraFovEffect = require(Client.core.ui.CameraFovEffect)
 local Confetti = require(Client.core.ui.Confetti)
 local DataController = require(Client.core.data.DataController)
 local Network = require(Shared.networking.Network)
@@ -61,7 +62,7 @@ local INDICATOR_TODO = Color3.fromRGB(255, 255, 255)
 local HOVER_LIFT_PIXELS = 14
 local HOVER_TWEEN_INFO = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
--- Selected preview: al clicar un item, el ImageLabel de Container.Selected
+-- Selected preview: al clicar un item, el ImageLabel de BattlePass.Selected
 -- cambia su Image y entra desde un poco más abajo hasta su Position autorada.
 local SELECTED_LIFT_PIXELS = 24
 local SELECTED_TWEEN_INFO = TweenInfo.new(0.28, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
@@ -101,10 +102,8 @@ local BattlePassFeature = {}
 -- Helpers de resolución de UI
 -- ────────────────────────────────────────────────────────────
 
-local function _resolveCloseButton(battlepassGui: ScreenGui): GuiButton?
-	local container = battlepassGui:FindFirstChild("Container")
-	if not container then return nil end
-	local closeBtn = container:FindFirstChild("CloseBtn")
+local function _resolveCloseButton(battlepassFrame: GuiObject): GuiButton?
+	local closeBtn = battlepassFrame:FindFirstChild("CloseBtn")
 	if closeBtn and closeBtn:IsA("GuiButton") then
 		return closeBtn
 	end
@@ -196,16 +195,18 @@ function BattlePassFeature.start(menuController: any): any
 	local menuGui = menuController:getGui()
 
 	local battlepassButton = UIUtils.findBottomButton(menuGui, "BattlePass")
-	local battlepassGui = playerGui:FindFirstChild("BattlePass")
+	local uiGui = playerGui:WaitForChild("UserInterface") :: ScreenGui
+	local battlepassFrameNode = uiGui:WaitForChild("BattlePass")
 
 	if not battlepassButton then
 		warn("[BattlePassFeature] No se encontró el botón 'BattlePass' en Menu.Bottom")
 		return janitor
 	end
-	if not battlepassGui or not battlepassGui:IsA("ScreenGui") then
-		warn("[BattlePassFeature] No se encontró ScreenGui 'BattlePass' en PlayerGui")
+	if not battlepassFrameNode:IsA("GuiObject") then
+		warn("[BattlePassFeature] PlayerGui.UserInterface.BattlePass no es un GuiObject")
 		return janitor
 	end
+	local battlepassFrame = battlepassFrameNode :: GuiObject
 
 	-- Bottom bar UI (Menu.Bottom.BattlePass.*): mirror compacto del estado del
 	-- pass. Todos los nodos son opcionales — si el UI author no los pone, se
@@ -234,31 +235,26 @@ function BattlePassFeature.start(menuController: any): any
 		end
 	end
 
-	local container = battlepassGui:FindFirstChild("Container")
-	if not container then
-		warn("[BattlePassFeature] PlayerGui.BattlePass.Container no existe")
-		return janitor
-	end
-
 	-- Resolver nodos. Faltantes solo warn; el panel sigue abriéndose.
-	local mainFolder = container:FindFirstChild("Main")
-	local indicatorsFolder = container:FindFirstChild("LevelIndicators")
-	local levelContainer = container:FindFirstChild("LevelContainer")
-	local nextBtn = container:FindFirstChild("Next")
-	local backBtn = container:FindFirstChild("Back")
+	-- "Main" here is a Frame name in the BattlePass UI, unrelated to WeaponCategory.
+	local mainFolder = battlepassFrame:FindFirstChild("Main")
+	local indicatorsFolder = battlepassFrame:FindFirstChild("LevelIndicators")
+	local levelContainer = battlepassFrame:FindFirstChild("LevelContainer")
+	local nextBtn = battlepassFrame:FindFirstChild("Next")
+	local backBtn = battlepassFrame:FindFirstChild("Back")
 	local backIndicatorNode = if backBtn then backBtn:FindFirstChild("Indicator") else nil
 	local backIndicator: GuiObject? = if backIndicatorNode and backIndicatorNode:IsA("GuiObject") then backIndicatorNode else nil
 	local premiumFolder = if mainFolder then mainFolder:FindFirstChild("Premium") else nil
 	local purchaseBtn = if premiumFolder then premiumFolder:FindFirstChild("Purchase") else nil
-	local skipBtn = container:FindFirstChild("Skip")
-	local timeLeftNode = container:FindFirstChild("TimeLeft")
+	local skipBtn = battlepassFrame:FindFirstChild("Skip")
+	local timeLeftNode = battlepassFrame:FindFirstChild("TimeLeft")
 	local timeLeftLabel: TextLabel? = if timeLeftNode and timeLeftNode:IsA("TextLabel") then timeLeftNode else nil
-	local notificationNode = container:FindFirstChild("Notification")
+	local notificationNode = battlepassFrame:FindFirstChild("Notification")
 	local notificationFrame: GuiObject? = if notificationNode and notificationNode:IsA("GuiObject") then notificationNode else nil
 
-	if not mainFolder then warn("[BattlePassFeature] Container.Main no existe") end
-	if not indicatorsFolder then warn("[BattlePassFeature] Container.LevelIndicators no existe") end
-	if not levelContainer then warn("[BattlePassFeature] Container.LevelContainer no existe") end
+	if not mainFolder then warn("[BattlePassFeature] BattlePass.Main no existe") end
+	if not indicatorsFolder then warn("[BattlePassFeature] BattlePass.LevelIndicators no existe") end
+	if not levelContainer then warn("[BattlePassFeature] BattlePass.LevelContainer no existe") end
 
 	-- Resolver slots 1..6 y indicators 1..6.
 	local mainSlots: { GuiObject } = {}
@@ -287,12 +283,12 @@ function BattlePassFeature.start(menuController: any): any
 		end
 	end
 
-	-- Container.Selected puede ser el propio ImageLabel/ImageButton, o un
-	-- contenedor cuyo primer hijo Image* es el preview. Soportamos ambas formas
-	-- para no atar la implementación a un layout exacto del UI.
+	-- Selected puede ser el propio ImageLabel/ImageButton, o un contenedor cuyo
+	-- primer hijo Image* es el preview. Soportamos ambas formas para no atar la
+	-- implementación a un layout exacto del UI.
 	local selectedImage: (ImageLabel | ImageButton)? = nil
 	do
-		local selectedNode = container:FindFirstChild("Selected")
+		local selectedNode = battlepassFrame:FindFirstChild("Selected")
 		if selectedNode then
 			if selectedNode:IsA("ImageLabel") or selectedNode:IsA("ImageButton") then
 				selectedImage = selectedNode :: any
@@ -391,15 +387,20 @@ function BattlePassFeature.start(menuController: any): any
 	-- Panel open/close
 	-- ────────────────────────────────────────────────────────
 
-	local closeButton = _resolveCloseButton(battlepassGui)
+	local closeButton = _resolveCloseButton(battlepassFrame)
+	if not closeButton then
+		warn("[BattlePassFeature] No se encontró CloseBtn en BattlePass")
+		return janitor
+	end
 
-	local panel = FeaturePanelController.new({
-		menuController = menuController,
-		screenGui = battlepassGui,
-		openButton = battlepassButton,
-		closeButton = closeButton,
+	local fovEffect = CameraFovEffect.new()
+	janitor:Add(fovEffect, "Destroy")
+
+	local panel = PanelController.new(menuController, battlepassFrame, battlepassButton, closeButton, {
+		animationMode = "fade",
 		onOpen = function()
 			BlurController.acquire(BLUR_KEY)
+			fovEffect:expand()
 			-- Cada vez que se abre el panel, snapeamos a la página del
 			-- progreso actual del jugador. Reabrir el panel reinicia la
 			-- paginación al estado "primera vez" sin perder el resto del
@@ -409,6 +410,7 @@ function BattlePassFeature.start(menuController: any): any
 		end,
 		onClose = function()
 			BlurController.release(BLUR_KEY)
+			fovEffect:restore()
 		end,
 	})
 	janitor:Add(panel, "Destroy")
@@ -560,7 +562,7 @@ function BattlePassFeature.start(menuController: any): any
 		frame.Position = abovePos
 		frame.Visible = true
 
-		Confetti.Rain(battlepassGui, {
+		Confetti.Rain(battlepassFrame, {
 			colors = NOTIFICATION_CONFETTI_COLORS,
 			count = 60,
 			minLifetime = 0.9,
@@ -691,7 +693,7 @@ function BattlePassFeature.start(menuController: any): any
 			bindIconHover(row.frame, row.icon)
 		end
 
-		-- Click siempre actualiza el preview de Container.Selected. Si además
+		-- Click siempre actualiza el preview de BattlePass.Selected. Si además
 		-- el slot está Claimable, enviamos el claim al servidor.
 		bindRowClick(row.frame, function()
 			playSelectedAnimation(image)

@@ -209,6 +209,13 @@ function BattlePassConfig.IsBPExclusive(category: string, itemId: string): boole
 	return cat ~= nil and cat[itemId] == true
 end
 
+-- Invalida el cache lazy. Llamar tras mutar `BattlePassConfig.Seasons` en runtime
+-- (hot reload, eventos seasonales, parches en caliente). No es necesario en flujo
+-- normal porque las seasons son inmutables.
+function BattlePassConfig.InvalidateBPCache()
+	_bpExclusiveCache = nil
+end
+
 -- Resuelve un productId a su (Season, kind). kind ∈ "Premium" | "Skip".
 -- Devuelve (nil, nil) si el producto no pertenece a ningún BattlePass.
 -- Permite que ProcessReceipt despache un único receipt entre los dos tipos

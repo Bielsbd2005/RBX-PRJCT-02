@@ -28,8 +28,4 @@ function CameraLock.isLocked(): boolean
 	return _owner ~= nil
 end
 
-function CameraLock.getOwner(): string?
-	return _owner
-end
-
 return CameraLock

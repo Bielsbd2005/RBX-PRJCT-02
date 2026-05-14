@@ -1,13 +1,14 @@
 --!strict
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ItemDefaults = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("ItemDefaults"))
+
 local DefaultKillEffect = require(script.Parent.Default)
 local GravityKillEffect = require(script.Parent.Gravity)
 
 type KillEffectModule = {
 	apply: (target: Model) -> boolean,
 }
-
-local DEFAULT_KILL_EFFECT_ID = "Default"
 
 local killEffectsById = {
 	Default = DefaultKillEffect,
@@ -17,8 +18,8 @@ local killEffectsById = {
 local KillEffectsRegistry = {}
 
 function KillEffectsRegistry.apply(effectId: string?, target: Model): boolean
-	local resolvedId = if type(effectId) == "string" and effectId ~= "" then effectId else DEFAULT_KILL_EFFECT_ID
-	local killEffectModule = killEffectsById[resolvedId] or killEffectsById[DEFAULT_KILL_EFFECT_ID]
+	local resolvedId = if type(effectId) == "string" and effectId ~= "" then effectId else ItemDefaults.ITEM_ID
+	local killEffectModule = killEffectsById[resolvedId] or killEffectsById[ItemDefaults.ITEM_ID]
 	return killEffectModule.apply(target)
 end
 

@@ -7,8 +7,9 @@ local Players = game:GetService("Players")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local GameConfig = require(Shared:WaitForChild("GameConfig"))
-local KillEffectsRegistry = require(Shared.locker.killEffects.KillEffectsRegistry)
+local KillEffectsRegistry = require(Shared.Locker.killEffects.KillEffectsRegistry)
 local BotNames = require(Shared.constants.BotNames)
+local ItemDefaults = require(Shared.constants.ItemDefaults)
 
 local BotAI = require(script:WaitForChild("BotAI"))
 
@@ -38,14 +39,14 @@ local function _getKillEffectForBotAttacker(humanoid: Humanoid): string
 	local attackerUserId = if type(attackerUserIdAttr) == "number" then attackerUserIdAttr else nil
 	local attackerAt = if type(attackerAtAttr) == "number" then attackerAtAttr else 0
 	if attackerAt > 0 and math.abs(time() - attackerAt) > 4 then
-		return "Default"
+		return ItemDefaults.ITEM_ID
 	end
 	if not attackerUserId then
-		return "Default"
+		return ItemDefaults.ITEM_ID
 	end
 	local attackerPlayer = Players:GetPlayerByUserId(attackerUserId)
 	if not attackerPlayer then
-		return "Default"
+		return ItemDefaults.ITEM_ID
 	end
 	local profile = nil :: any
 	local dataService = _dataServiceRef
@@ -58,7 +59,7 @@ local function _getKillEffectForBotAttacker(humanoid: Humanoid): string
 			return killEffect
 		end
 	end
-	return "Default"
+	return ItemDefaults.ITEM_ID
 end
 
 local AIService = {}
@@ -149,6 +150,20 @@ end
 Players.PlayerRemoving:Connect(function(player)
 	if player.Character then
 		_removeAliveTarget(player.Character)
+	end
+end)
+
+-- Graceful shutdown: cuando el servidor cierra, paramos los loops de todos los
+-- bots para que no se queden ejecutando contra un DataModel a punto de morir.
+-- Esto evita warnings/errores ruidosos durante el shutdown y permite que las
+-- coroutines salgan limpiamente.
+game:BindToClose(function()
+	for _, record in pairs(_botsByName) do
+		if record and record.ai then
+			pcall(function()
+				record.ai:Stop()
+			end)
+		end
 	end
 end)
 

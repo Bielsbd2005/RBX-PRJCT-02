@@ -202,7 +202,7 @@ local CasesNamespace = ByteNet.DefineNamespace("Cases", function()
 		SummonResult = ByteNet.DefinePacket({
 			Value = ByteNet.Struct({
 				caseId    = ByteNet.String,
-				skinId    = ByteNet.String,
+				wrapId    = ByteNet.String,
 				weaponCategory = ByteNet.String,
 				weaponId  = ByteNet.String,
 				isPity    = ByteNet.Bool,
@@ -306,7 +306,7 @@ local MatchNamespace = ByteNet.DefineNamespace("Match", function()
 				killerName = ByteNet.String,
 				killerKills = ByteNet.Int32,
 				killerLevel = ByteNet.Int32,
-				weaponName = ByteNet.String,
+				weaponId = ByteNet.String,
 			}),
 			ReliabilityType = "Reliable",
 		}),

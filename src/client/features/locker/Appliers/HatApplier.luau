@@ -2,6 +2,9 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local LockerConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("LockerConfig"))
+local LockerCategory = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("LockerCategory"))
+
 local HatApplier = {}
 HatApplier.__index = HatApplier
 
@@ -12,21 +15,9 @@ type HatApplier = {
 	GetHatsFolder: (self: HatApplier) -> Folder?,
 	Clear: (self: HatApplier) -> (),
 	Apply: (self: HatApplier, itemData: any) -> (),
-	ApplyItemKey: (self: HatApplier, itemKey: string?) -> (),
-	ApplyFromLoadoutHat: (self: HatApplier, loadoutHat: string?) -> (),
+	ApplyItemId: (self: HatApplier, itemId: string?) -> (),
 	Reset: (self: HatApplier) -> (),
 }
-
-local function findFirstChildByCandidates(parent: Instance, candidates: { string }): Instance?
-	for _, name in candidates do
-		local child = parent:FindFirstChild(name)
-		if child then
-			return child
-		end
-	end
-
-	return nil
-end
 
 local function resolveHatsFolder(): Folder?
 	local shared = ReplicatedStorage:FindFirstChild("Shared")
@@ -34,19 +25,11 @@ local function resolveHatsFolder(): Folder?
 		return nil
 	end
 
-	local locker = shared:FindFirstChild("locker")
+	local locker = shared:FindFirstChild("Locker")
 	if locker and locker:IsA("Folder") then
-		local hats = locker:FindFirstChild("hats")
+		local hats = locker:FindFirstChild("Hats")
 		if hats and hats:IsA("Folder") then
 			return hats
-		end
-	end
-
-	local lockerUpper = shared:FindFirstChild("Locker")
-	if lockerUpper and lockerUpper:IsA("Folder") then
-		local hatsUpper = lockerUpper:FindFirstChild("Hats")
-		if hatsUpper and hatsUpper:IsA("Folder") then
-			return hatsUpper
 		end
 	end
 
@@ -54,7 +37,7 @@ local function resolveHatsFolder(): Folder?
 	if systems and systems:IsA("Folder") then
 		local systemsLocker = systems:FindFirstChild("Locker")
 		if systemsLocker and systemsLocker:IsA("Folder") then
-			local systemsHats = findFirstChildByCandidates(systemsLocker, { "Hats", "hats" })
+			local systemsHats = systemsLocker:FindFirstChild("Hats")
 			if systemsHats and systemsHats:IsA("Folder") then
 				return systemsHats
 			end
@@ -118,26 +101,26 @@ function HatApplier:Apply(itemData: any)
 	end
 
 	local itemName = if type(itemData.Name) == "string" then itemData.Name else nil
-	local itemKey = if type(itemData.ItemKey) == "string" then itemData.ItemKey else nil
+	local itemId = if type(itemData.id) == "string" then itemData.id else nil
 	local hatTemplate = nil :: Instance?
 
 	if itemName then
 		hatTemplate = hatsFolder:FindFirstChild(itemName)
 	end
 
-	if not hatTemplate and itemKey then
-		hatTemplate = hatsFolder:FindFirstChild(itemKey)
+	if not hatTemplate and itemId then
+		hatTemplate = hatsFolder:FindFirstChild(itemId)
 	end
 
-	if not hatTemplate and type(itemData.Id) == "string" then
-		local idSuffix = string.match(itemData.Id, "[^%.]+$")
+	if not hatTemplate and type(itemData.qualifiedId) == "string" then
+		local idSuffix = string.match(itemData.qualifiedId, "[^%.]+$")
 		if idSuffix then
 			hatTemplate = hatsFolder:FindFirstChild(idSuffix)
 		end
 	end
 
 	if not hatTemplate or not hatTemplate:IsA("Accessory") then
-		warn("[HatApplier] No se encontro el sombrero:", itemName or itemKey or "<sin nombre>")
+		warn("[HatApplier] No se encontro el sombrero:", itemName or itemId or "<sin nombre>")
 		return
 	end
 
@@ -167,8 +150,8 @@ function HatApplier:Apply(itemData: any)
 	newHat.Parent = self._model
 end
 
-function HatApplier:ApplyItemKey(itemKey: string?)
-	if type(itemKey) ~= "string" or itemKey == "" then
+function HatApplier:ApplyItemId(itemId: string?)
+	if type(itemId) ~= "string" or itemId == "" then
 		self:Reset()
 		return
 	end
@@ -179,21 +162,17 @@ function HatApplier:ApplyItemKey(itemKey: string?)
 		return
 	end
 
-	local itemConfig = hatsCategory[itemKey]
+	local itemConfig = hatsCategory[itemId]
 	if type(itemConfig) ~= "table" then
 		self:Reset()
 		return
 	end
 
 	self:Apply({
-		Id = "Hats." .. itemKey,
-		ItemKey = itemKey,
+		qualifiedId = LockerConfig.makeQualifiedId(LockerCategory.HATS, itemId),
+		id = itemId,
 		Name = itemConfig.Name,
 	})
-end
-
-function HatApplier:ApplyFromLoadoutHat(loadoutHat: string?)
-	self:ApplyItemKey(loadoutHat)
 end
 
 function HatApplier:Reset()

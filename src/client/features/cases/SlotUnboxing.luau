@@ -35,12 +35,12 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Janitor = require(Packages.janitor) :: any
 local CasesConfig = require(Shared.constants.CasesConfig) :: any
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
-local WeaponSkinWrapPreviewer = require(features.locker.Previewers.WeaponSkinWrapPreviewer)
+local WeaponWrapPreviewer = require(features.locker.Previewers.WeaponWrapPreviewer)
 
 export type OwnedWeapon = { category: string, weaponId: string }
 export type SummonResult = {
     caseId: string,
-    skinId: string,
+    wrapId: string,
     weaponCategory: string,
     weaponId: string,
     isPity: boolean,
@@ -127,12 +127,12 @@ local function buildWrapsList(caseDef: any?): { string }
     if not caseDef or type(caseDef.Drops) ~= "table" then return keys end
     local seen = {} :: { [string]: boolean }
     for _, drop in caseDef.Drops do
-        local skinId = drop.SkinId
-        if seen[skinId] then continue end
-        local skinCfg = if ItemsConfig.WeaponSkins then ItemsConfig.WeaponSkins[skinId] else nil
-        if not skinCfg then continue end
-        seen[skinId] = true
-        table.insert(keys, skinId)
+        local wrapId = drop.WrapId
+        if seen[wrapId] then continue end
+        local wrapCfg = if ItemsConfig.WeaponWraps then ItemsConfig.WeaponWraps[wrapId] else nil
+        if not wrapCfg then continue end
+        seen[wrapId] = true
+        table.insert(keys, wrapId)
     end
     return keys
 end
@@ -207,11 +207,11 @@ end
 
 local function applyWeaponContent(
     item: LaneItem,
-    weaponKey: string,
+    slotKey: string,
     weaponImageMap: { [string]: string }
 )
     if not item.icon:IsA("ImageLabel") then return end
-    local image = weaponImageMap[weaponKey]
+    local image = weaponImageMap[slotKey]
     if not image or image == "" then return end -- no machacar con vacío si el lookup falla
     local imgLabel = item.icon :: ImageLabel
     imgLabel.Image = image
@@ -276,22 +276,22 @@ local function reframeWrapCentered(vp: ViewportFrame)
     )
 end
 
-local function applyWrapContent(item: LaneItem, skinId: string)
+local function applyWrapContent(item: LaneItem, wrapId: string)
     if not item.previewJanitor then return end
     if not item.icon:IsA("ViewportFrame") then return end
     item.previewJanitor:Cleanup()
 
-    local skinCfg = if ItemsConfig.WeaponSkins then ItemsConfig.WeaponSkins[skinId] else nil
-    if not skinCfg then return end
+    local wrapCfg = if ItemsConfig.WeaponWraps then ItemsConfig.WeaponWraps[wrapId] else nil
+    if not wrapCfg then return end
 
     -- Siempre la plantilla genérica ReplicatedStorage.Wrap (textura sobre Wrap.Main).
     -- No pasamos PreviewWeaponCategory/Key para que el previewer caiga al template genérico.
     local vp = item.icon :: ViewportFrame
-    WeaponSkinWrapPreviewer.Render(vp, {
-        TextureID = skinCfg.TextureID,
-        BaseColor = skinCfg.BaseColor,
+    WeaponWrapPreviewer.Render(vp, {
+        TextureID = wrapCfg.TextureID,
+        BaseColor = wrapCfg.BaseColor,
         Animated = false,
-        StudsPerTile = skinCfg.StudsPerTile,
+        StudsPerTile = wrapCfg.StudsPerTile,
     }, item.previewJanitor)
     reframeWrapCentered(vp)
 end
@@ -514,39 +514,39 @@ function SlotUnboxing.play(
     if equipButton and equipButton:IsA("GuiObject") then equipButton.Visible = false end
 
     -- Pool de armas (Lane1)
-    local weaponKeys, weaponImageMap = buildWeaponImageMap(ownedWeapons)
-    local resultWeaponKey = result.weaponCategory .. ":" .. result.weaponId
-    if not weaponImageMap[resultWeaponKey] then
+    local slotKeys, weaponImageMap = buildWeaponImageMap(ownedWeapons)
+    local resultSlotKey = result.weaponCategory .. ":" .. result.weaponId
+    if not weaponImageMap[resultSlotKey] then
         local categoryCfg = ItemsConfig[result.weaponCategory]
         local cfg = if type(categoryCfg) == "table" then categoryCfg[result.weaponId] else nil
         local image = if cfg and type(cfg.Image) == "string" and cfg.Image ~= "" then cfg.Image else nil
         if image then
-            table.insert(weaponKeys, resultWeaponKey)
-            weaponImageMap[resultWeaponKey] = image
+            table.insert(slotKeys, resultSlotKey)
+            weaponImageMap[resultSlotKey] = image
         else
             -- El server puede picar weaponId="Default" (existe en Inventory pero no
             -- en ItemsConfig.Main/Special). Aliasamos al primer asset válido del map
             -- para que el reel nunca termine con la imagen en blanco.
             for _, fallbackImg in weaponImageMap do
-                table.insert(weaponKeys, resultWeaponKey)
-                weaponImageMap[resultWeaponKey] = fallbackImg
+                table.insert(slotKeys, resultSlotKey)
+                weaponImageMap[resultSlotKey] = fallbackImg
                 break
             end
         end
     end
-    if #weaponKeys == 0 then
+    if #slotKeys == 0 then
         local defaultCfg = if type(ItemsConfig.Main) == "table" then ItemsConfig.Main.Default else nil
         local image = if defaultCfg and type(defaultCfg.Image) == "string" and defaultCfg.Image ~= "" then defaultCfg.Image else nil
         if image then
             local k = "Main:Default"
-            table.insert(weaponKeys, k)
+            table.insert(slotKeys, k)
             weaponImageMap[k] = image
         end
     end
 
     -- Precargar la imagen del resultado para evitar el flash en blanco mientras
     -- Roblox descarga el asset en el momento exacto del swap final.
-    local resultImage = weaponImageMap[resultWeaponKey]
+    local resultImage = weaponImageMap[resultSlotKey]
     if resultImage and resultImage ~= "" then
         task.spawn(function()
             pcall(ContentProvider.PreloadAsync, ContentProvider, { resultImage })
@@ -558,11 +558,11 @@ function SlotUnboxing.play(
     local wrapKeys = buildWrapsList(caseDef)
     local hasResult = false
     for _, k in wrapKeys do
-        if k == result.skinId then hasResult = true break end
+        if k == result.wrapId then hasResult = true break end
     end
     if not hasResult then
-        local skinCfg = if ItemsConfig.WeaponSkins then ItemsConfig.WeaponSkins[result.skinId] else nil
-        if skinCfg then table.insert(wrapKeys, result.skinId) end
+        local wrapCfg = if ItemsConfig.WeaponWraps then ItemsConfig.WeaponWraps[result.wrapId] else nil
+        if wrapCfg then table.insert(wrapKeys, result.wrapId) end
     end
 
     -- Crear los 5 items de Lane1, semilla aleatoria
@@ -571,15 +571,15 @@ function SlotUnboxing.play(
         local item = createLaneItem(lane1 :: GuiObject, false, masterJanitor)
         table.insert(lane1Items, item)
         applyState(item, i)
-        if #weaponKeys > 0 then
-            applyWeaponContent(item, pickRandom(weaponKeys), weaponImageMap)
+        if #slotKeys > 0 then
+            applyWeaponContent(item, pickRandom(slotKeys), weaponImageMap)
         end
     end
 
     -- Reel 1: armas
-    playReel(lane1Items, weaponKeys, function(item, key)
+    playReel(lane1Items, slotKeys, function(item, key)
         applyWeaponContent(item, key, weaponImageMap)
-    end, resultWeaponKey)
+    end, resultSlotKey)
 
     local lane1Center = findCenterItem(lane1Items)
     if lane1Center then
@@ -600,10 +600,10 @@ function SlotUnboxing.play(
 
     playReel(lane2Items, wrapKeys, function(item, key)
         applyWrapContent(item, key)
-    end, result.skinId)
+    end, result.wrapId)
 
-    local skinCfg = if ItemsConfig.WeaponSkins then ItemsConfig.WeaponSkins[result.skinId] else nil
-    local rarity = if skinCfg and type(skinCfg.Rarity) == "string" then skinCfg.Rarity else nil
+    local wrapCfg = if ItemsConfig.WeaponWraps then ItemsConfig.WeaponWraps[result.wrapId] else nil
+    local rarity = if wrapCfg and type(wrapCfg.Rarity) == "string" then wrapCfg.Rarity else nil
     local lane2GlowColor = getRarityColor(rarity)
 
     local lane2Center = findCenterItem(lane2Items)

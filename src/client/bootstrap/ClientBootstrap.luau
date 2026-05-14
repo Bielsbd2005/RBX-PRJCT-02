@@ -69,6 +69,7 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 
 	local DataController = require(clientRoot.core.data.DataController)
 	local MenuController = require(clientRoot.core.ui.MenuController)
+	local UISoundsController = require(clientRoot.core.ui.UISoundsController)
 	local PulseAlert = require(clientRoot.core.ui.animators.PulseAlert)
 	local WeaponWrapAnimator = require(clientRoot.core.visuals.WeaponWrapAnimator)
 	local StoreFeature = require(clientRoot.features.store)
@@ -101,6 +102,8 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 
 	local menuController = MenuController.new()
 	_janitor:Add(menuController, "Destroy")
+
+	_janitor:Add(UISoundsController.start(), "Destroy")
 
 	-- Pulso de alerta en Menu.Bottom.Indicator: crece 15% mientras se desvanece,
 	-- al hacerse transparente reinicia el ciclo. Si el nodo no existe, no pasa

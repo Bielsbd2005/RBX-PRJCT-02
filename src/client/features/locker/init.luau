@@ -23,12 +23,17 @@ local WeaponPreviewController = require(script:WaitForChild("WeaponPreviewContro
 local FaceApplier = require(script.Appliers.FaceApplier)
 local HatApplier = require(script.Appliers.HatApplier)
 local MenuHover = require(Client.core.ui.MenuHover)
+local NavStaggerController = require(Client.core.ui.NavStaggerController)
 local UIUtils = require(Client.core.ui.UIUtils)
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
 local LockerConfig = require(Shared.constants.LockerConfig)
+local WeaponCategoryMod = require(Shared.constants.WeaponCategory)
+local ItemDefaults = require(Shared.constants.ItemDefaults)
+local LockerCategory = require(Shared.constants.LockerCategory)
+local LockerMainCategory = require(Shared.constants.LockerMainCategory)
 local Network = require(Shared.networking.Network)
 local DataController = require(Client.core.data.DataController)
-local KillEffectsRegistry = require(Shared.locker.killEffects.KillEffectsRegistry)
+local KillEffectsRegistry = require(Shared.Locker.killEffects.KillEffectsRegistry)
 local StoreProducts = require(Shared.constants.StoreProducts)
 local UITheme = require(Client.core.ui.UITheme)
 local NavTabController = require(Client.core.ui.NavTabController)
@@ -50,7 +55,7 @@ local ACTION_FRAME_TWEEN_INFO = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.E
 local LOCKER_PREVIEW_IDLE_ANIMATION_ID = "rbxassetid://115197033304718"
 local SHOP_REQUEST_TIMEOUT = 5
 
-type LockerCategoryKey = "Style" | "Arsenal" | "Effects"
+type LockerCategoryKey = LockerMainCategory.LockerMainCategory
 
 type LockerNavItemDefinition = {
 	key: string,
@@ -59,9 +64,9 @@ type LockerNavItemDefinition = {
 }
 
 type LockerCatalogItem = {
-	Id: string,
+	qualifiedId: string,
 	Category: string,
-	ItemKey: string,
+	id: string,
 	Name: string,
 	Price: number,
 	LevelRequired: number,
@@ -73,8 +78,8 @@ type LockerCatalogItem = {
 	Animated: boolean?,
 	StudsPerTile: number?,
 	PreviewWeaponCategory: string?,
-	PreviewWeaponKey: string?,
-	PreviewWeaponName: string?,
+	PreviewWeaponId: string?,
+	PreviewWeaponDisplayName: string?,
 	KillGoal: number?,
 	KillProgress: number?,
 }
@@ -91,7 +96,7 @@ type StatsData = {
 
 type InventoryData = {
 	[string]: { [string]: boolean },
-	WeaponSkinsByWeapon: {
+	WeaponWrapsByWeapon: {
 		Main: { [string]: { [string]: number | boolean } },
 		Special: { [string]: { [string]: number | boolean } },
 	}?,
@@ -101,7 +106,7 @@ type LoadoutData = {
 	[string]: string?,
 }
 
-type WeaponCategory = "Main" | "Special"
+type WeaponCategory = WeaponCategoryMod.WeaponCategory
 
 type LockerPreviewSpawnTarget = Folder | Model | BasePart
 
@@ -115,7 +120,6 @@ local CAMERA_TARGET_BY_MAIN_CATEGORY = {
 	Arsenal = "weapons",
 	Effects = "weapons",
 } :: { [LockerCategoryKey]: string }
-local KILL_EFFECTS_NAV_KEY = "KillEffects"
 local KILL_EFFECTS_CAMERA_TARGET = "killEffects"
 local KILL_EFFECTS_DUMMY_NAME = "LockerKillEffectsDummy"
 local KILL_EFFECTS_DUMMY_RESTORE_DELAY = 1.25
@@ -147,49 +151,51 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local specialIndicator = lockerWeaponsFolder:FindFirstChild("SpecialIndicator")
 
 	local lockerBtn = menuGui.Bottom:WaitForChild("Locker") :: GuiButton
-	local lockerGui = playerGui:WaitForChild("LockerGui") :: ScreenGui
+	local uiGui = playerGui:WaitForChild("UserInterface") :: ScreenGui
+	local lockerFrame = uiGui:WaitForChild("Locker") :: Frame
 
-	-- Registrar el LockerGui como panel del MenuController para que
-	-- hasOpenPanel() lo cuente — afecta a MapVote (auto-hide cuando hay panel
-	-- encima) y al estado MUFFLED de la música del lobby. El Locker oculta
-	-- el menú via :hide()/:show() pero antes no se registraba: la música caía
-	-- en STOP creyendo que estábamos en match.
-	menuController:registerPanel(lockerGui)
+	-- Registrar el Locker como panel del MenuController para que hasOpenPanel()
+	-- lo cuente — afecta a MapVote (auto-hide cuando hay panel encima) y al
+	-- estado MUFFLED de la música del lobby. El Locker oculta el menú via
+	-- :hide()/:show() pero antes no se registraba: la música caía en STOP
+	-- creyendo que estábamos en match.
+	menuController:registerPanel(lockerFrame)
 	janitor:Add(function()
-		menuController:unregisterPanel(lockerGui)
+		menuController:unregisterPanel(lockerFrame)
 	end, true)
-	local root = lockerGui:WaitForChild("Root")
-	local nav = root:WaitForChild("Nav2")
+	local nav = lockerFrame:WaitForChild("Nav2")
 	local navTemplate = nav:WaitForChild("Template") :: GuiButton
 	local defaultNavItemSize = navTemplate.Size
-	local nav1 = root:WaitForChild("Nav1")
+	local nav1 = lockerFrame:WaitForChild("Nav1")
 	local closeBtn = nav1:WaitForChild("CloseBtn") :: GuiButton
 	local styleBtn = nav1:WaitForChild("Style") :: GuiButton
 	local arsenalBtn = nav1:WaitForChild("Arsenal") :: GuiButton
 	local effectsBtn = nav1:WaitForChild("Effects") :: GuiButton
-	local mainFrame = root:WaitForChild("MainFrame")
-	local wrapsTitle = root:WaitForChild("WrapsTitle") :: TextLabel
+	local mainFrame = lockerFrame:WaitForChild("MainFrame")
+	local wrapsTitle = lockerFrame:WaitForChild("WrapsTitle") :: TextLabel
 	local itemGrid = mainFrame:WaitForChild("ItemGrid")
 	local itemGridTemplate = itemGrid:WaitForChild("Template") :: GuiObject
-	local itemGridWrapsTemplate = itemGrid:WaitForChild("Wraps") :: GuiObject
-	local actionFrame = root:WaitForChild("ActionFrame") :: GuiObject
+	-- ⚠️ Requiere que el Frame en Studio se llame "WeaponWraps" (renombrado manual).
+	local itemGridWrapsTemplate = itemGrid:WaitForChild("WeaponWraps") :: GuiObject
+	local actionFrame = lockerFrame:WaitForChild("ActionFrame") :: GuiObject
 	local purchaseButtonContainer = actionFrame:WaitForChild("PurchaseButton") :: GuiButton
-	local wrapsButtonContainer = actionFrame:WaitForChild("Wraps") :: GuiButton
+	-- ⚠️ Requiere que el GuiButton en Studio se llame "WeaponWraps" (renombrado manual).
+	local wrapsButtonContainer = actionFrame:WaitForChild("WeaponWraps") :: GuiButton
 	local wrapsButton = wrapsButtonContainer
 	local purchaseButton = purchaseButtonContainer
 	local purchasePriceLabel = purchaseButtonContainer:WaitForChild("Price") :: TextLabel
 	local purchaseIconLocked = purchaseButtonContainer:WaitForChild("IconLocked") :: GuiObject
 	local purchaseLockedGradient = purchaseButtonContainer:WaitForChild("Locked") :: UIGradient
 	local purchaseUnlockedGradient = purchaseButtonContainer:WaitForChild("Unlocked") :: UIGradient
-	local cashFrame = lockerGui:WaitForChild("CashFrame")
+	local cashFrame = lockerFrame:WaitForChild("CashFrame")
 	local cashValueNode = cashFrame:WaitForChild("Value")
 	local cashValueLabel = if cashValueNode:IsA("TextLabel") then cashValueNode else nil
-	local levelContainer = lockerGui:WaitForChild("LevelContainer")
+	local levelContainer = lockerFrame:WaitForChild("LevelContainer")
 	local levelValueNode = levelContainer:WaitForChild("Value")
 	local levelValueLabel = if levelValueNode:IsA("TextLabel") then levelValueNode else nil
 	local cameraController = LockerCameraController.new("weapons")
 	janitor:Add(cameraController, "Destroy")
-	lockerGui.Enabled = false
+	lockerFrame.Visible = false
 
 	MenuHover.bindButton(closeBtn, janitor)
 
@@ -203,7 +209,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local selectedNavButton: GuiButton? = nil
 	local selectedMainCategory: LockerCategoryKey? = nil
 	local selectedCatalogItem: LockerCatalogItem? = nil
-	local wrapsTargetWeaponCategory: WeaponCategory = "Main"
+	local wrapsTargetWeaponCategory: WeaponCategory = WeaponCategoryMod.MAIN
 	local wrapsTargetWeaponIdByCategory = {
 		Main = "",
 		Special = "",
@@ -221,6 +227,10 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	} :: { [WeaponCategory]: { [string]: { [string]: number } } }
 	local equippedLookup = {} :: { [string]: string }
 	local selectedNavKey: string? = nil
+	-- Forward decl: el controlador del stagger de Nav2 se construye más abajo
+	-- (cuando `navTemplate`/janitor están listos) pero `populateNavButtons` lo
+	-- llama para re-tweenear los items al cambiar de categoría.
+	local nav2Stagger: NavStaggerController.NavStaggerController? = nil
 	local isOpen = false
 	local dirtyWhileClosed = false
 	local activeKillEffectsDummy: Model? = nil
@@ -228,7 +238,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local nextAllowedKillEffectPreviewAt = 0
 	local skipNextKillEffectSelectionPreview = false
 	local nextAllowedMainCategorySwitchAt = 0
-	local sharedLockerAssets = Shared:WaitForChild("locker")
+	local sharedLockerAssets = Shared:WaitForChild("Locker")
 	local sharedWeaponAssets = sharedLockerAssets:WaitForChild("weapons")
 	local actionFrameVisiblePosition = actionFrame.Position
 	local actionFrameHiddenPosition = UDim2.new(actionFrameVisiblePosition.X.Scale, actionFrameVisiblePosition.X.Offset, 1.15, actionFrameVisiblePosition.Y.Offset)
@@ -419,7 +429,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			return
 		end
 
-		if item and item.Category == "Faces" then
+		if item and item.Category == LockerCategory.FACES then
 			faceApplier:ApplyImage(item.Image)
 			return
 		end
@@ -432,7 +442,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			return
 		end
 
-		if item and item.Category == "Hats" then
+		if item and item.Category == LockerCategory.HATS then
 			hatApplier:Apply(item)
 			return
 		end
@@ -445,7 +455,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			return
 		end
 
-		faceApplier:ApplyFromLoadoutFace(getOptionalString(equippedLookup.Faces) or getCurrentLoadout().Face)
+		faceApplier:ApplyItemId(getOptionalString(equippedLookup.Faces) or getCurrentLoadout().Face)
 	end
 
 	applyEquippedHatPreview = function()
@@ -453,7 +463,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			return
 		end
 
-		hatApplier:ApplyFromLoadoutHat(getOptionalString(equippedLookup.Hats) or getCurrentLoadout().Hat)
+		hatApplier:ApplyItemId(getOptionalString(equippedLookup.Hats) or getCurrentLoadout().Hat)
 	end
 
 	if previewCharacter then
@@ -465,7 +475,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	local function getResolvedKillEffectId(): string
-		return getOptionalString(equippedLookup.KillEffects) or getOptionalString(getCurrentLoadout().KillEffect) or "Default"
+		return getOptionalString(equippedLookup.KillEffects) or getOptionalString(getCurrentLoadout().KillEffect) or ItemDefaults.ITEM_ID
 	end
 
 	local killEffectsDummyTemplateModel = if killEffectsDummyTemplate:IsA("Model")
@@ -507,7 +517,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	local function previewKillEffect(effectId: string?)
-		if not isOpen or selectedMainCategory ~= "Effects" or selectedNavKey ~= KILL_EFFECTS_NAV_KEY then
+		if not isOpen or selectedMainCategory ~= LockerMainCategory.EFFECTS or selectedNavKey ~= LockerCategory.KILL_EFFECTS then
 			return
 		end
 
@@ -534,7 +544,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 				return
 			end
 
-			if not isOpen or selectedMainCategory ~= "Effects" or selectedNavKey ~= KILL_EFFECTS_NAV_KEY then
+			if not isOpen or selectedMainCategory ~= LockerMainCategory.EFFECTS or selectedNavKey ~= LockerCategory.KILL_EFFECTS then
 				return
 			end
 
@@ -543,11 +553,11 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	local function updateKillEffectsPreviewState(categoryKey: LockerCategoryKey, navKey: string)
-		if categoryKey == "Effects" and navKey == KILL_EFFECTS_NAV_KEY then
+		if categoryKey == LockerMainCategory.EFFECTS and navKey == LockerCategory.KILL_EFFECTS then
 			cameraController:setTargetPartName(KILL_EFFECTS_CAMERA_TARGET)
 			if isOpen then
-				if selectedCatalogItem and selectedCatalogItem.Category == "KillEffects" then
-					previewKillEffect(selectedCatalogItem.ItemKey)
+				if selectedCatalogItem and selectedCatalogItem.Category == LockerCategory.KILL_EFFECTS then
+					previewKillEffect(selectedCatalogItem.id)
 				else
 					replaceKillEffectsDummy()
 				end
@@ -582,32 +592,32 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		} :: { [WeaponCategory]: { [string]: { [string]: number } } }
 
 		for category, items in inventory do
-			if category == "WeaponSkinsByWeapon" then
+			if category == "WeaponWrapsByWeapon" then
 				local wrapsByWeapon = items :: any
 				for weaponCategory, weaponEntriesAny in wrapsByWeapon do
-					if weaponCategory == "Main" or weaponCategory == "Special" then
+					if WeaponCategoryMod.isValid(weaponCategory) then
 						local weaponEntries = weaponEntriesAny :: { [string]: { [string]: number | boolean } }
 						local categoryWrapLookup = nextWrapsByWeapon[weaponCategory :: WeaponCategory]
-						for weaponId, ownedSkinsAny in weaponEntries do
-							if type(ownedSkinsAny) == "table" then
-								local skinLookup = {} :: { [string]: number }
-								for skinId, skinOwned in ownedSkinsAny do
-									if skinOwned == true then
-										skinLookup[skinId] = 1
-									elseif type(skinOwned) == "number" and skinOwned > 0 then
-										skinLookup[skinId] = math.max(1, math.floor(skinOwned))
+						for weaponId, ownedWrapsAny in weaponEntries do
+							if type(ownedWrapsAny) == "table" then
+								local wrapLookup = {} :: { [string]: number }
+								for wrapId, wrapOwned in ownedWrapsAny do
+									if wrapOwned == true then
+										wrapLookup[wrapId] = 1
+									elseif type(wrapOwned) == "number" and wrapOwned > 0 then
+										wrapLookup[wrapId] = math.max(1, math.floor(wrapOwned))
 									end
 								end
-								categoryWrapLookup[weaponId] = skinLookup
+								categoryWrapLookup[weaponId] = wrapLookup
 							end
 						end
 					end
 				end
-			elseif category ~= "WeaponSkins" then
+			elseif category ~= LockerCategory.WEAPON_WRAPS then
 				local categoryLookup = {} :: { [string]: boolean }
-				for itemKey, owned in items do
+				for itemId, owned in items do
 					if owned == true then
-						categoryLookup[itemKey] = true
+						categoryLookup[itemId] = true
 					end
 				end
 				nextLookup[category] = categoryLookup
@@ -637,34 +647,34 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 		if loadout then
 			local weaponSlot = CATEGORY_TO_LOADOUT_SLOT[weaponCategory]
-			local weaponKey = if weaponSlot then getOptionalString(loadout[weaponSlot]) else nil
-			if weaponKey then
-				return weaponKey
+			local weaponId = if weaponSlot then getOptionalString(loadout[weaponSlot]) else nil
+			if weaponId then
+				return weaponId
 			end
 		end
 
-		return "Default"
+		return ItemDefaults.ITEM_ID
 	end
 
 	local function getResolvedWrapsTargetWeaponId(loadout: LoadoutData?): string
 		return getResolvedWeaponIdForCategory(wrapsTargetWeaponCategory, loadout)
 	end
 
-	local function getWeaponSkinRequestContext(category: string): (string, string)
-		if category ~= "WeaponSkins" then
+	local function getWeaponWrapRequestContext(category: string): (string, string)
+		if category ~= LockerCategory.WEAPON_WRAPS then
 			return "", ""
 		end
 
 		return wrapsTargetWeaponCategory, getResolvedWrapsTargetWeaponId(getCurrentLoadout())
 	end
 
-	local getWrapAmountForWeapon: (weaponCategory: WeaponCategory, weaponId: string, skinId: string) -> number
+	local getWrapAmountForWeapon: (weaponCategory: WeaponCategory, weaponId: string, wrapId: string) -> number
 
-	local function isWrapOwnedForWeapon(weaponCategory: WeaponCategory, weaponId: string, skinId: string): boolean
-		return getWrapAmountForWeapon(weaponCategory, weaponId, skinId) > 0
+	local function isWrapOwnedForWeapon(weaponCategory: WeaponCategory, weaponId: string, wrapId: string): boolean
+		return getWrapAmountForWeapon(weaponCategory, weaponId, wrapId) > 0
 	end
 
-	function getWrapAmountForWeapon(weaponCategory: WeaponCategory, weaponId: string, skinId: string): number
+	function getWrapAmountForWeapon(weaponCategory: WeaponCategory, weaponId: string, wrapId: string): number
 		local categoryLookup = ownedWrapsByWeaponLookup[weaponCategory]
 		if not categoryLookup then
 			return 0
@@ -675,7 +685,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			return 0
 		end
 
-		return weaponLookup[skinId] or 0
+		return weaponLookup[wrapId] or 0
 	end
 
 	local function rebuildEquippedLookup()
@@ -707,16 +717,16 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	local function getEquippedWeaponByCategory(category: WeaponCategory): string
-		return getEquippedItemByCategory(category) or "Default"
+		return getEquippedItemByCategory(category) or ItemDefaults.ITEM_ID
 	end
 
-	local function resolveWeaponWrap(loadout: LoadoutData, weaponCategory: WeaponCategory, weaponKey: string?): string
-		local normalizedWeaponKey = getOptionalString(weaponKey) or "Default"
-		local wrapsTableKey = if weaponCategory == "Main" then "MainWeaponWraps" else "SpecialWeaponWraps"
+	local function resolveWeaponWrap(loadout: LoadoutData, weaponCategory: WeaponCategory, weaponId: string?): string
+		local normalizedWeaponId = getOptionalString(weaponId) or ItemDefaults.ITEM_ID
+		local wrapsTableKey = if weaponCategory == WeaponCategoryMod.MAIN then "MainWeaponWraps" else "SpecialWeaponWraps"
 		local wrapsTableAny = loadout[wrapsTableKey]
 		if type(wrapsTableAny) == "table" then
 			local wrapsTable = wrapsTableAny :: { [string]: string }
-			local resolvedByWeapon = getOptionalString(wrapsTable[normalizedWeaponKey])
+			local resolvedByWeapon = getOptionalString(wrapsTable[normalizedWeaponId])
 			if resolvedByWeapon then
 				return resolvedByWeapon
 			end
@@ -727,11 +737,11 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			end
 		end
 
-		return "Default"
+		return ItemDefaults.ITEM_ID
 	end
 
 	local function isWeaponCategory(category: string): boolean
-		return category == "Main" or category == "Special"
+		return WeaponCategoryMod.isValid(category)
 	end
 
 	weaponPreviewController = WeaponPreviewController.new({
@@ -744,9 +754,9 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		getCurrentLevel = getCurrentLevel,
 		getCurrentLoadout = getCurrentLoadout,
 		getEquippedItemByCategory = getEquippedItemByCategory,
-		isOwned = function(category: string, itemKey: string): boolean
+		isOwned = function(category: string, itemId: string): boolean
 			local categoryLookup = ownedLookup[category]
-			return categoryLookup ~= nil and categoryLookup[itemKey] == true
+			return categoryLookup ~= nil and categoryLookup[itemId] == true
 		end,
 	})
 	janitor:Add(weaponPreviewController, "Destroy")
@@ -899,13 +909,13 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	local function isItemOwned(item: LockerCatalogItem): boolean
-		if item.Category == "WeaponSkins" then
+		if item.Category == LockerCategory.WEAPON_WRAPS then
 			local targetWeaponId = getResolvedWrapsTargetWeaponId(getCurrentLoadout())
-			return isWrapOwnedForWeapon(wrapsTargetWeaponCategory, targetWeaponId, item.ItemKey)
+			return isWrapOwnedForWeapon(wrapsTargetWeaponCategory, targetWeaponId, item.id)
 		end
 
 		local categoryLookup = ownedLookup[item.Category]
-		return categoryLookup ~= nil and categoryLookup[item.ItemKey] == true
+		return categoryLookup ~= nil and categoryLookup[item.id] == true
 	end
 
 	local function getRarityRank(rarity: string): number
@@ -915,15 +925,15 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local function isItemEquipped(item: LockerCatalogItem): boolean
 		if pendingShopAction and pendingShopAction.kind == "equip" then
 			if pendingShopAction.item.Category == item.Category then
-				return pendingShopAction.item.Id == item.Id
+				return pendingShopAction.item.qualifiedId == item.qualifiedId
 			end
 		end
 
-		if item.Category == "WeaponSkins" then
+		if item.Category == LockerCategory.WEAPON_WRAPS then
 			local loadout = getCurrentLoadout()
 			local targetWeaponId = getResolvedWrapsTargetWeaponId(loadout)
 			local equippedWrap = resolveWeaponWrap(loadout, wrapsTargetWeaponCategory, targetWeaponId)
-			return equippedWrap == item.ItemKey
+			return equippedWrap == item.id
 		end
 
 		local slot = CATEGORY_TO_LOADOUT_SLOT[item.Category]
@@ -932,12 +942,12 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end
 
 		local equippedItem = getEquippedItemByCategory(item.Category)
-		return equippedItem == item.ItemKey
+		return equippedItem == item.id
 	end
 
 	catalog = LockerCatalog.new(ItemsConfig, ITEMS_CONFIG_BY_NAV, DEFAULT_NAV_THUMBNAIL, getRarityRank, isItemOwned)
 	local updateActionFrameForSelected: () -> ()
-	local populateMainContentForNavItem: (LockerCategoryKey, string, string?) -> ()
+	local populateMainContentForNavItem: (LockerCategoryKey, string, string?, boolean?) -> ()
 	local clearItemGrid: () -> ()
 	local syncWeaponPreviewsFromLoadout: () -> ()
 
@@ -947,12 +957,12 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end,
 		isItemOwned = isItemOwned,
 		getItemAmount = function(item: LockerCatalogItem): number
-			if item.Category ~= "WeaponSkins" then
+			if item.Category ~= LockerCategory.WEAPON_WRAPS then
 				return if isItemOwned(item) then 1 else 0
 			end
 
 			local targetWeaponId = getResolvedWrapsTargetWeaponId(getCurrentLoadout())
-			return getWrapAmountForWeapon(wrapsTargetWeaponCategory, targetWeaponId, item.ItemKey)
+			return getWrapAmountForWeapon(wrapsTargetWeaponCategory, targetWeaponId, item.id)
 		end,
 		isItemEquipped = isItemEquipped,
 		getCurrentLevel = getCurrentLevel,
@@ -961,26 +971,26 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			if item and isWeaponCategory(item.Category) then
 				local selectedWeaponCategory = item.Category :: WeaponCategory
 				wrapsTargetWeaponCategory = selectedWeaponCategory
-				setStoredWrapsTargetWeaponId(selectedWeaponCategory, item.ItemKey)
+				setStoredWrapsTargetWeaponId(selectedWeaponCategory, item.id)
 				updateWeaponCategoryIndicators()
 			end
 			applySelectedFacePreview(item)
 			applySelectedHatPreview(item)
 			applySelectedWeaponPreview(item)
-			if item and item.Category == "KillEffects" then
+			if item and item.Category == LockerCategory.KILL_EFFECTS then
 				if skipNextKillEffectSelectionPreview then
 					skipNextKillEffectSelectionPreview = false
 					replaceKillEffectsDummy()
 				else
-					previewKillEffect(item.ItemKey)
+					previewKillEffect(item.id)
 				end
-			elseif selectedMainCategory == "Effects" and selectedNavKey == KILL_EFFECTS_NAV_KEY then
+			elseif selectedMainCategory == LockerMainCategory.EFFECTS and selectedNavKey == LockerCategory.KILL_EFFECTS then
 					replaceKillEffectsDummy()
 			end
 			updateActionFrameForSelected()
 		end,
 		onOwnedItemActivated = function(item: LockerCatalogItem)
-			local weaponCategoryForEquip, weaponIdForEquip = getWeaponSkinRequestContext(item.Category)
+			local weaponCategoryForEquip, weaponIdForEquip = getWeaponWrapRequestContext(item.Category)
 
 			local equipAction = {
 				kind = "equip",
@@ -996,7 +1006,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			end)
 			Network.Shop.EquipItem.Send({
 				category = item.Category,
-				itemId = item.ItemKey,
+				itemId = item.id,
 				weaponCategory = weaponCategoryForEquip,
 				weaponId = weaponIdForEquip,
 			})
@@ -1004,37 +1014,37 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	})
 	janitor:Add(grid, "Destroy")
 
-	local function getPreferredSelectedItemId(categoryKey: LockerCategoryKey, navKey: string, selectedItemId: string?): string?
-		if selectedItemId ~= nil then
-			return selectedItemId
+	local function getPreferredSelectedQualifiedId(categoryKey: LockerCategoryKey, navKey: string, selectedQualifiedId: string?): string?
+		if selectedQualifiedId ~= nil then
+			return selectedQualifiedId
 		end
 
-		if categoryKey == "Style" and navKey == "Faces" then
+		if categoryKey == LockerMainCategory.STYLE and navKey == LockerCategory.FACES then
 			local equippedFace = getOptionalString(equippedLookup.Faces) or getOptionalString(getCurrentLoadout().Face)
 			if equippedFace then
-				return "Faces." .. equippedFace
+				return LockerConfig.makeQualifiedId(LockerCategory.FACES, equippedFace)
 			end
 		end
 
-		if categoryKey == "Arsenal" and isWeaponCategory(navKey) then
+		if categoryKey == LockerMainCategory.ARSENAL and isWeaponCategory(navKey) then
 			local weaponCategory = navKey :: WeaponCategory
 			local equippedWeapon = getEquippedWeaponByCategory(weaponCategory)
 			wrapsTargetWeaponCategory = weaponCategory
 			setStoredWrapsTargetWeaponId(weaponCategory, equippedWeapon)
 			updateWeaponCategoryIndicators()
-			return navKey .. "." .. equippedWeapon
+			return LockerConfig.makeQualifiedId(weaponCategory, equippedWeapon)
 		end
 
-		if categoryKey == "Arsenal" and navKey == "Wraps" then
+		if categoryKey == LockerMainCategory.ARSENAL and navKey == LockerCategory.WEAPON_WRAPS then
 			local loadout = getCurrentLoadout()
-			local weaponKey = getResolvedWrapsTargetWeaponId(loadout)
-			return "WeaponSkins." .. resolveWeaponWrap(loadout, wrapsTargetWeaponCategory, weaponKey)
+			local weaponId = getResolvedWrapsTargetWeaponId(loadout)
+			return LockerConfig.makeQualifiedId(LockerCategory.WEAPON_WRAPS, resolveWeaponWrap(loadout, wrapsTargetWeaponCategory, weaponId))
 		end
 
 		return nil
 	end
 
-	local function getKillProgressForWeaponSkin(weaponCategory: WeaponCategory, weaponId: string, _skinKey: string): number
+	local function getKillProgressForWeaponWrap(weaponCategory: WeaponCategory, weaponId: string, _wrapKey: string): number
 		local weaponKills = Fusion.peek(DataController.WeaponKills) :: any
 		if type(weaponKills) ~= "table" then
 			return 0
@@ -1055,7 +1065,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		local targetWeaponDefinition = if type(targetCategoryConfig) == "table"
 			then targetCategoryConfig[targetWeaponId]
 			else nil
-		local targetWeaponName = if type(targetWeaponDefinition) == "table"
+		local targetWeaponDisplayName = if type(targetWeaponDefinition) == "table"
 			and type(targetWeaponDefinition.Name) == "string"
 			and targetWeaponDefinition.Name ~= ""
 			then targetWeaponDefinition.Name
@@ -1063,15 +1073,15 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		local wrapItems = {} :: { LockerCatalogItem }
 
 		for _, item in items do
-			local owned = isWrapOwnedForWeapon(targetWeaponCategory, targetWeaponId, item.ItemKey)
+			local owned = isWrapOwnedForWeapon(targetWeaponCategory, targetWeaponId, item.id)
 			local isChallenge = item.KillGoal ~= nil and item.KillGoal > 0
 			if owned or isChallenge then
 				local wrapItem = table.clone(item)
 				wrapItem.PreviewWeaponCategory = targetWeaponCategory
-				wrapItem.PreviewWeaponKey = targetWeaponId
-				wrapItem.PreviewWeaponName = targetWeaponName
+				wrapItem.PreviewWeaponId = targetWeaponId
+				wrapItem.PreviewWeaponDisplayName = targetWeaponDisplayName
 				if isChallenge and not owned then
-					wrapItem.KillProgress = getKillProgressForWeaponSkin(targetWeaponCategory, targetWeaponId, item.ItemKey)
+					wrapItem.KillProgress = getKillProgressForWeaponWrap(targetWeaponCategory, targetWeaponId, item.id)
 				end
 				table.insert(wrapItems, wrapItem)
 			end
@@ -1082,12 +1092,12 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		--   2) Default
 		--   3) Resto (owned) por rareza descendente
 		local function groupRank(it: LockerCatalogItem): number
-			local owned = isWrapOwnedForWeapon(targetWeaponCategory, targetWeaponId, it.ItemKey)
+			local owned = isWrapOwnedForWeapon(targetWeaponCategory, targetWeaponId, it.id)
 			local isChallenge = it.KillGoal ~= nil and it.KillGoal > 0
 			if isChallenge and not owned then
 				return 1
 			end
-			if it.ItemKey == "Default" then
+			if it.id == ItemDefaults.ITEM_ID then
 				return 2
 			end
 			return 3
@@ -1118,26 +1128,33 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		return wrapItems
 	end
 
-	populateMainContentForNavItem = function(categoryKey: LockerCategoryKey, navKey: string, selectedItemId: string?)
+	-- `stagger` indica que la repoblación viene de una interacción de usuario
+	-- (cambio de categoría/nav, abrir locker) — los cards entran en orden con
+	-- UIScale 0→1. Las llamadas pasivas (observers de inventario/loadout) no
+	-- pasan stagger para evitar re-animar al comprar/equipar.
+	populateMainContentForNavItem = function(categoryKey: LockerCategoryKey, navKey: string, selectedQualifiedId: string?, stagger: boolean?)
 		local previousNavKey = selectedNavKey
 		selectedNavKey = navKey
 		updateWeaponCategoryIndicators()
-		skipNextKillEffectSelectionPreview = categoryKey == "Effects"
-			and navKey == KILL_EFFECTS_NAV_KEY
+		skipNextKillEffectSelectionPreview = categoryKey == LockerMainCategory.EFFECTS
+			and navKey == LockerCategory.KILL_EFFECTS
 			and previousNavKey ~= navKey
 		updateKillEffectsPreviewState(categoryKey, navKey)
-		if categoryKey ~= "Arsenal" or previousNavKey ~= navKey then
+		if categoryKey ~= LockerMainCategory.ARSENAL or previousNavKey ~= navKey then
 			restoreEquippedWeaponPreviews()
 		end
-		local preferredSelectedItemId = getPreferredSelectedItemId(categoryKey, navKey, selectedItemId)
+		local preferredSelectedQualifiedId = getPreferredSelectedQualifiedId(categoryKey, navKey, selectedQualifiedId)
 
 		local items = catalog:GetItems(categoryKey, navKey)
-		local isWrapsView = categoryKey == "Arsenal" and navKey == "Wraps"
+		local isWrapsView = categoryKey == LockerMainCategory.ARSENAL and navKey == LockerCategory.WEAPON_WRAPS
 		if isWrapsView then
 			items = getWrapItemsForCurrentWeapon(items)
 		end
 
-		grid:Populate(items, preferredSelectedItemId, if isWrapsView then "wraps" else "default")
+		grid:Populate(items, preferredSelectedQualifiedId, if isWrapsView then "wraps" else "default")
+		if stagger then
+			grid:PlayStagger()
+		end
 	end
 
 	updateActionFrameForSelected = function()
@@ -1173,7 +1190,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end
 
 		local selectedCategory = selectedItem.Category :: WeaponCategory
-		local otherCategory = if selectedCategory == "Main" then "Special" else "Main"
+		local otherCategory = if selectedCategory == WeaponCategoryMod.MAIN then WeaponCategoryMod.SPECIAL else WeaponCategoryMod.MAIN
 		restoreEquippedWeaponPreviewForCategory(otherCategory)
 
 		if weaponPreviewController:isMotionActive(selectedCategory) then
@@ -1211,13 +1228,17 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 			navItemsJanitor:Add(navButton.Activated:Connect(function()
 				setSelectedNavButton(navButton)
-				populateMainContentForNavItem(categoryKey, definition.key, nil)
+				populateMainContentForNavItem(categoryKey, definition.key, nil, true)
 			end), "Disconnect")
 		end
 
 		if #navButtons > 0 then
 			setSelectedNavButton(navButtons[1])
-			populateMainContentForNavItem(categoryKey, itemDefinitions[1].key, nil)
+			populateMainContentForNavItem(categoryKey, itemDefinitions[1].key, nil, true)
+		end
+
+		if nav2Stagger then
+			nav2Stagger:play()
 		end
 	end
 
@@ -1233,7 +1254,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 		setSelectedMainCategory(selectedKey)
 		cameraController:setTargetPartName(CAMERA_TARGET_BY_MAIN_CATEGORY[selectedKey])
-		if selectedKey ~= "Arsenal" then
+		if selectedKey ~= LockerMainCategory.ARSENAL then
 			restoreEquippedWeaponPreviews()
 		end
 		populateNavButtons(selectedKey)
@@ -1406,15 +1427,15 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 				if pendingShopAction == buyAction then
 					pendingShopAction = nil
 					if selectedMainCategory and selectedNavKey then
-						populateMainContentForNavItem(selectedMainCategory, selectedNavKey, buyAction.item.Id)
+						populateMainContentForNavItem(selectedMainCategory, selectedNavKey, buyAction.item.qualifiedId)
 					end
 				end
 			end)
 
-			local weaponCategory, weaponId = getWeaponSkinRequestContext(item.Category)
+			local weaponCategory, weaponId = getWeaponWrapRequestContext(item.Category)
 
 			Network.Shop.BuyItem.Send({
-				itemId = item.ItemKey,
+				itemId = item.id,
 				category = item.Category,
 				weaponCategory = weaponCategory,
 				weaponId = weaponId,
@@ -1435,16 +1456,16 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 			local selectedWeaponCategory = item.Category :: WeaponCategory
 			wrapsTargetWeaponCategory = selectedWeaponCategory
-			setStoredWrapsTargetWeaponId(selectedWeaponCategory, item.ItemKey)
+			setStoredWrapsTargetWeaponId(selectedWeaponCategory, item.id)
 			updateWeaponCategoryIndicators()
 
 			setWrapsMode(true)
-			local spawnPart = if selectedWeaponCategory == "Main" then mainWeaponSpawn else specialWeaponSpawn
+			local spawnPart = if selectedWeaponCategory == WeaponCategoryMod.MAIN then mainWeaponSpawn else specialWeaponSpawn
 			if spawnPart and spawnPart:IsA("BasePart") then
 				cameraController:zoomOnPosition(spawnPart.Position)
 			end
 
-			populateMainContentForNavItem("Arsenal", "Wraps", nil)
+			populateMainContentForNavItem(LockerMainCategory.ARSENAL, LockerCategory.WEAPON_WRAPS, nil, true)
 		end), "Disconnect")
 	end
 
@@ -1454,12 +1475,12 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 		if response.success then
 			if resolvedAction and resolvedAction.kind == "buy" then
-				Confetti.Rain(lockerGui)
+				Confetti.Rain(lockerFrame)
 			end
 		else
 			task.defer(function()
 				if resolvedAction and resolvedAction.kind == "buy" and selectedMainCategory and selectedNavKey then
-					populateMainContentForNavItem(selectedMainCategory, selectedNavKey, resolvedAction.item.Id)
+					populateMainContentForNavItem(selectedMainCategory, selectedNavKey, resolvedAction.item.qualifiedId)
 				else
 					refreshGridSelectionState()
 				end
@@ -1483,9 +1504,9 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 				dirtyWhileClosed = true
 				return
 			end
-			if selectedMainCategory == "Arsenal" and selectedNavKey == "Wraps" then
-				local selectedItemId = if selectedCatalogItem then selectedCatalogItem.Id else nil
-				populateMainContentForNavItem(selectedMainCategory, selectedNavKey, selectedItemId)
+			if selectedMainCategory == LockerMainCategory.ARSENAL and selectedNavKey == LockerCategory.WEAPON_WRAPS then
+				local selectedQualifiedId = if selectedCatalogItem then selectedCatalogItem.qualifiedId else nil
+				populateMainContentForNavItem(selectedMainCategory, selectedNavKey, selectedQualifiedId)
 			end
 		end), true)
 
@@ -1497,8 +1518,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 				return
 			end
 			if selectedMainCategory and selectedNavKey then
-				local selectedItemId = if selectedCatalogItem then selectedCatalogItem.Id else nil
-				populateMainContentForNavItem(selectedMainCategory, selectedNavKey, selectedItemId)
+				local selectedQualifiedId = if selectedCatalogItem then selectedCatalogItem.qualifiedId else nil
+				populateMainContentForNavItem(selectedMainCategory, selectedNavKey, selectedQualifiedId)
 			end
 		end), true)
 
@@ -1512,9 +1533,9 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			applyEquippedFacePreview()
 			applyEquippedHatPreview()
 			syncWeaponPreviewsFromLoadout()
-			if selectedMainCategory == "Effects" and selectedNavKey == KILL_EFFECTS_NAV_KEY then
-				if selectedCatalogItem and selectedCatalogItem.Category == "KillEffects" then
-					previewKillEffect(selectedCatalogItem.ItemKey)
+			if selectedMainCategory == LockerMainCategory.EFFECTS and selectedNavKey == LockerCategory.KILL_EFFECTS then
+				if selectedCatalogItem and selectedCatalogItem.Category == LockerCategory.KILL_EFFECTS then
+					previewKillEffect(selectedCatalogItem.id)
 				else
 					replaceKillEffectsDummy()
 				end
@@ -1539,6 +1560,19 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		setMenuVisibleInstant(true)
 	end
 
+	-- ── Stagger de aparición de los items de Nav ─────────────
+	-- Dos controladores separados: nav1 solo se anima al abrir el locker;
+	-- nav2 se re-anima además cada vez que se repuebla (cambio de categoría
+	-- en nav1) para que los nuevos items aparezcan escalonados.
+	local nav1Stagger = NavStaggerController.new({
+		{ container = nav1, getSelectedKey = function() return selectedMainCategory end },
+	})
+	nav2Stagger = NavStaggerController.new({
+		{ container = nav, getSelectedKey = function() return selectedNavKey end, exclude = { navTemplate } },
+	})
+	janitor:Add(nav1Stagger, "Destroy")
+	janitor:Add(nav2Stagger, "Destroy")
+
 	local function openLockerGui()
 		if isOpen then
 			return
@@ -1554,11 +1588,13 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		applyEquippedFacePreview()
 		applyEquippedHatPreview()
 		hideActionFrame()
-		selectItem("Arsenal")
+		selectItem(LockerMainCategory.ARSENAL)
 		cameraController:apply()
-		lockerGui.Enabled = true
+		lockerFrame.Visible = true
 		setMenuVisibleInstant(false)
 		LightingPresetController.apply("Locker")
+		nav1Stagger:play()
+		if nav2Stagger then nav2Stagger:play() end
 	end
 
 	local function closeLockerGui()
@@ -1573,7 +1609,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		hideActionFrame()
 		restoreLockerSceneState()
 		setWrapsMode(false)
-		lockerGui.Enabled = false
+		lockerFrame.Visible = false
 		LightingPresetController.apply("Lobby")
 	end
 
@@ -1581,7 +1617,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	janitor:Add(closeBtn.MouseButton1Click:Connect(function()
 		if isWrapsMode then
 			setWrapsMode(false)
-			local previousNavKey = wrapsTargetWeaponCategory or "Main"
+			local previousNavKey = wrapsTargetWeaponCategory or WeaponCategoryMod.MAIN
 
 			cameraController:unzoom()
 
@@ -1592,7 +1628,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 				end
 			end
 
-			populateMainContentForNavItem("Arsenal", previousNavKey, nil)
+			populateMainContentForNavItem(LockerMainCategory.ARSENAL, previousNavKey, nil, true)
 		else
 			closeLockerGui()
 		end
@@ -1603,8 +1639,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end), "Disconnect")
 	end
 
-	janitor:Add(lockerGui:GetPropertyChangedSignal("Enabled"):Connect(function()
-		if lockerGui.Enabled == false and isOpen then
+	janitor:Add(lockerFrame:GetPropertyChangedSignal("Visible"):Connect(function()
+		if lockerFrame.Visible == false and isOpen then
 			isOpen = false
 			restoreLockerSceneState()
 			LightingPresetController.apply("Lobby")

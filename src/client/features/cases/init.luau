@@ -31,9 +31,12 @@ local NavTabController = require(Client.core.ui.NavTabController)
 local UIUtils = require(Client.core.ui.UIUtils)
 local UITheme = require(Client.core.ui.UITheme)
 local DataController = require(Client.core.data.DataController)
-local WeaponSkinWrapPreviewer = require(Client.features.locker.Previewers.WeaponSkinWrapPreviewer)
+local WeaponWrapPreviewer = require(Client.features.locker.Previewers.WeaponWrapPreviewer)
 local CasesConfig = require(Shared.constants.CasesConfig)
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
+local WeaponCategoryMod = require(Shared.constants.WeaponCategory)
+local ItemDefaults = require(Shared.constants.ItemDefaults)
+local LockerCategory = require(Shared.constants.LockerCategory)
 local Network = require(Shared.networking.Network)
 local SlotUnboxing = require(script.SlotUnboxing)
 
@@ -152,7 +155,7 @@ function CasesFeature.start(menuController: any): any
 	-- ── Unboxing: estado y UI ────────────────────────────────
 	local FADE_TWEEN_INFO = TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut)
 
-	local unboxingQueue: { { caseId: string, skinId: string, weaponCategory: string, weaponId: string, isPity: boolean, newPity: number } } = {}
+	local unboxingQueue: { { caseId: string, wrapId: string, weaponCategory: string, weaponId: string, isPity: boolean, newPity: number } } = {}
 	local isUnboxing = false
 	local unboxingGeneration = 0
 	-- D3: BindableEvent en vuelo del unboxing actual. Si el panel se cierra
@@ -230,8 +233,8 @@ function CasesFeature.start(menuController: any): any
 
 		local orderedDrops = table.clone(caseDef.Drops)
 		table.sort(orderedDrops, function(a, b)
-			local aCfg = if ItemsConfig.WeaponSkins then ItemsConfig.WeaponSkins[a.SkinId] else nil
-			local bCfg = if ItemsConfig.WeaponSkins then ItemsConfig.WeaponSkins[b.SkinId] else nil
+			local aCfg = if ItemsConfig.WeaponWraps then ItemsConfig.WeaponWraps[a.WrapId] else nil
+			local bCfg = if ItemsConfig.WeaponWraps then ItemsConfig.WeaponWraps[b.WrapId] else nil
 
 			local aRarity = if aCfg and type(aCfg.Rarity) == "string" then aCfg.Rarity else "Common"
 			local bRarity = if bCfg and type(bCfg.Rarity) == "string" then bCfg.Rarity else "Common"
@@ -240,26 +243,26 @@ function CasesFeature.start(menuController: any): any
 			local bRank = rarityRankByName[bRarity] or 999
 
 			if aRank == bRank then
-				return a.SkinId < b.SkinId
+				return a.WrapId < b.WrapId
 			end
 
 			return aRank < bRank
 		end)
 
 		for _, drop in orderedDrops do
-			local skinConfig = if ItemsConfig.WeaponSkins then ItemsConfig.WeaponSkins[drop.SkinId] else nil
-			if not skinConfig then continue end
+			local wrapConfig = if ItemsConfig.WeaponWraps then ItemsConfig.WeaponWraps[drop.WrapId] else nil
+			if not wrapConfig then continue end
 
 			local clone = templateNode:Clone()
-			clone.Name = "Drop_" .. drop.SkinId
+			clone.Name = "Drop_" .. drop.WrapId
 			clone.Visible = true
 			clone.Parent = itemGrid
 			dropsJanitor:Add(clone, "Destroy")
 
-			applyRarityGradient(clone, if type(skinConfig.Rarity) == "string" then skinConfig.Rarity else nil)
+			applyRarityGradient(clone, if type(wrapConfig.Rarity) == "string" then wrapConfig.Rarity else nil)
 
 			local itemNameLabel = clone:WaitForChild("ItemName") :: TextLabel
-			itemNameLabel.Text = skinConfig.Name or drop.SkinId
+			itemNameLabel.Text = wrapConfig.Name or drop.WrapId
 
 			local chanceLabel = clone:WaitForChild("Chance") :: TextLabel
 			chanceLabel.Text = formatChance(drop.Weight, totalWeight)
@@ -270,14 +273,14 @@ function CasesFeature.start(menuController: any): any
 			local viewportFrame = clone:WaitForChild("ViewportFrame") :: ViewportFrame
 			do
 				local previewItem = {
-					TextureID = skinConfig.TextureID,
-					BaseColor = skinConfig.BaseColor,
-					Animated = skinConfig.Animated,
-					StudsPerTile = skinConfig.StudsPerTile,
+					TextureID = wrapConfig.TextureID,
+					BaseColor = wrapConfig.BaseColor,
+					Animated = wrapConfig.Animated,
+					StudsPerTile = wrapConfig.StudsPerTile,
 				}
 				local previewJanitor = Janitor.new()
 				dropsJanitor:Add(previewJanitor, "Destroy")
-				WeaponSkinWrapPreviewer.Render(viewportFrame, previewItem, previewJanitor)
+				WeaponWrapPreviewer.Render(viewportFrame, previewItem, previewJanitor)
 				SlotUnboxing.reframeWrap(viewportFrame)
 			end
 		end
@@ -489,7 +492,7 @@ function CasesFeature.start(menuController: any): any
 		local owned = {}
 		local inventory = Fusion.peek(DataController.Inventory)
 		if type(inventory) == "table" then
-			for _, categoryName in { "Main", "Special" } do
+			for _, categoryName in WeaponCategoryMod.ALL do
 				local cat = inventory[categoryName]
 				if type(cat) == "table" then
 					for weaponId, isOwned in cat do
@@ -501,7 +504,7 @@ function CasesFeature.start(menuController: any): any
 			end
 		end
 		if #owned == 0 then
-			table.insert(owned, { category = "Main", weaponId = "Default" })
+			table.insert(owned, { category = WeaponCategoryMod.MAIN, weaponId = ItemDefaults.ITEM_ID })
 		end
 		return owned
 	end
@@ -574,8 +577,8 @@ function CasesFeature.start(menuController: any): any
 
 				if chosenAction == "equip" then
 					Network.Shop.EquipItem.Send({
-						category = "WeaponSkins",
-						itemId = result.skinId,
+						category = LockerCategory.WEAPON_WRAPS,
+						itemId = result.wrapId,
 						weaponCategory = result.weaponCategory,
 						weaponId = result.weaponId,
 					})
@@ -624,7 +627,7 @@ function CasesFeature.start(menuController: any): any
 	janitor:Add(Network.Cases.SummonResult.Listen(function(data: any)
 		table.insert(unboxingQueue, {
 			caseId = data.caseId,
-			skinId = data.skinId,
+			wrapId = data.wrapId,
 			weaponCategory = data.weaponCategory,
 			weaponId = data.weaponId,
 			isPity = data.isPity,

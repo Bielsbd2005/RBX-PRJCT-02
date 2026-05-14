@@ -260,7 +260,7 @@ local Presets: { [string]: Preset } = {
 		},
 	},
 
-	-- Locker: showcase. Ambiente más oscuro/contrastado para que las skins
+	-- Locker: showcase. Ambiente más oscuro/contrastado para que los wraps
 	-- y armas con bloom destaquen, ligero tinte cool para look "premium".
 	Locker = {
 		lighting = {

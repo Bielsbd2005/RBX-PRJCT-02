@@ -15,6 +15,7 @@ local GameConfig = require(Shared.GameConfig)
 local Network = require(Shared.networking.Network)
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
 local DailyTasksConfig = require(Shared.constants.DailyTasks)
+local LockerCategory = require(Shared.constants.LockerCategory)
 
 local DAILY_TASK_COMPLETED_ICON = "rbxassetid://113694528712529"
 
@@ -525,7 +526,7 @@ function MatchFeature.start(menuController: any): any
 		killerName: string,
 		killerKills: number,
 		killerLevel: number,
-		weaponName: string,
+		weaponId: string,
 	})
 		hud:incrementLocalDeaths()
 		if not deathView then
@@ -539,7 +540,7 @@ function MatchFeature.start(menuController: any): any
 		killCam:start({
 			killerUserId = data.killerUserId,
 			killerName = data.killerName,
-			weaponName = data.weaponName,
+			weaponId = data.weaponId,
 		})
 
 		local killerCharacter = _resolveKillerCharacter(data.killerUserId)
@@ -720,11 +721,11 @@ function MatchFeature.start(menuController: any): any
 	local function findLevelUpUnlock(level: number): any
 		for category, items in ItemsConfig do
 			if type(items) == "table" then
-				for itemKey, definition in items do
+				for itemId, definition in items do
 					if type(definition) == "table" and tonumber(definition.LevelRequired) == level then
 						local name = if type(definition.Name) == "string" and definition.Name ~= ""
 							then definition.Name
-							else tostring(itemKey)
+							else tostring(itemId)
 						local image = if type(definition.Image) == "string" then definition.Image else nil
 						return {
 							name = name,
@@ -738,12 +739,12 @@ function MatchFeature.start(menuController: any): any
 		return nil
 	end
 
-	local function _isKillChallengeSkin(skinKey: string): (boolean, any)
-		local weaponSkins = ItemsConfig.WeaponSkins
-		if type(weaponSkins) ~= "table" then
+	local function _isKillChallengeWrap(wrapKey: string): (boolean, any)
+		local weaponWraps = ItemsConfig.WeaponWraps
+		if type(weaponWraps) ~= "table" then
 			return false, nil
 		end
-		local def = weaponSkins[skinKey]
+		local def = weaponWraps[wrapKey]
 		if type(def) ~= "table" then
 			return false, nil
 		end
@@ -797,22 +798,22 @@ function MatchFeature.start(menuController: any): any
 		local wrapsSeeded = false
 		local function snapshotWrapsOwned(inventory: any): { [string]: { [string]: { [string]: boolean } } }
 			local snapshot: { [string]: { [string]: { [string]: boolean } } } = {}
-			local byWeapon = if type(inventory) == "table" then inventory.WeaponSkinsByWeapon else nil
+			local byWeapon = if type(inventory) == "table" then inventory.WeaponWrapsByWeapon else nil
 			if type(byWeapon) ~= "table" then
 				return snapshot
 			end
 			for category, weaponMap in byWeapon do
 				if type(weaponMap) == "table" then
 					local catSnap: { [string]: { [string]: boolean } } = {}
-					for weaponKey, skinMap in weaponMap do
-						if type(skinMap) == "table" then
-							local skinSnap: { [string]: boolean } = {}
-							for skinKey, owned in skinMap do
+					for weaponId, wrapMap in weaponMap do
+						if type(wrapMap) == "table" then
+							local wrapSnap: { [string]: boolean } = {}
+							for wrapKey, owned in wrapMap do
 								if owned == true or (type(owned) == "number" and owned > 0) then
-									skinSnap[skinKey] = true
+									wrapSnap[wrapKey] = true
 								end
 							end
-							catSnap[weaponKey] = skinSnap
+							catSnap[weaponId] = wrapSnap
 						end
 					end
 					snapshot[category] = catSnap
@@ -828,19 +829,19 @@ function MatchFeature.start(menuController: any): any
 			if wrapsSeeded then
 				for category, weaponMap in current do
 					local prevCat = previousByWeapon[category] or {}
-					for weaponKey, skinMap in weaponMap do
-						local prevSkins = prevCat[weaponKey] or {}
-						for skinKey, _ in skinMap do
-							if not prevSkins[skinKey] then
-								local isChallenge, def = _isKillChallengeSkin(skinKey)
+					for weaponId, wrapMap in weaponMap do
+						local prevWraps = prevCat[weaponId] or {}
+						for wrapKey, _ in wrapMap do
+							if not prevWraps[wrapKey] then
+								local isChallenge, def = _isKillChallengeWrap(wrapKey)
 								if isChallenge then
 									hud:playChallengeCompletedAnimation({
-										name = if type(def.Name) == "string" and def.Name ~= "" then def.Name else skinKey,
+										name = if type(def.Name) == "string" and def.Name ~= "" then def.Name else wrapKey,
 										image = if type(def.Image) == "string" and def.Image ~= "" then def.Image else nil,
 										previewWeaponCategory = category,
-										previewWeaponKey = weaponKey,
-										itemKey = skinKey,
-										category = "WeaponSkins",
+										previewWeaponId = weaponId,
+										itemId = wrapKey,
+										category = LockerCategory.WEAPON_WRAPS,
 										textureID = if type(def.TextureID) == "string" then def.TextureID else nil,
 										baseColor = if typeof(def.BaseColor) == "Color3" then def.BaseColor else nil,
 										animated = def.Animated == true,

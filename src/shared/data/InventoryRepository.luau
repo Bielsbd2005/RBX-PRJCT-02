@@ -6,26 +6,29 @@
 
 	Por qué existe: ShopService, CasesService, LoadoutService y BattlePassService
 	tenían cada uno su propia versión de "¿el jugador posee X?". Cuando el
-	schema cambie (e.g. WeaponSkinsByWeapon migra a otra rama), todos esos
+	schema cambie (e.g. WeaponWrapsByWeapon migra a otra rama), todos esos
 	helpers tendrían que actualizarse en sincronía. Aquí está la lógica una vez.
 
 	Convención: `weaponId == "Default"` siempre se considera poseído porque
-	viene en el DataTemplate inicial. `skinId == "Default"` también.
+	viene en el DataTemplate inicial. `wrapId == "Default"` también.
 
 	NO valida que `profileData` no sea nil — los callers deben verificar
 	`dataService:GetProfile(player)` antes de llamar a este módulo.
 ]]
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local WeaponCategoryMod = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("WeaponCategory"))
+local ItemDefaults = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("ItemDefaults"))
+
 local InventoryRepository = {}
 
-export type WeaponCategory = "Main" | "Special"
+export type WeaponCategory = WeaponCategoryMod.WeaponCategory
 
 export type OwnedWeapon = {
 	category: WeaponCategory,
 	weaponId: string,
 }
 
-local DEFAULT_ID = "Default"
 
 -- True si el jugador posee el ítem en `profileData.Inventory[category][itemId]`.
 function InventoryRepository.ownsItem(profileData: any, category: string, itemId: string): boolean
@@ -38,20 +41,20 @@ end
 
 -- True si el jugador posee el arma. "Default" siempre es true.
 function InventoryRepository.ownsWeapon(profileData: any, category: WeaponCategory, weaponId: string): boolean
-	if weaponId == DEFAULT_ID then
+	if weaponId == ItemDefaults.ITEM_ID then
 		return true
 	end
 	return InventoryRepository.ownsItem(profileData, category, weaponId)
 end
 
--- True si el jugador posee el wrap (skin) específico para esa arma.
+-- True si el jugador posee el wrap específico para esa arma.
 -- "Default" wrap siempre es true.
--- Soporta dos shapes: { [skinId] = true } o { [skinId] = count }.
-function InventoryRepository.ownsWeaponWrap(profileData: any, category: WeaponCategory, weaponId: string, skinId: string): boolean
-	if skinId == DEFAULT_ID then
+-- Soporta dos shapes: { [wrapId] = true } o { [wrapId] = count }.
+function InventoryRepository.ownsWeaponWrap(profileData: any, category: WeaponCategory, weaponId: string, wrapId: string): boolean
+	if wrapId == ItemDefaults.ITEM_ID then
 		return true
 	end
-	local wraps = if profileData.Inventory then profileData.Inventory.WeaponSkinsByWeapon else nil
+	local wraps = if profileData.Inventory then profileData.Inventory.WeaponWrapsByWeapon else nil
 	if type(wraps) ~= "table" then
 		return false
 	end
@@ -63,7 +66,7 @@ function InventoryRepository.ownsWeaponWrap(profileData: any, category: WeaponCa
 	if type(weaponWraps) ~= "table" then
 		return false
 	end
-	local owned = weaponWraps[skinId]
+	local owned = weaponWraps[wrapId]
 	if owned == true then
 		return true
 	end
@@ -77,10 +80,10 @@ function InventoryRepository.listOwnedWeapons(profileData: any): { OwnedWeapon }
 	local ownedWeapons = {} :: { OwnedWeapon }
 	local inventory = profileData.Inventory
 	if type(inventory) ~= "table" then
-		return { { category = "Main", weaponId = DEFAULT_ID } }
+		return { { category = WeaponCategoryMod.MAIN, weaponId = ItemDefaults.ITEM_ID } }
 	end
 
-	for _, categoryName in { "Main", "Special" } do
+	for _, categoryName in WeaponCategoryMod.ALL do
 		local categoryInventory = inventory[categoryName]
 		if type(categoryInventory) == "table" then
 			for weaponId, isOwned in categoryInventory do
@@ -95,7 +98,7 @@ function InventoryRepository.listOwnedWeapons(profileData: any): { OwnedWeapon }
 	end
 
 	if #ownedWeapons == 0 then
-		table.insert(ownedWeapons, { category = "Main", weaponId = DEFAULT_ID })
+		table.insert(ownedWeapons, { category = WeaponCategoryMod.MAIN, weaponId = ItemDefaults.ITEM_ID })
 	end
 
 	return ownedWeapons

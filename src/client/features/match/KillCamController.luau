@@ -67,6 +67,31 @@ local function _resolveRootPartFromCharacter(character: Model?): BasePart?
 	return nil
 end
 
+-- Cache de la folder de bots para evitar workspace:GetDescendants() en cada kill.
+-- Se invalida automáticamente si el Parent desaparece (cambio de mapa).
+local _botsFolderCache: Instance? = nil
+
+local function _getBotsFolder(): Instance?
+	if _botsFolderCache and _botsFolderCache.Parent then
+		return _botsFolderCache
+	end
+	-- Los bots viven típicamente en mapRoot.Bots (hijo directo de algún hijo de workspace).
+	for _, child in workspace:GetChildren() do
+		local maybeBots = child:FindFirstChild("Bots")
+		if maybeBots and maybeBots:IsA("Folder") then
+			_botsFolderCache = maybeBots
+			return maybeBots
+		end
+	end
+	-- Fallback: tal vez está como hijo directo de workspace.
+	local direct = workspace:FindFirstChild("Bots")
+	if direct and direct:IsA("Folder") then
+		_botsFolderCache = direct
+		return direct
+	end
+	return nil
+end
+
 local function _resolveKillerRoot(killerUserId: number?, fallbackPosition: Vector3?): (BasePart?, Vector3)
 	local fallback = fallbackPosition or Vector3.zero
 
@@ -86,15 +111,18 @@ local function _resolveKillerRoot(killerUserId: number?, fallbackPosition: Vecto
 		return nil, fallback
 	end
 
-	-- Bot (negative fakeUserId): search workspace for model with matching FakeUserId attribute
-	for _, descendant in workspace:GetDescendants() do
-		if descendant:IsA("Model") and descendant:GetAttribute("FakeUserId") == killerUserId then
-			local root = _resolveRootPartFromCharacter(descendant)
-			if root then
-				return root, root.Position
+	-- Bot (negative fakeUserId): buscar primero en la folder cacheada (hijos directos),
+	-- evita escanear todo workspace en cada muerte.
+	local botsFolder = _getBotsFolder()
+	if botsFolder then
+		for _, model in botsFolder:GetChildren() do
+			if model:IsA("Model") and model:GetAttribute("FakeUserId") == killerUserId then
+				local root = _resolveRootPartFromCharacter(model)
+				if root then
+					return root, root.Position
+				end
+				return nil, model:GetPivot().Position
 			end
-			-- Model exists but root removed (ragdoll) — use model pivot
-			return nil, descendant:GetPivot().Position
 		end
 	end
 
@@ -104,7 +132,7 @@ end
 export type StartData = {
 	killerUserId: string,
 	killerName: string,
-	weaponName: string,
+	weaponId: string,
 	killerPosition: Vector3?,
 }
 

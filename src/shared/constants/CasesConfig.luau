@@ -2,7 +2,7 @@
 --[[
 	CasesConfig.luau
 	Definición estática de todas las cajas y su contenido.
-	Cada Case referencia skins de ItemsConfig.WeaponSkins por skinId.
+	Cada Case referencia wraps de ItemsConfig.WeaponWraps por wrapId.
 
 	Estructura:
 	  CasesConfig.Cases[caseId] = CaseDefinition
@@ -14,7 +14,7 @@
 -- ────────────────────────────────────────────────────────────
 
 export type CaseDrop = {
-	SkinId: string,
+	WrapId: string,
 	Weight: number,      -- Peso base (sin lucky)
 	LuckyWeight: number, -- Peso con lucky activo
 }
@@ -24,7 +24,7 @@ export type CaseDefinition = {
 	Price: number,           -- Precio en Cash por 1 apertura
 	PriceMulti: number,      -- Precio en Cash por X aperturas
 	PityThreshold: number,   -- Tiradas hasta pity drop garantizado
-	PityDropSkinId: string,  -- SkinId que se entrega en pity
+	PityDropWrapId: string,  -- WrapId que se entrega en pity
 	Drops: { CaseDrop },
 }
 
@@ -118,12 +118,12 @@ local CasesConfig: CasesConfigType = {
 			Price = 200,
 			PriceMulti = 1800,
 			PityThreshold = 35,
-			PityDropSkinId = "Skin_Blue",
+			PityDropWrapId = "Wrap_Blue",
 			Drops = {
-				{ SkinId = "Default",   Weight = 75, LuckyWeight = 58 },
-				{ SkinId = "Skin_Blue", Weight = 25, LuckyWeight = 42 },
-                { SkinId = "Skin_Red",  Weight = 80, LuckyWeight = 62 },
-				{ SkinId = "Skin_Gold", Weight = 20, LuckyWeight = 38 },
+				{ WrapId = "Default",   Weight = 75, LuckyWeight = 58 },
+				{ WrapId = "Wrap_Blue", Weight = 25, LuckyWeight = 42 },
+                { WrapId = "Wrap_Red",  Weight = 80, LuckyWeight = 62 },
+				{ WrapId = "Wrap_Gold", Weight = 20, LuckyWeight = 38 },
 			},
 		},
 		Case2 = {
@@ -131,10 +131,10 @@ local CasesConfig: CasesConfigType = {
 			Price = 650,
 			PriceMulti = 5800,
 			PityThreshold = 50,
-			PityDropSkinId = "Skin_Gold",
+			PityDropWrapId = "Wrap_Gold",
 			Drops = {
-				{ SkinId = "Skin_Red",  Weight = 80, LuckyWeight = 62 },
-				{ SkinId = "Skin_Gold", Weight = 20, LuckyWeight = 38 },
+				{ WrapId = "Wrap_Red",  Weight = 80, LuckyWeight = 62 },
+				{ WrapId = "Wrap_Gold", Weight = 20, LuckyWeight = 38 },
 			},
 		},
 	},

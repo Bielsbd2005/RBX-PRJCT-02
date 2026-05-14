@@ -2,13 +2,16 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local BattlePassConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("BattlePassConfig"))
+local LockerConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("LockerConfig"))
 
-type LockerCategoryKey = "Style" | "Arsenal" | "Effects"
+local LockerMainCategory = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("LockerMainCategory"))
+
+type LockerCategoryKey = LockerMainCategory.LockerMainCategory
 
 export type LockerCatalogItem = {
-	Id: string,
+	qualifiedId: string,
 	Category: string,
-	ItemKey: string,
+	id: string,
 	Name: string,
 	Price: number,
 	LevelRequired: number,
@@ -21,8 +24,8 @@ export type LockerCatalogItem = {
 	Animated: boolean?,
 	StudsPerTile: number?,
 	PreviewWeaponCategory: string?,
-	PreviewWeaponKey: string?,
-	PreviewWeaponName: string?,
+	PreviewWeaponId: string?,
+	PreviewWeaponDisplayName: string?,
 	KillGoal: number?,
 	KillProgress: number?,
 }
@@ -134,9 +137,9 @@ function LockerCatalog:_getTemplateItems(categoryKey: LockerCategoryKey, navKey:
 			end
 
 			table.insert(catalogItems, {
-				Id = tostring(sourceCategory) .. "." .. tostring(itemId),
+				qualifiedId = LockerConfig.makeQualifiedId(tostring(sourceCategory), tostring(itemId)),
 				Category = tostring(sourceCategory),
-				ItemKey = tostring(itemId),
+				id = tostring(itemId),
 				Name = tostring(definition.Name or itemId),
 				Price = tonumber(definition.Price) or 0,
 				LevelRequired = math.max(0, tonumber(definition.LevelRequired) or 0),

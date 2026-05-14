@@ -258,6 +258,7 @@ local function _playSummaryPhase(
 	if not summary then return end
 
 	-- Color y texto de Summary.Main.Result
+	-- "Main" here is a Frame name in the UI tree, unrelated to WeaponCategory.
 	local main       = _guiChild(summary, "Main")
 	local mainResult = _child(main, "Result")
 	if mainResult then
@@ -384,6 +385,34 @@ function EndResultsView.new(gui: ScreenGui): any
 end
 
 function EndResultsView:show(data: ShowData, onFinished: (() -> ())?)
+	-- Guard de reentrada: si ya hay un show activo, cancelamos los listas previas
+	-- antes de empezar para evitar clones duplicados visibles durante el yield
+	-- de _playSummaryPhase.
+	if self._showing then
+		self._token += 1 -- aborta el spawn anterior en su próximo check
+		-- Limpiar listas de jugadores que pudieran quedar del show previo.
+		-- Path real (ver doc del header): Summary.Main.Container.List{A,B}.PlayerList
+		-- "Main" here is a Frame name in the UI tree, unrelated to WeaponCategory.
+		local summary = _guiChild(self._canvas, "Summary")
+		local main = summary and _guiChild(summary, "Main")
+		local container = main and _guiChild(main, "Container")
+		if container then
+			for _, side in { "A", "B" } do
+				local listKey = "List" .. side
+				local listNode = _guiChild(_guiChild(container, listKey), "PlayerList")
+					or _guiChild(container, listKey)
+				if listNode then
+					for _, child in listNode:GetChildren() do
+						if child:IsA("GuiObject") and child.Name ~= "PlayerLabel" then
+							child:Destroy()
+						end
+					end
+				end
+			end
+		end
+	end
+	self._showing = true
+
 	self._token += 1
 	local token = self._token
 	self._onFinished = onFinished
@@ -423,6 +452,7 @@ end
 
 function EndResultsView:hide(onHidden: (() -> ())?)
 	self._token += 1
+	self._showing = false
 	_setResultsBlurEnabled(false)
 
 	local canvas: GuiObject = self._canvas

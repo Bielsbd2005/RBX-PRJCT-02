@@ -4,22 +4,23 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
+local ItemDefaults = require(Shared:WaitForChild("constants"):WaitForChild("ItemDefaults"))
 local wrapPreviewTemplate = ReplicatedStorage:WaitForChild("Wrap")
-local sharedWeaponAssets = Shared:WaitForChild("locker"):WaitForChild("weapons")
+local sharedWeaponAssets = Shared:WaitForChild("Locker"):WaitForChild("weapons")
 
-export type WeaponSkinPreviewItem = {
+export type WeaponWrapPreviewItem = {
     TextureID: string?,
     BaseColor: Color3?,
     Animated: boolean?,
     StudsPerTile: number?,
     PreviewWeaponCategory: string?,
-    PreviewWeaponKey: string?,
-    PreviewWeaponName: string?,
+    PreviewWeaponId: string?,
+    PreviewWeaponDisplayName: string?,
 }
 
-local WeaponSkinWrapPreviewer = {}
+local WeaponWrapPreviewer = {}
 
--- Constantes visuales del viewport (idénticas a SkinCard)
+-- Constantes visuales del viewport
 local DEFAULT_WRAP_STUDS_PER_TILE = 3
 local WRAP_TEXTURE_SCROLL_SPEED_U = 1
 local WRAP_TEXTURE_SCROLL_SPEED_V = 0
@@ -107,7 +108,7 @@ local function registerAnimatedWrapTextures(previewJanitor: any, textures: { Tex
     end, true)
 end
 
-local function resolveWeaponTemplate(item: WeaponSkinPreviewItem): Instance?
+local function resolveWeaponTemplate(item: WeaponWrapPreviewItem): Instance?
     local weaponCategory = if type(item.PreviewWeaponCategory) == "string" and item.PreviewWeaponCategory ~= ""
         then item.PreviewWeaponCategory
         else nil
@@ -120,16 +121,18 @@ local function resolveWeaponTemplate(item: WeaponSkinPreviewItem): Instance?
         return nil
     end
 
-    local weaponKey = if type(item.PreviewWeaponKey) == "string" and item.PreviewWeaponKey ~= ""
-        then item.PreviewWeaponKey
+    local weaponId = if type(item.PreviewWeaponId) == "string" and item.PreviewWeaponId ~= ""
+        then item.PreviewWeaponId
         else nil
-    local weaponName = if type(item.PreviewWeaponName) == "string" and item.PreviewWeaponName ~= ""
-        then item.PreviewWeaponName
+    local displayName = if type(item.PreviewWeaponDisplayName) == "string" and item.PreviewWeaponDisplayName ~= ""
+        then item.PreviewWeaponDisplayName
         else nil
 
-    return (if weaponKey then categoryFolder:FindFirstChild(weaponKey) else nil)
-        or (if weaponName then categoryFolder:FindFirstChild(weaponName) else nil)
-        or categoryFolder:FindFirstChild("Default")
+    return (if weaponId then categoryFolder:FindFirstChild(weaponId) else nil)
+        or (if displayName then categoryFolder:FindFirstChild(displayName) else nil)
+        -- "Default" aquí es el nombre del Tool fallback en Locker.weapons.*; por convención
+        -- coincide con el item-id default del catálogo, así que reusamos ItemDefaults.ITEM_ID.
+        or categoryFolder:FindFirstChild(ItemDefaults.ITEM_ID)
 end
 
 local function getWrapPreviewPrimaryPart(previewInstance: Instance): BasePart?
@@ -144,6 +147,7 @@ local function getWrapPreviewPrimaryPart(previewInstance: Instance): BasePart?
             return namedPrimary
         end
 
+        -- "Main" here is a BasePart name inside the weapon 3D model, unrelated to WeaponCategory.
         local mainPart = previewInstance:FindFirstChild("Main", true)
         if mainPart and mainPart:IsA("BasePart") then
             return mainPart
@@ -159,7 +163,7 @@ local function getWrapPreviewPrimaryPart(previewInstance: Instance): BasePart?
     return nil
 end
 
-local function applyWrapAppearanceToPrimaryPart(previewPrimaryPart: BasePart, item: WeaponSkinPreviewItem, previewJanitor: any): ()
+local function applyWrapAppearanceToPrimaryPart(previewPrimaryPart: BasePart, item: WeaponWrapPreviewItem, previewJanitor: any): ()
     local textureId = if type(item.TextureID) == "string" and item.TextureID ~= "" then item.TextureID else nil
     local baseColor = item.BaseColor
     local animated = item.Animated == true
@@ -206,7 +210,7 @@ local function applyWrapAppearanceToPrimaryPart(previewPrimaryPart: BasePart, it
     end
 end
 
-function WeaponSkinWrapPreviewer.Render(viewportNode: ViewportFrame, item: WeaponSkinPreviewItem, previewJanitor: any): boolean
+function WeaponWrapPreviewer.Render(viewportNode: ViewportFrame, item: WeaponWrapPreviewItem, previewJanitor: any): boolean
     local worldModel = Instance.new("WorldModel")
     worldModel.Parent = viewportNode
     previewJanitor:Add(worldModel, "Destroy")
@@ -265,4 +269,4 @@ function WeaponSkinWrapPreviewer.Render(viewportNode: ViewportFrame, item: Weapo
     return true
 end
 
-return WeaponSkinWrapPreviewer
+return WeaponWrapPreviewer

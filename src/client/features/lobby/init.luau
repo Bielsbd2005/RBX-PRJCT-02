@@ -123,8 +123,8 @@ function LobbyFeature.start(_menuController: any): any
 	local function _applyEquipped()
 		local loadout = Fusion.peek(DataController.Loadout) :: { [string]: any }
 		if type(loadout) ~= "table" then return end
-		faceApplier:ApplyFromLoadoutFace(_getOptionalString(loadout.Face))
-		hatApplier:ApplyFromLoadoutHat(_getOptionalString(loadout.Hat))
+		faceApplier:ApplyItemId(_getOptionalString(loadout.Face))
+		hatApplier:ApplyItemId(_getOptionalString(loadout.Hat))
 	end
 
 	DataController:WhenReady():andThen(function()
@@ -140,14 +140,16 @@ function LobbyFeature.start(_menuController: any): any
 	-- ── Highlight: ocultar mientras BattlePass está abierto ─────────────
 	local highlight = preview:FindFirstChildOfClass("Highlight")
 	local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui") :: PlayerGui
-	local battlePassGui = playerGui:FindFirstChild("BattlePass")
-	if highlight and battlePassGui then
+	local uiGui = playerGui:WaitForChild("UserInterface")
+	local battlePassFrame = uiGui:FindFirstChild("BattlePass")
+	if highlight and battlePassFrame and battlePassFrame:IsA("GuiObject") then
+		local frame = battlePassFrame :: GuiObject
 		local function _applyHighlightVisibility()
-			highlight.Enabled = not (battlePassGui :: ScreenGui).Enabled
+			highlight.Enabled = not frame.Visible
 		end
 
 		janitor:Add(
-			battlePassGui:GetPropertyChangedSignal("Enabled"):Connect(_applyHighlightVisibility),
+			frame:GetPropertyChangedSignal("Visible"):Connect(_applyHighlightVisibility),
 			"Disconnect"
 		)
 		_applyHighlightVisibility()

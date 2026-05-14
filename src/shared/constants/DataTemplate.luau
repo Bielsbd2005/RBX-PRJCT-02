@@ -59,7 +59,7 @@ export type Stats = {
 export type Inventory = {
 	Main: { [string]: boolean },
 	Special: { [string]: boolean },
-	WeaponSkinsByWeapon: {
+	WeaponWrapsByWeapon: {
 		Main: { [string]: { [string]: number | boolean } },
 		Special: { [string]: { [string]: number | boolean } },
 	},
@@ -288,7 +288,7 @@ local DEFAULT: PlayerProfile = {
 	Inventory = {
 		Main = { Default = true },
 		Special = { Default = true },
-		WeaponSkinsByWeapon = {
+		WeaponWrapsByWeapon = {
 			Main = {
 				Default = {
 					Default = true,
@@ -297,7 +297,7 @@ local DEFAULT: PlayerProfile = {
 			Special = {
 				Default = {
 					Default = true,
-					Skin_Red = true,
+					Wrap_Red = true,
 				},
 			},
 		},

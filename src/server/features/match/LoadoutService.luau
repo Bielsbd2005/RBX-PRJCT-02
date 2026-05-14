@@ -1,7 +1,7 @@
 --!strict
 --[[
 	LoadoutService.luau
-	Gestión de loadout de partida: armas (main + special), wraps/skins,
+	Gestión de loadout de partida: armas (main + special), wraps,
 	sombreros (hats) y caras (faces). Extraído de MatchService para
 	mantener responsabilidades separadas.
 ]]
@@ -14,6 +14,8 @@ local CollectionService = game:GetService("CollectionService")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ItemsConfig = require(Shared.constants.ItemsConfig)
 local InventoryRepository = require(Shared.data.InventoryRepository)
+local WeaponCategory = require(Shared.constants.WeaponCategory)
+local ItemDefaults = require(Shared.constants.ItemDefaults)
 
 local LoadoutService = {}
 
@@ -21,7 +23,6 @@ local LoadoutService = {}
 local WEAPON_TOOLS_ROOT_NAME = "WeaponTools"
 local MATCH_LOADOUT_TOOL_ATTRIBUTE = "MatchLoadoutTool"
 local MATCH_LOADOUT_HAT_ATTRIBUTE = "MatchLoadoutHat"
-local DEFAULT_WEAPON_SKIN_ID = "Default"
 local DEFAULT_WRAP_STUDS_PER_TILE = 3
 local DEFAULT_WRAP_SCROLL_SPEED_U = 1
 local DEFAULT_WRAP_SCROLL_SPEED_V = 0
@@ -72,7 +73,7 @@ local function _getWeaponToolsRoot(): Folder?
 	return nil
 end
 
-local function _findLoadoutToolTemplate(loadoutCategory: "Main" | "Special", weaponId: string): Tool?
+local function _findLoadoutToolTemplate(loadoutCategory: WeaponCategory.WeaponCategory, weaponId: string): Tool?
 	if weaponId == "" then
 		return nil
 	end
@@ -99,11 +100,11 @@ local function _findLoadoutToolTemplate(loadoutCategory: "Main" | "Special", wea
 end
 
 local function _getHatsRoot(): Folder?
-	local locker = Shared:FindFirstChild("locker")
+	local locker = Shared:FindFirstChild("Locker")
 	if not locker then
 		return nil
 	end
-	local hats = locker:FindFirstChild("hats")
+	local hats = locker:FindFirstChild("Hats")
 	if hats and hats:IsA("Folder") then
 		return hats
 	end
@@ -144,16 +145,16 @@ local function _clearMatchLoadoutHat(character: Model)
 	end
 end
 
-local function _resolveWeaponWrapForLoadout(profileData: any, loadoutCategory: "Main" | "Special", weaponId: string): string
+local function _resolveWeaponWrapForLoadout(profileData: any, loadoutCategory: WeaponCategory.WeaponCategory, weaponId: string): string
 	local loadout = profileData.Loadout
 	if type(loadout) ~= "table" then
-		return DEFAULT_WEAPON_SKIN_ID
+		return ItemDefaults.ITEM_ID
 	end
 
-	local wrapsTableKey = if loadoutCategory == "Main" then "MainWeaponWraps" else "SpecialWeaponWraps"
+	local wrapsTableKey = if loadoutCategory == WeaponCategory.MAIN then "MainWeaponWraps" else "SpecialWeaponWraps"
 	local wrapsTableAny = loadout[wrapsTableKey]
 	if type(wrapsTableAny) ~= "table" then
-		return DEFAULT_WEAPON_SKIN_ID
+		return ItemDefaults.ITEM_ID
 	end
 
 	local wrapsTable = wrapsTableAny :: { [string]: any }
@@ -167,7 +168,7 @@ local function _resolveWeaponWrapForLoadout(profileData: any, loadoutCategory: "
 		return resolvedDefault
 	end
 
-	return DEFAULT_WEAPON_SKIN_ID
+	return ItemDefaults.ITEM_ID
 end
 
 local function _applyWeaponWrapToTool(tool: Tool, wrapId: string)
@@ -182,7 +183,7 @@ local function _applyWeaponWrapToTool(tool: Tool, wrapId: string)
 		return
 	end
 
-	local wrapsConfig = ItemsConfig.WeaponSkins
+	local wrapsConfig = ItemsConfig.WeaponWraps
 	local wrapDefinition = if type(wrapsConfig) == "table" then wrapsConfig[wrapId] else nil
 	local validDefinition = type(wrapDefinition) == "table"
 	local textureId = if validDefinition then _getOptionalString(wrapDefinition.TextureID) else nil
@@ -265,24 +266,24 @@ local function _grantMatchLoadoutTools(player: Player, dataService: any): (boole
 
 	local profileData = profile.Data
 	local loadout = profileData.Loadout
-	local mainWeaponId = if type(loadout.MainWeapon) == "string" and loadout.MainWeapon ~= "" then loadout.MainWeapon else "Default"
-	local specialWeaponId = if type(loadout.SpecialWeapon) == "string" and loadout.SpecialWeapon ~= "" then loadout.SpecialWeapon else "Default"
+	local mainWeaponId = if type(loadout.MainWeapon) == "string" and loadout.MainWeapon ~= "" then loadout.MainWeapon else ItemDefaults.ITEM_ID
+	local specialWeaponId = if type(loadout.SpecialWeapon) == "string" and loadout.SpecialWeapon ~= "" then loadout.SpecialWeapon else ItemDefaults.ITEM_ID
 
 	-- Defense-in-depth: rechazar weapon ID que no esté en el inventario.
 	-- Mantiene al jugador con la weapon "Default" en lugar de equiparle algo
 	-- que no compró, si ShopService o el flujo de equip dejaron el Loadout
 	-- en un estado inválido (race, exploit, profile corrupto).
-	if not _ownsWeapon(profileData, "Main", mainWeaponId) then
+	if not _ownsWeapon(profileData, WeaponCategory.MAIN, mainWeaponId) then
 		warn(string.format("[LoadoutService] %s tiene Loadout.MainWeapon=%s pero no lo posee — fallback a Default.", player.Name, mainWeaponId))
-		mainWeaponId = "Default"
+		mainWeaponId = ItemDefaults.ITEM_ID
 	end
-	if not _ownsWeapon(profileData, "Special", specialWeaponId) then
+	if not _ownsWeapon(profileData, WeaponCategory.SPECIAL, specialWeaponId) then
 		warn(string.format("[LoadoutService] %s tiene Loadout.SpecialWeapon=%s pero no lo posee — fallback a Default.", player.Name, specialWeaponId))
-		specialWeaponId = "Default"
+		specialWeaponId = ItemDefaults.ITEM_ID
 	end
 
-	local mainWrapId = _resolveWeaponWrapForLoadout(profileData, "Main", mainWeaponId)
-	local specialWrapId = _resolveWeaponWrapForLoadout(profileData, "Special", specialWeaponId)
+	local mainWrapId = _resolveWeaponWrapForLoadout(profileData, WeaponCategory.MAIN, mainWeaponId)
+	local specialWrapId = _resolveWeaponWrapForLoadout(profileData, WeaponCategory.SPECIAL, specialWeaponId)
 
 	local backpackNode = player:FindFirstChild("Backpack") or player:WaitForChild("Backpack", 1)
 	local backpack = if backpackNode and backpackNode:IsA("Backpack") then backpackNode else nil
@@ -292,7 +293,7 @@ local function _grantMatchLoadoutTools(player: Player, dataService: any): (boole
 
 	_clearMatchLoadoutTools(player)
 
-	local function cloneIntoInventory(loadoutCategory: "Main" | "Special", weaponId: string, wrapId: string): boolean
+	local function cloneIntoInventory(loadoutCategory: WeaponCategory.WeaponCategory, weaponId: string, wrapId: string): boolean
 		local template = _findLoadoutToolTemplate(loadoutCategory, weaponId)
 		if not template then
 			warn(string.format("[LoadoutService] Tool no encontrada para %s/%s en ServerStorage.%s.", loadoutCategory, weaponId, WEAPON_TOOLS_ROOT_NAME))
@@ -306,8 +307,8 @@ local function _grantMatchLoadoutTools(player: Player, dataService: any): (boole
 		return true
 	end
 
-	local mainOk = cloneIntoInventory("Main", mainWeaponId, mainWrapId)
-	local specialOk = cloneIntoInventory("Special", specialWeaponId, specialWrapId)
+	local mainOk = cloneIntoInventory(WeaponCategory.MAIN, mainWeaponId, mainWrapId)
+	local specialOk = cloneIntoInventory(WeaponCategory.SPECIAL, specialWeaponId, specialWrapId)
 	if not mainOk or not specialOk then
 		return false, false, nil
 	end

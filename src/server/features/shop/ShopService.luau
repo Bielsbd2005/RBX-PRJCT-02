@@ -38,6 +38,9 @@ local InventoryRepository = require(Shared.data.InventoryRepository)
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
 local LockerConfig = require(Shared.constants.LockerConfig)
 local BattlePassConfig = require(Shared.constants.BattlePassConfig)
+local WeaponCategory = require(Shared.constants.WeaponCategory)
+local ItemDefaults = require(Shared.constants.ItemDefaults)
+local LockerCategory = require(Shared.constants.LockerCategory)
 
 local M = NetGuards.MAX
 
@@ -48,7 +51,7 @@ local WEAPON_WRAPS_PATH_BY_CATEGORY = {
 } :: { [string]: { string } }
 
 local function _resolveWeaponCategory(value: string?): string?
-	if value == "Main" or value == "Special" then
+	if WeaponCategory.isValid(value) then
 		return value
 	end
 
@@ -64,22 +67,22 @@ local function _resolveWeaponId(rawWeaponId: string?, fallbackWeaponId: string?)
 		return fallbackWeaponId
 	end
 
-	return "Default"
+	return ItemDefaults.ITEM_ID
 end
 
 -- Helpers de ownership delegan a InventoryRepository (single source of truth).
 local function _ownsTargetWeapon(profileData: any, weaponCategory: string, weaponId: string): boolean
-	if weaponCategory ~= "Main" and weaponCategory ~= "Special" then
+	if not WeaponCategory.isValid(weaponCategory) then
 		return false
 	end
-	return InventoryRepository.ownsWeapon(profileData, weaponCategory :: "Main" | "Special", weaponId)
+	return InventoryRepository.ownsWeapon(profileData, weaponCategory :: WeaponCategory.WeaponCategory, weaponId)
 end
 
-local function _getOwnedWeaponWrap(profileData: any, weaponCategory: string, weaponId: string, skinId: string): boolean
-	if weaponCategory ~= "Main" and weaponCategory ~= "Special" then
+local function _getOwnedWeaponWrap(profileData: any, weaponCategory: string, weaponId: string, wrapId: string): boolean
+	if not WeaponCategory.isValid(weaponCategory) then
 		return false
 	end
-	return InventoryRepository.ownsWeaponWrap(profileData, weaponCategory :: "Main" | "Special", weaponId, skinId)
+	return InventoryRepository.ownsWeaponWrap(profileData, weaponCategory :: WeaponCategory.WeaponCategory, weaponId, wrapId)
 end
 
 -- Cooldown por acción (segundos)
@@ -198,10 +201,10 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 	local weaponIdForWraps: string? = nil
 
 	-- Validación 4: ítem no poseído ya
-	if data.category == "WeaponSkins" then
+	if data.category == LockerCategory.WEAPON_WRAPS then
 		weaponCategoryForWraps = _resolveWeaponCategory(data.weaponCategory)
 		if not weaponCategoryForWraps then
-			Network.Shop.Response.SendTo({ success = false, message = "Categoría de arma inválida para skins." }, player)
+			Network.Shop.Response.SendTo({ success = false, message = "Categoría de arma inválida para wraps." }, player)
 			return
 		end
 
@@ -216,7 +219,7 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 		end
 
 		if _getOwnedWeaponWrap(profile.Data, weaponCategoryForWraps, weaponIdForWraps, data.itemId) then
-			Network.Shop.Response.SendTo({ success = false, message = "Ya posees esta skin para esa arma." }, player)
+			Network.Shop.Response.SendTo({ success = false, message = "Ya posees este wrap para esa arma." }, player)
 			return
 		end
 	else
@@ -257,20 +260,20 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 		{ path = { "Stats", "Cash" }, delta = -price },
 	}
 
-	if data.category == "WeaponSkins" then
+	if data.category == LockerCategory.WEAPON_WRAPS then
 		local resolvedWeaponCategory = weaponCategoryForWraps :: string
 		local resolvedWeaponId = weaponIdForWraps :: string
 		table.insert(updates, {
-			path = { "Inventory", "WeaponSkinsByWeapon", resolvedWeaponCategory, resolvedWeaponId, data.itemId },
+			path = { "Inventory", "WeaponWrapsByWeapon", resolvedWeaponCategory, resolvedWeaponId, data.itemId },
 			value = true,
 		})
 		-- Marcar metadata + NEW! flag para el wrap.
 		table.insert(updates, {
-			path = { "InventoryMeta", "WeaponSkins", data.itemId },
+			path = { "InventoryMeta", "WeaponWraps", data.itemId },
 			value = { AcquiredAt = os.time(), Source = "Shop" },
 		})
 		table.insert(updates, {
-			path = { "NewItemFlags", "WeaponSkins", data.itemId },
+			path = { "NewItemFlags", "WeaponWraps", data.itemId },
 			value = true,
 		})
 
@@ -294,16 +297,16 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 		})
 	end
 
-	-- WeaponSkins NO está en CATEGORY_TO_LOADOUT_SLOT (la skin equipada es
+	-- WeaponWraps NO está en CATEGORY_TO_LOADOUT_SLOT (el wrap equipado es
 	-- por-arma vía MainWeaponWraps/SpecialWeaponWraps, ya gestionado arriba).
 	local loadoutSlot = CATEGORY_TO_LOADOUT_SLOT[data.category]
 	if loadoutSlot then
 		table.insert(updates, { path = { "Loadout", loadoutSlot }, value = data.itemId })
 	end
 
-	if data.category == "Main" or data.category == "Special" then
+	if WeaponCategory.isValid(data.category) then
 		table.insert(updates, {
-			path = { "Inventory", "WeaponSkinsByWeapon", data.category, data.itemId, "Default" },
+			path = { "Inventory", "WeaponWrapsByWeapon", data.category, data.itemId, ItemDefaults.ITEM_ID },
 			value = true,
 		})
 	end
@@ -314,7 +317,7 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 		_markCooldown(player, "buy")
 		Network.Shop.Response.SendTo({
 			success = true,
-			message = if data.category == "WeaponSkins"
+			message = if data.category == LockerCategory.WEAPON_WRAPS
 				then itemConfig.Name .. " comprado y equipado para el arma seleccionada."
 				else if loadoutSlot
 				then itemConfig.Name .. " comprado y equipado."
@@ -362,7 +365,7 @@ local function _onEquipItem(data: { category: string, itemId: string, weaponCate
 	end
 
 	local ok = false
-	if data.category == "WeaponSkins" then
+	if data.category == LockerCategory.WEAPON_WRAPS then
 		local weaponCategory = _resolveWeaponCategory(data.weaponCategory)
 		if not weaponCategory then
 			Network.Shop.Response.SendTo({ success = false, message = "Arma objetivo inválida para wraps." }, player)
@@ -391,7 +394,7 @@ local function _onEquipItem(data: { category: string, itemId: string, weaponCate
 		end
 
 		if not _getOwnedWeaponWrap(profile.Data, weaponCategory, targetWeaponId, data.itemId) then
-			Network.Shop.Response.SendTo({ success = false, message = "No posees esta skin para esa arma." }, player)
+			Network.Shop.Response.SendTo({ success = false, message = "No posees este wrap para esa arma." }, player)
 			return
 		end
 

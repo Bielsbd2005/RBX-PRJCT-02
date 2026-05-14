@@ -1,5 +1,8 @@
 local RagdollModule = {}
 
+local PhysicsService = game:GetService("PhysicsService")
+local RunService = game:GetService("RunService")
+
 local Utils = require(script.Parent.Utils)
 
 -- Configuration
@@ -10,6 +13,36 @@ local CONFIG = {
 	RAGDOLL_HEAD_AS_JOINT = false,
 	BOUNCE_ELASTICITY = 0.85, -- Reducido un poquito de 1 a 0.85 para dar mayor estabilidad física
 }
+
+local RAGDOLL_COLLISION_GROUP = "RagdollBodyParts"
+
+-- Registra el CollisionGroup una sola vez (idempotente). Solo en server.
+-- RegisterCollisionGroup tira error si ya existe — lo absorbemos con pcall.
+-- Si tras el registro el grupo no es asignable, dejamos un warning para no
+-- enmascarar fallos silenciosos al asignar `part.CollisionGroup = name`.
+local _collisionGroupReady = false
+if RunService:IsServer() then
+	pcall(function()
+		PhysicsService:RegisterCollisionGroup(RAGDOLL_COLLISION_GROUP)
+	end)
+	pcall(function()
+		PhysicsService:CollisionGroupSetCollidable(RAGDOLL_COLLISION_GROUP, RAGDOLL_COLLISION_GROUP, false)
+	end)
+	-- Validar que el grupo quedó utilizable creando un BasePart probe.
+	local probe = Instance.new("Part")
+	local ok = pcall(function()
+		probe.CollisionGroup = RAGDOLL_COLLISION_GROUP
+	end)
+	probe:Destroy()
+	if ok then
+		_collisionGroupReady = true
+	else
+		warn(string.format(
+			"[Gravity ragdoll] CollisionGroup %q no está registrado; las partes del ragdoll colisionarán entre sí.",
+			RAGDOLL_COLLISION_GROUP
+		))
+	end
+end
 
 local rng = Random.new()
 
@@ -91,22 +124,15 @@ local function buildRagdoll(char: Model, parts: { [string]: BasePart })
 	end
 end
 
--- NUEVA FUNCIÓN: Evita que las partes del cuerpo choquen entre sí
-local function preventInternalCollisions(char: Model)
-	local parts = {}
-	for _, obj in ipairs(char:GetDescendants()) do
-		if obj:IsA("BasePart") then
-			table.insert(parts, obj)
-		end
+-- Asigna el CollisionGroup compartido a todos los BaseParts del ragdoll, de modo
+-- que no colisionen entre sí (ni con otros ragdolls activos). Sustituye el viejo
+-- patrón O(N²) que creaba NoCollisionConstraint por cada par.
+local function applyCollisionGroup(baseParts: { BasePart })
+	if not _collisionGroupReady then
+		return -- el warn ya se emitió en init; evitamos errores por parte.
 	end
-
-	for i = 1, #parts do
-		for j = i + 1, #parts do
-			local noCollision = Instance.new("NoCollisionConstraint")
-			noCollision.Part0 = parts[i]
-			noCollision.Part1 = parts[j]
-			noCollision.Parent = parts[i]
-		end
+	for _, part in ipairs(baseParts) do
+		part.CollisionGroup = RAGDOLL_COLLISION_GROUP
 	end
 end
 
@@ -126,14 +152,26 @@ local function applyRagdoll(char: Model, hum: Humanoid)
 	hum:ChangeState(Enum.HumanoidStateType.Dead)
 	hum:SetStateEnabled(Enum.HumanoidStateType.GettingUp, false)
 
-	if hum.RigType == Enum.HumanoidRigType.R15 then
-		buildRagdoll(char, parts)
-		preventInternalCollisions(char)
+	-- Recolectamos UNA sola vez todos los BaseParts del char para evitar múltiples
+	-- iteraciones O(N) de GetDescendants() y para minimizar GC pressure.
+	local baseParts: { BasePart } = {}
+	for _, descendant in ipairs(char:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			table.insert(baseParts, descendant)
+		end
 	end
 
+	if hum.RigType == Enum.HumanoidRigType.R15 then
+		buildRagdoll(char, parts)
+		applyCollisionGroup(baseParts)
+	end
+
+	-- AntiGravityForce solo en body parts (hijos directos del Model), no en
+	-- accesorios/tools/decoraciones que estarían soldadas y no necesitan
+	-- compensación gravitatoria individual.
 	local currentGravity = workspace.Gravity
-	for _, part in ipairs(char:GetDescendants()) do
-		if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+	for _, part in pairs(parts) do
+		if part.Name ~= "HumanoidRootPart" then
 			local att = Instance.new("Attachment")
 			att.Name = "AntiGravityAtt"
 			att.Parent = part

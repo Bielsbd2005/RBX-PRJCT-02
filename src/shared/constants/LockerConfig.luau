@@ -29,6 +29,8 @@ local NAV_ITEMS = table.freeze({
 	Effects = EFFECTS_NAV_ITEMS,
 })
 
+-- Mapping nav-key → catalog category. Tras la unificación Wraps→WeaponWraps,
+-- la única traducción no-identidad que queda es Body→Outfits.
 local ITEMS_CONFIG_BY_NAV = table.freeze({
 	Style = table.freeze({
 		Body = "Outfits",
@@ -38,7 +40,7 @@ local ITEMS_CONFIG_BY_NAV = table.freeze({
 	Arsenal = table.freeze({
 		Main = "Main",
 		Special = "Special",
-		Wraps = "WeaponSkins",
+		WeaponWraps = "WeaponWraps",
 	}),
 	Effects = table.freeze({
 		KillEffects = "KillEffects",
@@ -48,10 +50,10 @@ local ITEMS_CONFIG_BY_NAV = table.freeze({
 local CATEGORY_TO_LOADOUT_SLOT = table.freeze({
 	Main = "MainWeapon",
 	Special = "SpecialWeapon",
-	-- WeaponSkins NO se mapea aquí: la skin equipada es por-arma vía
+	-- WeaponWraps NO se mapea aquí: el wrap equipado es por-arma vía
 	-- MainWeaponWraps[weaponId] / SpecialWeaponWraps[weaponId]. Los call-sites
-	-- de WeaponSkins toman ramas explícitas (ver ShopService:_onBuyItem y
-	-- locker/init.luau item.Category == "WeaponSkins").
+	-- de WeaponWraps toman ramas explícitas (ver ShopService:_onBuyItem y
+	-- locker/init.luau item.Category == "WeaponWraps").
 	KillEffects = "KillEffect",
 	Faces = "Face",
 	Hats = "Hat",
@@ -66,11 +68,16 @@ local RARITY_RANK = table.freeze({
 	Legendary = 5,
 })
 
+local function makeQualifiedId(category: string, id: string): string
+	return category .. "." .. id
+end
+
 local LockerConfig = {
 	NavItems = NAV_ITEMS,
 	ItemsConfigByNav = ITEMS_CONFIG_BY_NAV,
 	CategoryToLoadoutSlot = CATEGORY_TO_LOADOUT_SLOT,
 	RarityRank = RARITY_RANK,
+	makeQualifiedId = makeQualifiedId,
 }
 
 return table.freeze(LockerConfig)

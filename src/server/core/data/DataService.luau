@@ -31,6 +31,7 @@ local Promise         = require(Packages["typed-promise"]) :: any
 local Sift            = require(Packages.sift)           :: any
 
 local DataTemplateModule = require(Shared.constants.DataTemplate)
+local WeaponCategory = require(Shared.constants.WeaponCategory)
 local DataTemplate = DataTemplateModule :: any
 local LevelingConfig = require(Shared.constants.LevelingConfig)
 local DataMigrations = require(script.Parent.DataMigrations)
@@ -61,7 +62,7 @@ export type DataServiceModule = {
 	GetReplica: (self: DataServiceModule, player: Player) -> Replica?,
 	SetValue: (self: DataServiceModule, player: Player, path: { string }, value: any) -> boolean,
 	Increment: (self: DataServiceModule, player: Player, path: { string }, amount: number) -> (boolean, number),
-	IncrementWeaponKills: (self: DataServiceModule, player: Player, weaponCategory: string, weaponKey: string, amount: number?) -> (boolean, number),
+	IncrementWeaponKills: (self: DataServiceModule, player: Player, weaponCategory: string, weaponId: string, amount: number?) -> (boolean, number),
 	AddXP: (self: DataServiceModule, player: Player, amount: number) -> (boolean, number, number, number),
 	BatchUpdate: (self: DataServiceModule, player: Player, updates: { BatchUpdateEntry }) -> boolean,
 	IsReceiptProcessed: (self: DataServiceModule, player: Player, purchaseId: string) -> boolean,
@@ -120,6 +121,9 @@ local _profiles: { [number]: any } = {}
 local _replicas:  { [number]: any } = {}
 local _janitors:  { [number]: any } = {}
 local _dirtyProfiles: { [number]: boolean } = {}
+-- Inicio de sesión por jugador. Necesario para que BindToClose pueda acumular
+-- TimePlayedSeconds antes de EndSession (igual que el flujo de _unloadPlayer).
+local _sessionStartByUserId: { [number]: number } = {}
 local _loadTokens: { [number]: number } = {}
 local _started = false
 local _serviceJanitor: any = nil
@@ -143,7 +147,7 @@ local _profileUnloadingBindable = Instance.new("BindableEvent")
 	  →  nuevo Inventory con Inventory.Main.Weapon2 = true
 
 	Sanity cap de profundidad: nuestros paths reales nunca superan ~5 niveles
-	(WeaponSkinsByWeapon → Main → weaponId → skinId). Un path > 32 indica un
+	(WeaponWrapsByWeapon → Main → weaponId → wrapId). Un path > 32 indica un
 	bug del caller; mejor abortar que stack-overflow.
 ]]
 local MAX_PATH_DEPTH = 32
@@ -496,6 +500,7 @@ local function _loadPlayer(player: Player): ()
 			-- 3. Destruir Replica (desreplica al cliente).
 			-- 4. Finalizar sesión de ProfileStore (guarda y libera lock).
 			local sessionStart = os.time()
+			_sessionStartByUserId[userId] = sessionStart
 			janitor:Add(function()
 				local sessionSeconds = math.max(0, os.time() - sessionStart)
 				if sessionSeconds > 0 then
@@ -512,6 +517,7 @@ local function _loadPlayer(player: Player): ()
 				_profiles[userId] = nil
 				_replicas[userId] = nil
 				_janitors[userId] = nil
+				_sessionStartByUserId[userId] = nil
 				if _loadTokens[userId] == loadToken then
 					_loadTokens[userId] = nil
 				end
@@ -655,6 +661,28 @@ function DataService:Start(): ()
 
 		for userId, profile in profilesToEnd do
 			task.spawn(function()
+				-- Replicar el flujo de _unloadPlayer para que la sesión actual
+				-- no pierda TimePlayedSeconds ni los cambios que dependen de
+				-- ProfileUnloading (servicios que escuchan para flush final).
+				local sessionStart = _sessionStartByUserId[userId]
+				if sessionStart then
+					local sessionSeconds = math.max(0, os.time() - sessionStart)
+					if sessionSeconds > 0 then
+						pcall(function()
+							local player = Players:GetPlayerByUserId(userId)
+							if player then
+								DataService:Increment(player, { "Stats", "TimePlayedSeconds" }, sessionSeconds)
+							end
+						end)
+					end
+					_sessionStartByUserId[userId] = nil
+				end
+				pcall(function()
+					local player = Players:GetPlayerByUserId(userId)
+					if player then
+						_profileUnloadingBindable:Fire(player)
+					end
+				end)
 				pcall(function()
 					-- EndSession yielda hasta confirmar el save y liberar el lock.
 					profile:EndSession()
@@ -788,18 +816,18 @@ end
 	Incrementa el contador de kills del jugador para un arma concreta.
 	Devuelve (success, newValue).
 ]]
-function DataService:IncrementWeaponKills(player: Player, weaponCategory: string, weaponKey: string, amount: number?): (boolean, number)
-	if weaponCategory ~= "Main" and weaponCategory ~= "Special" then
+function DataService:IncrementWeaponKills(player: Player, weaponCategory: string, weaponId: string, amount: number?): (boolean, number)
+	if not WeaponCategory.isValid(weaponCategory) then
 		return false, 0
 	end
-	if type(weaponKey) ~= "string" or weaponKey == "" then
+	if type(weaponId) ~= "string" or weaponId == "" then
 		return false, 0
 	end
 	local delta = math.max(0, math.floor(amount or 1))
 	if delta <= 0 then
 		return false, 0
 	end
-	return self:Increment(player, { "WeaponKills", weaponCategory, weaponKey }, delta)
+	return self:Increment(player, { "WeaponKills", weaponCategory, weaponId }, delta)
 end
 
 --[[

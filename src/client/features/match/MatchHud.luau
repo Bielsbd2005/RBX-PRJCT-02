@@ -11,10 +11,12 @@ local TweenService = game:GetService("TweenService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local GameConfig = require(Shared.GameConfig)
+local LockerConfig = require(Shared.constants.LockerConfig)
+local LockerCategory = require(Shared.constants.LockerCategory)
 local TeamUtils = require(Shared.utils.TeamUtils)
 local Confetti = require(script.Parent.Parent.Parent.core.ui.Confetti)
 local UIUtils = require(script.Parent.Parent.Parent.core.ui.UIUtils)
-local WeaponSkinWrapPreviewer = require(script.Parent.Parent.locker.Previewers.WeaponSkinWrapPreviewer)
+local WeaponWrapPreviewer = require(script.Parent.Parent.locker.Previewers.WeaponWrapPreviewer)
 local Janitor = require(ReplicatedStorage:WaitForChild("Packages").janitor) :: any
 
 -- ── Colores ──────────────────────────────────────────────────
@@ -534,15 +536,15 @@ export type ChallengeCompletedReward = {
 	name: string,
 	image: string?,
 	previewWeaponCategory: string?,
-	previewWeaponKey: string?,
-	itemKey: string?,
+	previewWeaponId: string?,
+	itemId: string?,
 	category: string?,
 	textureID: string?,
 	baseColor: Color3?,
 	animated: boolean?,
 	studsPerTile: number?,
 	-- Cantidad de cash recompensada. Si se provee, se muestra Reward.Value
-	-- (TextLabel oculto por defecto en el frame para desafíos de skin).
+	-- (TextLabel oculto por defecto en el frame para desafíos de wrap).
 	cashAmount: number?,
 }
 
@@ -592,8 +594,17 @@ function MatchHud:_processNotificationQueue()
 	end)
 end
 
+-- Cap defensivo de la queue: si se enchufan muchas notificaciones (drops, level-ups
+-- en cadena), tirar las más antiguas todavía sin reproducir antes que dejar crecer
+-- la cola indefinidamente. El usuario nunca alcanzaría a ver 20+ notificaciones
+-- encoladas — es mejor mostrar las recientes.
+local NOTIFICATION_QUEUE_CAP = 20
+
 function MatchHud:_enqueueNotification(runFn: (onDone: () -> ()) -> ())
 	self._notificationQueue = self._notificationQueue or {}
+	while #self._notificationQueue >= NOTIFICATION_QUEUE_CAP do
+		table.remove(self._notificationQueue, 1)
+	end
 	table.insert(self._notificationQueue, runFn)
 	self:_processNotificationQueue()
 end
@@ -789,7 +800,7 @@ function MatchHud:playChallengeCompletedAnimation(reward: ChallengeCompletedRewa
 		local descriptionLabel = _findDescendantTextLabel(completedFrame, { "Description" })
 
 		-- Reward.Value está oculto por defecto (no lo usan los challenges de
-		-- skin). Si llega cashAmount, lo mostramos con la cantidad y lo
+		-- wrap). Si llega cashAmount, lo mostramos con la cantidad y lo
 		-- restauramos a oculto al cerrar el frame.
 		local showedRewardValue = false
 		if rewardValueLabel and rewardValueLabel:IsA("TextLabel") and type(reward.cashAmount) == "number" then
@@ -845,9 +856,9 @@ function MatchHud:playChallengeCompletedAnimation(reward: ChallengeCompletedRewa
 				end
 				previewJanitor = Janitor.new()
 				local previewItem = {
-					Id = (reward.category or "WeaponSkins") .. "." .. tostring(reward.itemKey or reward.name),
-					Category = reward.category or "WeaponSkins",
-					ItemKey = reward.itemKey or reward.name,
+					qualifiedId = LockerConfig.makeQualifiedId(reward.category or LockerCategory.WEAPON_WRAPS, tostring(reward.itemId or reward.name)),
+					Category = reward.category or LockerCategory.WEAPON_WRAPS,
+					id = reward.itemId or reward.name,
 					Name = reward.name,
 					Price = 0,
 					LevelRequired = 0,
@@ -859,9 +870,9 @@ function MatchHud:playChallengeCompletedAnimation(reward: ChallengeCompletedRewa
 					Animated = reward.animated,
 					StudsPerTile = reward.studsPerTile,
 					PreviewWeaponCategory = reward.previewWeaponCategory,
-					PreviewWeaponKey = reward.previewWeaponKey,
+					PreviewWeaponId = reward.previewWeaponId,
 				}
-				WeaponSkinWrapPreviewer.Render(itemViewport, previewItem :: any, previewJanitor)
+				WeaponWrapPreviewer.Render(itemViewport, previewItem :: any, previewJanitor)
 			end
 		end
 
@@ -1063,6 +1074,13 @@ function MatchHud:_applyCachedOrFetchThumbnail(rowKey: string, userId: number, p
 	end
 
 	self._thumbnailRequestInFlight[userId] = true
+	-- Safety timeout: si GetUserThumbnailAsync se cuelga, liberamos el flag tras
+	-- 30s para que un siguiente intento pueda volver a pedir.
+	task.delay(30, function()
+		if self._thumbnailRequestInFlight[userId] then
+			self._thumbnailRequestInFlight[userId] = nil
+		end
+	end)
 	task.spawn(function()
 		local ok, content = pcall(function()
 			return Players:GetUserThumbnailAsync(userId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size100x100)
@@ -1072,7 +1090,9 @@ function MatchHud:_applyCachedOrFetchThumbnail(rowKey: string, userId: number, p
 			return
 		end
 		self._thumbnailByUserId[userId] = content
-		if self._rowUserIdByKey[rowKey] ~= userId then
+		-- Guard: si el row ya muestra otro userId o el ImageLabel perdió parent
+		-- (HUD destruido en cascada), no escribimos en una referencia muerta.
+		if self._rowUserIdByKey[rowKey] ~= userId or not profileRef.Parent then
 			return
 		end
 		profileRef.Image = content

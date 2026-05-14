@@ -11,8 +11,7 @@ type FaceApplier = {
 	_faceObject: FaceObject?,
 	_defaultTexture: string,
 	ApplyImage: (self: FaceApplier, image: string?) -> (),
-	ApplyItemKey: (self: FaceApplier, itemKey: string?) -> (),
-	ApplyFromLoadoutFace: (self: FaceApplier, loadoutFace: string?) -> (),
+	ApplyItemId: (self: FaceApplier, itemId: string?) -> (),
 	Reset: (self: FaceApplier) -> (),
 }
 
@@ -57,8 +56,8 @@ function FaceApplier:ApplyImage(image: string?)
 	end
 end
 
-function FaceApplier:ApplyItemKey(itemKey: string?)
-	if type(itemKey) ~= "string" or itemKey == "" then
+function FaceApplier:ApplyItemId(itemId: string?)
+	if type(itemId) ~= "string" or itemId == "" then
 		self:Reset()
 		return
 	end
@@ -69,17 +68,13 @@ function FaceApplier:ApplyItemKey(itemKey: string?)
 		return
 	end
 
-	local itemConfig = facesCategory[itemKey]
+	local itemConfig = facesCategory[itemId]
 	if type(itemConfig) ~= "table" then
 		self:Reset()
 		return
 	end
 
 	self:ApplyImage(itemConfig.Image)
-end
-
-function FaceApplier:ApplyFromLoadoutFace(loadoutFace: string?)
-	self:ApplyItemKey(loadoutFace)
 end
 
 function FaceApplier:Reset()

@@ -19,6 +19,7 @@ local MenuHover    = require(script.Parent.MenuHover)
 export type PanelControllerOptions = {
 	onOpen: (() -> ())?,
 	onClose: (() -> ())?,
+	animationMode: GuiAnimator.AnimatorMode?,
 }
 
 export type PanelController = {
@@ -36,7 +37,7 @@ PanelController.__index = PanelController
 
 function PanelController.new(
 	menuController: any,
-	container: Frame,
+	container: GuiObject,
 	menuBtn:   GuiButton,
 	closeBtn:  GuiButton,
 	options:   PanelControllerOptions?
@@ -44,7 +45,9 @@ function PanelController.new(
 	local self = setmetatable({}, PanelController) :: any
 
 	self._janitor = Janitor.new()
-	self._animator = GuiAnimator.new(nil, container)
+	self._animator = GuiAnimator.new(nil, container, {
+		mode = if options then options.animationMode else nil,
+	})
 	self._menuController = menuController
 	self._container = container
 	self._isOpen = container.Visible

@@ -16,14 +16,6 @@ function UIUtils.findBottomButton(menuGui: ScreenGui, buttonName: string): GuiBu
 	return nil
 end
 
-function UIUtils.findCloseButton(root: Instance): GuiButton?
-	local candidate = root:FindFirstChild("CloseBtn")
-	if candidate and candidate:IsA("GuiButton") then
-		return candidate
-	end
-	return nil
-end
-
 function UIUtils.formatCashAmount(amount: number): string
 	local formatted = tostring(math.max(0, math.floor(amount)))
 	local withSeparators = string.reverse(formatted):gsub("(%d%d%d)", "%1.")

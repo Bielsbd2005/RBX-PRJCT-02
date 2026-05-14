@@ -6,14 +6,17 @@ local TweenService = game:GetService("TweenService")
 local Packages = ReplicatedStorage:WaitForChild("Packages")
 
 local Janitor = require(Packages.janitor) :: any
-local WeaponSkinWrapPreviewer = require(script.Parent.Previewers.WeaponSkinWrapPreviewer)
+local WeaponWrapPreviewer = require(script.Parent.Previewers.WeaponWrapPreviewer)
 local UITheme = require(script.Parent.Parent.Parent.core.ui.UITheme)
 local UIUtils = require(script.Parent.Parent.Parent.core.ui.UIUtils)
+local WeaponCategoryMod = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("WeaponCategory"))
+local ItemDefaults = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("ItemDefaults"))
+local LockerCategory = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("LockerCategory"))
 
 export type LockerCatalogItem = {
-	Id: string,
+	qualifiedId: string,
 	Category: string,
-	ItemKey: string,
+	id: string,
 	Name: string,
 	Price: number,
 	LevelRequired: number,
@@ -25,8 +28,8 @@ export type LockerCatalogItem = {
 	Animated: boolean?,
 	StudsPerTile: number?,
 	PreviewWeaponCategory: string?,
-	PreviewWeaponKey: string?,
-	PreviewWeaponName: string?,
+	PreviewWeaponId: string?,
+	PreviewWeaponDisplayName: string?,
 	KillGoal: number?,
 	KillProgress: number?,
 }
@@ -88,18 +91,20 @@ export type LockerGrid = {
 	_selectedCatalogButton: GuiButton?,
 	_selectedCatalogItem: LockerCatalogItem?,
 	_activeGridScaleTweens: { [GuiButton]: Tween },
+	_gridStaggerTweens: { [GuiObject]: Tween },
 	_hoveredGridButtons: { [GuiButton]: boolean },
 	_gridCardByButton: { [GuiButton]: GuiObject },
-	_gridButtonByItemId: { [string]: GuiButton },
+	_gridButtonByQualifiedId: { [string]: GuiButton },
 	_cachedLevel: number,
 	_janitor: any,
 	_populateJanitor: any,
 	Destroy: (self: LockerGrid) -> (),
 	Clear: (self: LockerGrid) -> (),
-	Populate: (self: LockerGrid, items: { LockerCatalogItem }, selectedItemId: string?, templateKey: TemplateKey?) -> (),
+	Populate: (self: LockerGrid, items: { LockerCatalogItem }, selectedQualifiedId: string?, templateKey: TemplateKey?) -> (),
+	PlayStagger: (self: LockerGrid) -> (),
 	RefreshVisibleState: (self: LockerGrid, notifySelection: boolean?) -> (),
 	GetSelectedItem: (self: LockerGrid) -> LockerCatalogItem?,
-	GetCardForItem: (self: LockerGrid, itemId: string) -> GuiObject?,
+	GetCardForItem: (self: LockerGrid, qualifiedId: string) -> GuiObject?,
 	_getButtonStroke: (self: LockerGrid, button: GuiButton) -> UIStroke?,
 	_buildGridCardRefs: (self: LockerGrid, card: GuiObject, templateKey: TemplateKey) -> ItemGridCardRefs,
 	_getGridCardRefs: (self: LockerGrid, card: GuiObject) -> ItemGridCardRefs,
@@ -111,7 +116,7 @@ export type LockerGrid = {
 	_tweenGridButtonScale: (self: LockerGrid, button: GuiButton, targetScale: number, tweenInfo: TweenInfo) -> (),
 	_bindCatalogButtonHover: (self: LockerGrid, button: GuiButton) -> (),
 	_clearCardViewportPreview: (self: LockerGrid, card: GuiObject) -> (),
-	_applyWeaponSkinViewportPreview: (self: LockerGrid, card: GuiObject, item: LockerCatalogItem) -> boolean,
+	_applyWeaponWrapViewportPreview: (self: LockerGrid, card: GuiObject, item: LockerCatalogItem) -> boolean,
 	_applyCatalogItemToCard: (self: LockerGrid, card: GuiObject, item: LockerCatalogItem, layoutOrder: number) -> (),
 	_resetTransientState: (self: LockerGrid, notifySelection: boolean) -> (),
 }
@@ -127,7 +132,12 @@ local STROKE_DEFAULT = UITheme.StrokeDefault
 local STROKE_WHITE = UITheme.StrokeHover
 local POPULATE_SYNC_ITEM_COUNT = 24
 local POPULATE_ASYNC_BATCH_SIZE = 16
-local DEFAULT_WEAPON_SKIN_KEY = "Default"
+
+-- Stagger de aparición de los cards (UIScale 0 → 1 por orden de layout).
+-- Solo se aplica al lote síncrono (primeros POPULATE_SYNC_ITEM_COUNT cards);
+-- los async aparecen sin animación al rellenarse.
+local GRID_STAGGER_DELAY = 0.025
+local GRID_STAGGER_TWEEN_INFO = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
 local LockerGrid = {}
 LockerGrid.__index = LockerGrid
@@ -156,9 +166,10 @@ function LockerGrid.new(
 	self._selectedCatalogButton = nil
 	self._selectedCatalogItem = nil
 	self._activeGridScaleTweens = {}
+	self._gridStaggerTweens = {} :: { [GuiObject]: Tween }
 	self._hoveredGridButtons = {}
 	self._gridCardByButton = {}
-	self._gridButtonByItemId = {}
+	self._gridButtonByQualifiedId = {}
 	self._cachedLevel = 0
 	self._janitor = Janitor.new()
 	self._populateJanitor = Janitor.new()
@@ -302,7 +313,7 @@ function LockerGrid:_clearCardViewportPreview(card: GuiObject)
 	end
 end
 
-function LockerGrid:_applyWeaponSkinViewportPreview(card: GuiObject, item: LockerCatalogItem): boolean
+function LockerGrid:_applyWeaponWrapViewportPreview(card: GuiObject, item: LockerCatalogItem): boolean
 	local refs = self:_getGridCardRefs(card)
 	local viewportNode = refs.viewportNode
 	if not viewportNode then
@@ -317,15 +328,15 @@ function LockerGrid:_applyWeaponSkinViewportPreview(card: GuiObject, item: Locke
 		self._cardPreviewJanitors[card] = previewJanitor
 	end
 
-	return WeaponSkinWrapPreviewer.Render(viewportNode, item, previewJanitor)
+	return WeaponWrapPreviewer.Render(viewportNode, item, previewJanitor)
 end
 
-local function shouldUseWeaponSkinViewportPreview(item: LockerCatalogItem): boolean
-	return item.Category == "WeaponSkins" and item.ItemKey ~= DEFAULT_WEAPON_SKIN_KEY
+local function shouldUseWeaponWrapViewportPreview(item: LockerCatalogItem): boolean
+	return item.Category == LockerCategory.WEAPON_WRAPS and item.id ~= ItemDefaults.ITEM_ID
 end
 
 local function shouldUseFullSizeWeaponImage(item: LockerCatalogItem): boolean
-	return item.Category == "Main" or item.Category == "Special"
+	return WeaponCategoryMod.isValid(item.Category)
 end
 
 local function isKillChallengeItem(item: LockerCatalogItem): boolean
@@ -394,7 +405,7 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 		end
 
 		local isChallenge = isKillChallengeItem(item) and not owned
-		local isDefaultWrap = item.ItemKey == DEFAULT_WEAPON_SKIN_KEY
+		local isDefaultWrap = item.id == ItemDefaults.ITEM_ID
 		if refs.titleNode then
 			-- Si esta equipado se muestra solo el badge `Equiped`, sin titulo.
 			refs.titleNode.Visible = not equipped
@@ -607,13 +618,13 @@ function LockerGrid:_applyCatalogItemToCard(card: GuiObject, item: LockerCatalog
 	card.Visible = true
 
 	local refs = self:_getGridCardRefs(card)
-	local needsViewport = shouldUseWeaponSkinViewportPreview(item)
-		or (refs.templateKey == "wraps" and item.Category == "WeaponSkins")
+	local needsViewport = shouldUseWeaponWrapViewportPreview(item)
+		or (refs.templateKey == "wraps" and item.Category == LockerCategory.WEAPON_WRAPS)
 	local usesViewportPreview = false
 
 	if needsViewport then
 		self:_clearCardViewportPreview(card)
-		usesViewportPreview = self:_applyWeaponSkinViewportPreview(card, item)
+		usesViewportPreview = self:_applyWeaponWrapViewportPreview(card, item)
 	elseif self._cardPreviewJanitors[card] then
 		self:_clearCardViewportPreview(card)
 	end
@@ -674,12 +685,11 @@ function LockerGrid:_applyCatalogItemToCard(card: GuiObject, item: LockerCatalog
 
 	self._gridButtonItems[button] = item
 	self._gridCardByButton[button] = card
-	self._gridButtonByItemId[item.Id] = button
+	self._gridButtonByQualifiedId[item.qualifiedId] = button
 
 	button.Active = true
 	button.AutoButtonColor = false
 	button.Selectable = true
-	button:SetAttribute("ItemId", item.Id)
 	button:SetAttribute("ItemName", item.Name)
 	button:SetAttribute("Price", item.Price)
 	button:SetAttribute("Rarity", item.Rarity)
@@ -693,7 +703,7 @@ function LockerGrid:_applyCatalogItemToCard(card: GuiObject, item: LockerCatalog
 		end
 
 		local selectedItem = self._gridButtonItems[button]
-		if self._selectedCatalogButton == button and not (selectedItem and selectedItem.Category == "KillEffects") then
+		if self._selectedCatalogButton == button and not (selectedItem and selectedItem.Category == LockerCategory.KILL_EFFECTS) then
 			return
 		end
 
@@ -714,7 +724,7 @@ function LockerGrid:_resetTransientState(notifySelection: boolean)
 	self._selectedCatalogItem = nil
 	table.clear(self._gridButtonItems)
 	table.clear(self._gridCardByButton)
-	table.clear(self._gridButtonByItemId)
+	table.clear(self._gridButtonByQualifiedId)
 
 	for _, tween in self._activeGridScaleTweens do
 		tween:Cancel()
@@ -727,8 +737,45 @@ function LockerGrid:_resetTransientState(notifySelection: boolean)
 	end
 end
 
+function LockerGrid:_cancelStaggerTweens()
+	for _, tween in self._gridStaggerTweens do
+		tween:Cancel()
+	end
+	table.clear(self._gridStaggerTweens)
+end
+
+function LockerGrid:_ensureCardScale(card: GuiObject): UIScale
+	local existing = card:FindFirstChildOfClass("UIScale")
+	if existing then
+		return existing
+	end
+	local scale = Instance.new("UIScale")
+	scale.Name = "GridCardScale"
+	scale.Parent = card
+	return scale
+end
+
+function LockerGrid:PlayStagger()
+	self:_cancelStaggerTweens()
+
+	for index, card in self._activeGridCards do
+		if not card.Visible then continue end
+		local scale = self:_ensureCardScale(card)
+		scale.Scale = 0
+		local tween = TweenService:Create(scale, GRID_STAGGER_TWEEN_INFO, { Scale = 1 })
+		self._gridStaggerTweens[card] = tween
+		local thisTween = tween
+		local thisCard = card
+		task.delay((index - 1) * GRID_STAGGER_DELAY, function()
+			if self._gridStaggerTweens[thisCard] ~= thisTween then return end
+			thisTween:Play()
+		end)
+	end
+end
+
 function LockerGrid:Clear()
 	self:_resetTransientState(true)
+	self:_cancelStaggerTweens()
 
 	for index = #self._activeGridCards, 1, -1 do
 		local card = self._activeGridCards[index]
@@ -739,7 +786,7 @@ function LockerGrid:Clear()
 	self._currentTemplateKey = nil
 end
 
-function LockerGrid:Populate(items: { LockerCatalogItem }, selectedItemId: string?, templateKey: TemplateKey?)
+function LockerGrid:Populate(items: { LockerCatalogItem }, selectedQualifiedId: string?, templateKey: TemplateKey?)
 	local resolvedTemplateKey: TemplateKey = templateKey or "default"
 
 	if self._currentTemplateKey ~= nil and self._currentTemplateKey ~= resolvedTemplateKey then
@@ -791,8 +838,8 @@ function LockerGrid:Populate(items: { LockerCatalogItem }, selectedItemId: strin
 
 	local selectedResolved = false
 
-	local function selectByItemId(itemId: string): boolean
-		local targetButton = self._gridButtonByItemId[itemId]
+	local function selectByQualifiedId(qualifiedId: string): boolean
+		local targetButton = self._gridButtonByQualifiedId[qualifiedId]
 		if not targetButton then
 			return false
 		end
@@ -823,8 +870,8 @@ function LockerGrid:Populate(items: { LockerCatalogItem }, selectedItemId: strin
 		return true
 	end
 
-	if selectedItemId then
-		selectedResolved = selectByItemId(selectedItemId)
+	if selectedQualifiedId then
+		selectedResolved = selectByQualifiedId(selectedQualifiedId)
 	elseif totalItems > 0 then
 		selectedResolved = selectFirstVisibleItem()
 	else
@@ -832,7 +879,7 @@ function LockerGrid:Populate(items: { LockerCatalogItem }, selectedItemId: strin
 	end
 
 	if totalItems <= syncItemCount then
-		if selectedItemId and not selectedResolved then
+		if selectedQualifiedId and not selectedResolved then
 			selectFirstVisibleItem()
 		end
 		return
@@ -854,8 +901,8 @@ function LockerGrid:Populate(items: { LockerCatalogItem }, selectedItemId: strin
 
 				applyCatalogItem(index)
 
-				if selectedItemId and not selectedResolved and items[index].Id == selectedItemId then
-					selectedResolved = selectByItemId(selectedItemId)
+				if selectedQualifiedId and not selectedResolved and items[index].qualifiedId == selectedQualifiedId then
+					selectedResolved = selectByQualifiedId(selectedQualifiedId)
 				end
 			end
 
@@ -867,7 +914,7 @@ function LockerGrid:Populate(items: { LockerCatalogItem }, selectedItemId: strin
 			return
 		end
 
-		if selectedItemId and not selectedResolved then
+		if selectedQualifiedId and not selectedResolved then
 			selectFirstVisibleItem()
 		end
 	end)
@@ -895,8 +942,8 @@ function LockerGrid:GetSelectedItem(): LockerCatalogItem?
 	return self._selectedCatalogItem
 end
 
-function LockerGrid:GetCardForItem(itemId: string): GuiObject?
-	local button = self._gridButtonByItemId[itemId]
+function LockerGrid:GetCardForItem(qualifiedId: string): GuiObject?
+	local button = self._gridButtonByQualifiedId[qualifiedId]
 	if not button then
 		return nil
 	end
@@ -914,9 +961,10 @@ function LockerGrid:Destroy()
 		tween:Cancel()
 	end
 	table.clear(self._activeGridScaleTweens)
+	self:_cancelStaggerTweens()
 	table.clear(self._hoveredGridButtons)
 	table.clear(self._gridCardByButton)
-	table.clear(self._gridButtonByItemId)
+	table.clear(self._gridButtonByQualifiedId)
 end
 
 return LockerGrid

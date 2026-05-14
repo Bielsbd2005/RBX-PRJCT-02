@@ -7,7 +7,7 @@
 	Estructura:
 	  ItemsConfig[category][itemId] = ItemConfig
 
-	Categorías válidas: "Main", "Special", "WeaponSkins", "KillEffects",
+	Categorías válidas: "Main", "Special", "WeaponWraps", "KillEffects",
 	                    "Faces", "Hats", "Outfits"
 ]]
 
@@ -37,7 +37,7 @@ export type ItemCategory = { [string]: ItemConfig }
 export type ItemsConfigType = {
 	Main: ItemCategory,
 	Special: ItemCategory,
-	WeaponSkins: ItemCategory,
+	WeaponWraps: ItemCategory,
 	KillEffects: ItemCategory,
 	Faces: ItemCategory,
 	Hats: ItemCategory,
@@ -72,7 +72,7 @@ Special = {
     RPG     = { Name = "RPG",     Price = 1000, LevelRequired = 0,  Rarity = "Rare",      Image = asset(139650368086109), CanPurchase = false },
 },
 
-	WeaponSkins = {
+	WeaponWraps = {
 		Default   = {
 			Name = "DefaulEt",
 			Price = 0,
@@ -84,7 +84,7 @@ Special = {
 			Animated = false,
 			StudsPerTile = 3,
 		},
-		Skin_Red  = {
+		Wrap_Red  = {
 			Name = "SK_0020",
 			Price = 300,
 			LevelRequired = 1,
@@ -96,8 +96,8 @@ Special = {
 			ScrollSpeedU = 1,
 			ScrollSpeedV = 0,
 		},
-		Skin_Blue = {
-			Name = "Blue Skin",
+		Wrap_Blue = {
+			Name = "Blue Wrap",
 			Price = 300,
 			LevelRequired = 1,
 			Rarity = "Common",
@@ -106,8 +106,8 @@ Special = {
 			Animated = false,
 			StudsPerTile = 3,
 		},
-		Skin_Gold = {
-			Name = "Gold Skin",
+		Wrap_Gold = {
+			Name = "Gold Wrap",
 			Price = 2500,
 			LevelRequired = 15,
 			Rarity = "Legendary",

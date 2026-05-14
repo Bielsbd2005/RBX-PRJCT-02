@@ -4,8 +4,15 @@
 -- preview de armas bloqueadas (negro neón), motion de selección (rise + bob), y
 -- transición down/up al cambiar de arma.
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
+
+local LockerConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("LockerConfig"))
+local WeaponCategoryMod = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("WeaponCategory"))
+local ItemDefaults = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("ItemDefaults"))
+local LockerCategory = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("LockerCategory"))
+local LockerMainCategory = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("LockerMainCategory"))
 
 local SELECTED_WEAPON_RISE_TWEEN_INFO = TweenInfo.new(0.06, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local SELECTED_WEAPON_RISE_HEIGHT = 0.28
@@ -37,12 +44,12 @@ local WEAPON_WRAP_TEXTURE_ORDER = {
 } :: { string }
 
 export type LockerPreviewSpawnTarget = Folder | Model | BasePart
-export type WeaponCategory = "Main" | "Special"
+export type WeaponCategory = WeaponCategoryMod.WeaponCategory
 
 export type LockerCatalogItem = {
-	Id: string,
+	qualifiedId: string,
 	Category: string,
-	ItemKey: string,
+	id: string,
 	Name: string,
 	Price: number,
 	LevelRequired: number,
@@ -54,8 +61,8 @@ export type LockerCatalogItem = {
 	Animated: boolean?,
 	StudsPerTile: number?,
 	PreviewWeaponCategory: string?,
-	PreviewWeaponKey: string?,
-	PreviewWeaponName: string?,
+	PreviewWeaponId: string?,
+	PreviewWeaponDisplayName: string?,
 }
 
 export type LoadoutData = {
@@ -72,7 +79,7 @@ export type WeaponPreviewControllerOptions = {
 	getCurrentLevel: () -> number,
 	getCurrentLoadout: () -> LoadoutData,
 	getEquippedItemByCategory: (category: string) -> string?,
-	isOwned: (category: string, itemKey: string) -> boolean,
+	isOwned: (category: string, itemId: string) -> boolean,
 }
 
 export type WeaponPreviewController = {
@@ -103,7 +110,7 @@ local function getOptionalString(value: any): string?
 end
 
 local function isWeaponCategory(category: string): boolean
-	return category == "Main" or category == "Special"
+	return WeaponCategoryMod.isValid(category)
 end
 
 local function getSpawnPivot(spawnTarget: LockerPreviewSpawnTarget): CFrame
@@ -161,13 +168,13 @@ local function cancelTweenFromMap(map: { [any]: Tween }, key: any)
 	end
 end
 
-local function resolveWeaponWrap(loadout: LoadoutData, weaponCategory: WeaponCategory, weaponKey: string?): string
-	local normalizedWeaponKey = getOptionalString(weaponKey) or "Default"
-	local wrapsTableKey = if weaponCategory == "Main" then "MainWeaponWraps" else "SpecialWeaponWraps"
+local function resolveWeaponWrap(loadout: LoadoutData, weaponCategory: WeaponCategory, weaponId: string?): string
+	local normalizedWeaponId = getOptionalString(weaponId) or ItemDefaults.ITEM_ID
+	local wrapsTableKey = if weaponCategory == WeaponCategoryMod.MAIN then "MainWeaponWraps" else "SpecialWeaponWraps"
 	local wrapsTableAny = loadout[wrapsTableKey]
 	if type(wrapsTableAny) == "table" then
 		local wrapsTable = wrapsTableAny :: { [string]: string }
-		local resolvedByWeapon = getOptionalString(wrapsTable[normalizedWeaponKey])
+		local resolvedByWeapon = getOptionalString(wrapsTable[normalizedWeaponId])
 		if resolvedByWeapon then
 			return resolvedByWeapon
 		end
@@ -178,7 +185,7 @@ local function resolveWeaponWrap(loadout: LoadoutData, weaponCategory: WeaponCat
 		end
 	end
 
-	return "Default"
+	return ItemDefaults.ITEM_ID
 end
 
 -- ── Constructor ────────────────────────────────────────────────
@@ -229,25 +236,25 @@ end
 -- ── Métodos privados ───────────────────────────────────────────
 
 function WeaponPreviewController:_getSpawnFor(category: string): LockerPreviewSpawnTarget?
-	if category == "Main" then
+	if category == WeaponCategoryMod.MAIN then
 		return self._options.mainWeaponSpawn
-	elseif category == "Special" then
+	elseif category == WeaponCategoryMod.SPECIAL then
 		return self._options.specialWeaponSpawn
 	end
 	return nil
 end
 
-function WeaponPreviewController:_isLocked(category: WeaponCategory, itemKey: string?): boolean
-	if type(itemKey) ~= "string" or itemKey == "" then
+function WeaponPreviewController:_isLocked(category: WeaponCategory, itemId: string?): boolean
+	if type(itemId) ~= "string" or itemId == "" then
 		return false
 	end
 
-	if self._options.isOwned(category, itemKey) then
+	if self._options.isOwned(category, itemId) then
 		return false
 	end
 
 	local categoryConfig = self._options.itemsConfig[category]
-	local definition = if type(categoryConfig) == "table" then categoryConfig[itemKey] else nil
+	local definition = if type(categoryConfig) == "table" then categoryConfig[itemId] else nil
 	local levelRequired = if type(definition) == "table" then tonumber(definition.LevelRequired) else nil
 	if levelRequired and self._options.getCurrentLevel() < levelRequired then
 		return true
@@ -256,7 +263,7 @@ function WeaponPreviewController:_isLocked(category: WeaponCategory, itemKey: st
 	return false
 end
 
-function WeaponPreviewController:_resolveTemplate(category: string, itemKey: string?, itemName: string?): Instance?
+function WeaponPreviewController:_resolveTemplate(category: string, itemId: string?, itemName: string?): Instance?
 	if not isWeaponCategory(category) then
 		return nil
 	end
@@ -266,23 +273,25 @@ function WeaponPreviewController:_resolveTemplate(category: string, itemKey: str
 		return nil
 	end
 
-	return (if itemKey then categoryFolder:FindFirstChild(itemKey) else nil)
+	return (if itemId then categoryFolder:FindFirstChild(itemId) else nil)
 		or (if itemName then categoryFolder:FindFirstChild(itemName) else nil)
-		or categoryFolder:FindFirstChild("Default")
+		-- "Default" aquí es el nombre del Tool fallback en Locker.weapons.*; por convención
+		-- coincide con el item-id default del catálogo, así que reusamos ItemDefaults.ITEM_ID.
+		or categoryFolder:FindFirstChild(ItemDefaults.ITEM_ID)
 end
 
 function WeaponPreviewController:_getStateId(
 	category: WeaponCategory,
-	itemKey: string?,
+	itemId: string?,
 	previewId: string,
 	locked: boolean?
 ): string
 	if locked then
 		return previewId .. "::locked"
 	end
-	local resolvedWeaponKey = getOptionalString(itemKey) or "Default"
+	local resolvedWeaponId = getOptionalString(itemId) or ItemDefaults.ITEM_ID
 	local loadout = self._options.getCurrentLoadout()
-	local resolvedWrapId = resolveWeaponWrap(loadout, category, resolvedWeaponKey)
+	local resolvedWrapId = resolveWeaponWrap(loadout, category, resolvedWeaponId)
 	return previewId .. "::" .. resolvedWrapId .. "::unlocked"
 end
 
@@ -308,7 +317,7 @@ function WeaponPreviewController:_applyWrap(previewInstance: Instance, weaponCat
 
 	self._wrapAnimDataByCategory[weaponCategory] = nil
 
-	local wrapsConfig = self._options.itemsConfig.WeaponSkins
+	local wrapsConfig = self._options.itemsConfig.WeaponWraps
 	local wrapDefinition = if type(wrapsConfig) == "table" then wrapsConfig[wrapId] else nil
 	local validDef = type(wrapDefinition) == "table"
 	local textureId = if validDef then getOptionalString(wrapDefinition.TextureID) else nil
@@ -359,15 +368,15 @@ function WeaponPreviewController:_applyWrap(previewInstance: Instance, weaponCat
 	end
 end
 
-function WeaponPreviewController:_getOrCreateLockedTemplate(category: string, itemKey: string?, itemName: string?): Instance?
-	local resolvedKey = getOptionalString(itemKey) or "Default"
+function WeaponPreviewController:_getOrCreateLockedTemplate(category: string, itemId: string?, itemName: string?): Instance?
+	local resolvedKey = getOptionalString(itemId) or ItemDefaults.ITEM_ID
 	local cacheKey = category .. "::" .. resolvedKey
 	local cached = self._lockedTemplateCache[cacheKey]
 	if cached then
 		return cached
 	end
 
-	local weaponTemplate = self:_resolveTemplate(category, itemKey, itemName)
+	local weaponTemplate = self:_resolveTemplate(category, itemId, itemName)
 	if not weaponTemplate then
 		return nil
 	end
@@ -470,14 +479,14 @@ function WeaponPreviewController:_startMotion(category: WeaponCategory, startOff
 	riseTween:Play()
 end
 
-function WeaponPreviewController:_applyForCategory(category: string, itemKey: string?, itemName: string?, previewId: string)
+function WeaponPreviewController:_applyForCategory(category: string, itemId: string?, itemName: string?, previewId: string)
 	if not isWeaponCategory(category) then
 		return
 	end
 
 	local previewCategory = category :: WeaponCategory
-	local previewLocked = self:_isLocked(previewCategory, itemKey)
-	local previewStateId = self:_getStateId(previewCategory, itemKey, previewId, previewLocked)
+	local previewLocked = self:_isLocked(previewCategory, itemId)
+	local previewStateId = self:_getStateId(previewCategory, itemId, previewId, previewLocked)
 
 	local spawnTarget = self:_getSpawnFor(category)
 	if not spawnTarget then
@@ -495,13 +504,13 @@ function WeaponPreviewController:_applyForCategory(category: string, itemKey: st
 
 	local clonedWeapon: Instance
 	if previewLocked then
-		local lockedTemplate = self:_getOrCreateLockedTemplate(category, itemKey, itemName)
+		local lockedTemplate = self:_getOrCreateLockedTemplate(category, itemId, itemName)
 		if not lockedTemplate then
 			return
 		end
 		clonedWeapon = lockedTemplate:Clone()
 	else
-		local weaponTemplate = self:_resolveTemplate(category, itemKey, itemName)
+		local weaponTemplate = self:_resolveTemplate(category, itemId, itemName)
 		if not weaponTemplate then
 			return
 		end
@@ -516,9 +525,9 @@ function WeaponPreviewController:_applyForCategory(category: string, itemKey: st
 		self._previewBasePivotByCategory[category] = basePivot
 	end
 	if not previewLocked then
-		local resolvedWeaponKey = getOptionalString(itemKey) or "Default"
+		local resolvedWeaponId = getOptionalString(itemId) or ItemDefaults.ITEM_ID
 		local loadout = self._options.getCurrentLoadout()
-		local resolvedWrapId = resolveWeaponWrap(loadout, previewCategory, resolvedWeaponKey)
+		local resolvedWrapId = resolveWeaponWrap(loadout, previewCategory, resolvedWeaponId)
 		self:_applyWrap(clonedWeapon, previewCategory, resolvedWrapId)
 	end
 
@@ -533,22 +542,22 @@ function WeaponPreviewController:restoreEquippedFor(category: string)
 		return
 	end
 
-	local equippedItemKey = self._options.getEquippedItemByCategory(category) or "Default"
+	local equippedItemId = self._options.getEquippedItemByCategory(category) or ItemDefaults.ITEM_ID
 
 	local categoryConfig = self._options.itemsConfig[category]
-	local definition = if type(categoryConfig) == "table" then categoryConfig[equippedItemKey] else nil
-	local resolvedName = if type(definition) == "table" then tostring(definition.Name or equippedItemKey) else equippedItemKey
-	local previewId = category .. "." .. equippedItemKey
-	self:_applyForCategory(category, equippedItemKey, resolvedName, previewId)
+	local definition = if type(categoryConfig) == "table" then categoryConfig[equippedItemId] else nil
+	local resolvedName = if type(definition) == "table" then tostring(definition.Name or equippedItemId) else equippedItemId
+	local previewId = LockerConfig.makeQualifiedId(category, equippedItemId)
+	self:_applyForCategory(category, equippedItemId, resolvedName, previewId)
 
 	-- Restaurar el wrap del loadout sobre el preview activo (cancela cualquier
 	-- preview de wrap no equipado que hubiera quedado por la última selección).
 	local previewCategory = category :: WeaponCategory
-	if not self:_isLocked(previewCategory, equippedItemKey) then
+	if not self:_isLocked(previewCategory, equippedItemId) then
 		local activePreview = self._activePreviewByCategory[category]
 		if activePreview and activePreview.Parent then
 			local loadout = self._options.getCurrentLoadout()
-			local equippedWrapId = resolveWeaponWrap(loadout, previewCategory, equippedItemKey)
+			local equippedWrapId = resolveWeaponWrap(loadout, previewCategory, equippedItemId)
 			self:_applyWrap(activePreview, previewCategory, equippedWrapId)
 		end
 	end
@@ -565,22 +574,22 @@ function WeaponPreviewController:applyWrapPreview(weaponCategory: string, wrapId
 		return
 	end
 
-	local resolvedWrapId = getOptionalString(wrapId) or "Default"
+	local resolvedWrapId = getOptionalString(wrapId) or ItemDefaults.ITEM_ID
 	self:_applyWrap(activePreview, previewCategory, resolvedWrapId)
 end
 
 function WeaponPreviewController:restoreEquipped()
-	self:_stopMotion("Main", true)
-	self:_stopMotion("Special", true)
-	self:restoreEquippedFor("Main")
-	self:restoreEquippedFor("Special")
+	self:_stopMotion(WeaponCategoryMod.MAIN, true)
+	self:_stopMotion(WeaponCategoryMod.SPECIAL, true)
+	self:restoreEquippedFor(WeaponCategoryMod.MAIN)
+	self:restoreEquippedFor(WeaponCategoryMod.SPECIAL)
 end
 
 function WeaponPreviewController:applySelected(item: LockerCatalogItem?)
-	if item and item.Category == "WeaponSkins" then
+	if item and item.Category == LockerCategory.WEAPON_WRAPS then
 		local previewCategory = item.PreviewWeaponCategory
 		if previewCategory and isWeaponCategory(previewCategory) then
-			self:applyWrapPreview(previewCategory, item.ItemKey)
+			self:applyWrapPreview(previewCategory, item.id)
 		end
 		return
 	end
@@ -591,14 +600,14 @@ function WeaponPreviewController:applySelected(item: LockerCatalogItem?)
 	end
 
 	local selectedCategory = item.Category :: WeaponCategory
-	if selectedCategory == "Main" then
-		self:_stopMotion("Special", true)
+	if selectedCategory == WeaponCategoryMod.MAIN then
+		self:_stopMotion(WeaponCategoryMod.SPECIAL, true)
 	else
-		self:_stopMotion("Main", true)
+		self:_stopMotion(WeaponCategoryMod.MAIN, true)
 	end
 
-	local selectedLocked = self:_isLocked(selectedCategory, item.ItemKey)
-	local desiredPreviewStateId = self:_getStateId(selectedCategory, item.ItemKey, item.Id, selectedLocked)
+	local selectedLocked = self:_isLocked(selectedCategory, item.id)
+	local desiredPreviewStateId = self:_getStateId(selectedCategory, item.id, item.qualifiedId, selectedLocked)
 	local activePreviewStateId = self._activePreviewItemIdByCategory[selectedCategory]
 	local currentPreview = self._activePreviewByCategory[selectedCategory]
 	if currentPreview
@@ -618,7 +627,7 @@ function WeaponPreviewController:applySelected(item: LockerCatalogItem?)
 
 	local currentBasePivot = self._previewBasePivotByCategory[selectedCategory]
 	if not currentPreview or not currentPreview.Parent or not currentBasePivot then
-		self:_applyForCategory(item.Category, item.ItemKey, item.Name, item.Id)
+		self:_applyForCategory(item.Category, item.id, item.Name, item.qualifiedId)
 		self:_startMotion(selectedCategory, -SELECTED_WEAPON_SWITCH_DOWN_STUDS)
 		return
 	end
@@ -668,7 +677,7 @@ function WeaponPreviewController:applySelected(item: LockerCatalogItem?)
 			return
 		end
 
-		self:_applyForCategory(item.Category, item.ItemKey, item.Name, item.Id)
+		self:_applyForCategory(item.Category, item.id, item.Name, item.qualifiedId)
 
 		local nextPreview = self._activePreviewByCategory[selectedCategory]
 		local nextBasePivot = self._previewBasePivotByCategory[selectedCategory]
@@ -689,8 +698,8 @@ function WeaponPreviewController:isMotionActive(category: string): boolean
 end
 
 function WeaponPreviewController:destroyAll()
-	self:_destroyForCategory("Main")
-	self:_destroyForCategory("Special")
+	self:_destroyForCategory(WeaponCategoryMod.MAIN)
+	self:_destroyForCategory(WeaponCategoryMod.SPECIAL)
 end
 
 function WeaponPreviewController:updateIndicators(
@@ -705,16 +714,16 @@ function WeaponPreviewController:updateIndicators(
 	end
 
 	local activeWeaponCategory: WeaponCategory? = nil
-	if selectedMainCategory == "Arsenal" then
-		if selectedNavKey == "Main" or selectedNavKey == "Special" then
+	if selectedMainCategory == LockerMainCategory.ARSENAL then
+		if WeaponCategoryMod.isValid(selectedNavKey) then
 			activeWeaponCategory = selectedNavKey :: WeaponCategory
-		elseif selectedNavKey == "Wraps" then
+		elseif selectedNavKey == LockerCategory.WEAPON_WRAPS then
 			activeWeaponCategory = wrapsTargetWeaponCategory
 		end
 	end
 
-	(mainIndicator :: BasePart).LocalTransparencyModifier = if activeWeaponCategory == "Main" then 0 else 1
-	(specialIndicator :: BasePart).LocalTransparencyModifier = if activeWeaponCategory == "Special" then 0 else 1
+	(mainIndicator :: BasePart).LocalTransparencyModifier = if activeWeaponCategory == WeaponCategoryMod.MAIN then 0 else 1
+	(specialIndicator :: BasePart).LocalTransparencyModifier = if activeWeaponCategory == WeaponCategoryMod.SPECIAL then 0 else 1
 end
 
 function WeaponPreviewController:Destroy()
