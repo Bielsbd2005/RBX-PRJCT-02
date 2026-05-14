@@ -772,11 +772,6 @@ local function _extractCharacterRootPart(character: Model): BasePart?
 	return root
 end
 
-local function _extractCharacterRootPosition(character: Model): Vector3?
-	local root = _extractCharacterRootPart(character)
-	return if root then root.Position else nil
-end
-
 local TeamUtils = require(Shared.utils.TeamUtils)
 
 local function _resolveNpcSide(character: Model): "A" | "B"?
