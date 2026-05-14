@@ -126,10 +126,10 @@ end
 
 function LockerCameraController:setTargetPartName(targetPartName: string, refreshIfApplied: boolean?)
 	local nextTargetPart = resolveTargetPart(targetPartName)
-	self:setTargetPart(nextTargetPart, refreshIfApplied)
+	self:_setTargetPart(nextTargetPart, refreshIfApplied)
 end
 
-function LockerCameraController:setTargetPart(nextTargetPart: BasePart, refreshIfApplied: boolean?)
+function LockerCameraController:_setTargetPart(nextTargetPart: BasePart, refreshIfApplied: boolean?)
 	if self._targetPart == nextTargetPart then
 		return
 	end
