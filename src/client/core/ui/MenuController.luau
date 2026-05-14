@@ -59,27 +59,6 @@ local function setText(label: TextLabel?, value: string): ()
 	end
 end
 
-local function findDescendantByName(root: Instance, names: { string }): Instance?
-	for _, descendant in ipairs(root:GetDescendants()) do
-		for _, candidate in ipairs(names) do
-			if descendant.Name == candidate then
-				return descendant
-			end
-		end
-	end
-
-	return nil
-end
-
-local function findTextLabel(root: Instance, names: { string }): TextLabel?
-	local node = findDescendantByName(root, names)
-	if node and node:IsA("TextLabel") then
-		return node
-	end
-
-	return nil
-end
-
 local function resolveHudRefs(menuGui: ScreenGui): HudRefs
 	local top = menuGui:FindFirstChild("Top")
 	if not top then
