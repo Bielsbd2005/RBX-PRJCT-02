@@ -17,7 +17,6 @@ function ServerBootstrap.start(serverRoot: Script): ()
 
 	local DataService = require(serverRoot.core.data.DataService)
 	local ShopService = require(serverRoot.features.shop.ShopService)
-	local StoreService = require(serverRoot.features.store.StoreService)
 	local SettingsService = require(serverRoot.features.settings.SettingsService)
 	local RewardsService = require(serverRoot.features.rewards.RewardsService)
 	local CasesService = require(serverRoot.features.cases.CasesService)
@@ -29,7 +28,6 @@ function ServerBootstrap.start(serverRoot: Script): ()
 
 	DataService:Start()
 	ShopService:Start(DataService)
-	StoreService:Start(DataService)
 	SettingsService:Start(DataService)
 	RewardsService:Start(DataService)
 	-- BattlePassService debe arrancar ANTES que CasesService porque CasesService

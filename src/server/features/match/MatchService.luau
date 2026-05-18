@@ -18,7 +18,7 @@ local SpawnSelector = require(script.Parent:WaitForChild("SpawnSelector"))
 local LoadoutService = require(script.Parent:WaitForChild("LoadoutService"))
 local HealthPickupService = require(script.Parent:WaitForChild("HealthPickupService"))
 local KillEffectsRegistry = require(Shared.Locker.killEffects.KillEffectsRegistry)
-local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
+local ItemsConfig = require(Shared.constants.ItemsConfig)
 local ActionRewards = require(Shared.constants.ActionRewards)
 local WeaponCategory = require(Shared.constants.WeaponCategory)
 local ItemDefaults = require(Shared.constants.ItemDefaults)
@@ -97,9 +97,6 @@ local _tieBreakToA = false
 -- Cooldown entre cambios de voto del mismo jugador. 0.5s permite ~2 cambios/seg
 -- — suficiente para UX responsive sin permitir spam que sature broadcasts.
 local VOTE_CHANGE_COOLDOWN = 0.5
--- Ventana máxima entre el último daño y la muerte para acreditar el kill.
--- Más allá de este tiempo, el kill se considera "muerte natural" / no atribuible.
-local KILL_ATTRIBUTION_WINDOW = 2
 local DEFAULT_PLACEHOLDER_IMAGE = "rbxasset://textures/ui/GuiImagePlaceholder.png"
 
 local function _log(message: string)
@@ -371,15 +368,15 @@ local function _grantActionRewardsToAttacker(attackerUserId: number?, action: st
 	local xpAmount = ActionRewards.GetXP(action)
 	local cashAmount = ActionRewards.GetCash(action)
 
-	if xpAmount > 0 and type((_dataService :: any).AddXP) == "function" then
-		local ok, err = pcall((_dataService :: any).AddXP, _dataService, attackerPlayer, xpAmount)
+	if xpAmount > 0 then
+		local ok, err = pcall(_dataService.AddXP, _dataService, attackerPlayer, xpAmount)
 		if not ok then
 			warn("[MatchService] AddXP error: " .. tostring(err))
 		end
 	end
 
-	if cashAmount > 0 and type((_dataService :: any).Increment) == "function" then
-		local ok, err = pcall((_dataService :: any).Increment, _dataService, attackerPlayer, { "Stats", "Cash" }, cashAmount)
+	if cashAmount > 0 then
+		local ok, err = pcall(_dataService.Increment, _dataService, attackerPlayer, { "Stats", "Cash" }, cashAmount)
 		if not ok then
 			warn("[MatchService] Cash Increment error: " .. tostring(err))
 		end
@@ -396,7 +393,7 @@ local function _grantMasteryWrapsIfEligible(player: Player, weaponCategory: stri
 		return
 	end
 
-	local profile = (_dataService :: any).GetProfile and _dataService:GetProfile(player)
+	local profile = _dataService:GetProfile(player)
 	if not profile or not profile.Data then
 		return
 	end
@@ -411,10 +408,10 @@ local function _grantMasteryWrapsIfEligible(player: Player, weaponCategory: stri
 	local updates: { { path: { string }, value: any } } = {}
 	for wrapKey, definition in weaponWrapsConfig do
 		if type(definition) == "table" then
-			local challenge = (definition :: any).KillChallenge
+			local challenge = definition.KillChallenge
 			local kills: number? = nil
-			if type(challenge) == "table" then
-				kills = tonumber((challenge :: any).Kills)
+			if challenge then
+				kills = tonumber(challenge.Kills)
 			end
 			if kills and kills > 0 and newKillCount >= kills then
 				local alreadyOwned = type(weaponMap) == "table" and weaponMap[wrapKey] == true
@@ -463,12 +460,7 @@ local function _registerWeaponKillForAttacker(attackerUserId: number?, weaponId:
 		return
 	end
 
-	local incrementFn = (_dataService :: any).IncrementWeaponKills
-	if type(incrementFn) ~= "function" then
-		return
-	end
-
-	local ok, success, newCount = pcall(incrementFn, _dataService, attackerPlayer, weaponCategory, resolvedWeaponId, 1)
+	local ok, success, newCount = pcall(_dataService.IncrementWeaponKills, _dataService, attackerPlayer, weaponCategory, resolvedWeaponId, 1)
 	if not ok then
 		warn("[MatchService] IncrementWeaponKills error: " .. tostring(success))
 		return
@@ -536,12 +528,12 @@ local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?, a
 
 	-- Persistir Stats.Deaths lifetime del que muere (siempre que sea jugador).
 	-- C2: si el profile aún no cargó, encolar para flush en ProfileLoaded.
-	if _dataService and (_dataService :: any).Increment then
+	if _dataService then
 		if _hasProfile(deadPlayer) then
-			pcall((_dataService :: any).Increment, _dataService, deadPlayer, { "Stats", "Deaths" }, 1)
+			pcall(_dataService.Increment, _dataService, deadPlayer, { "Stats", "Deaths" }, 1)
 		else
 			_deferUntilProfile(deadPlayer, function()
-				pcall((_dataService :: any).Increment, _dataService, deadPlayer, { "Stats", "Deaths" }, 1)
+				pcall(_dataService.Increment, _dataService, deadPlayer, { "Stats", "Deaths" }, 1)
 			end)
 		end
 	end
@@ -915,7 +907,7 @@ local function _registerDeathListener(player: Player, character: Model)
 		local attackerAt = if type(attackerAtAttr) == "number" then attackerAtAttr else 0
 		local attackerWeaponId = if type(attackerWeaponIdAttr) == "string" then attackerWeaponIdAttr else ""
 		local attackerWasHeadshot = attackerHeadshotAttr == true
-		if attackerAt > 0 and time() - attackerAt > KILL_ATTRIBUTION_WINDOW then
+		if attackerAt > 0 and time() - attackerAt > GameConfig.KillAttributionWindow then
 			attackerUserId = nil
 		end
 		-- Atacante humano: descartar si no sigue in-match.
@@ -1539,11 +1531,11 @@ local function _startMapLoadFlow(winnerMapName: string)
 					local attackerAt = if type(attackerAtAttr) == "number" then attackerAtAttr else 0
 					local attackerWeaponId = if type(attackerWeaponIdAttr) == "string" then attackerWeaponIdAttr else ""
 					local attackerWasHeadshot = attackerHeadshotAttr == true
-					if attackerAt > 0 and time() - attackerAt > KILL_ATTRIBUTION_WINDOW then
+					if attackerAt > 0 and time() - attackerAt > GameConfig.KillAttributionWindow then
 						attackerUserId = nil
 					end
 					-- H5 fix: NO descartamos por _isInMenuByUserId aquí. La
-					-- ventana KILL_ATTRIBUTION_WINDOW (2s) ya filtra daño viejo
+					-- ventana KillAttributionWindow (2s) ya filtra daño viejo
 					-- de cuando el jugador estaba in-match. Si el daño es
 					-- reciente y el bot muere justo cuando vuelve al menú,
 					-- la kill es legítima — no robarla.

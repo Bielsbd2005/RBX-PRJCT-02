@@ -22,10 +22,13 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local DailyTasks = require(Shared.constants.DailyTasks)
 
+local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
+type DataService = DataServiceMod.DataServiceModule
+
 local DailyTasksService = {}
 DailyTasksService.__index = DailyTasksService
 
-local _dataService: any = nil
+local _dataService: DataService = nil :: any
 local _started = false
 
 -- Devuelve el día UTC actual como "YYYY-MM-DD". Usar UTC evita saltos por
@@ -128,7 +131,7 @@ end
 
 -- Inicialización: arranca un loop que comprueba el cambio de día UTC para
 -- jugadores activos (relevante para sesiones largas que cruzan medianoche).
-function DailyTasksService:Start(dataService: any): ()
+function DailyTasksService:Start(dataService: DataService): ()
 	if _started then return end
 	_started = true
 	_dataService = dataService

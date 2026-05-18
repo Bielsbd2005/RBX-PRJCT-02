@@ -25,12 +25,15 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Network   = require(Shared.networking.Network)
 local NetGuards = require(Shared.networking.NetGuards)
 
+local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
+type DataService = DataServiceMod.DataServiceModule
+
 local M = NetGuards.MAX
 
 local SettingsService = {}
 SettingsService.__index = SettingsService
 
-local _dataService: any = nil
+local _dataService: DataService = nil :: any
 local _started = false
 -- Cooldown global por player (no por-key) para evitar spam por rotación de keys.
 -- Un usuario que mueva un slider Y cambie un toggle dentro de 100ms verá el
@@ -187,7 +190,7 @@ local function _onUpdateColor(data: { key: string, r: number, g: number, b: numb
 	_dataService:SetValue(player, { "Settings", data.key }, color)
 end
 
-function SettingsService:Start(dataService: any): ()
+function SettingsService:Start(dataService: DataService): ()
 	if _started then
 		return
 	end

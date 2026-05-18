@@ -30,7 +30,7 @@ local Network = require(Shared.networking.Network)
 local NetGuards = require(Shared.networking.NetGuards)
 local InventoryRepository = require(Shared.data.InventoryRepository)
 local CasesConfig = require(Shared.constants.CasesConfig)
-local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
+local ItemsConfig = require(Shared.constants.ItemsConfig)
 local StoreProducts = require(Shared.constants.StoreProducts)
 local WeaponCategoryMod = require(Shared.constants.WeaponCategory)
 

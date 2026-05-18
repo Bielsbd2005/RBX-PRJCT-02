@@ -74,7 +74,7 @@ Special = {
 
 	WeaponWraps = {
 		Default   = {
-			Name = "DefaulEt",
+			Name = "Default",
 			Price = 0,
 			LevelRequired = 1,
 			Rarity = "Common",

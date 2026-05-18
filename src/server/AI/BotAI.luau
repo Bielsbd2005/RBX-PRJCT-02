@@ -9,6 +9,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local TeamUtils = require(Shared.utils.TeamUtils)
+local BotConfig = require(Shared.constants.BotConfig)
 
 local WEAPON_TAG = "WeaponsSystemWeapon"
 
@@ -42,28 +43,12 @@ end
 -- Configuracion por instancia
 -- ────────────────────────────────────────────────────────────────
 
-local JUMP_HEIGHT = 5
-local WANDER_RADIUS = 40
-local DETECT_RANGE = 35
-local DISTANCIA_SUAVIDAD = 4
-local FIRE_RATE = 0.1        -- igual que ShotCooldown del arma real
-local PRECISION = 40         -- 40% de balas hacen daño
-local WALK_SPEED = 16        -- igual que jugadores reales
-
-local PLAYER_AGGRESSION = {
-	FIRE_RATE = 0.1,
-	PRECISION = 40,
-	DAMAGE_MIN = 2,
-	DAMAGE_MAX = 5,
-	JUMP_CHANCE = 0.03,
-}
-
 local AGENT_PARAMS = {
-	AgentRadius = 2,
-	AgentHeight = 5,
-	AgentCanJump = true,
-	AgentJumpHeight = JUMP_HEIGHT,
-	AgentMaxSlope = 45,
+	AgentRadius = BotConfig.Pathfinding.AgentRadius,
+	AgentHeight = BotConfig.Pathfinding.AgentHeight,
+	AgentCanJump = BotConfig.Pathfinding.AgentCanJump,
+	AgentJumpHeight = BotConfig.Movement.JumpHeight,
+	AgentMaxSlope = BotConfig.Pathfinding.AgentMaxSlope,
 }
 
 local ANIM_IDS = {
@@ -225,7 +210,7 @@ function BotAI:_canSeeTarget(target: Model): boolean
 	local targetPos = (targetRoot :: BasePart).Position + Vector3.new(0, 1.5, 0)
 	local direction = targetPos - origin
 
-	if direction.Magnitude > DETECT_RANGE then
+	if direction.Magnitude > BotConfig.Combat.DetectRange then
 		return false
 	end
 
@@ -274,7 +259,7 @@ function BotAI:_getBestTarget(): (Model?, boolean)
 		if charTeam and myTeam and charTeam == myTeam then continue end
 
 		local d = (rootPos - (root :: BasePart).Position).Magnitude
-		if d > DETECT_RANGE then continue end
+		if d > BotConfig.Combat.DetectRange then continue end
 
 		table.insert(candidates, { char = char, d = d })
 	end
@@ -362,7 +347,7 @@ function BotAI:_moveToLocation(location: Vector3, stopCondition: () -> boolean)
 		self._humanoid:MoveTo(wp.Position)
 
 		while not self._hasReachedMove do
-			if i < #waypoints and (self._rootPart.Position - wp.Position).Magnitude < DISTANCIA_SUAVIDAD then
+			if i < #waypoints and (self._rootPart.Position - wp.Position).Magnitude < BotConfig.Movement.WaypointSmoothDistance then
 				break
 			end
 			if stopCondition() then
@@ -400,8 +385,8 @@ function BotAI:Start(mapRoot: Instance?, aliveTargets: { Model }?)
 	local rootPart = self._rootPart
 
 	humanoid.UseJumpPower = false
-	humanoid.JumpHeight = JUMP_HEIGHT
-	humanoid.WalkSpeed = WALK_SPEED
+	humanoid.JumpHeight = BotConfig.Movement.JumpHeight
+	humanoid.WalkSpeed = BotConfig.Movement.WalkSpeed
 
 	local tracks = self:_setupAnimations()
 	local alignOrientation = self:_setupRotationConstraint()
@@ -522,9 +507,9 @@ function BotAI:Start(mapRoot: Instance?, aliveTargets: { Model }?)
 					end
 
 					local isPlayer = Players:GetPlayerFromCharacter(currentTarget) ~= nil
-					local jumpChance = if isPlayer then PLAYER_AGGRESSION.JUMP_CHANCE else 0.4
+					local profile = if isPlayer then BotConfig.Combat.VsPlayer else BotConfig.Combat.VsBot
 					if os.clock() - lastJumpTime > math.random(20, 50) / 10 then
-						if math.random() < jumpChance then
+						if math.random() < profile.JumpChance then
 							humanoid.Jump = true
 						end
 						lastJumpTime = os.clock()
@@ -532,8 +517,9 @@ function BotAI:Start(mapRoot: Instance?, aliveTargets: { Model }?)
 				end
 
 				local isPlayer = Players:GetPlayerFromCharacter(currentTarget) ~= nil
-				local fireRate = if isPlayer then PLAYER_AGGRESSION.FIRE_RATE else FIRE_RATE
-				local precision = if isPlayer then PLAYER_AGGRESSION.PRECISION else PRECISION
+				local profile = if isPlayer then BotConfig.Combat.VsPlayer else BotConfig.Combat.VsBot
+				local fireRate = BotConfig.Combat.FireRate
+				local precision = BotConfig.Combat.Precision
 
 				-- Sprint 3: reusar la visibility del _getBestTarget de este tick.
 				-- Antes esto hacía un tercer raycast por tick en ATTACK.
@@ -543,9 +529,7 @@ function BotAI:Start(mapRoot: Instance?, aliveTargets: { Model }?)
 					if math.random(1, 100) <= precision then
 						local targetHum = currentTarget:FindFirstChildOfClass("Humanoid")
 						if targetHum and (targetHum :: Humanoid).Health > 0 then
-							local dmg = if isPlayer
-								then math.random(PLAYER_AGGRESSION.DAMAGE_MIN, PLAYER_AGGRESSION.DAMAGE_MAX)
-								else math.random(10, 25)
+							local dmg = math.random(profile.DamageMin, profile.DamageMax)
 
 							-- Stamp attacker attributes so kill tracking works
 							;(targetHum :: Humanoid):SetAttribute("LastAttackerUserId", self._fakeUserId)
@@ -650,9 +634,9 @@ function BotAI:Start(mapRoot: Instance?, aliveTargets: { Model }?)
 					dest = wp.Position + offset
 				else
 					local randomVec = Vector3.new(
-						math.random(-WANDER_RADIUS, WANDER_RADIUS),
+						math.random(-BotConfig.Movement.WanderRadius, BotConfig.Movement.WanderRadius),
 						0,
-						math.random(-WANDER_RADIUS, WANDER_RADIUS)
+						math.random(-BotConfig.Movement.WanderRadius, BotConfig.Movement.WanderRadius)
 					)
 					dest = rootPart.Position + randomVec
 				end

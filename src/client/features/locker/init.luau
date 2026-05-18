@@ -25,7 +25,7 @@ local HatApplier = require(script.Appliers.HatApplier)
 local MenuHover = require(Client.core.ui.MenuHover)
 local NavStaggerController = require(Client.core.ui.NavStaggerController)
 local UIUtils = require(Client.core.ui.UIUtils)
-local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
+local ItemsConfig = require(Shared.constants.ItemsConfig)
 local LockerConfig = require(Shared.constants.LockerConfig)
 local WeaponCategoryMod = require(Shared.constants.WeaponCategory)
 local ItemDefaults = require(Shared.constants.ItemDefaults)
@@ -1086,16 +1086,16 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end
 
 		-- Orden dentro de la vista Wraps:
-		--   1) Challenges de kill no desbloqueados
-		--   2) Default
+		--   1) Default (siempre primero)
+		--   2) Challenges de kill no desbloqueados
 		--   3) Resto (owned) por rareza descendente
 		local function groupRank(it: LockerCatalogItem): number
+			if it.id == ItemDefaults.ITEM_ID then
+				return 1
+			end
 			local isOwned = isWrapOwnedForWeapon(targetWeaponCategory, targetWeaponId, it.id)
 			local isChallenge = it.KillGoal ~= nil and it.KillGoal > 0
 			if isChallenge and not isOwned then
-				return 1
-			end
-			if it.id == ItemDefaults.ITEM_ID then
 				return 2
 			end
 			return 3

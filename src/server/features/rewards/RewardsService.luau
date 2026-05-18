@@ -8,12 +8,15 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Network   = require(Shared.networking.Network)
 local NetGuards = require(Shared.networking.NetGuards)
 
+local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
+type DataService = DataServiceMod.DataServiceModule
+
 local M = NetGuards.MAX
 
 local RewardsService = {}
 RewardsService.__index = RewardsService
 
-local _dataService: any = nil
+local _dataService: DataService = nil :: any
 local _started = false
 
 local COOLDOWN = 0.3
@@ -222,7 +225,7 @@ local function _onRedeemCode(data: { code: string }, player: Player): ()
 	end
 end
 
-function RewardsService:Start(dataService: any): ()
+function RewardsService:Start(dataService: DataService): ()
 	if _started then
 		return
 	end

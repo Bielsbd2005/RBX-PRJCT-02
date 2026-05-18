@@ -22,12 +22,15 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Network   = require(Shared.networking.Network)
 local NetGuards = require(Shared.networking.NetGuards)
 
+local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
+type DataService = DataServiceMod.DataServiceModule
+
 local M = NetGuards.MAX
 
 local LockerService = {}
 LockerService.__index = LockerService
 
-local _dataService: any = nil
+local _dataService: DataService = nil :: any
 local _started = false
 
 local RATE_LIMIT_SECONDS = 0.05
@@ -53,7 +56,7 @@ local function _onMarkItemSeen(data: { category: string, itemId: string }, playe
 	_dataService:MarkItemSeen(player, data.category, data.itemId)
 end
 
-function LockerService:Start(dataService: any): ()
+function LockerService:Start(dataService: DataService): ()
 	if _started then
 		return
 	end

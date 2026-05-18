@@ -331,7 +331,18 @@ function LockerGrid:_applyWeaponWrapViewportPreview(card: GuiObject, item: Locke
 		self._cardPreviewJanitors[card] = previewJanitor
 	end
 
-	return WeaponWrapPreviewer.Render(viewportNode, item, previewJanitor)
+	local previewItem = {
+		TextureID = item.TextureID,
+		BaseColor = item.BaseColor,
+		isAnimated = item.isAnimated,
+		StudsPerTile = item.StudsPerTile,
+	}
+
+	local ok = WeaponWrapPreviewer.Render(viewportNode, previewItem, previewJanitor)
+	if ok then
+		WeaponWrapPreviewer.reframeCentered(viewportNode)
+	end
+	return ok
 end
 
 local function shouldUseWeaponWrapViewportPreview(item: LockerCatalogItem): boolean

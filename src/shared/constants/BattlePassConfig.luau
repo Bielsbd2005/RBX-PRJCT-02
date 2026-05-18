@@ -56,11 +56,15 @@ export type Season = {
 -- CONFIGURACIÓN
 -- ────────────────────────────────────────────────────────────
 
+local ActionRewards = require(script.Parent:WaitForChild("ActionRewards"))
+
 local BattlePassConfig = {}
 
 -- XP rates por evento. v1: solo kills.
+-- PerKill reusa ActionRewards.GetXP("Kill") para mantener una única fuente de
+-- verdad: si el balance cambia en ActionRewards, el BP lo hereda sin drift.
 BattlePassConfig.XPRates = {
-	PerKill = 25,
+	PerKill = ActionRewards.GetXP("Kill"),
 }
 
 -- Icono por defecto para rewards Cash cuando un Reward no define Icon
@@ -70,11 +74,22 @@ BattlePassConfig.RewardIcons = {
 	Cash = "rbxassetid://113694528712529",
 }
 
+-- Curva de XP por tier. Base 100 + 5 XP por nivel completado. Da una rampa
+-- suave (level 1 = 100 XP ≈ 4 kills, level 30 = 245 XP ≈ 10 kills) sin
+-- explotar el grind: total S1 ≈ 5175 XP vs 3000 con curva plana anterior.
+-- Tunear `XP_BASE` y `XP_STEP` aquí mueve la curva entera.
+local XP_BASE = 100
+local XP_STEP = 5
+local function xpForLevel(level: number): number
+	return XP_BASE + (level - 1) * XP_STEP
+end
+
 -- Helper local para reducir el ruido de declaración de tiers.
-local function tier(level: number, free: Reward, premium: Reward): Tier
+-- Acepta override opcional de XPRequired para casos puntuales (boss tier, etc.).
+local function tier(level: number, free: Reward, premium: Reward, xpRequired: number?): Tier
 	return {
 		Level = level,
-		XPRequired = 100,
+		XPRequired = xpRequired or xpForLevel(level),
 		Free = free,
 		Premium = premium,
 	}

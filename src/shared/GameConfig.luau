@@ -32,6 +32,7 @@ export type GameConfigType = {
 	TotalParticipantsTarget: number,
 	MaxRoundDuration: number,
 	WinScoreLimit: number,
+	KillAttributionWindow: number,
 	Teams: TeamsDefinition,
 	Maps: { MapDefinition },
 }
@@ -51,6 +52,10 @@ local GameConfig: GameConfigType = {
 	TotalParticipantsTarget = 8,
 	MaxRoundDuration = 480,
 	WinScoreLimit = 240,
+	-- Ventana máxima entre el último daño y la muerte para acreditar el kill.
+	-- Más allá de este tiempo, el kill se considera "muerte natural" / no atribuible.
+	-- Consumida por MatchService (PvP) y AIService (bots) para mantener atribución uniforme.
+	KillAttributionWindow = 2,
 
 	Teams = {
 		A = {

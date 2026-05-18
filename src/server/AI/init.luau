@@ -9,6 +9,7 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local GameConfig = require(Shared:WaitForChild("GameConfig"))
 local KillEffectsRegistry = require(Shared.Locker.killEffects.KillEffectsRegistry)
 local BotNames = require(Shared.constants.BotNames)
+local BotConfig = require(Shared.constants.BotConfig)
 local ItemDefaults = require(Shared.constants.ItemDefaults)
 
 local BotAI = require(script:WaitForChild("BotAI"))
@@ -30,7 +31,6 @@ type BotRecord = {
 	ai: typeof(BotAI.new(({} :: any), "A")),
 }
 
-local BOT_RAGDOLL_CLEANUP_DELAY = 5
 local _dataServiceRef: any = nil
 
 local function _getKillEffectForBotAttacker(humanoid: Humanoid): string
@@ -38,7 +38,7 @@ local function _getKillEffectForBotAttacker(humanoid: Humanoid): string
 	local attackerAtAttr = humanoid:GetAttribute("LastAttackerAt")
 	local attackerUserId = if type(attackerUserIdAttr) == "number" then attackerUserIdAttr else nil
 	local attackerAt = if type(attackerAtAttr) == "number" then attackerAtAttr else 0
-	if attackerAt > 0 and math.abs(time() - attackerAt) > 4 then
+	if attackerAt > 0 and math.abs(time() - attackerAt) > GameConfig.KillAttributionWindow then
 		return ItemDefaults.ITEM_ID
 	end
 	if not attackerUserId then
@@ -489,7 +489,7 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 		_refreshAliveLists()
 
 		-- 4. Programar destrucción siempre, incluso si _onBotDied falla.
-		task.delay(BOT_RAGDOLL_CLEANUP_DELAY, function()
+		task.delay(BotConfig.Lifecycle.RagdollCleanupDelay, function()
 			if botModel.Parent ~= nil then
 				botModel:Destroy()
 			end

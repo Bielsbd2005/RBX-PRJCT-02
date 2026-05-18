@@ -210,6 +210,63 @@ local function applyWrapAppearanceToPrimaryPart(previewPrimaryPart: BasePart, it
     end
 end
 
+-- El previewer calibra la cámara para el card del locker con el modelo del arma
+-- (cerca, descentrada y rotada). Cuando se usa el template genérico `Wrap`,
+-- preferimos verlo con una pequeña inclinación X y centrado, con margen.
+local WRAP_CENTERED_CAMERA_DISTANCE_MULT = 1.9
+local WRAP_CENTERED_ROTATION_X_DEG = 14
+local WRAP_CENTERED_ROTATION_Y_DEG = 0
+local WRAP_CENTERED_ROTATION_Z_DEG = 0
+local WRAP_CENTERED_ORIENTATION = CFrame.fromEulerAnglesYXZ(
+    math.rad(WRAP_CENTERED_ROTATION_X_DEG),
+    math.rad(WRAP_CENTERED_ROTATION_Y_DEG),
+    math.rad(WRAP_CENTERED_ROTATION_Z_DEG)
+)
+
+function WeaponWrapPreviewer.reframeCentered(vp: ViewportFrame): ()
+    local cam = vp.CurrentCamera
+    if not cam then return end
+    local worldModel = vp:FindFirstChildOfClass("WorldModel")
+    if not worldModel then return end
+
+    local wrap: Instance? = worldModel:FindFirstChildWhichIsA("Model")
+        or worldModel:FindFirstChildWhichIsA("BasePart")
+    if not wrap then return end
+
+    local pivotCenter: Vector3
+    if wrap:IsA("Model") then
+        local cf, _ = wrap:GetBoundingBox()
+        pivotCenter = cf.Position
+        wrap:PivotTo(CFrame.new(pivotCenter) * WRAP_CENTERED_ORIENTATION)
+    elseif wrap:IsA("BasePart") then
+        pivotCenter = wrap.Position
+        wrap.CFrame = CFrame.new(pivotCenter) * WRAP_CENTERED_ORIENTATION
+    else
+        return
+    end
+
+    local centerPos: Vector3
+    local size: Vector3
+    if wrap:IsA("Model") then
+        local cf, sz = wrap:GetBoundingBox()
+        centerPos = cf.Position
+        size = sz
+    else
+        local part = wrap :: BasePart
+        centerPos = part.Position
+        size = part.Size
+    end
+
+    local maxDim = math.max(size.X, size.Y, size.Z)
+    local halfFov = math.rad(cam.FieldOfView / 2)
+    local distance = (maxDim / 2) / math.tan(halfFov) * WRAP_CENTERED_CAMERA_DISTANCE_MULT
+
+    cam.CFrame = CFrame.new(
+        centerPos + Vector3.new(0, 0, distance),
+        centerPos
+    )
+end
+
 function WeaponWrapPreviewer.Render(viewportNode: ViewportFrame, item: WeaponWrapPreviewItem, previewJanitor: any): boolean
     local worldModel = Instance.new("WorldModel")
     worldModel.Parent = viewportNode

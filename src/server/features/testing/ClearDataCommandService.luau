@@ -3,10 +3,13 @@
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 
+local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
+type DataService = DataServiceMod.DataServiceModule
+
 local ClearDataCommandService = {}
 ClearDataCommandService.__index = ClearDataCommandService
 
-local _dataService: any = nil
+local _dataService: DataService = nil :: any
 local _started = false
 
 local ENABLE_CLEAR_COMMAND = RunService:IsStudio()
@@ -56,7 +59,7 @@ local function _onPlayerChatted(player: Player, message: string): ()
 	player:Kick("Tus datos fueron borrados para testing. Vuelve a entrar.")
 end
 
-function ClearDataCommandService:Start(dataService: any): ()
+function ClearDataCommandService:Start(dataService: DataService): ()
 	if _started then
 		return
 	end

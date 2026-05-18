@@ -843,17 +843,15 @@ function BattlePassFeature.start(menuController: any): any
 		paintNavButton(backBtn, currentPage > 0)
 		paintNavButton(nextBtn, currentPage < pageCount - 1)
 
-		-- Indicator del Back: visible si la página inmediatamente anterior tiene
-		-- algún reward "Claimable" sin reclamar (free siempre cuenta; premium
-		-- solo si el jugador posee Premium — sin pase no son claimables y no
-		-- deberían pintar pendiente). Si ya estamos en la primera página, oculto.
+		-- Indicator del Back: visible si CUALQUIER página anterior tiene algún
+		-- reward "Claimable" sin reclamar (free siempre cuenta; premium solo si
+		-- el jugador posee Premium — sin pase no son claimables y no deberían
+		-- pintar pendiente). Si ya estamos en la primera página, oculto.
 		if backIndicator then
 			local hasPending = false
 			if currentPage > 0 then
-				local prevPage = currentPage - 1
-				local startLevel = prevPage * SLOTS_PER_PAGE + 1
-				local endLevel = math.min(startLevel + SLOTS_PER_PAGE - 1, maxTier)
-				for level = startLevel, endLevel do
+				local endLevel = math.min(currentPage * SLOTS_PER_PAGE, maxTier)
+				for level = 1, endLevel do
 					if level >= currentTier then
 						break -- los siguientes tiers tampoco están completados
 					end
