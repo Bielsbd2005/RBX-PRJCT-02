@@ -9,6 +9,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
+local StarterPlayer = game:GetService("StarterPlayer")
 local CollectionService = game:GetService("CollectionService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
@@ -21,6 +22,9 @@ local LoadoutService = {}
 
 -- ── Constantes ───────────────────────────────────────────────
 local WEAPON_TOOLS_ROOT_NAME = "WeaponTools"
+local BODIES_ROOT_NAME = "Bodies"
+local DEFAULT_BODY_ID = "Default"
+local MATCH_BODY_CLONE_ATTRIBUTE = "MatchBodyClone"
 local MATCH_LOADOUT_TOOL_ATTRIBUTE = "MatchLoadoutTool"
 local MATCH_LOADOUT_HAT_ATTRIBUTE = "MatchLoadoutHat"
 local DEFAULT_WRAP_STUDS_PER_TILE = 3
@@ -418,6 +422,87 @@ function LoadoutService.applyCosmetics(player: Player, character: Model, dataSer
 	end
 
 	(faceDecal :: Decal).Texture = textureId
+end
+
+-- ── Body swap (StarterCharacter por jugador) ─────────────────
+--
+-- Roblox lee StarterPlayer.StarterCharacter al llamar player:LoadCharacter().
+-- Para servir bodies distintos por jugador, clonamos el template desde
+-- ServerStorage.Bodies[outfitId], lo parenteamos como StarterCharacter,
+-- llamamos LoadCharacter (yields) y limpiamos. El mutex serializa swaps
+-- concurrentes para que dos LoadCharacter simultáneos no se pisen el template.
+
+local _bodySwapBusy = false
+
+local function _resolveFullBodyTemplate(outfitId: string?): Model?
+	local bodies = ServerStorage:FindFirstChild(BODIES_ROOT_NAME)
+	if not bodies then
+		return nil
+	end
+	local byId = if outfitId and outfitId ~= "" then bodies:FindFirstChild(outfitId) else nil
+	if byId and byId:IsA("Model") then
+		return byId :: Model
+	end
+	local fallback = bodies:FindFirstChild(DEFAULT_BODY_ID)
+	return if fallback and fallback:IsA("Model") then fallback :: Model else nil
+end
+
+--- Carga el Character del jugador usando el body equipado en Loadout.Outfit.
+--- Bloquea mientras otro swap esté en curso para no contaminar el StarterCharacter.
+function LoadoutService.loadCharacterWithBody(player: Player, dataService: any)
+	if player.Parent ~= Players then
+		return
+	end
+
+	while _bodySwapBusy do
+		task.wait()
+	end
+	_bodySwapBusy = true
+
+	-- Limpieza defensiva: si un swap previo crasheó dejó su clon en StarterPlayer.
+	local leftover = StarterPlayer:FindFirstChild("StarterCharacter")
+	if leftover and leftover:GetAttribute(MATCH_BODY_CLONE_ATTRIBUTE) == true then
+		leftover:Destroy()
+		leftover = nil
+	end
+
+	local previousStarter = leftover
+	local installedClone: Model? = nil
+
+	local profile = if dataService then dataService:GetProfile(player) else nil
+	local outfitId: string? = nil
+	if profile and profile.Data and profile.Data.Loadout then
+		outfitId = _getOptionalString(profile.Data.Loadout.Outfit)
+	end
+
+	local template = _resolveFullBodyTemplate(outfitId)
+	if template then
+		if previousStarter then
+			previousStarter.Parent = nil
+		end
+		local clone = template:Clone()
+		clone.Name = "StarterCharacter"
+		clone:SetAttribute(MATCH_BODY_CLONE_ATTRIBUTE, true)
+		clone.Parent = StarterPlayer
+		installedClone = clone
+	end
+
+	local ok, err = pcall(function()
+		player:LoadCharacter()
+	end)
+
+	if installedClone and installedClone.Parent then
+		installedClone:Destroy()
+	end
+	if previousStarter and previousStarter.Parent == nil then
+		previousStarter.Parent = StarterPlayer
+	end
+
+	_bodySwapBusy = false
+
+	if not ok then
+		warn(string.format("[LoadoutService] LoadCharacter falló para %s: %s", player.Name, tostring(err)))
+	end
 end
 
 --- Entrega armas del loadout con reintentos (blocking). Llamar en task.spawn.

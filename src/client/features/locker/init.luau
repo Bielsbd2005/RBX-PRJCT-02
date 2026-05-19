@@ -136,8 +136,17 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local player = Players.LocalPlayer
 	local playerGui = player:WaitForChild("PlayerGui")
 	local menuGui = menuController:getGui()
-	local sharedTemplates = Shared:WaitForChild("templates")
-	local characterTemplate = sharedTemplates:WaitForChild("CharacterTemplate")
+	local lockerBodiesFolder = Shared:WaitForChild("LockerBodies") :: Folder
+	local defaultLockerBodyTemplate = lockerBodiesFolder:WaitForChild("Default") :: Instance
+
+	local function resolveLockerBodyTemplate(outfitId: string?): Model?
+		local byId = if outfitId and outfitId ~= "" then lockerBodiesFolder:FindFirstChild(outfitId) else nil
+		if byId and byId:IsA("Model") then
+			return byId :: Model
+		end
+		return if defaultLockerBodyTemplate:IsA("Model") then defaultLockerBodyTemplate :: Model else nil
+	end
+
 	local lockerFolder = Workspace:WaitForChild("Locker")
 	local lockerWeaponsFolder = lockerFolder:WaitForChild("weapons")
 	local characterSpawn = lockerFolder:WaitForChild("CharacterSpawn")
@@ -393,32 +402,46 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end, true)
 	end
 
-	local function ensurePreviewCharacter(): Model?
+	local previewCharacter: Model? = nil
+	local faceApplier: any = nil
+	local hatApplier: any = nil
+	local lastPreviewOutfitId: string? = nil
+
+	local function rebuildPreviewCharacter(outfitId: string?)
 		local spawnTarget = characterSpawn :: LockerPreviewSpawnTarget
 		local targetParent = spawnTarget :: Instance
-		local existingPreview = targetParent:FindFirstChild("CharacterTemplate")
-		if existingPreview and existingPreview:IsA("Model") then
-			placePreviewCharacter(existingPreview, spawnTarget)
-			playPreviewIdleAnimation(existingPreview)
-			return existingPreview
+
+		-- Limpieza defensiva: cualquier preview previo (incluido el de un build
+		-- anterior con nombre "CharacterTemplate") cae aquí.
+		if previewCharacter and previewCharacter.Parent then
+			previewCharacter:Destroy()
+		end
+		local stale = targetParent:FindFirstChild("PreviewCharacter")
+		if stale then stale:Destroy() end
+		local staleLegacy = targetParent:FindFirstChild("CharacterTemplate")
+		if staleLegacy then staleLegacy:Destroy() end
+
+		previewCharacter = nil
+		faceApplier = nil
+		hatApplier = nil
+
+		local template = resolveLockerBodyTemplate(outfitId)
+		if not template then
+			return
 		end
 
-		local previewTemplate = characterTemplate
-		if not previewTemplate:IsA("Model") then
-			return nil
-		end
+		local clone = template:Clone()
+		clone.Name = "PreviewCharacter"
+		clone.Parent = targetParent
+		placePreviewCharacter(clone, spawnTarget)
+		playPreviewIdleAnimation(clone)
 
-		local previewClone = previewTemplate:Clone()
-		previewClone.Name = "CharacterTemplate"
-		previewClone.Parent = targetParent
-		placePreviewCharacter(previewClone, spawnTarget)
-		playPreviewIdleAnimation(previewClone)
-		return previewClone
+		previewCharacter = clone
+		faceApplier = FaceApplier.new(clone, ItemsConfig)
+		hatApplier = HatApplier.new(clone, ItemsConfig)
+		lastPreviewOutfitId = outfitId
 	end
 
-	local previewCharacter = ensurePreviewCharacter()
-	local faceApplier = if previewCharacter then FaceApplier.new(previewCharacter, ItemsConfig) else nil
-	local hatApplier = if previewCharacter then HatApplier.new(previewCharacter, ItemsConfig) else nil
 	local applyEquippedFacePreview: () -> ()
 	local applyEquippedHatPreview: () -> ()
 
@@ -464,13 +487,35 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		hatApplier:ApplyItemId(getOptionalString(equippedLookup.Hats) or getCurrentLoadout().Hat)
 	end
 
-	if previewCharacter then
-		janitor:Add(function()
-			if previewCharacter.Parent then
-				previewCharacter:Destroy()
-			end
-		end, true)
+	-- Body preview: a diferencia de face/hat, reconstruir el modelo entero. Por eso
+	-- comparamos contra `lastPreviewOutfitId` para evitar clonar si el item
+	-- seleccionado ya coincide con lo que está parenteado. Tras la reconstrucción,
+	-- los appliers se reasignan dentro de rebuildPreviewCharacter — los siguientes
+	-- applySelectedFace/HatPreview del onSelectionChanged ven los nuevos.
+	local function applyEquippedBodyPreview()
+		local outfitId = getOptionalString(equippedLookup.Outfits) or getCurrentLoadout().Outfit
+		if outfitId ~= lastPreviewOutfitId then
+			rebuildPreviewCharacter(outfitId)
+		end
 	end
+
+	local function applySelectedBodyPreview(item: LockerCatalogItem?)
+		local targetOutfitId: string?
+		if item and item.Category == LockerCategory.OUTFITS then
+			targetOutfitId = item.id
+		else
+			targetOutfitId = getOptionalString(equippedLookup.Outfits) or getCurrentLoadout().Outfit
+		end
+		if targetOutfitId ~= lastPreviewOutfitId then
+			rebuildPreviewCharacter(targetOutfitId)
+		end
+	end
+
+	janitor:Add(function()
+		if previewCharacter and previewCharacter.Parent then
+			previewCharacter:Destroy()
+		end
+	end, true)
 
 	local function resolveKillEffectId(): string
 		return getOptionalString(equippedLookup.KillEffects) or getOptionalString(getCurrentLoadout().KillEffect) or ItemDefaults.ITEM_ID
@@ -479,8 +524,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local killEffectsDummyTemplateModel = if killEffectsDummyTemplate:IsA("Model")
 			and killEffectsDummyTemplate:FindFirstChildWhichIsA("Humanoid", true)
 		then killEffectsDummyTemplate
-		else if characterTemplate:IsA("Model") and characterTemplate:FindFirstChildWhichIsA("Humanoid", true)
-			then characterTemplate
+		else if defaultLockerBodyTemplate:IsA("Model") and defaultLockerBodyTemplate:FindFirstChildWhichIsA("Humanoid", true)
+			then defaultLockerBodyTemplate
 			else nil
 
 	local function replaceKillEffectsDummy(): Model?
@@ -972,6 +1017,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 				setStoredWrapsTargetWeaponId(selectedWeaponCategory, item.id)
 				updateWeaponCategoryIndicators()
 			end
+			applySelectedBodyPreview(item)
 			applySelectedFacePreview(item)
 			applySelectedHatPreview(item)
 			applySelectedWeaponPreview(item)
@@ -1489,6 +1535,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	DataController:WhenReady():andThen(function()
 		rebuildOwnedLookup()
 		rebuildEquippedLookup()
+		rebuildPreviewCharacter(getOptionalString(getCurrentLoadout().Outfit))
 		applyEquippedFacePreview()
 		applyEquippedHatPreview()
 		restoreEquippedWeaponPreviews()
@@ -1524,6 +1571,15 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		local loadoutObserver = fusionScope:Observer(DataController.Loadout)
 		janitor:Add(loadoutObserver:onBind(function()
 			rebuildEquippedLookup()
+			-- Solo revertir el body al equipado si NO hay un body en preview no-comprometido.
+			-- En otro caso, un cambio de loadout (p.ej. equipar un hat) sobreescribiría
+			-- el preview del body que el usuario está mirando.
+			local previewingBody = selectedCatalogItem ~= nil
+				and selectedCatalogItem.Category == LockerCategory.OUTFITS
+			local currentOutfit = getOptionalString(getCurrentLoadout().Outfit)
+			if not previewingBody and currentOutfit ~= lastPreviewOutfitId then
+				rebuildPreviewCharacter(currentOutfit)
+			end
 			if not isOpen then
 				dirtyWhileClosed = true
 				return
@@ -1553,6 +1609,9 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local function restoreLockerSceneState()
 		destroyKillEffectsDummy()
 		restoreEquippedWeaponPreviews()
+		applyEquippedBodyPreview()
+		applyEquippedFacePreview()
+		applyEquippedHatPreview()
 		cameraController:restore()
 		CameraLock.release("locker")
 		setMenuVisibleInstant(true)

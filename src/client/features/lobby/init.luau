@@ -5,8 +5,10 @@
 	Workspace.Lobby.Spawners.P1 con la cara y los hats equipados según el
 	loadout. Reactivo a cambios de loadout (DataController.Loadout).
 
-	Mismo patrón que el preview del Locker: clona Shared.templates.CharacterTemplate,
-	aplica idle animation, y delega face/hats a FaceApplier/HatApplier.
+	Mismo patrón que el preview del Locker: clona el body equipado desde
+	Shared.LockerBodies[Loadout.Outfit] (con fallback a "Default"), aplica idle
+	animation, y delega face/hats a FaceApplier/HatApplier. Si el Outfit cambia,
+	el preview se reconstruye desde cero.
 
 	Las modificaciones de Workspace desde un LocalScript no replican, así que
 	cada cliente clona su propio preview y cada jugador ve solo el suyo.
@@ -98,33 +100,86 @@ function LobbyFeature.start(_menuController: any): any
 		return janitor
 	end
 
-	local sharedTemplates = Shared:FindFirstChild("templates")
-	local characterTemplate = sharedTemplates and sharedTemplates:FindFirstChild("CharacterTemplate")
-	if not characterTemplate or not characterTemplate:IsA("Model") then
-		warn("[LobbyFeature] Shared.templates.CharacterTemplate no encontrado")
+	local lockerBodiesFolder = Shared:FindFirstChild("LockerBodies")
+	if not lockerBodiesFolder then
+		warn("[LobbyFeature] Shared.LockerBodies no encontrado")
 		return janitor
+	end
+
+	local function _resolveLobbyBodyTemplate(outfitId: string?): Model?
+		local byId = if outfitId and outfitId ~= "" then lockerBodiesFolder:FindFirstChild(outfitId) else nil
+		if byId and byId:IsA("Model") then
+			return byId :: Model
+		end
+		local fallback = lockerBodiesFolder:FindFirstChild("Default")
+		return if fallback and fallback:IsA("Model") then fallback :: Model else nil
 	end
 
 	-- Limpiar preview previo en P1 (hot reload o re-arranque del feature).
 	local previousPreview = p1:FindFirstChild("CharacterPreview")
 	if previousPreview then previousPreview:Destroy() end
 
-	local preview = (characterTemplate :: Model):Clone()
-	preview.Name = "CharacterPreview"
-	preview.Parent = p1
-	janitor:Add(preview, "Destroy")
+	local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui") :: PlayerGui
+	local uiGui = playerGui:WaitForChild("UserInterface")
+	local battlePassFrame = uiGui:FindFirstChild("BattlePass")
 
-	_placeCharacter(preview, p1)
-	_playIdleAnimation(preview, janitor)
+	local previewJanitor = Janitor.new()
+	janitor:Add(previewJanitor, "Destroy")
 
-	local faceApplier = FaceApplier.new(preview, ItemsConfig)
-	local hatApplier = HatApplier.new(preview, ItemsConfig)
+	local faceApplier: any = nil
+	local hatApplier: any = nil
+	local lastLobbyOutfitId: string? = nil
+
+	local function _rebuildLobbyPreview(outfitId: string?)
+		previewJanitor:Cleanup()
+		faceApplier = nil
+		hatApplier = nil
+
+		local template = _resolveLobbyBodyTemplate(outfitId)
+		if not template then
+			return
+		end
+
+		local preview = template:Clone()
+		preview.Name = "CharacterPreview"
+		preview.Parent = p1
+		previewJanitor:Add(preview, "Destroy")
+
+		_placeCharacter(preview, p1)
+		_playIdleAnimation(preview, previewJanitor)
+
+		faceApplier = FaceApplier.new(preview, ItemsConfig)
+		hatApplier = HatApplier.new(preview, ItemsConfig)
+
+		local highlight = preview:FindFirstChildOfClass("Highlight")
+		if highlight and battlePassFrame and battlePassFrame:IsA("GuiObject") then
+			local frame = battlePassFrame :: GuiObject
+			local function _applyHighlightVisibility()
+				highlight.Enabled = not frame.Visible
+			end
+			previewJanitor:Add(
+				frame:GetPropertyChangedSignal("Visible"):Connect(_applyHighlightVisibility),
+				"Disconnect"
+			)
+			_applyHighlightVisibility()
+		end
+
+		lastLobbyOutfitId = outfitId
+	end
 
 	local function _applyEquipped()
 		local loadout = Fusion.peek(DataController.Loadout) :: { [string]: any }
 		if type(loadout) ~= "table" then return end
-		faceApplier:ApplyItemId(_getOptionalString(loadout.Face))
-		hatApplier:ApplyItemId(_getOptionalString(loadout.Hat))
+		local outfitId = _getOptionalString(loadout.Outfit)
+		if not faceApplier or outfitId ~= lastLobbyOutfitId then
+			_rebuildLobbyPreview(outfitId)
+		end
+		if faceApplier then
+			faceApplier:ApplyItemId(_getOptionalString(loadout.Face))
+		end
+		if hatApplier then
+			hatApplier:ApplyItemId(_getOptionalString(loadout.Hat))
+		end
 	end
 
 	DataController:WhenReady():andThen(function()
@@ -136,24 +191,6 @@ function LobbyFeature.start(_menuController: any): any
 		local obs = scope:Observer(DataController.Loadout :: any)
 		janitor:Add(obs:onBind(_applyEquipped), true)
 	end)
-
-	-- ── Highlight: ocultar mientras BattlePass está abierto ─────────────
-	local highlight = preview:FindFirstChildOfClass("Highlight")
-	local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui") :: PlayerGui
-	local uiGui = playerGui:WaitForChild("UserInterface")
-	local battlePassFrame = uiGui:FindFirstChild("BattlePass")
-	if highlight and battlePassFrame and battlePassFrame:IsA("GuiObject") then
-		local frame = battlePassFrame :: GuiObject
-		local function _applyHighlightVisibility()
-			highlight.Enabled = not frame.Visible
-		end
-
-		janitor:Add(
-			frame:GetPropertyChangedSignal("Visible"):Connect(_applyHighlightVisibility),
-			"Disconnect"
-		)
-		_applyHighlightVisibility()
-	end
 
 	return janitor
 end

@@ -973,7 +973,7 @@ local function _teleportCharacterToSpawn(player: Player, spawnPoint: BasePart)
 		return nil
 	end
 
-	player:LoadCharacter()
+	LoadoutService.loadCharacterWithBody(player, _dataService)
 	local character = player.Character or player.CharacterAdded:Wait()
 	if player.Parent ~= Players then
 		return nil
@@ -1436,7 +1436,7 @@ function _finishRoundAndScheduleRestart(reason: string, winnerTeam: string)
 		if lobbySpawn then
 			_teleportCharacterToSpawn(player, lobbySpawn)
 		else
-			player:LoadCharacter()
+			LoadoutService.loadCharacterWithBody(player, _dataService)
 		end
 
 		if player.Parent == Players then
@@ -2007,7 +2007,7 @@ local function _onRequestReturnToMenu(_: {}, player: Player)
 	if lobbySpawn then
 		_teleportCharacterToSpawn(player, lobbySpawn)
 	else
-		player:LoadCharacter()
+		LoadoutService.loadCharacterWithBody(player, _dataService)
 	end
 
 	if player.Parent == Players then
