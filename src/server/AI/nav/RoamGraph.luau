@@ -6,14 +6,15 @@
 	sin orden ni numeración. Los bots piden puntos aleatorios cuando
 	necesitan un destino.
 
-	Authoring (mapas de producción):
+	Authoring (contractual — todos los mapas en producción deben tenerlo):
 	  Workspace/Maps/<MapName>/AINav/RoamPoints/
 	  Cada hijo BasePart es un destino. Nombres no importan. Atributos Tags
 	  (string) y Weight (number) se leen e ignoran en v1.
 
-	Fallback automático (prototipo/WIP):
-	  Si no existe la carpeta AINav, genera puntos por raycast top-down
-	  multinivel — cubre suelo + plataformas hasta 30 studs por encima.
+	Si la carpeta no existe al construir el RoamGraph, se emite un `warn`
+	ruidoso una sola vez y el pool queda vacío — `pickRandomNavigablePoint`
+	devolverá `nil` y los bots no recibirán destinos válidos. Es un bug de
+	level design, no debe ocurrir en producción.
 
 	Caché por mapRoot Instance. Invalidación explícita:
 	  • mapRoot.Parent == nil → entrada descartada (mapa destruido).
@@ -29,10 +30,6 @@
 	    cuando mapRoot.Parent == nil.
 ]]
 
-local SCAN_STEP = 8              -- separación XZ entre rayos
-local SCAN_HEIGHT = 200          -- altura desde la que cae el rayo
-local FALLBACK_MAX_LIFT = 30     -- studs sobre el suelo donde aún consideramos hits (plataformas)
-
 local RoamGraph = {}
 RoamGraph.__index = RoamGraph
 
@@ -40,7 +37,6 @@ export type RoamGraph = typeof(setmetatable({} :: {
 	_mapRoot: Instance,
 	_points: { Vector3 },
 	_conns: { RBXScriptConnection },
-	_isFallback: boolean,
 	_destroyed: boolean,
 }, RoamGraph))
 
@@ -65,58 +61,6 @@ local function _readAuthoredPoints(folder: Instance): { Vector3 }
 	return points
 end
 
-local function _computeMapBounds(mapRoot: Instance): (Vector3?, Vector3?)
-	local minV: Vector3? = nil
-	local maxV: Vector3? = nil
-	for _, d in mapRoot:GetDescendants() do
-		if d:IsA("BasePart") then
-			local p = d.Position
-			if not minV then
-				minV = p
-				maxV = p
-			else
-				minV = Vector3.new(math.min((minV :: Vector3).X, p.X), math.min((minV :: Vector3).Y, p.Y), math.min((minV :: Vector3).Z, p.Z))
-				maxV = Vector3.new(math.max((maxV :: Vector3).X, p.X), math.max((maxV :: Vector3).Y, p.Y), math.max((maxV :: Vector3).Z, p.Z))
-			end
-		end
-	end
-	return minV, maxV
-end
-
--- Fallback: raycast top-down a una grid XZ. Captura el primer hit (suelo) y
--- también hits a hasta FALLBACK_MAX_LIFT studs por encima del suelo (plataformas
--- intermedias). No es perfecto en escaleras complejas pero da pool aceptable
--- para mapas en prototipo.
-local function _generateFallbackPoints(mapRoot: Instance): { Vector3 }
-	local lo, hi = _computeMapBounds(mapRoot)
-	local points: { Vector3 } = {}
-	if not lo or not hi then
-		return points
-	end
-
-	local params = RaycastParams.new()
-	params.FilterType = Enum.RaycastFilterType.Include
-	params.FilterDescendantsInstances = { mapRoot }
-
-	for x = lo.X, hi.X, SCAN_STEP do
-		for z = lo.Z, hi.Z, SCAN_STEP do
-			local origin = Vector3.new(x, hi.Y + SCAN_HEIGHT, z)
-			local result = workspace:Raycast(origin, Vector3.new(0, -(SCAN_HEIGHT + (hi.Y - lo.Y) + 50), 0), params)
-			if result then
-				table.insert(points, result.Position + Vector3.new(0, 2, 0))
-				-- Multinivel: dispara desde la altura del primer hit + FALLBACK_MAX_LIFT
-				-- hacia arriba, buscando plataformas encima.
-				local liftOrigin = result.Position + Vector3.new(0, FALLBACK_MAX_LIFT + 0.1, 0)
-				local liftResult = workspace:Raycast(liftOrigin, Vector3.new(0, -(FALLBACK_MAX_LIFT - 1), 0), params)
-				if liftResult and (liftResult.Position - result.Position).Magnitude > 4 then
-					table.insert(points, liftResult.Position + Vector3.new(0, 2, 0))
-				end
-			end
-		end
-	end
-	return points
-end
-
 local function _rebuild(self: RoamGraph)
 	if self._destroyed then
 		return
@@ -124,14 +68,13 @@ local function _rebuild(self: RoamGraph)
 	local folder = _findAINavFolder(self._mapRoot)
 	if folder then
 		self._points = _readAuthoredPoints(folder)
-		self._isFallback = false
 	else
-		print(string.format(
-			"[RoamGraph] fallback raycast generation for map '%s' — no AINav/RoamPoints folder; only acceptable for prototype/WIP",
+		-- Bug de level design: no debería ocurrir en producción.
+		warn(string.format(
+			"[RoamGraph] map '%s' no tiene AINav/RoamPoints folder. Los bots no podrán hacer roaming en este mapa. Authoreá la carpeta en Studio (ver Pre-PR1 del plan).",
 			self._mapRoot.Name
 		))
-		self._points = _generateFallbackPoints(self._mapRoot)
-		self._isFallback = true
+		self._points = {}
 	end
 end
 
@@ -164,7 +107,6 @@ function RoamGraph.forMap(mapRoot: Instance): RoamGraph
 		_mapRoot = mapRoot,
 		_points = {},
 		_conns = {},
-		_isFallback = false,
 		_destroyed = false,
 	}, RoamGraph) :: RoamGraph
 
@@ -192,15 +134,11 @@ function RoamGraph:size(): number
 	return #self._points
 end
 
-function RoamGraph:isFallback(): boolean
-	return self._isFallback
-end
-
 -- Pick algoritmo (4 niveles de relax, sin handwave):
 --   1. anillo [minDist, maxDist]
 --   2. anillo [minDist * 0.5, maxDist * 2]
 --   3. cualquier punto del pool
---   4. nil (pool vacío o RoamGraph mal construido)
+--   4. nil (pool vacío — mapa sin AINav o todavía no authoreado)
 function RoamGraph:pickRandomNavigablePoint(originPos: Vector3, minDist: number, maxDist: number): Vector3?
 	local points = self._points
 	if #points == 0 then
