@@ -661,6 +661,10 @@ function BaseWeapon:onStepped(dt)
 	local selfClass = getmetatable(self)
 	if not selfClass.CanBeFired then return end
 
+	-- Aim assist + auto-fire son exclusivos de móvil. En PC no hay nada que
+	-- calcular: nos saltamos los raycasts de target-finding por completo.
+	if not _isTouchPrimaryInput() then return end
+
 	local targetPart, targetPos = AutoAimSystem.findBestTarget(self.weaponsSystem)
 	if not targetPart or not targetPos then return end
 
@@ -687,7 +691,8 @@ function BaseWeapon:onStepped(dt)
 		end
 	end
 
-	-- Soft camera pull (Aim Assist)
+	-- Soft camera pull (Aim Assist). El early-return arriba garantiza
+	-- _isTouchPrimaryInput(); este bloque ya no corre en PC.
 	if self.weaponsSystem and self.weaponsSystem.camera then
 		local directionToTarget = (targetPos - cameraOrigin).Unit
 		local desiredYaw = math.atan2(-directionToTarget.X, -directionToTarget.Z)
@@ -702,14 +707,7 @@ function BaseWeapon:onStepped(dt)
 
 		local deltaPitch = desiredPitch - currentPitch
 
-		-- AutoShoot solo en movil; en PC dejamos un aim assist mucho mas sutil.
-		local isTouchInput = _isTouchPrimaryInput()
-		local pullStrength: number
-		if isTouchInput then
-			pullStrength = isAimingAtEnemy and (1.5 * dt) or (4.5 * dt)
-		else
-			pullStrength = isAimingAtEnemy and (0.2 * dt) or (0.6 * dt)
-		end
+		local pullStrength = if isAimingAtEnemy then (1.5 * dt) else (4.5 * dt)
 
 		self.weaponsSystem.camera.yaw = currentYaw + deltaYaw * pullStrength
 		self.weaponsSystem.camera.pitch = math.clamp(
@@ -734,7 +732,6 @@ function BaseWeapon:onStepped(dt)
 	-- nextFireTime con ShotCooldown / BurstShotCooldown tras cada disparo, igual
 	-- que el flujo manual de fuego (ver BulletWeapon.onActivatedChanged).
 	if tick() < (self.nextFireTime or 0) then return end
-	if not _isTouchPrimaryInput() then return end
 
 	-- Determine weapon muzzle origin matching BulletWeapon's self.tipAttach precisely.
 	-- El lookup se cachea: el subárbol del Tool no cambia en runtime, y los

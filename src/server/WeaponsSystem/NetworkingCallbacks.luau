@@ -221,13 +221,9 @@ function NetworkingCallbacks.PlayerAssist()
 	local PersonalKillFeed = require(script.Parent:WaitForChild("Libraries"):WaitForChild("PersonalKillFeed"))
 	PersonalKillFeed.showAssist()
 
-	if WeaponsSystem then
-		if WeaponsSystem.camera then
-			WeaponsSystem.camera:playKillCameraShake(false)
-		end
-		if WeaponsSystem.gui then
-			WeaponsSystem.gui:showKillContainer()
-		end
+	-- Las assists no disparan FOV kick (reservado para kills propias).
+	if WeaponsSystem and WeaponsSystem.gui then
+		WeaponsSystem.gui:showKillContainer()
 	end
 end
 
