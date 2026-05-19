@@ -90,6 +90,7 @@ export type BotAIInstance = typeof(setmetatable({} :: {
 	_connections: { RBXScriptConnection },
 	_nextShotId: number,
 	_aliveTargets: { Model },
+	_raycastParams: RaycastParams?,
 	_currentTarget: Model?,
 	_isCurrentTargetVisible: boolean,
 	_lastTargetEvalAt: number,
@@ -122,6 +123,7 @@ function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?): BotAI
 		_connections = {} :: { RBXScriptConnection },
 		_nextShotId = 1,
 		_aliveTargets = {},
+		_raycastParams = nil,
 		_currentTarget = nil,
 		_isCurrentTargetVisible = false,
 		_lastTargetEvalAt = 0,
@@ -238,9 +240,14 @@ function BotAI:_canSeeTarget(target: Model): boolean
 		return false
 	end
 
-	local params = RaycastParams.new()
-	params.FilterDescendantsInstances = { self._dummy }
-	params.FilterType = Enum.RaycastFilterType.Exclude
+	-- Audit fix P2: usa el RaycastParams cacheado en Start. Fallback defensive
+	-- si _canSeeTarget se llamase antes de Start (no debería ocurrir).
+	local params = self._raycastParams
+	if not params then
+		params = RaycastParams.new()
+		params.FilterDescendantsInstances = { self._dummy }
+		params.FilterType = Enum.RaycastFilterType.Exclude
+	end
 
 	local result = workspace:Raycast(origin, direction, params)
 	local seesTarget = result ~= nil and result.Instance:IsDescendantOf(target)
@@ -393,6 +400,14 @@ end
 -- actualiza self._currentTarget en background. La stopCondition del walk
 -- loop ve el cambio al instante.
 function BotAI:_evaluateTarget(now: number)
+	-- Audit fix C1: guard contra ejecución post-Stop. Aunque el while del
+	-- coroutine paralelo re-evalúa isAlive entre iteraciones, este guard
+	-- elimina cualquier ventana posible si Stop se llama mientras la
+	-- iteración del body ya ha comenzado (no debería ocurrir en runtime
+	-- single-thread cooperativo, pero defensive).
+	if not self._isAlive then
+		return
+	end
 	local potentialTarget: Model?
 	local isVisible: boolean
 	local forced = self:_getForcedTarget()
@@ -400,7 +415,38 @@ function BotAI:_evaluateTarget(now: number)
 		potentialTarget = forced
 		isVisible = self:_canSeeTarget(forced)
 	else
-		potentialTarget, isVisible = self:_getBestTarget()
+		-- Audit fix P5: fast path para engagement estable. Si el target
+		-- actual sigue válido (vivo, en rango, en FOV) y mantiene LOS,
+		-- saltamos Pass 1 + Pass 2 + sort. Evita iteración sobre
+		-- _aliveTargets cuando el bot está concentrado en un enemigo.
+		-- Behavior change deseable: el bot NO cambia de target a uno
+		-- más cercano mid-combat (los players reales tampoco lo hacen).
+		-- Si pierde LOS o el target sale de rango/FOV, fallback al
+		-- _getBestTarget normal.
+		local current = self._currentTarget
+		local fastPath = false
+		if current and current.Parent then
+			local hum = current:FindFirstChildOfClass("Humanoid")
+			local root = current:FindFirstChild("HumanoidRootPart")
+			if hum and (hum :: Humanoid).Health > 0 and root then
+				local toRoot = (root :: BasePart).Position - self._rootPart.Position
+				local d = toRoot.Magnitude
+				if d <= BotConfig.Combat.DetectRange then
+					local fovCos = math.cos(math.rad(BotConfig.Combat.FOVDegrees / 2))
+					local facing = self._rootPart.CFrame.LookVector
+					if d > 0.001 and facing:Dot(toRoot.Unit) >= fovCos then
+						if self:_canSeeTarget(current) then
+							potentialTarget = current
+							isVisible = true
+							fastPath = true
+						end
+					end
+				end
+			end
+		end
+		if not fastPath then
+			potentialTarget, isVisible = self:_getBestTarget()
+		end
 	end
 
 	-- Target grace de 3s post-LOS: si vimos al enemigo hace <3s pero ahora
@@ -492,6 +538,14 @@ function BotAI:Start(mapRoot: Instance?, aliveTargets: { Model }?, roamGraph: Ro
 	local humanoid = self._humanoid
 	local rootPart = self._rootPart
 
+	-- Audit fix P2: cachear RaycastParams una vez. _canSeeTarget se llama
+	-- ~160 veces/seg (10Hz × bots × candidates) y reconstruir la tabla
+	-- + setter de FilterType en cada call es allocation evitable.
+	local raycastParams = RaycastParams.new()
+	raycastParams.FilterDescendantsInstances = { self._dummy }
+	raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+	self._raycastParams = raycastParams
+
 	-- Sprint 4: Navigator encapsula Path + walk loop + throttle + MoveToFinished.
 	-- Las llamadas a ComputeAsync ahora pasan por la PathfindingQueue global.
 	self._navigator = Navigator.new(humanoid, rootPart, AGENT_PARAMS)
@@ -548,12 +602,9 @@ function BotAI:Start(mapRoot: Instance?, aliveTargets: { Model }?, roamGraph: Ro
 	local currentTrack: AnimationTrack? = nil
 	local lastShotTime = 0
 	local lastJumpTime = 0
-	-- Throttle de CHASE-visible MoveTo: el loop principal corre a 60Hz pero
-	-- emitir humanoid:MoveTo a esa frecuencia genera 60 MoveTos superseded/seg.
-	-- Cada superseded eventualmente firea MoveToFinished (timeout 8s) que
-	-- contamina el walk loop del Navigator. Throttle a ~12Hz reduce el
-	-- número de timeouts pendientes en flight.
-	local lastDirectMoveAt = 0
+	-- Throttle de CHASE-visible MoveTo: reemitir solo cuando target se mueva
+	-- >2 studs respecto al último MoveTo. Sin time-gate — MoveTo persiste
+	-- hasta llegada o timeout 8s, no necesita refresh periódico.
 	local lastDirectMoveTarget = Vector3.zero
 
 	-- Animaciones reactivas
@@ -818,14 +869,12 @@ function BotAI:Start(mapRoot: Instance?, aliveTargets: { Model }?, roamGraph: Ro
 						if self._navigator and self._navigator:isMoving() then
 							self._navigator:cancel()
 						end
-						-- Throttle: solo reemitir MoveTo si el target se movió >2 studs
-						-- o si pasaron >80ms desde el último. Sin esto, MoveTos
-						-- pendientes acumulan timeouts y contaminan walk loops futuros.
-						local nowDir = os.clock()
-						if (targetPos - lastDirectMoveTarget).Magnitude > 2
-							or (nowDir - lastDirectMoveAt) > 0.08 then
+						-- Throttle: reemitir MoveTo solo cuando el target se haya
+						-- movido >2 studs. Sin time-gate — Roblox MoveTo persiste
+						-- hasta llegada o timeout 8s, no necesita refresh. Quitar
+						-- el OR de tiempo ahorra ~96 RPC/seg con 8 bots en CHASE.
+						if (targetPos - lastDirectMoveTarget).Magnitude > 2 then
 							humanoid:MoveTo(targetPos)
-							lastDirectMoveAt = nowDir
 							lastDirectMoveTarget = targetPos
 						end
 						if math.random() < 0.05 then
@@ -903,14 +952,13 @@ function BotAI:Start(mapRoot: Instance?, aliveTargets: { Model }?, roamGraph: Ro
 			end
 		end
 
-		-- Bot muerto o detenido: limpiar constraints
+		-- Audit fix C2: cleanup vive en BotAI:Stop. Aquí solo dejamos el
+		-- AlignOrientation deshabilitado para que el cuerpo no se quede
+		-- apuntando a un target obsoleto si el coroutine sale por
+		-- Health<=0 sin que Stop se haya llamado todavía (race window).
 		if alignOrientation then
 			alignOrientation.Enabled = false
 		end
-		for _, conn in self._connections do
-			conn:Disconnect()
-		end
-		table.clear(self._connections)
 	end)
 end
 
