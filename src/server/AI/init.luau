@@ -13,6 +13,8 @@ local BotConfig = require(Shared.constants.BotConfig)
 local ItemDefaults = require(Shared.constants.ItemDefaults)
 
 local BotAI = require(script:WaitForChild("BotAI"))
+local NavMetrics = require(script:WaitForChild("telemetry"):WaitForChild("NavMetrics"))
+local RoamGraph = require(script:WaitForChild("nav"):WaitForChild("RoamGraph"))
 
 type BotIdentity = { name: string, image: string }
 
@@ -66,6 +68,7 @@ local AIService = {}
 
 local _isRoundActive = false
 local _mapRoot: Instance? = nil
+local _roamGraph: RoamGraph.RoamGraph? = nil
 local _spawnPoints: { BasePart } = {}
 local _onBotDied: ((string, string, Humanoid, number) -> ())? = nil
 local _botsByName: { [string]: BotRecord } = {}
@@ -310,6 +313,14 @@ local function _createBotModel(botName: string): Model
 	return _buildFallbackBotModel(botName)
 end
 
+local function _notifyActiveBotCount()
+	local count = 0
+	for _ in _botsByName do
+		count += 1
+	end
+	NavMetrics.SetActiveBotCount(count)
+end
+
 local function _removeBotByName(botName: string)
 	local bot = _botsByName[botName]
 	if not bot then
@@ -339,6 +350,7 @@ local function _removeBotByName(botName: string)
 
 	_botsByName[botName] = nil
 	_refreshAliveLists()
+	_notifyActiveBotCount()
 end
 
 local function _markBotTeam(model: Model, team: "A" | "B")
@@ -455,7 +467,7 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 		ai = botAIInstance,
 	}
 
-	botAIInstance:Start(mapRoot, _aliveTargets)
+	botAIInstance:Start(mapRoot, _aliveTargets, _roamGraph)
 
 	record.deathConnection = humanoid.Died:Connect(function()
 		if record.hasDeathBeenReported then
@@ -487,6 +499,7 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 		table.insert(_recycledByTeam[team], { identity = identity, fakeUserId = fakeUserId })
 		_botsByName[botName] = nil
 		_refreshAliveLists()
+		_notifyActiveBotCount()
 
 		-- 4. Programar destrucción siempre, incluso si _onBotDied falla.
 		task.delay(BotConfig.Lifecycle.RagdollCleanupDelay, function()
@@ -507,6 +520,7 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 
 	_botsByName[botName] = record
 	table.insert(_botNamesByTeam[team], botName)
+	_notifyActiveBotCount()
 	return true
 end
 
@@ -564,6 +578,16 @@ function AIService:OnRoundStart(config: RoundStartConfig)
 	table.clear(_recycledByTeam.B)
 	table.clear(_identityByFakeUserId)
 	table.clear(_teamByFakeUserId)
+	NavMetrics.ResetCounts()
+	NavMetrics.SetActiveBotCount(0)
+	-- RoamGraph cacheado por mapRoot. Si el mapa es el mismo del round
+	-- anterior, reusa el pool ya construido (cero coste). Si es distinto,
+	-- construye uno nuevo en el primer pickRandomNavigablePoint.
+	if _mapRoot then
+		_roamGraph = RoamGraph.forMap(_mapRoot)
+	else
+		_roamGraph = nil
+	end
 end
 
 function AIService:SetBotTargets(targetA: number, targetB: number)
@@ -592,6 +616,10 @@ function AIService:OnRoundEnd()
 	table.clear(_botNamesByTeam.B)
 	_spawnPoints = {}
 	_mapRoot = nil
+	-- No destruir _roamGraph aquí: si la siguiente ronda usa el mismo mapRoot,
+	-- queremos reusar la caché. AncestryChanged limpia automáticamente cuando
+	-- el modelo del mapa se destruya.
+	_roamGraph = nil
 	_onBotDied = nil
 	table.clear(_usedIdentityIndices)
 	table.clear(_botIdentityByName)

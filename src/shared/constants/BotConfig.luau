@@ -21,6 +21,18 @@ export type CombatTargetProfile = {
 	JumpChance: number,
 }
 
+export type StuckThresholds = {
+	lateral: number,
+	repath: number,
+	jump: number,
+	teleport: number,
+}
+
+export type IdleSecondsRange = {
+	min: number,
+	max: number,
+}
+
 export type BotConfigType = {
 	Movement: {
 		WalkSpeed: number,
@@ -32,6 +44,16 @@ export type BotConfigType = {
 		DetectRange: number,
 		FireRate: number,
 		Precision: number,
+		FOVDegrees: number,
+		ReactionDelayMin: number,
+		ReactionDelayMax: number,
+		MissSpreadDegMin: number,
+		MissSpreadDegMax: number,
+		CombatPauseChance: number,
+		CombatPauseMin: number,
+		CombatPauseMax: number,
+		CombatStepMin: number,
+		CombatStepMax: number,
 		VsPlayer: CombatTargetProfile,
 		VsBot: CombatTargetProfile,
 	},
@@ -40,6 +62,20 @@ export type BotConfigType = {
 		AgentHeight: number,
 		AgentCanJump: boolean,
 		AgentMaxSlope: number,
+		WaypointSpacing: number,
+		MinComputeInterval: number,
+		PostBlockedCooldown: number,
+	},
+	Navigation: {
+		RoamMinDist: number,
+		RoamMaxDist: number,
+		SpawnMinDist: number,
+		SpawnMaxDist: number,
+		IdleAfterArriveChance: number,
+		IdleAfterArriveSeconds: IdleSecondsRange,
+		StuckThresholds: StuckThresholds,
+		StuckMoveEpsilon: number,
+		QueueRequestsPerHeartbeat: number,
 	},
 	Lifecycle: {
 		RagdollCleanupDelay: number,
@@ -58,6 +94,19 @@ local BotConfig: BotConfigType = {
 		DetectRange = 35,
 		FireRate = 0.1,           -- compartido VsPlayer/VsBot (igual que ShotCooldown del arma real)
 		Precision = 40,           -- % de balas que impactan (0..100)
+
+		-- PR1.5: combat feel polish
+		FOVDegrees = 150,          -- cono frontal total (75° por lado). Solo aplica a detección normal — retaliation bypassa
+		ReactionDelayMin = 0.15,   -- seg: delay aleatorio entre adquirir target y primer disparo
+		ReactionDelayMax = 0.35,
+		MissSpreadDegMin = 3,      -- spread angular para misses visibles (bullet pasa al lado)
+		MissSpreadDegMax = 8,
+		CombatPauseChance = 0.6,   -- fracción de ciclos en Engage que son pause (vs step lateral)
+		CombatPauseMin = 0.5,      -- seg
+		CombatPauseMax = 1.5,
+		CombatStepMin = 0.4,
+		CombatStepMax = 1.2,
+
 		VsPlayer = {
 			DamageMin = 2,
 			DamageMax = 5,
@@ -71,10 +120,25 @@ local BotConfig: BotConfigType = {
 	},
 
 	Pathfinding = {
-		AgentRadius = 2,
+		AgentRadius = 2,             -- empírico: 2.5 generaba paths fallidos en pasillos estrechos
 		AgentHeight = 5,
 		AgentCanJump = true,
 		AgentMaxSlope = 45,
+		WaypointSpacing = 4,         -- default Roblox; 2 producía giros bruscos en cada wp
+		MinComputeInterval = 0.5,    -- empírico: 1.0s hacía CHASE lento; 0.5 matchea throttle original
+		PostBlockedCooldown = 0.3,   -- cooldown tras Path.Blocked antes de recomputar
+	},
+
+	Navigation = {
+		RoamMinDist = 20,
+		RoamMaxDist = 80,
+		SpawnMinDist = 30,
+		SpawnMaxDist = 120,
+		IdleAfterArriveChance = 0,                          -- desactivado: bot siempre en marcha (objetivo "constant velocity like real players")
+		IdleAfterArriveSeconds = { min = 0, max = 0 },
+		StuckThresholds = { lateral = 1.0, repath = 2.0, jump = 4.0, teleport = 8.0 },
+		StuckMoveEpsilon = 0.5,        -- studs/seg debajo de los cuales contamos stuck
+		QueueRequestsPerHeartbeat = 2, -- ComputeAsync globales por Heartbeat
 	},
 
 	Lifecycle = {
