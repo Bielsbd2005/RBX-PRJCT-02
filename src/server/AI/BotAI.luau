@@ -732,13 +732,24 @@ function BotAI:Start(mapRoot: Instance?, aliveTargets: { Model }?, roamGraph: Ro
 							local hi = BotConfig.Combat.CombatPauseMax
 							self._combatCycleEndAt = now + lo + math.random() * (hi - lo)
 						else
-							-- Step cycle: bias lateral, fwd/back leve (≈ no acercarse)
+							-- Step cycle: dirección lateral decisiva (no wobble cerca
+							-- de zero), ocasional charge/retreat (30% de pasos).
+							-- Antes `lateral = (math.random()-0.5)*2` daba valores
+							-- como -0.1 o 0.7 → bot parecía indeciso. Ahora signo
+							-- explícito 50/50 con magnitud comprometida.
 							local toTarget = (targetRoot :: BasePart).Position - rootPart.Position
 							local right = toTarget:Cross(Vector3.new(0, 1, 0))
 							if right.Magnitude > 0.01 then
 								right = right.Unit
-								local lateral = (math.random() - 0.5) * 2    -- -1 a 1
-								local forward = (math.random() - 0.5) * 0.3  -- ±0.15
+								local lateralSign = if math.random() < 0.5 then -1 else 1
+								local lateral = lateralSign * (0.7 + math.random() * 0.3)
+								-- 20% de los pasos incluyen componente forward/back leve
+								-- (cargar al target o retroceder). Resto: orbita pura.
+								local forward = 0
+								if math.random() < 0.2 then
+									local forwardSign = if math.random() < 0.5 then -1 else 1
+									forward = forwardSign * (0.25 + math.random() * 0.25)
+								end
 								local dir = right * lateral + toTarget.Unit * forward
 								if dir.Magnitude > 0.01 then
 									self._combatMoveDir = dir.Unit

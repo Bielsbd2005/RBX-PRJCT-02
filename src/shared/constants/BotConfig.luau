@@ -101,11 +101,11 @@ local BotConfig: BotConfigType = {
 		ReactionDelayMax = 0.35,
 		MissSpreadDegMin = 3,      -- spread angular para misses visibles (bullet pasa al lado)
 		MissSpreadDegMax = 8,
-		CombatPauseChance = 0.6,   -- fracción de ciclos en Engage que son pause (vs step lateral)
-		CombatPauseMin = 0.5,      -- seg
-		CombatPauseMax = 1.5,
-		CombatStepMin = 0.4,
-		CombatStepMax = 1.2,
+		CombatPauseChance = 0.4,   -- 40% pause, 60% step — punto medio: 60% torreta era mucho, 25% era hiperactivo
+		CombatPauseMin = 0.3,      -- pausas perceptibles pero breves
+		CombatPauseMax = 0.9,
+		CombatStepMin = 0.5,
+		CombatStepMax = 1.4,
 
 		VsPlayer = {
 			DamageMin = 2,
