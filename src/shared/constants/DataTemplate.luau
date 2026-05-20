@@ -75,7 +75,7 @@ export type Inventory = {
 
 	Estructura: category → itemId → { AcquiredAt, Source }
 	  AcquiredAt: os.time() de adquisición.
-	  Source: "Shop" | "Case" | "Reward" | "Default" | "Gift" | "Code" | etc.
+	  Source: "Shop" | "Reward" | "Default" | "Gift" | "Code" | etc.
 ]]
 export type InventoryItemMeta = {
 	AcquiredAt: number,
@@ -126,11 +126,6 @@ export type Settings = {
 	Language: string,       -- ISO 639-1 ("en", "es", ...)
 	-- Visual ajustable. RGB 0..1.
 	CrosshairColor: { R: number, G: number, B: number },
-}
-
-export type CasesData = {
-	PityCounters: { [string]: number },   -- caseId → tiradas sin pity drop
-	LuckyExpiresAt: number,                -- os.time() cuando expira el lucky boost (0 = inactivo)
 }
 
 export type Rewards = {
@@ -250,7 +245,6 @@ export type PlayerProfile = {
 	WeaponKills: WeaponKills,
 	Settings: Settings,
 	Rewards: Rewards,
-	Cases: CasesData,
 	LoginStreak: LoginStreak,
 	NewItemFlags: NewItemFlags,
 	DailyTasks: DailyTasksState,
@@ -353,11 +347,6 @@ local DEFAULT: PlayerProfile = {
 		NotificationsClaimed = false,
 		ClaimedCodes = {},
 		FirstPurchaseClaimed = false,
-	},
-
-	Cases = {
-		PityCounters = {},
-		LuckyExpiresAt = 0,
 	},
 
 	LoginStreak = {

@@ -30,7 +30,7 @@ local NetGuards = {}
 -- Caps por tipo lógico (en bytes — ByteNet escribe strings como UTF-8 raw).
 -- Los valores son intencionalmente generosos para no bloquear UX legítimo.
 NetGuards.MAX = table.freeze({
-	Id            = 32,   -- itemId, weaponId, wrapId, caseId
+	Id            = 32,   -- itemId, weaponId, wrapId
 	Category      = 16,   -- "Main", "Special", "Faces", "Hats", "KillEffects", "Outfits", "WeaponWraps"
 	SettingKey    = 32,   -- claves de Settings (whitelisted server-side igualmente)
 	SettingChoice = 32,   -- valores enum de Settings (whitelisted)

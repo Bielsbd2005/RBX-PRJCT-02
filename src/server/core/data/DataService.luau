@@ -1033,8 +1033,8 @@ end
 	  2. InventoryMeta[category][itemId] = { AcquiredAt, Source }.
 	  3. NewItemFlags[category][itemId] = true (badge "NEW!" en UI).
 
-	Source: una etiqueta corta para analytics ("Shop", "Case", "Reward",
-	"Default", "Code", "Gift", etc.).
+	Source: una etiqueta corta para analytics ("Shop", "Reward", "Default",
+	"Code", "Gift", etc.).
 
 	Devuelve true si todas las escrituras tuvieron éxito.
 ]]

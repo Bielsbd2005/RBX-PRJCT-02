@@ -123,7 +123,7 @@ Más helpers compartidos (`cancelTween`, `cancelTweenMap`, `disconnectFromMap`,
 
 ## 4. Restantes services con `_dataService: any`
 
-Sprint 4 migró Shop/Cases/BattlePass/Match a tipos públicos.
+Sprint 4 migró Shop/BattlePass/Match a tipos públicos.
 Quedan por migrar al patrón `local DataService = require(...).DataServiceModule`:
 - `RewardsService` (P2)
 - `LockerService` (P2)

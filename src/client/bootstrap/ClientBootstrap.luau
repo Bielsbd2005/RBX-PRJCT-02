@@ -75,7 +75,6 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 	local StoreFeature = require(clientRoot.features.store)
 	local SettingsFeature = require(clientRoot.features.settings)
 	local RewardsFeature = require(clientRoot.features.rewards)
-	local CasesFeature = require(clientRoot.features.cases)
 	local DailyTasksFeature = require(clientRoot.features.dailyTasks)
 	local BattlePassFeature = require(clientRoot.features.battlepass)
 	local LobbyFeature = require(clientRoot.features.lobby)
@@ -124,7 +123,6 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 		{ label = "store", start = StoreFeature.start },
 		{ label = "settings", start = SettingsFeature.start },
 		{ label = "rewards", start = RewardsFeature.start },
-		{ label = "cases", start = CasesFeature.start },
 		{ label = "dailyTasks", start = DailyTasksFeature.start },
 		{ label = "battlepass", start = BattlePassFeature.start },
 		{ label = "lobby", start = LobbyFeature.start },

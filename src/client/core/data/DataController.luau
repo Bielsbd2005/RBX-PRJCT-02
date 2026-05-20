@@ -93,7 +93,6 @@ DataController.Loadout       = nil :: any
 DataController.WeaponKills   = nil :: any
 DataController.Settings      = nil :: any
 DataController.Rewards       = nil :: any
-DataController.Cases         = nil :: any
 DataController.LoginStreak   = nil :: any
 DataController.NewItemFlags  = nil :: any
 DataController.DailyTasks    = nil :: any
@@ -136,7 +135,6 @@ function DataController:Start(): ()
 	DataController.WeaponKills   = _scope:Value(_deepCopy(DataTemplate.WeaponKills))
 	DataController.Settings      = _scope:Value(_deepCopy(DataTemplate.Settings))
 	DataController.Rewards       = _scope:Value(_deepCopy(DataTemplate.Rewards))
-	DataController.Cases         = _scope:Value(_deepCopy(DataTemplate.Cases))
 	DataController.LoginStreak   = _scope:Value(_deepCopy(DataTemplate.LoginStreak))
 	DataController.NewItemFlags  = _scope:Value(_deepCopy(DataTemplate.NewItemFlags))
 	DataController.DailyTasks    = _scope:Value(_deepCopy(DataTemplate.DailyTasks))
@@ -171,7 +169,6 @@ function DataController:Start(): ()
 		DataController.WeaponKills:set(replica.Data.WeaponKills)
 		DataController.Settings:set(replica.Data.Settings)
 		DataController.Rewards:set(replica.Data.Rewards)
-		DataController.Cases:set(replica.Data.Cases)
 		DataController.LoginStreak:set(replica.Data.LoginStreak)
 		DataController.NewItemFlags:set(replica.Data.NewItemFlags)
 		DataController.DailyTasks:set(replica.Data.DailyTasks)
@@ -215,12 +212,6 @@ function DataController:Start(): ()
 		replica:AddCleanupTask(
 			replica:ListenToChange({ "Rewards" }, function(newRewards: any)
 				DataController.Rewards:set(newRewards)
-			end)
-		)
-
-		replica:AddCleanupTask(
-			replica:ListenToChange({ "Cases" }, function(newCases: any)
-				DataController.Cases:set(newCases)
 			end)
 		)
 

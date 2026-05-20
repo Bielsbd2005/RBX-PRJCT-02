@@ -1,7 +1,14 @@
 --!strict
 
+local MarketplaceService = game:GetService("MarketplaceService")
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local StarterGui = game:GetService("StarterGui")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local StoreProducts = require(Shared:WaitForChild("constants"):WaitForChild("StoreProducts"))
+
+local STORE_PRODUCTS_BY_ID = StoreProducts.ProductsByProductId :: { [number]: { CashAmount: number } }
 
 local ServerBootstrap = {}
 
@@ -19,7 +26,6 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	local ShopService = require(serverRoot.features.shop.ShopService)
 	local SettingsService = require(serverRoot.features.settings.SettingsService)
 	local RewardsService = require(serverRoot.features.rewards.RewardsService)
-	local CasesService = require(serverRoot.features.cases.CasesService)
 	local MatchService = require(serverRoot.features.match.MatchService)
 	local DailyTasksService = require(serverRoot.features.dailyTasks.DailyTasksService)
 	local BattlePassService = require(serverRoot.features.battlepass.BattlePassService)
@@ -30,12 +36,45 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	ShopService:Start(DataService)
 	SettingsService:Start(DataService)
 	RewardsService:Start(DataService)
-	-- BattlePassService debe arrancar ANTES que CasesService porque CasesService
-	-- registra MarketplaceService.ProcessReceipt y consultará BattlePassService
-	-- en su dispatcher.
 	BattlePassService:Start(DataService)
-	CasesService:Start(DataService)
 	DailyTasksService:Start(DataService)
+
+	-- ProcessReceipt dispatcher central: delega BattlePass primero, luego Cash
+	-- store products. Vive aquí (cross-cutting) en lugar de en una feature para
+	-- que la responsabilidad sea explícita y no quede acoplada a una sola.
+	MarketplaceService.ProcessReceipt = function(receiptInfo: any): Enum.ProductPurchaseDecision
+		local bpDecision = BattlePassService:ProcessReceipt(receiptInfo)
+		if bpDecision ~= nil then
+			return bpDecision
+		end
+
+		local storeProduct = STORE_PRODUCTS_BY_ID[receiptInfo.ProductId]
+		if storeProduct then
+			local buyer = Players:GetPlayerByUserId(receiptInfo.PlayerId)
+			if not buyer then
+				return Enum.ProductPurchaseDecision.NotProcessedYet
+			end
+
+			-- Idempotencia: si ya procesamos este PurchaseId, no re-otorgar Cash.
+			local purchaseId = tostring(receiptInfo.PurchaseId)
+			if DataService:IsReceiptProcessed(buyer, purchaseId) then
+				return Enum.ProductPurchaseDecision.PurchaseGranted
+			end
+
+			-- Atómico: grant Cash + mark receipt en el mismo BatchUpdate.
+			local ok = DataService:BatchUpdate(buyer, {
+				{ path = { "Stats", "Cash" }, delta = storeProduct.CashAmount },
+				{ path = { "ProcessedReceipts", purchaseId }, value = os.time() },
+			})
+			if ok then
+				return Enum.ProductPurchaseDecision.PurchaseGranted
+			end
+			return Enum.ProductPurchaseDecision.NotProcessedYet
+		end
+
+		warn("[ServerBootstrap] Unknown ProductId:", receiptInfo.ProductId)
+		return Enum.ProductPurchaseDecision.NotProcessedYet
+	end
 
 	-- Inyectar servicios en WeaponsSystem ANTES de MatchService:Start, para
 	-- que las primeras kills/assists ya tengan DataService disponible. Si

@@ -1,6 +1,6 @@
 --!strict
 -- FeaturePanelController: patrón unificado para features con ScreenGui propia
--- (Store, Cases, Fusion, Locker). Encapsula el ciclo open/close + cámara +
+-- (Store, Fusion, Locker). Encapsula el ciclo open/close + cámara +
 -- sincronización con menú principal.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")

@@ -3,7 +3,7 @@
 	Retween.luau
 	Helper para el patrón "cancelar tween anterior, ejecutar nuevo tween, limpiar
 	el slot cuando termina". Sustituye boilerplate repetido en CameraFovEffect,
-	InteractiveScaleTween, LockerGrid y la pity bar de cases.
+	InteractiveScaleTween y LockerGrid.
 
 	Uso:
 		local slot = { current = nil :: Tween? }

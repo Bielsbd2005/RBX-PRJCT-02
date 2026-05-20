@@ -1,7 +1,7 @@
 --!strict
 -- NavTabController: gestión reutilizable de tabs/nav buttons con
 -- tween de scale + ImageColor3 cancelable. Sustituye el patrón duplicado
--- en store, cases, locker.
+-- en store, locker.
 
 local TweenService = game:GetService("TweenService")
 local UITheme = require(script.Parent.UITheme)

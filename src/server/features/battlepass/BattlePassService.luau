@@ -458,7 +458,7 @@ local function _grantSkip(player: Player, purchaseId: string): boolean
 end
 
 --[[
-	ProcessReceipt: invocado desde el dispatcher central en CasesService.
+	ProcessReceipt: invocado desde el dispatcher central en ServerBootstrap.
 	Devuelve:
 	  • Enum.ProductPurchaseDecision si este servicio reconoce el producto
 	    (PurchaseGranted en éxito o idempotencia, NotProcessedYet en error).
