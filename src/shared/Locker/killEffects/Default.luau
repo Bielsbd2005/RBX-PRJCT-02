@@ -1,6 +1,9 @@
 local RagdollModule = {}
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
 local Utils = require(script.Parent.Utils)
+local CollisionGroups = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("CollisionGroups"))
 
 -- Configuration
 local CONFIG = {
@@ -103,7 +106,12 @@ function RagdollModule.apply(char: Model): boolean
 	-- 3. Build ragdoll
 	buildRagdoll(char)
 
-	-- 4. Apply force and release
+	-- 4. Mover baseparts al grupo RAGDOLL para que jugadores vivos no choquen
+	-- con el cadáver. Antes este kill effect NO asignaba grupo, así que los
+	-- corpses con kill effect Default bloqueaban a los players vivos.
+	CollisionGroups.setGroupForCharacter(char, CollisionGroups.RAGDOLL)
+
+	-- 5. Apply force and release
 	Utils.anchor(char, false)
 
 	local lowerTorso = char:FindFirstChild("LowerTorso", true)

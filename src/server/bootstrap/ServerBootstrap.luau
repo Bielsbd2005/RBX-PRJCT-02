@@ -6,6 +6,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local StarterGui = game:GetService("StarterGui")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
+local ActionRewards = require(Shared:WaitForChild("constants"):WaitForChild("ActionRewards"))
 local StoreProducts = require(Shared:WaitForChild("constants"):WaitForChild("StoreProducts"))
 
 local STORE_PRODUCTS_BY_ID = StoreProducts.ProductsByProductId :: { [number]: { CashAmount: number } }
@@ -23,6 +24,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	StarterGui.ResetPlayerGuiOnSpawn = false
 
 	local DataService = require(serverRoot.core.data.DataService)
+	local RewardService = require(serverRoot.core.RewardService)
 	local ShopService = require(serverRoot.features.shop.ShopService)
 	local SettingsService = require(serverRoot.features.settings.SettingsService)
 	local RewardsService = require(serverRoot.features.rewards.RewardsService)
@@ -33,6 +35,10 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	local ClearDataCommandService = require(serverRoot.features.testing.ClearDataCommandService)
 
 	DataService:Start()
+	-- RewardService arranca justo después de DataService: cualquier service
+	-- que conceda XP o Cash (MatchService, RewardsService, DailyTasksService,
+	-- WeaponsSystem injected) lo necesita listo antes de su propio Start.
+	RewardService.Start(DataService)
 	ShopService:Start(DataService)
 	SettingsService:Start(DataService)
 	RewardsService:Start(DataService)
@@ -93,6 +99,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 				MatchService = MatchService,
 				DailyTasksService = DailyTasksService,
 				BattlePassService = BattlePassService,
+				RewardService = RewardService,
 			})
 		else
 			warn("[ServerBootstrap] WeaponsSystem.injectServices no disponible — usando autoload")
@@ -103,10 +110,10 @@ function ServerBootstrap.start(serverRoot: Script): ()
 		-- WeaponsSystem queda agnóstico al juego; el bootstrap es el único punto
 		-- que sabe qué services existen en este modo.
 		if type(WeaponsSystem) == "table" then
-			-- killHook: sincronía. Computa rewards data necesaria para el
-			-- payload del PlayerEliminated remote (UI del killer la consume
-			-- en el mismo frame: streak count, coinAmount).
-			local CashBonusSystem: any = nil  -- placeholder hasta que se cree el módulo
+			-- killHook: sincronía. Calcula el payload del remote PlayerEliminated
+			-- (UI del killer en el mismo frame). NO concede cash/XP — eso lo hace
+			-- MatchService vía RewardService en _registerKillEvent. Aquí solo
+			-- replicamos lo que va a otorgar para que la UI no mienta.
 			WeaponsSystem.killHook = function(killer: Player, _victimHum: Humanoid, _weaponName: string, wasHeadshot: boolean)
 				local streakAfterKill = 1
 				if MatchService and (MatchService :: any).GetPlayerKillStreak then
@@ -118,26 +125,20 @@ function ServerBootstrap.start(serverRoot: Script): ()
 					end
 				end
 
-				local coinAmount: number? = nil
-				if CashBonusSystem and CashBonusSystem.CalculateKillReward then
-					local reward = CashBonusSystem.CalculateKillReward(wasHeadshot, streakAfterKill)
-					if reward then
-						coinAmount = reward.coinAmount
-						if reward.totalCash and reward.totalCash > 0 then
-							local okIncrement = pcall(function()
-								(DataService :: any):Increment(killer, { "Stats", "Cash" }, reward.totalCash)
-							end)
-							if not okIncrement then
-								warn("[ServerBootstrap] Failed to grant kill cash to " .. killer.Name)
-							end
-						end
-					end
+				-- Valores reales de ActionRewards (no hardcoded). Streak3/5 se
+				-- conceden por separado en MatchService y se mostrarán con su
+				-- propia UI cuando suceda.
+				local xpGained = ActionRewards.GetXP("Kill")
+				local coinAmount = ActionRewards.GetCash("Kill")
+				if wasHeadshot then
+					xpGained += ActionRewards.GetXP("Headshot")
+					coinAmount += ActionRewards.GetCash("Headshot")
 				end
 
 				return {
 					streakAfterKill = streakAfterKill,
 					coinAmount = coinAmount,
-					xpGained = wasHeadshot and 150 or 100,
+					xpGained = xpGained,
 				}
 			end
 

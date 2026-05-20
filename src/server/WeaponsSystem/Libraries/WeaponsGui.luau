@@ -140,6 +140,56 @@ function WeaponsGui:_setButtonVisual(button, isActive)
 	button.ImageTransparency = isActive and ACTIVE_BUTTON_TRANSPARENCY or INACTIVE_BUTTON_TRANSPARENCY
 end
 
+-- Filtro de "tap directo". GuiObject.InputBegan dispara también cuando un
+-- touch ya activo desliza dentro de los bounds (drag-onto), así que NO podemos
+-- usar ese evento como trigger. En su lugar, escuchamos UserInputService.InputBegan
+-- — que sólo dispara una vez al nacer el touch — y comprobamos si la posición
+-- de origen cae dentro de un botón con _isInsideButton.
+function WeaponsGui:_isInsideButton(pos, button)
+	if not pos or not button or not button.Visible then return false end
+	-- Si el padre (Small/LargeTouchscreen) está oculto, los bounds siguen siendo
+	-- válidos pero el botón no es interactivo en pantalla.
+	local parent = button.Parent
+	if parent and parent:IsA("GuiObject") and not parent.Visible then return false end
+	local abs = button.AbsolutePosition
+	local size = button.AbsoluteSize
+	return pos.X >= abs.X and pos.X <= abs.X + size.X
+		and pos.Y >= abs.Y and pos.Y <= abs.Y + size.Y
+end
+
+function WeaponsGui:_dispatchTouchBegin(input)
+	local pos = input.Position
+	if self:_isInsideButton(pos, self.smallAimButton) then
+		self:onTouchAimButton(self.smallAimButton, input, Enum.UserInputState.Begin)
+	elseif self:_isInsideButton(pos, self.largeAimButton) then
+		self:onTouchAimButton(self.largeAimButton, input, Enum.UserInputState.Begin)
+	end
+	if self:_isInsideButton(pos, self.smallFireButton) then
+		self:onTouchFireButton(self.smallFireButton, input, Enum.UserInputState.Begin)
+	elseif self:_isInsideButton(pos, self.largeFireButton) then
+		self:onTouchFireButton(self.largeFireButton, input, Enum.UserInputState.Begin)
+	end
+	if self:_isInsideButton(pos, self.smallReloadButton) then
+		self:onTouchReloadButton(self.smallReloadButton, input, Enum.UserInputState.Begin)
+	elseif self:_isInsideButton(pos, self.largeReloadButton) then
+		self:onTouchReloadButton(self.largeReloadButton, input, Enum.UserInputState.Begin)
+	end
+	if self.smallJumpButton and self:_isInsideButton(pos, self.smallJumpButton) then
+		self:onTouchJumpButton(self.smallJumpButton, input, Enum.UserInputState.Begin)
+	elseif self.largeJumpButton and self:_isInsideButton(pos, self.largeJumpButton) then
+		self:onTouchJumpButton(self.largeJumpButton, input, Enum.UserInputState.Begin)
+	end
+end
+
+function WeaponsGui:_dispatchTouchEnd(input)
+	-- Cada handler filtra por su _activeXxxInput, así que pasar el evento a
+	-- todos es seguro y simple.
+	self:onTouchAimButton(nil, input, Enum.UserInputState.End)
+	self:onTouchFireButton(nil, input, Enum.UserInputState.End)
+	self:onTouchReloadButton(nil, input, Enum.UserInputState.End)
+	self:onTouchJumpButton(nil, input, Enum.UserInputState.End)
+end
+
 function WeaponsGui:_setFireButtonsPressed(isPressed)
 	self._isFirePressed = isPressed
 	self:_setButtonVisual(self.smallFireButton, isPressed)
@@ -725,6 +775,8 @@ function WeaponsGui.new(weaponsSystem)
 	self._activeJumpInput = nil
 	self._activeFireInput = nil
 	self._activeFireInputConn = nil
+	self._activeAimInput = nil
+	self._activeReloadInput = nil
 	self._isFirePressed = false
 	self._isReloadPressed = false
 	self._isJumpPressed = false
@@ -867,39 +919,54 @@ function WeaponsGui.new(weaponsSystem)
 		self.hotbarPC = self.gui:FindFirstChild("Hotbar_PC")
 		self.hotbarTouchscreen = self.gui:FindFirstChild("Hotbar_TouchScreen")
 
+		-- NoClickSound: UISoundsController auto-bindea sonido de click a todo
+		-- GuiButton en PlayerGui via .Activated. Estos botones móviles no deben sonar.
+		-- Why: Activated dispara también cuando se suelta el dedo encima tras venir
+		-- de fuera (drag-onto), produciendo clicks espurios al girar cámara.
 		self.smallAimButton = self.smallTouchscreen:WaitForChild("AimButton")
-		self.smallAimButton.Activated:Connect(function() self:onTouchAimButtonActivated() end)
+		self.smallAimButton:SetAttribute("NoClickSound", true)
 		self.largeAimButton = self.largeTouchscreen:WaitForChild("AimButton")
-		self.largeAimButton.Activated:Connect(function() self:onTouchAimButtonActivated() end)
+		self.largeAimButton:SetAttribute("NoClickSound", true)
 
 		self.smallFireButton = self.smallTouchscreen:WaitForChild("FireButton")
-		self.smallFireButton.InputBegan:Connect(function(inputObj) self:onTouchFireButton(inputObj, Enum.UserInputState.Begin) end)
-		self.smallFireButton.InputEnded:Connect(function(inputObj) self:onTouchFireButton(inputObj, Enum.UserInputState.End) end)
+		self.smallFireButton:SetAttribute("NoClickSound", true)
 		self.largeFireButton = self.largeTouchscreen:WaitForChild("FireButton")
-		self.largeFireButton.InputBegan:Connect(function(inputObj) self:onTouchFireButton(inputObj, Enum.UserInputState.Begin) end)
-		self.largeFireButton.InputEnded:Connect(function(inputObj) self:onTouchFireButton(inputObj, Enum.UserInputState.End) end)
+		self.largeFireButton:SetAttribute("NoClickSound", true)
 
 		self.smallReloadButton = self.smallTouchscreen:WaitForChild("ReloadButton")
-		self.smallReloadButton.InputBegan:Connect(function(inputObj) self:onTouchReloadButton(inputObj, Enum.UserInputState.Begin) end)
-		self.smallReloadButton.InputEnded:Connect(function(inputObj) self:onTouchReloadButton(inputObj, Enum.UserInputState.End) end)
+		self.smallReloadButton:SetAttribute("NoClickSound", true)
 		self.largeReloadButton = self.largeTouchscreen:WaitForChild("ReloadButton")
-		self.largeReloadButton.InputBegan:Connect(function(inputObj) self:onTouchReloadButton(inputObj, Enum.UserInputState.Begin) end)
-		self.largeReloadButton.InputEnded:Connect(function(inputObj) self:onTouchReloadButton(inputObj, Enum.UserInputState.End) end)
+		self.largeReloadButton:SetAttribute("NoClickSound", true)
 
 		self.smallJumpButton = self.smallTouchscreen:FindFirstChild("JumpButton")
 		if self.smallJumpButton then
 			self.smallJumpButton.Active = true
-			self.smallJumpButton.Activated:Connect(function() self:_tryJump() end)
-			self.smallJumpButton.InputBegan:Connect(function(inputObj) self:onTouchJumpButton(inputObj, Enum.UserInputState.Begin) end)
-			self.smallJumpButton.InputEnded:Connect(function(inputObj) self:onTouchJumpButton(inputObj, Enum.UserInputState.End) end)
+			self.smallJumpButton:SetAttribute("NoClickSound", true)
 		end
 		self.largeJumpButton = self.largeTouchscreen:FindFirstChild("JumpButton")
 		if self.largeJumpButton then
 			self.largeJumpButton.Active = true
-			self.largeJumpButton.Activated:Connect(function() self:_tryJump() end)
-			self.largeJumpButton.InputBegan:Connect(function(inputObj) self:onTouchJumpButton(inputObj, Enum.UserInputState.Begin) end)
-			self.largeJumpButton.InputEnded:Connect(function(inputObj) self:onTouchJumpButton(inputObj, Enum.UserInputState.End) end)
+			self.largeJumpButton:SetAttribute("NoClickSound", true)
 		end
+
+		-- Tap directo only: UIS.InputBegan sólo dispara una vez por touch (cuando
+		-- nace), nunca cuando un touch ya activo desliza dentro de un botón. Eso
+		-- evita el footgun de GuiObject.InputBegan (que sí dispara con drag-onto).
+		-- Position-check decide qué botón activar.
+		UserInputService.InputBegan:Connect(function(input, _)
+			if input.UserInputType ~= Enum.UserInputType.Touch
+				and input.UserInputType ~= Enum.UserInputType.MouseButton1 then
+				return
+			end
+			self:_dispatchTouchBegin(input)
+		end)
+		UserInputService.InputEnded:Connect(function(input, _)
+			if input.UserInputType ~= Enum.UserInputType.Touch
+				and input.UserInputType ~= Enum.UserInputType.MouseButton1 then
+				return
+			end
+			self:_dispatchTouchEnd(input)
+		end)
 
 		self.smallFireButton.Visible = UserInputService.TouchEnabled
 		self.largeFireButton.Visible = UserInputService.TouchEnabled
@@ -1551,11 +1618,22 @@ function WeaponsGui:setZoomed(zoomed)
 	end
 end
 
-function WeaponsGui:onTouchAimButtonActivated()
-	self:setZoomed(not self.isZoomed)
+-- _dispatchTouchBegin garantiza que estos handlers sólo se llaman con un input
+-- cuya posición de origen cae dentro del botón correspondiente. _dispatchTouchEnd
+-- los llama a todos en End; cada uno filtra por su _activeXxxInput.
+
+function WeaponsGui:onTouchAimButton(_button, inputObj, inputState)
+	if inputState == Enum.UserInputState.Begin then
+		if self._activeAimInput then return end
+		self._activeAimInput = inputObj
+	elseif inputState == Enum.UserInputState.End then
+		if inputObj ~= self._activeAimInput then return end
+		self._activeAimInput = nil
+		self:setZoomed(not self.isZoomed)
+	end
 end
 
-function WeaponsGui:onTouchFireButton(inputObj, inputState)
+function WeaponsGui:onTouchFireButton(_button, inputObj, inputState)
 	if inputObj and self._activeJumpInput and inputObj == self._activeJumpInput then
 		return
 	end
@@ -1576,13 +1654,15 @@ function WeaponsGui:onTouchFireButton(inputObj, inputState)
 			end
 		end)
 		self:_setFireButtonsPressed(true)
-	elseif inputState == Enum.UserInputState.End and inputObj and inputObj.UserInputState == Enum.UserInputState.End then
+	elseif inputState == Enum.UserInputState.End then
+		if inputObj ~= self._activeFireInput then return end
 		self:_stopTouchFire()
 	end
 end
 
-function WeaponsGui:onTouchReloadButton(inputObj, inputState)
+function WeaponsGui:onTouchReloadButton(_button, inputObj, inputState)
 	if inputState == Enum.UserInputState.Begin then
+		self._activeReloadInput = inputObj
 		self:_setReloadButtonsPressed(true)
 		local currentWeapon = self.weaponsSystem.currentWeapon
 		if currentWeapon and currentWeapon.instance and currentWeapon.instance:IsA("Tool") then
@@ -1591,11 +1671,13 @@ function WeaponsGui:onTouchReloadButton(inputObj, inputState)
 			end
 		end
 	elseif inputState == Enum.UserInputState.End then
+		if inputObj ~= self._activeReloadInput then return end
+		self._activeReloadInput = nil
 		self:_setReloadButtonsPressed(false)
 	end
 end
 
-function WeaponsGui:onTouchJumpButton(inputObj, inputState)
+function WeaponsGui:onTouchJumpButton(_button, inputObj, inputState)
 	if inputState == Enum.UserInputState.Begin then
 		self._activeJumpInput = inputObj
 		self:_setJumpButtonsPressed(true)
@@ -1603,8 +1685,8 @@ function WeaponsGui:onTouchJumpButton(inputObj, inputState)
 	elseif inputState == Enum.UserInputState.End then
 		if inputObj and self._activeJumpInput == inputObj then
 			self._activeJumpInput = nil
+			self:_setJumpButtonsPressed(false)
 		end
-		self:_setJumpButtonsPressed(false)
 	end
 end
 
@@ -1668,6 +1750,14 @@ function WeaponsGui:_stopReloadProgressAnimation(hideProgress)
 end
 
 function WeaponsGui:playReloadProgressAnimation(reloadTime)
+	-- Limpiar antes de bumpear runId. Si lo hacemos al revés, el _stop interno
+	-- vuelve a incrementar _reloadProgressRunId y deja stale el `runId` local
+	-- que capturan los callbacks Changed/Completed → barra congelada en 0% y
+	-- nunca se oculta al terminar.
+	if self._reloadProgressTween or self._reloadProgressConnection then
+		self:_stopReloadProgressAnimation(false)
+	end
+
 	self._isReloadProgressAnimating = true
 	self:_refreshCrosshairVisibility()
 	self:_setReloadProgressVisible(true)
@@ -1689,10 +1779,6 @@ function WeaponsGui:playReloadProgressAnimation(reloadTime)
 		progressValue.Name = "ProgressValue"
 		progressValue.Value = 0
 		progressValue.Parent = progressFrame
-	end
-
-	if self._reloadProgressTween or self._reloadProgressConnection then
-		self:_stopReloadProgressAnimation(false)
 	end
 
 	progressValue.Value = 0

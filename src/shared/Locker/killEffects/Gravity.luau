@@ -1,9 +1,9 @@
 local RagdollModule = {}
 
-local PhysicsService = game:GetService("PhysicsService")
-local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Utils = require(script.Parent.Utils)
+local CollisionGroups = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("CollisionGroups"))
 
 -- Configuration
 local CONFIG = {
@@ -14,35 +14,9 @@ local CONFIG = {
 	BOUNCE_ELASTICITY = 0.85, -- Reducido un poquito de 1 a 0.85 para dar mayor estabilidad física
 }
 
-local RAGDOLL_COLLISION_GROUP = "RagdollBodyParts"
-
--- Registra el CollisionGroup una sola vez (idempotente). Solo en server.
--- RegisterCollisionGroup tira error si ya existe — lo absorbemos con pcall.
--- Si tras el registro el grupo no es asignable, dejamos un warning para no
--- enmascarar fallos silenciosos al asignar `part.CollisionGroup = name`.
-local _collisionGroupReady = false
-if RunService:IsServer() then
-	pcall(function()
-		PhysicsService:RegisterCollisionGroup(RAGDOLL_COLLISION_GROUP)
-	end)
-	pcall(function()
-		PhysicsService:CollisionGroupSetCollidable(RAGDOLL_COLLISION_GROUP, RAGDOLL_COLLISION_GROUP, false)
-	end)
-	-- Validar que el grupo quedó utilizable creando un BasePart probe.
-	local probe = Instance.new("Part")
-	local ok = pcall(function()
-		probe.CollisionGroup = RAGDOLL_COLLISION_GROUP
-	end)
-	probe:Destroy()
-	if ok then
-		_collisionGroupReady = true
-	else
-		warn(string.format(
-			"[Gravity ragdoll] CollisionGroup %q no está registrado; las partes del ragdoll colisionarán entre sí.",
-			RAGDOLL_COLLISION_GROUP
-		))
-	end
-end
+-- Registro de grupos + reglas cruzadas en CollisionGroups (server-side init).
+-- Ahora el grupo RagdollBodyParts también es no-collidable contra Characters,
+-- así jugadores vivos no chocan con cadáveres.
 
 local rng = Random.new()
 
@@ -124,18 +98,6 @@ local function buildRagdoll(char: Model, parts: { [string]: BasePart })
 	end
 end
 
--- Asigna el CollisionGroup compartido a todos los BaseParts del ragdoll, de modo
--- que no colisionen entre sí (ni con otros ragdolls activos). Sustituye el viejo
--- patrón O(N²) que creaba NoCollisionConstraint por cada par.
-local function applyCollisionGroup(baseParts: { BasePart })
-	if not _collisionGroupReady then
-		return -- el warn ya se emitió en init; evitamos errores por parte.
-	end
-	for _, part in ipairs(baseParts) do
-		part.CollisionGroup = RAGDOLL_COLLISION_GROUP
-	end
-end
-
 local function applyRagdoll(char: Model, hum: Humanoid)
 	Utils.anchor(char, true)
 	Utils.destroyMotors(char)
@@ -163,8 +125,11 @@ local function applyRagdoll(char: Model, hum: Humanoid)
 
 	if hum.RigType == Enum.HumanoidRigType.R15 then
 		buildRagdoll(char, parts)
-		applyCollisionGroup(baseParts)
 	end
+
+	-- Mover todos los baseparts al grupo RAGDOLL: no colisionan ni entre sí
+	-- ni contra jugadores vivos (CHARACTERS), pero sí contra el mundo (Default).
+	CollisionGroups.setGroupForParts(char, baseParts, CollisionGroups.RAGDOLL)
 
 	-- AntiGravityForce solo en body parts (hijos directos del Model), no en
 	-- accesorios/tools/decoraciones que estarían soldadas y no necesitan

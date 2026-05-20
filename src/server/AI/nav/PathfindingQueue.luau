@@ -30,6 +30,10 @@ local PathfindingQueue = {}
 
 local _queue: { Entry } = {}
 local _onEnqueue: ((depth: number) -> ())? = nil
+-- Semáforo de in-flight: el budget per-Heartbeat sólo limita enqueues. Sin
+-- tope concurrente, un repath storm spawnea N coroutines paralelas que ceden
+-- mid-ComputeAsync y el spike se acumula en lugar de diluirse.
+local _inFlight = 0
 
 function PathfindingQueue.enqueue(path: Path, origin: Vector3, dest: Vector3, callback: (ok: boolean) -> ())
 	table.insert(_queue, {
@@ -54,17 +58,20 @@ end
 
 RunService.Heartbeat:Connect(function()
 	local budget = BotConfig.Navigation.QueueRequestsPerHeartbeat
+	local maxInFlight = BotConfig.Navigation.MaxInFlightCompute
 	local processed = 0
-	while processed < budget and #_queue > 0 do
+	while processed < budget and #_queue > 0 and _inFlight < maxInFlight do
 		local entry = table.remove(_queue, 1)
 		if not entry then
 			break
 		end
 		processed += 1
+		_inFlight += 1
 		task.spawn(function()
 			local ok = pcall(function()
 				entry.path:ComputeAsync(entry.origin, entry.dest)
 			end)
+			_inFlight -= 1
 			entry.callback(ok)
 		end)
 	end

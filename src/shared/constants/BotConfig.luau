@@ -28,11 +28,6 @@ export type StuckThresholds = {
 	teleport: number,
 }
 
-export type IdleSecondsRange = {
-	min: number,
-	max: number,
-}
-
 export type BotConfigType = {
 	Movement: {
 		WalkSpeed: number,
@@ -71,11 +66,10 @@ export type BotConfigType = {
 		RoamMaxDist: number,
 		SpawnMinDist: number,
 		SpawnMaxDist: number,
-		IdleAfterArriveChance: number,
-		IdleAfterArriveSeconds: IdleSecondsRange,
 		StuckThresholds: StuckThresholds,
 		StuckMoveEpsilon: number,
 		QueueRequestsPerHeartbeat: number,
+		MaxInFlightCompute: number,
 	},
 	Lifecycle: {
 		RagdollCleanupDelay: number,
@@ -134,11 +128,10 @@ local BotConfig: BotConfigType = {
 		RoamMaxDist = 80,
 		SpawnMinDist = 30,
 		SpawnMaxDist = 120,
-		IdleAfterArriveChance = 0,                          -- desactivado: bot siempre en marcha (objetivo "constant velocity like real players")
-		IdleAfterArriveSeconds = { min = 0, max = 0 },
 		StuckThresholds = { lateral = 1.0, repath = 2.0, jump = 4.0, teleport = 8.0 },
 		StuckMoveEpsilon = 0.5,        -- studs/seg debajo de los cuales contamos stuck
 		QueueRequestsPerHeartbeat = 2, -- ComputeAsync globales por Heartbeat
+		MaxInFlightCompute = 4,        -- tope de ComputeAsync simultáneos (semáforo). El budget por Heartbeat sólo regula enqueues; sin tope concurrente un repath storm puede arrancar N coroutines en paralelo.
 	},
 
 	Lifecycle = {

@@ -15,6 +15,7 @@ local GameConfig = require(Shared.GameConfig)
 local Network = require(Shared.networking.Network)
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
 local DailyTasksConfig = require(Shared.constants.DailyTasks)
+local ActionRewards = require(Shared.constants.ActionRewards)
 local LockerCategory = require(Shared.constants.LockerCategory)
 
 local DAILY_TASK_COMPLETED_ICON = "rbxassetid://113694528712529"
@@ -877,11 +878,12 @@ function MatchFeature.start(menuController: any): any
 					local before = prevClaimed[def.Id] == true
 					if now and not before then
 						-- Description leerá "You earned Cash"; Reward.Value
-						-- mostrará el monto otorgado por la tarea.
+						-- mostrará el monto otorgado por la tarea. Cash vive en
+						-- ActionRewards (clave "Daily"..Id), no en DailyTasks.luau.
 						hud:playChallengeCompletedAnimation({
 							name = "Cash",
 							image = DAILY_TASK_COMPLETED_ICON,
-							cashAmount = def.Cash,
+							cashAmount = ActionRewards.GetCash("Daily" .. def.Id),
 						})
 					end
 				end

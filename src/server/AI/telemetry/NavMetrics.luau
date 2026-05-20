@@ -82,6 +82,16 @@ function NavMetrics.GetActiveBotCount(): number
 	return _activeBotCount
 end
 
+-- Lifecycle counters: sin payload (acumulan en _counts vía record). Útiles
+-- para health del sistema en summaries y para sanity-check de re-spawn rate.
+function NavMetrics.RecordBotSpawned()
+	NavMetrics.record("bots_spawned", {})
+end
+
+function NavMetrics.RecordBotDied()
+	NavMetrics.record("bots_died", {})
+end
+
 -- queueDepth > 2 × activeBotCount → repath storm / re-spawn anómalo. Si no
 -- hay bots activos, ignorar (la cola está abierta pero vacía de forma
 -- natural).

@@ -4,14 +4,16 @@
 
 	Mantiene el progreso de tareas diarias por jugador y otorga el cash
 	cuando se completan. La definición de las tareas vive en
-	`shared/constants/DailyTasks.luau` (Id, Kind, Title, Objective, Cash).
+	`shared/constants/DailyTasks.luau` (Id, Kind, Title, Objective); el cash
+	de cada una vive en `ActionRewards.luau` (claves DailyTask1/2/3).
 
 	Responsabilidades:
 	  • Reset diario por jugador: al cargar el perfil o al cambiar el día UTC
 	    durante la sesión, resetea Progress y Claimed.
 	  • IncrementProgress(player, kind, amount): suma al contador del Kind y,
-	    si supera el objetivo y la tarea no está claimed, otorga Cash y marca
-	    Claimed. Idempotente respecto a llamadas extra (no paga doble).
+	    si supera el objetivo y la tarea no está claimed, concede Cash vía
+	    RewardService y marca Claimed atómicamente. Idempotente respecto a
+	    llamadas extra (no paga doble).
 	  • Hooks expuestos: OnKill, OnMatchPlayed, OnMatchWon — hooks semánticos
 	    para que WeaponsSystem y MatchService no tengan que conocer Kind.
 ]]
@@ -24,6 +26,7 @@ local DailyTasks = require(Shared.constants.DailyTasks)
 
 local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
 type DataService = DataServiceMod.DataServiceModule
+local RewardService = require(script.Parent.Parent.Parent.core.RewardService)
 
 local DailyTasksService = {}
 DailyTasksService.__index = DailyTasksService
@@ -100,20 +103,21 @@ function DailyTasksService:IncrementProgress(player: Player, kind: string, amoun
 		return
 	end
 
-	local updates = {
-		{ path = { "DailyTasks", "Progress", kind }, value = newProgress },
-	}
+	local progressUpdate = { path = { "DailyTasks", "Progress", kind }, value = newProgress }
 
 	-- Reglas de claim: progreso completo + no claimed previamente.
 	local justCompleted = newProgress >= taskDef.Objective and not wasClaimed
 	if justCompleted then
-		table.insert(updates, { path = { "DailyTasks", "Claimed", taskDef.Id }, value = true })
-		-- Cash con delta: evita TOCTOU si una compra/kill muta Stats.Cash
-		-- entre este punto y el apply del BatchUpdate.
-		table.insert(updates, { path = { "Stats", "Cash" }, delta = taskDef.Cash })
+		-- RewardService.Award resuelve el cash (clave "Daily"..Id en ActionRewards),
+		-- mete Cash + Progress + Claimed en un único BatchUpdate (atómico) y aplica
+		-- XP por separado vía AddXP. Cash delta evita TOCTOU con compras/kills.
+		RewardService.Award(player, "Daily" .. taskDef.Id, {
+			progressUpdate,
+			{ path = { "DailyTasks", "Claimed", taskDef.Id }, value = true },
+		})
+	else
+		_dataService:BatchUpdate(player, { progressUpdate })
 	end
-
-	_dataService:BatchUpdate(player, updates)
 end
 
 -- Hooks semánticos — los callers no conocen los Kind internos.

@@ -8,6 +8,7 @@ local Players = game:GetService("Players")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local GameConfig = require(Shared:WaitForChild("GameConfig"))
 local KillEffectsRegistry = require(Shared.Locker.killEffects.KillEffectsRegistry)
+local CollisionGroups = require(Shared:WaitForChild("CollisionGroups"))
 local BotNames = require(Shared.constants.BotNames)
 local BotConfig = require(Shared.constants.BotConfig)
 local ItemDefaults = require(Shared.constants.ItemDefaults)
@@ -186,8 +187,10 @@ local function _assignIdentity(): (BotIdentity, number)
 		_usedIdentityIndices[idx] = true
 		identity = BotNames[idx]
 	else
-		-- Fallback: all identities used, generate unique name
-		identity = { name = "Player" .. tostring(math.abs(fakeUserId)), image = "rbxassetid://0" }
+		-- Fallback: pool agotado (>20 bots/team). Prefijo "Bot_" en lugar de
+		-- "Player" para evitar colisiones con usernames reales de Roblox que
+		-- empiezan por "Player".
+		identity = { name = "Bot_" .. tostring(math.abs(fakeUserId)), image = "rbxassetid://0" }
 	end
 	return identity, fakeUserId
 end
@@ -302,6 +305,7 @@ local function _buildFallbackBotModel(botName: string): Model
 	return model
 end
 
+local _hasWarnedMissingTemplate = false
 local function _createBotModel(botName: string): Model
 	local template = _findTemplateBot()
 	if template then
@@ -310,6 +314,14 @@ local function _createBotModel(botName: string): Model
 		return clone
 	end
 
+	-- Audit P2: warn una sola vez por proceso. Antes el fallback silencioso
+	-- producía bots T-pose sin tool en producción y nadie se enteraba salvo
+	-- viendo en vivo. Si el template falta, todos los bots del round caen
+	-- al fallback — no necesitamos N warns iguales, solo uno con contexto.
+	if not _hasWarnedMissingTemplate then
+		_hasWarnedMissingTemplate = true
+		warn("[AIService] BotTemplate no encontrado (buscado en ReplicatedStorage.NPC, .Bots.NPC, ServerStorage.Bots.BotTemplate, .BotTemplate). Usando modelo barebones — los bots aparecerán en T-pose y sin arma hasta que se restaure el template.")
+	end
 	return _buildFallbackBotModel(botName)
 end
 
@@ -445,6 +457,16 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 	humanoid.Health = humanoid.MaxHealth
 	humanoid.BreakJointsOnDeath = false
 
+	-- Mismo tratamiento que los jugadores: CHARACTERS group para que players
+	-- vivos no choquen con cadáveres. Al morir, el kill effect migra al grupo
+	-- RAGDOLL. Watcher cubre tools/accesorios que se parenten después.
+	CollisionGroups.setGroupForCharacter(botModel, CollisionGroups.CHARACTERS)
+	botModel.DescendantAdded:Connect(function(descendant)
+		if descendant:IsA("BasePart") then
+			descendant.CollisionGroup = CollisionGroups.groupForNewPart(botModel)
+		end
+	end)
+
 	-- Misma inmunidad al spawn que los jugadores (ver MatchService). ForceField
 	-- nativo, no se rompe al disparar, expira por tiempo vía Debris.
 	if GameConfig.SpawnProtectionDuration > 0 then
@@ -500,6 +522,7 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 		_botsByName[botName] = nil
 		_refreshAliveLists()
 		_notifyActiveBotCount()
+		NavMetrics.RecordBotDied()
 
 		-- 4. Programar destrucción siempre, incluso si _onBotDied falla.
 		task.delay(BotConfig.Lifecycle.RagdollCleanupDelay, function()
@@ -521,6 +544,7 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 	_botsByName[botName] = record
 	table.insert(_botNamesByTeam[team], botName)
 	_notifyActiveBotCount()
+	NavMetrics.RecordBotSpawned()
 	return true
 end
 

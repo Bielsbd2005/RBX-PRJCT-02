@@ -29,6 +29,7 @@ local Janitor = require(Packages.janitor) :: any
 local Fusion = require(Packages.fusion) :: any
 
 local DailyTasks = require(Shared.constants.DailyTasks)
+local ActionRewards = require(Shared.constants.ActionRewards)
 local DataController = require(Client.core.data.DataController)
 local UIUtils = require(Client.core.ui.UIUtils)
 
@@ -83,7 +84,9 @@ local function _paintSlot(slot: Slot, def: any, progress: number, claimed: boole
 
 	_setText(slot.titleLabel, def.Title)
 	_setText(slot.valueLabel, string.format("%d/%d", clampedProgress, objective))
-	_setText(slot.rewardLabel, UIUtils.formatCashAmount(def.Cash))
+	-- Cash de la tarea vive en ActionRewards (clave "Daily"..Id) — fuente única
+	-- compartida con RewardService en el server.
+	_setText(slot.rewardLabel, UIUtils.formatCashAmount(ActionRewards.GetCash("Daily" .. def.Id)))
 
 	if slot.barFill then
 		-- Solo escalar el eje X; conservar Y. X.Offset = 0 para evitar que el

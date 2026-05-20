@@ -7,6 +7,7 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
@@ -64,6 +65,7 @@ type HudRefs = {
 	teamAScore: TextLabel?,
 	teamBBarFill: GuiObject?,
 	teamBScore: TextLabel?,
+	version: TextLabel?,
 	teamAPlayerRows: { HudPlayerRowRefs },
 	teamBPlayerRows: { HudPlayerRowRefs },
 }
@@ -269,6 +271,7 @@ local function _resolveHudRefs(matchHudGui: ScreenGui?): HudRefs
 			cashValue = nil, levelValue = nil, levelBarFill = nil,
 			teamABarFill = nil, teamAScore = nil,
 			teamBBarFill = nil, teamBScore = nil,
+			version = nil,
 			teamAPlayerRows = {}, teamBPlayerRows = {},
 		}
 	end
@@ -285,6 +288,12 @@ local function _resolveHudRefs(matchHudGui: ScreenGui?): HudRefs
 	local teamAPlayersNode = _findDescendantGuiObject(matchNode, { "TeamA", "PlayersA" })
 	local teamBPlayersNode = _findDescendantGuiObject(matchNode, { "TeamB", "PlayersB" })
 
+	-- Container.Version puede ser un TextLabel directo (caso simple) o un
+	-- contenedor con un hijo `Value` que muestra el número (patrón usado por
+	-- Cash/Level). Probamos ambos para no acoplarnos al naming del asset.
+	local versionLabel = _findDescendantTextLabel(containerNode, { "Version" })
+		or _findDescendantTextLabel(containerNode, { "Version", "Value" })
+
 	return {
 		scoreA = _findDescendantTextLabel(teamAFillNode, { "ScoreA" }),
 		scoreB = _findDescendantTextLabel(teamBFillNode, { "ScoreB" }),
@@ -297,6 +306,7 @@ local function _resolveHudRefs(matchHudGui: ScreenGui?): HudRefs
 		teamAScore = _findDescendantTextLabel(teamAFillNode, { "ScoreA" }),
 		teamBBarFill = teamBFillNode,
 		teamBScore = _findDescendantTextLabel(teamBFillNode, { "ScoreB" }),
+		version = versionLabel,
 		teamAPlayerRows = _collectHudPlayerRows(teamAPlayersNode),
 		teamBPlayerRows = _collectHudPlayerRows(teamBPlayersNode),
 	}
@@ -312,6 +322,28 @@ function MatchHud.new(matchHudGui: ScreenGui?): any
 	self._gui = matchHudGui
 	self._hudRefs = _resolveHudRefs(matchHudGui)
 	self._localUserId = Players.LocalPlayer.UserId
+
+	-- Stats overlay: "vX | Yms | Zfps" en Container.Version cada 1s.
+	if self._hudRefs.version then
+		local versionLabel = self._hudRefs.version
+		local placePrefix = "v" .. tostring(game.PlaceVersion)
+		local localPlayer = Players.LocalPlayer
+		local frameCount = 0
+
+		RunService.RenderStepped:Connect(function()
+			frameCount += 1
+		end)
+
+		task.spawn(function()
+			while true do
+				local framesAtStart = frameCount
+				local dt = task.wait(1)
+				local fps = math.floor((frameCount - framesAtStart) / dt + 0.5)
+				local pingMs = math.floor(localPlayer:GetNetworkPing() * 1000 + 0.5)
+				versionLabel.Text = string.format("%s | %dms | %dfps", placePrefix, pingMs, fps)
+			end
+		end)
+	end
 
 	-- Tracking de partida
 	self._killsByUserId = {} :: { [number]: number }

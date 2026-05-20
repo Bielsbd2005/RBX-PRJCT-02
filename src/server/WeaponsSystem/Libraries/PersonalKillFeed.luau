@@ -1,9 +1,14 @@
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
 
+local ActionRewards = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("ActionRewards"))
+
 local DISPLAY_TIME = 3.5
-local HEADSHOT_BONUS_XP = 50
+-- Lee de ActionRewards para que la UI no mienta si el valor cambia (es la
+-- misma cifra que MatchService concede vía RewardService.Award(_, "Headshot")).
+local HEADSHOT_BONUS_XP = ActionRewards.GetXP("Headshot")
 local MAX_NOTIFS = 5
 
 local currentNotificationOrder = 0

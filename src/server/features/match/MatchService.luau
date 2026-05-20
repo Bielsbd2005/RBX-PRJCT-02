@@ -18,13 +18,14 @@ local SpawnSelector = require(script.Parent:WaitForChild("SpawnSelector"))
 local LoadoutService = require(script.Parent:WaitForChild("LoadoutService"))
 local HealthPickupService = require(script.Parent:WaitForChild("HealthPickupService"))
 local KillEffectsRegistry = require(Shared.Locker.killEffects.KillEffectsRegistry)
+local CollisionGroups = require(Shared.CollisionGroups)
 local ItemsConfig = require(Shared.constants.ItemsConfig)
-local ActionRewards = require(Shared.constants.ActionRewards)
 local WeaponCategory = require(Shared.constants.WeaponCategory)
 local ItemDefaults = require(Shared.constants.ItemDefaults)
 local DailyTasksService = require(script.Parent.Parent.dailyTasks.DailyTasksService)
 
 local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
+local RewardService = require(script.Parent.Parent.Parent.core.RewardService)
 type DataService = DataServiceMod.DataServiceModule
 
 type MapDefinition = {
@@ -365,22 +366,7 @@ local function _grantActionRewardsToAttacker(attackerUserId: number?, action: st
 		return
 	end
 
-	local xpAmount = ActionRewards.GetXP(action)
-	local cashAmount = ActionRewards.GetCash(action)
-
-	if xpAmount > 0 then
-		local ok, err = pcall(_dataService.AddXP, _dataService, attackerPlayer, xpAmount)
-		if not ok then
-			warn("[MatchService] AddXP error: " .. tostring(err))
-		end
-	end
-
-	if cashAmount > 0 then
-		local ok, err = pcall(_dataService.Increment, _dataService, attackerPlayer, { "Stats", "Cash" }, cashAmount)
-		if not ok then
-			warn("[MatchService] Cash Increment error: " .. tostring(err))
-		end
-	end
+	RewardService.Award(attackerPlayer, action)
 end
 
 local function _grantMasteryWrapsIfEligible(player: Player, weaponCategory: string, weaponId: string, newKillCount: number)
@@ -1859,6 +1845,22 @@ function _startVoteIfPossible()
 	task.spawn(_runVoteTimer, voteState)
 end
 
+local function _onCharacterAdded(player: Player, character: Model)
+	-- Asignar al grupo CHARACTERS para que jugadores vivos no colisionen con
+	-- cadáveres (ragdolls están en RAGDOLL via los kill effects). Snapshot
+	-- inmediato + DescendantAdded por si accesorios/tools cargan tarde.
+	-- La conexión muere con el modelo del personaje (no leak entre lives).
+	CollisionGroups.setGroupForCharacter(character, CollisionGroups.CHARACTERS)
+	character.DescendantAdded:Connect(function(descendant)
+		if descendant:IsA("BasePart") then
+			-- Si el char ya ragdollizó cuando llega una part nueva (VFX del
+			-- kill effect, p.ej.), tomar el grupo coherente con su estado.
+			descendant.CollisionGroup = CollisionGroups.groupForNewPart(character)
+		end
+	end)
+	_registerDeathListener(player, character)
+end
+
 local function _bindCharacterTracking(player: Player)
 	local old = _characterConnectionsByUserId[player.UserId]
 	if old then
@@ -1867,11 +1869,11 @@ local function _bindCharacterTracking(player: Player)
 	end
 
 	_characterConnectionsByUserId[player.UserId] = player.CharacterAdded:Connect(function(character)
-		_registerDeathListener(player, character)
+		_onCharacterAdded(player, character)
 	end)
 
 	if player.Character then
-		_registerDeathListener(player, player.Character)
+		_onCharacterAdded(player, player.Character)
 	end
 end
 

@@ -47,11 +47,11 @@ ShoulderCamera.SpringService = SpringService
 --
 -- Las variables son `local` para que las closures definidas más abajo capturen
 -- el upvalue: re-asignar la variable se ve desde todas las funciones.
-local CashBonusSystem = nil
 local MatchService = nil
 local DataService = nil
 local DailyTasksService = nil
 local BattlePassService = nil
+local RewardService = nil
 
 local _AUTOLOAD_TIMEOUT = 5
 
@@ -84,9 +84,6 @@ local function _autoloadServices()
 	local featuresFolder = _safeWaitForChild(serverRoot, "features")
 	local matchFeatures = featuresFolder and _safeWaitForChild(featuresFolder, "match")
 	if matchFeatures then
-		if not CashBonusSystem then
-			CashBonusSystem = _safeRequire(matchFeatures:FindFirstChild("CashBonusSystem"), "CashBonusSystem")
-		end
 		if not MatchService then
 			MatchService = _safeRequire(matchFeatures:FindFirstChild("MatchService"), "MatchService")
 		end
@@ -206,7 +203,7 @@ WeaponsSystem.CurrentWeaponChanged = Instance.new("BindableEvent")
 --   weaponName, wasHeadshot) y devuelve { coinAmount, streakAfterKill,
 --   xpGained } para el payload del PlayerEliminated remote (UI del killer
 --   los necesita en el mismo frame). Si nadie registra el hook, valores
---   default (xpGained = 150/100, streakAfterKill = 1, coinAmount = nil).
+--   default resueltos vía ActionRewards (Kill + Headshot si aplica).
 --
 -- Killed.Event (asíncrono):
 --   Se Fire después de aplicar damage + flush assists. Bootstrap conecta
@@ -222,21 +219,19 @@ function WeaponsSystem.injectServices(services: {
 	MatchService: any?,
 	DailyTasksService: any?,
 	BattlePassService: any?,
-	CashBonusSystem: any?,
+	RewardService: any?,
 })
 	if services.DataService ~= nil then DataService = services.DataService end
 	if services.MatchService ~= nil then MatchService = services.MatchService end
 	if services.DailyTasksService ~= nil then DailyTasksService = services.DailyTasksService end
 	if services.BattlePassService ~= nil then BattlePassService = services.BattlePassService end
-	if services.CashBonusSystem ~= nil then CashBonusSystem = services.CashBonusSystem end
+	if services.RewardService ~= nil then RewardService = services.RewardService end
 end
 
 -- Assign flushAssists body now that WeaponsSystem exists
 flushAssists = function(target: Humanoid, killerPlayer: Player?)
 	local assistEvent = WeaponsSystem.remoteEvents["PlayerAssist"]
 	if damageContributors[target] then
-		local assistXP = ActionRewards.GetXP("Assist")
-		local assistCash = ActionRewards.GetCash("Assist")
 		for contributor, _ in damageContributors[target] do
 			-- Guard estricto: contributor sigue en el server Y no es el killer.
 			-- Re-evaluamos contributor.Parent justo antes del write (puede haber
@@ -246,29 +241,13 @@ flushAssists = function(target: Humanoid, killerPlayer: Player?)
 				if assistEvent then
 					assistEvent:FireClient(contributor)
 				end
-				if DataService then
-					-- BatchUpdate atómico: Stats.Assists + Cash en un único save.
-					-- Stats.Assists existe en el schema AAA (Stats expandido).
-					local updates = {
+				if RewardService then
+					-- Stats.Assists+1 va atómico con el Cash dentro del mismo
+					-- BatchUpdate. XP se aplica internamente vía AddXP (cascada
+					-- de level-up).
+					(RewardService :: any).Award(contributor, "Assist", {
 						{ path = { "Stats", "Assists" }, delta = 1 },
-					}
-					if assistCash > 0 then
-						table.insert(updates, { path = { "Stats", "Cash" }, delta = assistCash })
-					end
-					if (DataService :: any).BatchUpdate then
-						local ok, err = pcall((DataService :: any).BatchUpdate, DataService, contributor, updates)
-						if not ok then
-							warn("WeaponsSystem: Assist BatchUpdate error: " .. tostring(err))
-						end
-					end
-					-- AddXP es separado porque tiene lógica de level-up en cascada
-					-- que no encaja en BatchUpdate genérico.
-					if assistXP > 0 and (DataService :: any).AddXP then
-						local ok, err = pcall((DataService :: any).AddXP, DataService, contributor, assistXP)
-						if not ok then
-							warn("WeaponsSystem: Assist AddXP error: " .. tostring(err))
-						end
-					end
+					})
 				end
 			end
 		end
@@ -956,7 +935,11 @@ local function _defaultDamageCallback(system, target, amount, damageType, dealer
 						end
 					end
 
-					local xpGained = (rewards and rewards.xpGained) or (wasHeadshot and 150 or 100)
+					-- Fallback solo cuando nadie registró killHook (uso standalone
+					-- del módulo). En el flujo normal el bootstrap registra el hook
+					-- y devuelve los valores reales de ActionRewards.
+					local fallbackXp = ActionRewards.GetXP("Kill") + (wasHeadshot and ActionRewards.GetXP("Headshot") or 0)
+					local xpGained = (rewards and rewards.xpGained) or fallbackXp
 					local streakAfterKill = (rewards and rewards.streakAfterKill) or 1
 					local coinAmount = rewards and rewards.coinAmount
 

@@ -63,6 +63,10 @@ local function bindButton(boundSet: { [GuiButton]: boolean }, janitor: any, butt
 
 	janitor:Add(button.Activated:Connect(function()
 		if not button.Active then return end
+		-- Opt-out por botón. Lo usan los controles móviles (Fire/Aim/Reload/Jump)
+		-- porque Activated puede dispararse al deslizar el dedo desde fuera y
+		-- soltar encima, lo que provocaba un click sound espurio al girar la cámara.
+		if button:GetAttribute("NoClickSound") then return end
 		local soundName = if button.Name == CLOSE_BUTTON_NAME then CLOSE_SOUND_NAME else CLICK_SOUND_NAME
 		playSound(soundName)
 	end), "Disconnect")

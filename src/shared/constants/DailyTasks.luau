@@ -11,8 +11,13 @@
 		.Title         — TextLabel
 		.Value         — TextLabel "<progress>/<objective>"
 		.Bar.Fill      — Frame (escalado X = progress/objective)
-		.Reward.Value  — TextLabel (Cash)
+		.Reward.Value  — TextLabel (Cash, resuelto vía ActionRewards.GetCash("Daily"..Id))
 		.Icon          — ImageLabel (rbxassetid)
+
+	El cash que da cada tarea NO vive aquí — vive en
+	`shared/constants/ActionRewards.luau` bajo las claves DailyTask1/DailyTask2/
+	DailyTask3 (convención: "Daily" .. Id). Es la fuente única de verdad para
+	cualquier sistema que conceda XP o Cash, vía `server/core/RewardService`.
 ]]
 
 export type TaskKind = "Eliminations" | "WinMatches" | "PlayMatches"
@@ -23,7 +28,6 @@ export type TaskDefinition = {
 	Title: string,
 	Icon: string,       -- rbxassetid (vacío hasta que se asigne)
 	Objective: number,  -- meta a alcanzar
-	Cash: number,       -- recompensa al completar
 }
 
 local DailyTasks = {}
@@ -35,7 +39,6 @@ DailyTasks.Tasks = {
 		Title = "Eliminations",
 		Icon = "rbxassetid://87933886143928",
 		Objective = 3,
-		Cash = 20,
 	},
 	{
 		Id = "Task2",
@@ -43,7 +46,6 @@ DailyTasks.Tasks = {
 		Title = "Win Matches",
 		Icon = "rbxassetid://112053349618869",
 		Objective = 2,
-		Cash = 25,
 	},
 	{
 		Id = "Task3",
@@ -51,7 +53,6 @@ DailyTasks.Tasks = {
 		Title = "Play Matches",
 		Icon = "rbxassetid://133869836581697",
 		Objective = 3,
-		Cash = 20,
 	},
 } :: { TaskDefinition }
 

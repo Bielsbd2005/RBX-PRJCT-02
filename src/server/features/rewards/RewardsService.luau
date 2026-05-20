@@ -10,6 +10,8 @@ local NetGuards = require(Shared.networking.NetGuards)
 
 local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
 type DataService = DataServiceMod.DataServiceModule
+local RewardService = require(script.Parent.Parent.Parent.core.RewardService)
+local ActionRewards = require(Shared:WaitForChild("constants"):WaitForChild("ActionRewards"))
 
 local M = NetGuards.MAX
 
@@ -20,19 +22,17 @@ local _dataService: DataService = nil :: any
 local _started = false
 
 local COOLDOWN = 0.3
-local CLAIM_CASH_REWARD = {
-	LikeJoin = 100,
-	Notifications = 100,
-}
 
---CODIGOS
-local CODE_REWARDS: { [string]: number } = {
-	WELCOME = 100,
-	REWARDS = 100,
+-- Mapeo "código en input" → clave de ActionRewards. Para añadir un código nuevo:
+--   1. Añadir entry en ActionRewards.Amounts (server/shared single source of truth).
+--   2. Añadir entry aquí mapeando el string que el jugador escribe a esa clave.
+local CODE_TO_ACTION: { [string]: string } = {
+	WELCOME = "CodeWelcome",
+	REWARDS = "CodeRewards",
 }
 
 -- Sanity cap: ningún código puede recompensar más que esto, sin importar la
--- entrada en CODE_REWARDS. Defensa contra typos / valores inflados accidentales.
+-- entrada en ActionRewards. Defensa contra typos / valores inflados accidentales.
 local MAX_CODE_REWARD = 10000
 
 local _cooldowns: { [number]: { [string]: number } } = {}
@@ -128,9 +128,7 @@ local function _onClaimLikeJoin(_: {}, player: Player): ()
 		return
 	end
 
-	local rewardCash = CLAIM_CASH_REWARD.LikeJoin
-	local ok = _dataService:BatchUpdate(player, {
-		{ path = { "Stats", "Cash" }, delta = rewardCash },
+	local ok, _xp, rewardCash = RewardService.Award(player, "ClaimLikeJoin", {
 		{ path = { "Rewards", "GroupClaimed" }, value = true },
 	})
 
@@ -158,9 +156,7 @@ local function _onClaimNotifications(_: {}, player: Player): ()
 		return
 	end
 
-	local rewardCash = CLAIM_CASH_REWARD.Notifications
-	local ok = _dataService:BatchUpdate(player, {
-		{ path = { "Stats", "Cash" }, delta = rewardCash },
+	local ok, _xp, rewardCash = RewardService.Award(player, "ClaimNotifications", {
 		{ path = { "Rewards", "NotificationsClaimed" }, value = true },
 	})
 
@@ -196,16 +192,19 @@ local function _onRedeemCode(data: { code: string }, player: Player): ()
 		return
 	end
 
-	local rewardCash = CODE_REWARDS[normalizedCode]
-	if not rewardCash then
+	local actionKey = CODE_TO_ACTION[normalizedCode]
+	if not actionKey or not ActionRewards.Has(actionKey) then
 		_send(player, false, "Codigo invalido.", "Code", 0)
 		return
 	end
 
-	-- Sanity cap por si CODE_REWARDS tiene un valor inflado.
-	if rewardCash > MAX_CODE_REWARD then
-		warn(("[RewardsService] Code %s exceeds MAX_CODE_REWARD (%d > %d) — capping."):format(normalizedCode, rewardCash, MAX_CODE_REWARD))
-		rewardCash = MAX_CODE_REWARD
+	-- Sanity cap por si la entry en ActionRewards tiene un valor inflado.
+	local cashFromCatalog = ActionRewards.GetCash(actionKey)
+	if cashFromCatalog > MAX_CODE_REWARD then
+		warn(("[RewardsService] Code %s (%s) excede MAX_CODE_REWARD (%d > %d) — bloqueando claim"):format(
+			normalizedCode, actionKey, cashFromCatalog, MAX_CODE_REWARD))
+		_send(player, false, "Codigo invalido.", "Code", 0)
+		return
 	end
 
 	if profile.Data.Rewards.ClaimedCodes[normalizedCode] then
@@ -213,8 +212,7 @@ local function _onRedeemCode(data: { code: string }, player: Player): ()
 		return
 	end
 
-	local ok = _dataService:BatchUpdate(player, {
-		{ path = { "Stats", "Cash" }, delta = rewardCash },
+	local ok, _xp, rewardCash = RewardService.Award(player, actionKey, {
 		{ path = { "Rewards", "ClaimedCodes", normalizedCode }, value = true },
 	})
 
