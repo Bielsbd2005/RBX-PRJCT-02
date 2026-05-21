@@ -1,14 +1,7 @@
 
 local function _isDescendantOfStarterGear(instance: Instance): boolean
-	local current: Instance? = instance
-	while current do
-		if current:IsA("StarterGear") then
-			return true
-		end
-		current = current.Parent
-	end
-
-	return false
+	-- W10: nativo en lugar de loop manual sobre la ancestría.
+	return instance:FindFirstAncestorOfClass("StarterGear") ~= nil
 end
 local CollectionService = game:GetService("CollectionService")
 local RunService = game:GetService("RunService")
@@ -133,10 +126,13 @@ local REMOTE_EVENT_NAMES = {
 	"PlayExplosionVFX",
 }
 
--- Damage contributors per humanoid for assist tracking
-local damageContributors: { [Humanoid]: { [Player]: number } } = {}
-local assistDiedConnections: { [Humanoid]: RBXScriptConnection } = {}
-local assistAncestryConnections: { [Humanoid]: RBXScriptConnection } = {}
+-- Damage contributors per humanoid for assist tracking.
+-- W9: weak keys (__mode = "k") aseguran que si un Humanoid se queda sin refs
+-- fuertes (mapa re-parented, mob destruido sin disparar Died, etc.) el GC
+-- limpia la entry. Defense-in-depth — el flujo normal usa Died/AncestryChanged.
+local damageContributors: { [Humanoid]: { [Player]: number } } = setmetatable({}, { __mode = "k" }) :: any
+local assistDiedConnections: { [Humanoid]: RBXScriptConnection } = setmetatable({}, { __mode = "k" }) :: any
+local assistAncestryConnections: { [Humanoid]: RBXScriptConnection } = setmetatable({}, { __mode = "k" }) :: any
 
 local function _clearDamageContributors(target: Humanoid)
 	damageContributors[target] = nil
@@ -802,11 +798,14 @@ end
 
 
 function WeaponsSystem.getPlayerFromHumanoid(humanoid)
-	for _, player in ipairs(Players:GetPlayers()) do
-		if player.Character and humanoid:IsDescendantOf(player.Character) then
-			return player
-		end
+	-- W5: nativo O(1) via tabla interna del servicio. Antes loop sobre
+	-- Players:GetPlayers() + IsDescendantOf por hit (caro en explosiones,
+	-- que llaman este por cada parte en el radio).
+	local parent = humanoid and humanoid.Parent
+	if not parent then
+		return nil
 	end
+	return Players:GetPlayerFromCharacter(parent)
 end
 
 

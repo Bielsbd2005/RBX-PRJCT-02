@@ -42,6 +42,39 @@ local PARABOLA_SAMPLES_LOW = 1
 local localRandom = Random.new()
 local localPlayer = not IsServer and Players.LocalPlayer
 
+-- W2: bucle global de proyectiles. Antes cada bala creaba su propia conexión
+-- Heartbeat (con shotgun NumProjectiles=8 + auto-fire son decenas de
+-- conexiones simultáneas por jugador). Ahora una única conexión itera
+-- activeProjectiles y libera entries marcadas inactive via swap-remove.
+type ProjectileEntry = { active: boolean, callback: ((number) -> ())? }
+local activeProjectiles: { ProjectileEntry } = {}
+local projectileLoopConn: RBXScriptConnection? = nil
+
+local function _projectileLoopTick(dt: number)
+	local i = 1
+	while i <= #activeProjectiles do
+		local entry = activeProjectiles[i]
+		if entry.active and entry.callback then
+			-- pcall opcional aquí evitaría que una bala con bug detenga el
+			-- bucle global. Dejado fuera para no enmascarar errores reales —
+			-- los callbacks son código nuestro, no input externo.
+			entry.callback(dt)
+		end
+		if not entry.active then
+			local n = #activeProjectiles
+			activeProjectiles[i] = activeProjectiles[n]
+			activeProjectiles[n] = nil
+		else
+			i += 1
+		end
+	end
+end
+
+local function _ensureProjectileLoop()
+	if projectileLoopConn then return end
+	projectileLoopConn = RunService.Heartbeat:Connect(_projectileLoopTick)
+end
+
 local BulletWeapon = {}
 BulletWeapon.__index = BulletWeapon
 setmetatable(BulletWeapon, BaseWeapon)
@@ -158,8 +191,11 @@ function BulletWeapon:getRandomSeedForId(id)
 	return id
 end
 
--- Emite partículas de muzzle desde el bulletEffect, agrupadas en passes con velocidades aleatorias
--- para dispersión natural. No depende de self.
+-- Emite partículas de muzzle desde el bulletEffect.
+-- W8: 1 emit + 1 escritura Velocity por proyectil (antes 5 + 5). La dispersión
+-- por-partícula viene del SpreadAngle/VelocitySpread del template ParticleEmitter
+-- (configurado en el .rbxm). Con shotgun (NumProjectiles=8) eran 40 writes + 40
+-- emits/shot.
 local function _emitMuzzleParticles(bulletEffect: Instance, origin: Vector3, dir: Vector3, totalParticles: number)
 	local muzzleParticles = bulletEffect:FindFirstChild("MuzzleParticles", true)
 	if not muzzleParticles then
@@ -167,16 +203,12 @@ local function _emitMuzzleParticles(bulletEffect: Instance, origin: Vector3, dir
 	end
 	local emitter = muzzleParticles.Parent
 	emitter.CFrame = CFrame.new(origin, origin + dir)
-	local numSteps = 5
-	local perStep = totalParticles / numSteps
-	for _ = 1, numSteps do
-		emitter.Velocity = Vector3.new(
-			localRandom:NextNumber(-10, 10),
-			localRandom:NextNumber(-10, 10),
-			localRandom:NextNumber(-10, 10)
-		)
-		muzzleParticles:Emit(perStep)
-	end
+	emitter.Velocity = Vector3.new(
+		localRandom:NextNumber(-10, 10),
+		localRandom:NextNumber(-10, 10),
+		localRandom:NextNumber(-10, 10)
+	)
+	muzzleParticles:Emit(totalParticles)
 end
 
 -- Muestra el muzzle flash en self.tipAttach. Devuelve true si se mostró (para que el caller
@@ -263,12 +295,11 @@ function BulletWeapon:simulateFire(firingPlayer, fireInfo)
 
 	if self.player == Players.LocalPlayer then
 		coroutine.wrap(function()
-			-- Wait for "RecoilDelayTime" before adding recoil. task.wait usa el
-			-- scheduler interno (un solo resume), evitando el bucle de
-			-- RenderStepped:Wait que iteraba a 60-120Hz solo para esperar.
+			-- W12: task.wait sólo. El RenderStepped:Wait extra que había aquí
+			-- añadía 1 frame (~16ms) de latencia sin propósito documentado —
+			-- el recoil delay ya está cubierto por task.wait.
 			local recoilDelayTime = self:getConfigValue("RecoilDelayTime", 0.07)
 			task.wait(recoilDelayTime)
-			RunService.RenderStepped:Wait()
 
 			-- Add recoil to camera
 			local recoilMin, recoilMax = self:getConfigValue("RecoilMin", 0.05), self:getConfigValue("RecoilMax", 0.5)
@@ -404,7 +435,12 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 	end
 
 	-- Set up/initialize variables used in steppedCallback
-	local stepConn = nil
+	-- W2: stepConn ahora es un stub. Su `:Disconnect()` marca la entry como
+	-- inactive — el bucle global la elimina via swap-remove en la próxima
+	-- iteración. El closure no se entera del cambio (sigue usando upvalue
+	-- stepConn igual que antes).
+	local projectileEntry: ProjectileEntry = { active = true, callback = nil }
+	local stepConn = { Disconnect = function() projectileEntry.active = false end }
 	local pTravelDistance = 0 -- projected travel distance so far if projectile never stops
 	local startTime = tick()
 	local didHit = false
@@ -644,7 +680,10 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 		end
 	end
 
-	stepConn = RunService.Heartbeat:Connect(steppedCallback)
+	-- W2: push al bucle global en lugar de Connect propio.
+	projectileEntry.callback = steppedCallback
+	table.insert(activeProjectiles, projectileEntry)
+	_ensureProjectileLoop()
 
 	-- Get rid of charge on chargeable weapons
 	if not IsServer and self.usesCharging then
@@ -845,16 +884,16 @@ function BulletWeapon:onRenderStepped(dt)
 		local aimTrack = self:getAnimTrack(self:getConfigValue("AimTrack", "RifleAim"))
 		local aimZoomTrack = self:getAnimTrack(self:getConfigValue("AimZoomTrack", "RifleAimDownSights"))
 		if aimTrack then
-			local aimDir = tipCFrame.LookVector
-
-			local gunLookRay = Ray.new(tipCFrame.p, aimDir * 500)
-
-			local _, gunHitPoint = Roblox.penetrateCast(gunLookRay, self.ignoreList)
-
+			-- W6: gunLookRay solo se usa como fallback cuando NO hay aimRayCallback.
+			-- Con ShoulderCamera activa el callback siempre está set, así que
+			-- antes hacíamos 2 penetrateCast/frame y descartábamos el primero.
 			if self.weaponsSystem.aimRayCallback then
 				local _, hitPoint = Roblox.penetrateCast(self.weaponsSystem.aimRayCallback(), self.ignoreList)
 				self.aimPoint = hitPoint
 			else
+				local aimDir = tipCFrame.LookVector
+				local gunLookRay = Ray.new(tipCFrame.p, aimDir * 500)
+				local _, gunHitPoint = Roblox.penetrateCast(gunLookRay, self.ignoreList)
 				self.aimPoint = gunHitPoint
 			end
 

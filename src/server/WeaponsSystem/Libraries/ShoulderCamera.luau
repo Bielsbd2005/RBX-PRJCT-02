@@ -873,16 +873,21 @@ end
 local PENETRATE_MAX_TRIES = 8
 
 function ShoulderCamera:penetrateCast(ray, ignoreList)
-	-- Clonar para evitar mutar el ignoreList del caller (contamina entre frames).
-	local localIgnore = table.clone(ignoreList)
+	-- W7: mutar ignoreList in-place y restaurar al final. Antes table.clone()
+	-- por frame en RenderStep alocaba un array completo + GC churn. No hay
+	-- reentrancia (penetrateCast no yield) → mutación temporal es segura.
+	local originalSize = #ignoreList
 	local hitPart, hitPoint, hitNormal, hitMaterial = nil, ray.Origin + ray.Direction, Vector3.new(0, 1, 0), Enum.Material.Air
 	for _ = 1, PENETRATE_MAX_TRIES do
-		hitPart, hitPoint, hitNormal, hitMaterial = workspace:FindPartOnRayWithIgnoreList(ray, localIgnore, false, true)
+		hitPart, hitPoint, hitNormal, hitMaterial = workspace:FindPartOnRayWithIgnoreList(ray, ignoreList, false, true)
 		if hitPart and not hitPart.CanCollide then
-			table.insert(localIgnore, hitPart)
+			table.insert(ignoreList, hitPart)
 		else
 			break
 		end
+	end
+	for i = #ignoreList, originalSize + 1, -1 do
+		ignoreList[i] = nil
 	end
 	return hitPart, hitPoint, hitNormal, hitMaterial
 end

@@ -325,10 +325,77 @@ local function _buildFallbackBotModel(botName: string): Model
 end
 
 local _hasWarnedMissingTemplate = false
-local function _createBotModel(botName: string): Model
+
+-- B5: pool async de Models pre-clonados. Desacopla el coste de Model:Clone
+-- (con sus 30+ parts/accessories) del path crítico de _spawnOneBot. El refill
+-- corre en task.spawn — la siguiente vez que un bot muere y se necesita uno
+-- nuevo, el pool ya tiene un rig caliente listo.
+--
+-- No se reutilizan rigs entre vidas (no es un pool de "ressurect"): la
+-- Humanoid en estado Dead no se puede revivir limpiamente sin reemplazar el
+-- Humanoid entero. Esta variante mata complejidad pero no la ganancia de
+-- decouplear cloning del spawn moment.
+local _botRigPool: { Model } = {}
+local BOT_RIG_POOL_TARGET = 3
+local _botRigRefilling = false
+local _botRigParkFolder: Folder? = nil
+
+local function _ensureParkFolder(): Folder
+	if _botRigParkFolder and _botRigParkFolder.Parent then
+		return _botRigParkFolder
+	end
+	-- ServerStorage no replica al cliente — los rigs parked no se ven.
+	local existing = ServerStorage:FindFirstChild("_BotRigPool")
+	if existing and existing:IsA("Folder") then
+		_botRigParkFolder = existing
+		return existing
+	end
+	local folder = Instance.new("Folder")
+	folder.Name = "_BotRigPool"
+	folder.Parent = ServerStorage
+	_botRigParkFolder = folder
+	return folder
+end
+
+local function _clonePreparedRig(): Model?
 	local template = _findTemplateBot()
-	if template then
-		local clone = template:Clone()
+	if not template then return nil end
+	local clone = template:Clone()
+	-- Parented a ServerStorage para que Roblox no intente streaming/replicación
+	-- ni dispare ChildAdded en el workspace mientras está en el pool.
+	clone.Parent = _ensureParkFolder()
+	return clone
+end
+
+local function _refillBotRigPoolAsync()
+	if _botRigRefilling then return end
+	_botRigRefilling = true
+	task.spawn(function()
+		while #_botRigPool < BOT_RIG_POOL_TARGET do
+			local rig = _clonePreparedRig()
+			if not rig then break end -- template missing → abandona refill
+			table.insert(_botRigPool, rig)
+		end
+		_botRigRefilling = false
+	end)
+end
+
+local function _takeBotRigFromPool(): Model?
+	local n = #_botRigPool
+	if n > 0 then
+		local rig = _botRigPool[n]
+		_botRigPool[n] = nil
+		_refillBotRigPoolAsync()
+		return rig
+	end
+	-- Pool vacío (e.g., burst inicial de spawns) → fallback sync.
+	_refillBotRigPoolAsync()
+	return _clonePreparedRig()
+end
+
+local function _createBotModel(botName: string): Model
+	local clone = _takeBotRigFromPool()
+	if clone then
 		clone.Name = botName
 		return clone
 	end
@@ -343,6 +410,10 @@ local function _createBotModel(botName: string): Model
 	end
 	return _buildFallbackBotModel(botName)
 end
+
+-- Warm-up: pre-rellena el pool al cargar AIService para que la primera oleada
+-- de spawns no pague el coste de Clone en el path crítico.
+_refillBotRigPoolAsync()
 
 local function _notifyActiveBotCount()
 	local count = 0

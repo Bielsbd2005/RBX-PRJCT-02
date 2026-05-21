@@ -21,6 +21,12 @@ end
 
 local localRandom = Random.new()
 
+-- W3: throttle del path mobile-only de auto-aim/auto-fire. Antes corría
+-- a 60Hz: workspace barrer + 2 raycasts + RaycastParams.new() por frame.
+-- 20Hz (50ms) es imperceptible para el aim-assist (pull usa elapsed time,
+-- mantiene desplazamiento total).
+local AUTO_AIM_TICK_INTERVAL = 0.05
+
 local BaseWeapon = {}
 BaseWeapon.__index = BaseWeapon
 
@@ -665,6 +671,15 @@ function BaseWeapon:onStepped(dt)
 	-- calcular: nos saltamos los raycasts de target-finding por completo.
 	if not _isTouchPrimaryInput() then return end
 
+	-- W3: gate por tiempo. El pull usa `elapsed` (tiempo real desde el último
+	-- tick), no `dt` del Heartbeat — así el desplazamiento total del aim assist
+	-- es independiente de la frecuencia del gate.
+	local now = os.clock()
+	local lastTickAt = self._autoAimLastTickAt or 0
+	if now - lastTickAt < AUTO_AIM_TICK_INTERVAL then return end
+	local elapsed = if lastTickAt == 0 then dt else now - lastTickAt
+	self._autoAimLastTickAt = now
+
 	local targetPart, targetPos = AutoAimSystem.findBestTarget(self.weaponsSystem)
 	if not targetPart or not targetPos then return end
 
@@ -678,9 +693,22 @@ function BaseWeapon:onStepped(dt)
 	local cameraRay = camera:ViewportPointToRay(camera.ViewportSize.X * 0.5, camera.ViewportSize.Y * 0.5)
 	local targetHitPoint = cameraRay.Origin + cameraRay.Direction * 1000
 
-	local raycastParams = RaycastParams.new()
-	raycastParams.FilterType = Enum.RaycastFilterType.Exclude
-	raycastParams.FilterDescendantsInstances = { self.player and self.player.Character or self.instance.Parent }
+	-- W3: RaycastParams + filter cacheados en self. Antes new() + table literal
+	-- por frame → GC churn constante. Solo mutamos filter[1] que cambia con el
+	-- character (respawn).
+	local raycastParams = self._autoAimRaycastParams
+	if not raycastParams then
+		raycastParams = RaycastParams.new()
+		raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+		self._autoAimRaycastParams = raycastParams
+	end
+	local filter = self._autoAimFilter
+	if not filter then
+		filter = table.create(1)
+		self._autoAimFilter = filter
+	end
+	filter[1] = self.player and self.player.Character or self.instance.Parent
+	raycastParams.FilterDescendantsInstances = filter
 	local result = workspace:Raycast(cameraRay.Origin, cameraRay.Direction * 1000, raycastParams)
 
 	local isAimingAtEnemy = false
@@ -707,7 +735,7 @@ function BaseWeapon:onStepped(dt)
 
 		local deltaPitch = desiredPitch - currentPitch
 
-		local pullStrength = if isAimingAtEnemy then (1.5 * dt) else (4.5 * dt)
+		local pullStrength = if isAimingAtEnemy then (1.5 * elapsed) else (4.5 * elapsed)
 
 		self.weaponsSystem.camera.yaw = currentYaw + deltaYaw * pullStrength
 		self.weaponsSystem.camera.pitch = math.clamp(

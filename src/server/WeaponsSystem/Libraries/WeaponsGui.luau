@@ -108,6 +108,64 @@ local function setGuiColorRecursive(guiObject, color)
 	end
 end
 
+-- W11: lista plana pre-categorizada para el vignette. Antes refreshVignette
+-- (disparado a 60Hz durante el tween 0.14s) hacía GetChildren recursivo +
+-- 4 :IsA por nodo cada vez. Ahora 1 build + iterate flat list con flags.
+type VignetteNode = {
+	obj: Instance,
+	hasImage: boolean,
+	hasText: boolean,
+	hasBackground: boolean,
+	isStroke: boolean,
+}
+
+local function buildVignetteNodeList(root: Instance): { VignetteNode }
+	local list: { VignetteNode } = {}
+	local function visit(obj: Instance)
+		local isImage = obj:IsA("ImageLabel") or obj:IsA("ImageButton")
+		local isText = obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")
+		local isFrame = obj:IsA("Frame")
+		local isStroke = obj:IsA("UIStroke")
+		if isImage or isText or isFrame or isStroke then
+			table.insert(list, {
+				obj = obj,
+				hasImage = isImage,
+				hasText = isText,
+				hasBackground = isFrame or isText,
+				isStroke = isStroke,
+			})
+		end
+		for _, child in ipairs(obj:GetChildren()) do
+			visit(child)
+		end
+	end
+	visit(root)
+	return list
+end
+
+local function applyVignetteAlpha(nodes: { VignetteNode }, alpha: number)
+	local strokeAlpha = math.clamp(alpha, 0, 1)
+	for _, n in nodes do
+		local obj = n.obj :: any
+		if n.hasImage then obj.ImageTransparency = alpha end
+		if n.hasText then
+			obj.TextTransparency = alpha
+			obj.TextStrokeTransparency = strokeAlpha
+		end
+		if n.hasBackground then obj.BackgroundTransparency = alpha end
+		if n.isStroke then obj.Transparency = alpha end
+	end
+end
+
+local function applyVignetteColor(nodes: { VignetteNode }, color: Color3)
+	for _, n in nodes do
+		local obj = n.obj :: any
+		if n.hasImage then obj.ImageColor3 = color end
+		if n.hasBackground then obj.BackgroundColor3 = color end
+		if n.isStroke then obj.Color = color end
+	end
+end
+
 local function isMobileTouchDevice()
     return UserInputService.TouchEnabled
 end
@@ -585,6 +643,100 @@ function WeaponsGui:_updateHotbarAmmoDisplay(mainTool, specialTool)
 	end
 end
 
+-- W1: marca el hotbar dirty para que el próximo onRenderStepped lo refresque.
+-- Inlineado en los handlers (vs método) para evitar el overhead del : call.
+local function _markDirty(self)
+	self._hotbarDirty = true
+end
+
+function WeaponsGui:_disconnectHotbarAmmoConns()
+	for _, c in self._hotbarAmmoConns do
+		c:Disconnect()
+	end
+	table.clear(self._hotbarAmmoConns)
+end
+
+function WeaponsGui:_connectHotbarAmmoConns(mainTool, specialTool)
+	-- Reconnect solo si cambió alguna de las dos tools (caso común: refresh
+	-- intra-vida en el que las tools no cambiaron — evita disconnect+reconnect).
+	if mainTool == self._hotbarLastMainTool and specialTool == self._hotbarLastSpecialTool then
+		return
+	end
+	self._hotbarLastMainTool = mainTool
+	self._hotbarLastSpecialTool = specialTool
+	self:_disconnectHotbarAmmoConns()
+	if mainTool then
+		table.insert(
+			self._hotbarAmmoConns,
+			mainTool:GetAttributeChangedSignal("CurrentAmmo"):Connect(function()
+				self._hotbarDirty = true
+			end)
+		)
+	end
+	if specialTool and specialTool ~= mainTool then
+		table.insert(
+			self._hotbarAmmoConns,
+			specialTool:GetAttributeChangedSignal("CurrentAmmo"):Connect(function()
+				self._hotbarDirty = true
+			end)
+		)
+	end
+end
+
+function WeaponsGui:_connectHotbarCharacterEvents(character: Instance?)
+	for _, c in self._hotbarCharConns do
+		c:Disconnect()
+	end
+	table.clear(self._hotbarCharConns)
+	if not character then return end
+	-- Tool equip/unequip se manifiesta como Tool entrando/saliendo del Character.
+	table.insert(self._hotbarCharConns, character.ChildAdded:Connect(function() _markDirty(self) end))
+	table.insert(self._hotbarCharConns, character.ChildRemoved:Connect(function() _markDirty(self) end))
+end
+
+function WeaponsGui:_setupHotbarEvents()
+	-- Connect once: lifetime de la instancia WeaponsGui.
+	if self._hotbarEventsSetup then return end
+	self._hotbarEventsSetup = true
+
+	-- Character respawn: re-hookear ChildAdded/Removed sobre el nuevo character
+	-- y marcar dirty (cambian los tools disponibles).
+	table.insert(
+		self._hotbarLifetimeConns,
+		LocalPlayer.CharacterAdded:Connect(function(char)
+			_markDirty(self)
+			self:_connectHotbarCharacterEvents(char)
+		end)
+	)
+	table.insert(
+		self._hotbarLifetimeConns,
+		LocalPlayer.CharacterRemoving:Connect(function()
+			_markDirty(self)
+		end)
+	)
+	self:_connectHotbarCharacterEvents(LocalPlayer.Character)
+
+	-- Backpack: una sola instancia por sesión (no se recrea con respawn).
+	-- ChildAdded/Removed cubre tools entregadas/quitadas/equipadas.
+	local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+	if backpack then
+		table.insert(self._hotbarLifetimeConns, backpack.ChildAdded:Connect(function() _markDirty(self) end))
+		table.insert(self._hotbarLifetimeConns, backpack.ChildRemoved:Connect(function() _markDirty(self) end))
+	else
+		-- Backpack puede aparecer tras nosotros si el GUI se crea muy pronto.
+		table.insert(
+			self._hotbarLifetimeConns,
+			LocalPlayer.ChildAdded:Connect(function(child)
+				if child:IsA("Backpack") then
+					table.insert(self._hotbarLifetimeConns, child.ChildAdded:Connect(function() _markDirty(self) end))
+					table.insert(self._hotbarLifetimeConns, child.ChildRemoved:Connect(function() _markDirty(self) end))
+					_markDirty(self)
+				end
+			end)
+		)
+	end
+end
+
 function WeaponsGui:_refreshHotbar()
 	local mainTool, specialTool = self:_findMainSpecialTools()
 	self.hotbarMainTool = mainTool
@@ -606,6 +758,11 @@ function WeaponsGui:_refreshHotbar()
 	end
 
 	self:_applyHotbarSelectedVisual(selectedSlot)
+
+	-- W1: hookear ammo listeners en las tools actuales (si cambiaron) + clear
+	-- dirty al final del refresh.
+	self:_connectHotbarAmmoConns(mainTool, specialTool)
+	self._hotbarDirty = false
 end
 
 function WeaponsGui:_equipTool(tool)
@@ -771,6 +928,16 @@ function WeaponsGui.new(weaponsSystem)
 	self._lastWeaponInstance = nil
 	self._isShotgun = false
 	self._toolConns = {}
+	-- W1: dirty flag para hotbar. Antes _refreshHotbar corría cada frame
+	-- iterando Character + Backpack + FindFirstChildOfClass por slot. Ahora
+	-- solo cuando algún evento (tool added/removed, ammo changed, weapon
+	-- swap) marca dirty. Init true para refresh inicial.
+	self._hotbarDirty = true
+	self._hotbarLifetimeConns = {}
+	self._hotbarCharConns = {}
+	self._hotbarAmmoConns = {}
+	self._hotbarLastMainTool = nil
+	self._hotbarLastSpecialTool = nil
 	self._kickCooldownEnd = 0
 	self._activeJumpInput = nil
 	self._activeFireInput = nil
@@ -874,8 +1041,13 @@ function WeaponsGui.new(weaponsSystem)
 			end
 			self.vignetteHealthAlphaDriver.Value = self.vignetteHealthAlphaDriver.Value or 0
 
+			-- W11: build cacheado de la lista plana del subárbol del vignette.
+			-- Subárbol estático en runtime — no recorremos descendants en cada
+			-- Changed (que dispara a 60Hz durante el tween 0.14s).
+			self._vignetteNodes = buildVignetteNodeList(self.vignette)
+
 			local function refreshVignette()
-				if not self.vignette then
+				if not self.vignette or not self._vignetteNodes then
 					return
 				end
 
@@ -884,14 +1056,14 @@ function WeaponsGui.new(weaponsSystem)
 				local visibleAlpha = math.max(killAlpha, healthAlpha)
 
 				if visibleAlpha <= 0 then
-					setGuiTransparencyRecursive(self.vignette, 1)
+					applyVignetteAlpha(self._vignetteNodes, 1)
 					self.vignette.Visible = false
 					return
 				end
 
 				local color = if killAlpha >= healthAlpha then VIGNETTE_KILL_COLOR else VIGNETTE_HEALTH_COLOR
-				setGuiColorRecursive(self.vignette, color)
-				setGuiTransparencyRecursive(self.vignette, 1 - math.clamp(visibleAlpha, 0, 1))
+				applyVignetteColor(self._vignetteNodes, color)
+				applyVignetteAlpha(self._vignetteNodes, 1 - math.clamp(visibleAlpha, 0, 1))
 				self.vignette.Visible = true
 			end
 
@@ -949,24 +1121,12 @@ function WeaponsGui.new(weaponsSystem)
 			self.largeJumpButton:SetAttribute("NoClickSound", true)
 		end
 
-		-- Tap directo only: UIS.InputBegan sólo dispara una vez por touch (cuando
-		-- nace), nunca cuando un touch ya activo desliza dentro de un botón. Eso
-		-- evita el footgun de GuiObject.InputBegan (que sí dispara con drag-onto).
-		-- Position-check decide qué botón activar.
-		UserInputService.InputBegan:Connect(function(input, _)
-			if input.UserInputType ~= Enum.UserInputType.Touch
-				and input.UserInputType ~= Enum.UserInputType.MouseButton1 then
-				return
-			end
-			self:_dispatchTouchBegin(input)
-		end)
-		UserInputService.InputEnded:Connect(function(input, _)
-			if input.UserInputType ~= Enum.UserInputType.Touch
-				and input.UserInputType ~= Enum.UserInputType.MouseButton1 then
-				return
-			end
-			self:_dispatchTouchEnd(input)
-		end)
+		-- W4: el dispatch de tap directo se hace ahora desde las conexiones
+		-- inputBegan/inputEnded de setEnabled (que sí viven en self.connections
+		-- y se desconectan en setEnabled(false)/reinstantiation). Antes estas
+		-- 2 conexiones quedaban colgadas para siempre porque no se trackeaban.
+		-- _dispatchTouchBegin/End filtran internamente por _isInsideButton, que
+		-- ya chequea Visible — en PC sin UI touch es no-op barato.
 
 		self.smallFireButton.Visible = UserInputService.TouchEnabled
 		self.largeFireButton.Visible = UserInputService.TouchEnabled
@@ -980,6 +1140,9 @@ function WeaponsGui.new(weaponsSystem)
 		table.clear(self.hotbarLayouts)
 		self:_setupHotbarLayout(self.hotbarPC)
 		self:_setupHotbarLayout(self.hotbarTouchscreen)
+		-- W1: event-driven (LocalPlayer Character/Backpack changes + per-tool
+		-- CurrentAmmo). Idempotente — _setupHotbarEvents tiene su propio guard.
+		self:_setupHotbarEvents()
 		self:_refreshHotbar()
 
 		self.gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
@@ -1148,6 +1311,17 @@ function WeaponsGui:setEnabled(enabled)
 
 		self.connections.renderStepped = RunService.RenderStepped:Connect(function(dt) self:onRenderStepped(dt) end)
 		self.connections.inputBegan = UserInputService.InputBegan:Connect(function(input,gp)
+			-- W4: tap directo (touch/MouseButton1) routed aquí — ya no en conexión
+			-- separada que leakea. _dispatchTouchBegin filtra por _isInsideButton,
+			-- que chequea Visible — en PC sin UI touch es no-op barato.
+			if input.UserInputType == Enum.UserInputType.Touch
+				or input.UserInputType == Enum.UserInputType.MouseButton1
+			then
+				if self.smallFireButton then
+					self:_dispatchTouchBegin(input)
+				end
+			end
+
 			if not gp then
 				if input.KeyCode == Enum.KeyCode.One then
 					self:equipHotbarSlot(1)
@@ -1165,6 +1339,14 @@ function WeaponsGui:setEnabled(enabled)
 			end
 		end)
 		self.connections.inputEnded = UserInputService.InputEnded:Connect(function(input,gp)
+			if input.UserInputType == Enum.UserInputType.Touch
+				or input.UserInputType == Enum.UserInputType.MouseButton1
+			then
+				if self.smallFireButton then
+					self:_dispatchTouchEnd(input)
+				end
+			end
+
 			if input.UserInputType == Enum.UserInputType.MouseButton2 then
 				self:setZoomed(false)
 			end
@@ -1209,8 +1391,8 @@ function WeaponsGui:hideKillContainer(immediate)
 	if immediate then
 		if self.vignetteKillAlphaDriver then
 			self.vignetteKillAlphaDriver.Value = 0
-		else
-			setGuiTransparencyRecursive(self.vignette, 1)
+		elseif self._vignetteNodes then
+			applyVignetteAlpha(self._vignetteNodes, 1)
 		end
 		if not self.vignetteHealthAlphaDriver or self.vignetteHealthAlphaDriver.Value <= 0 then
 			self.vignette.Visible = false
@@ -1232,8 +1414,8 @@ function WeaponsGui:hideKillContainer(immediate)
 			end
 			self.vignetteFadeTween = nil
 		end)
-	else
-		setGuiTransparencyRecursive(self.vignette, 1)
+	elseif self._vignetteNodes then
+		applyVignetteAlpha(self._vignetteNodes, 1)
 		self.vignette.Visible = false
 	end
 end
@@ -1343,6 +1525,11 @@ function WeaponsGui:_setCrosshairVariant(isShotgun)
 	SpringService:Target(self, self.crosshairDampingRatio, self.crosshairFrequency, { crosshairSpread = self.crosshairSpreadTarget })
 end
 
+-- W1: throttle del shotgun OutOfRange check. Solo corre en mobile (autoshoot),
+-- y a 10Hz es imperceptible para el aviso visual. Antes raycast de 300 studs
+-- + RaycastParams.new() + table literal por frame.
+local SHOTGUN_RANGE_TICK_INTERVAL = 0.1
+
 function WeaponsGui:_updateShotgunRangeState()
 	if not self._isShotgun then return end
 	if not self.outOfRangeFrame then return end -- sin frame OutOfRange no hay nada que togglear
@@ -1357,6 +1544,12 @@ function WeaponsGui:_updateShotgunRangeState()
 		end
 		return
 	end
+
+	-- W1: gate por tiempo (10Hz). Por frame el raycast + creación de
+	-- RaycastParams era todo desperdiciado en estado estable.
+	local now = os.clock()
+	if now - (self._shotgunRangeLastTickAt or 0) < SHOTGUN_RANGE_TICK_INTERVAL then return end
+	self._shotgunRangeLastTickAt = now
 
 	local camera = workspace.CurrentCamera
 	if not camera then return end
@@ -1381,17 +1574,33 @@ function WeaponsGui:_updateShotgunRangeState()
 
 	local cameraOrigin = camera.CFrame.Position
 	local cameraRay = camera:ViewportPointToRay(camera.ViewportSize.X * 0.5, camera.ViewportSize.Y * 0.5)
-	local rayParams = RaycastParams.new()
-	rayParams.FilterType = Enum.RaycastFilterType.Exclude
-	local filter = {}
+
+	-- W1: RaycastParams + filter cacheados en self. Mutamos slots in-place.
+	local rayParams = self._shotgunRangeParams
+	if not rayParams then
+		rayParams = RaycastParams.new()
+		rayParams.FilterType = Enum.RaycastFilterType.Exclude
+		rayParams.IgnoreWater = true
+		self._shotgunRangeParams = rayParams
+	end
+	local filter = self._shotgunRangeFilter
+	if not filter then
+		filter = table.create(2)
+		self._shotgunRangeFilter = filter
+	end
+	local n = 0
 	if LocalPlayer and LocalPlayer.Character then
-		table.insert(filter, LocalPlayer.Character)
+		n += 1
+		filter[n] = LocalPlayer.Character
 	end
 	if tool then
-		table.insert(filter, tool)
+		n += 1
+		filter[n] = tool
+	end
+	for i = n + 1, #filter do
+		filter[i] = nil
 	end
 	rayParams.FilterDescendantsInstances = filter
-	rayParams.IgnoreWater = true
 
 	local maxRay = AutoAimSystem.MAX_DISTANCE or 300
 	local result = workspace:Raycast(cameraRay.Origin, cameraRay.Direction * maxRay, rayParams)
@@ -1432,6 +1641,8 @@ function WeaponsGui:_applyCrosshairByWeapon()
 	local tool = w and w.instance
 	if tool == self._lastWeaponInstance then return end
 	self._lastWeaponInstance = tool
+	-- W1: weapon swap → marcar hotbar dirty (cambia selected slot visual).
+	self._hotbarDirty = true
 	local isShotgun = tool and tool:GetAttribute("Shotgun") == true
 	self:_setCrosshairVariant(isShotgun)
 	self:_connectToolConns(tool)
@@ -1546,9 +1757,16 @@ function WeaponsGui:onRenderStepped(dt)
 		return
 	end
 	if not self.enabled or not self.gui then return end
-	self:_hideDefaultJumpButton()
+	-- _hideDefaultJumpButton se llamaba aquí cada frame. Redundante: el
+	-- listener instalado por _trackAndHideDefaultJumpButton (en setEnabled)
+	-- ya re-oculta el botón si Roblox lo re-parenta. Llamadas restantes
+	-- (setEnabled, setScopeEnabled, etc.) cubren state changes que mutan UI.
 	self:_applyCrosshairByWeapon()
-	self:_refreshHotbar()
+	-- W1: refresh solo cuando algo cambió. Antes _findMainSpecialTools +
+	-- FindFirstChildOfClass por slot + .Text/.RichText writes cada frame.
+	if self._hotbarDirty then
+		self:_refreshHotbar()
+	end
 	self:_updateAmmoDisplay()
 	if self._isShotgun then
 		if os.clock() >= (self._kickCooldownEnd or 0) then

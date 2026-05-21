@@ -21,6 +21,9 @@ AutoAimSystem.MAX_DISTANCE = 300				-- Max studs distance to detect enemies
 local raycastParams = RaycastParams.new()
 raycastParams.FilterType = Enum.RaycastFilterType.Exclude
 raycastParams.IgnoreWater = true
+-- Filter array reusado entre llamadas. Mutamos [1] in-place y asignamos
+-- FilterDescendantsInstances al mismo array — evita el table literal por call.
+local visibilityFilter: { Instance } = table.create(1)
 
 -- Find the best enemy target near the screen center
 function AutoAimSystem.findBestTarget(weaponsSystem)
@@ -136,15 +139,10 @@ function AutoAimSystem.isTargetVisible(origin, targetPart)
 	local targetPos = targetPart.Position
 	local direction = targetPos - origin
 
-	-- Build ignore list: local player's character + the target's character accessories
+	-- Reuse module-level filter (mutate slot 1) en lugar de table literal por call.
 	local localCharacter = LocalPlayer and LocalPlayer.Character
-	local filterInstances = {}
-
-	if localCharacter then
-		table.insert(filterInstances, localCharacter)
-	end
-
-	raycastParams.FilterDescendantsInstances = filterInstances
+	visibilityFilter[1] = localCharacter
+	raycastParams.FilterDescendantsInstances = visibilityFilter
 
 	local result = workspace:Raycast(origin, direction, raycastParams)
 
