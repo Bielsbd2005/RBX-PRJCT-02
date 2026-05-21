@@ -73,6 +73,10 @@ local _roamGraph: RoamGraph.RoamGraph? = nil
 local _spawnPoints: { BasePart } = {}
 local _onBotDied: ((string, string, Humanoid, number) -> ())? = nil
 local _botsByName: { [string]: BotRecord } = {}
+-- B6: index O(1) por FakeUserId para _findAttackerModel. Antes scan lineal
+-- sobre aliveTargets por cada damage event (peor caso 16 events/100ms × 16
+-- candidatos = 2560 comparaciones/seg).
+local _botModelByFakeUserId: { [number]: Model } = {}
 local _botNamesByTeam: { A: { string }, B: { string } } = {
 	A = {},
 	B = {},
@@ -99,12 +103,27 @@ local _botFakeUserIdByName: { [string]: number } = {}
 -- los ~16 candidatos relevantes.
 -- ────────────────────────────────────────────────────────────────
 
-local _aliveTargets: { Model } = {}
+-- B4: tupla en lugar de Model. Antes _getBestTarget hacía
+-- FindFirstChildOfClass + FindFirstChild por cada candidato cada tick
+-- (16 bots × 24 chars × 2 × 10Hz ≈ 7680 lookups/seg en PATROL).
+-- Resuelto al add-time + lazy refresh si el ref muere (respawn streaming).
+export type AliveTarget = {
+	model: Model,
+	hum: Humanoid?,
+	root: BasePart?,
+}
+
+local _aliveTargets: { AliveTarget } = {}
 local _aliveTargetIndex: { [Model]: number } = {}
 
 local function _addAliveTarget(model: Model)
 	if _aliveTargetIndex[model] then return end
-	table.insert(_aliveTargets, model)
+	local entry: AliveTarget = {
+		model = model,
+		hum = model:FindFirstChildOfClass("Humanoid"),
+		root = model:FindFirstChild("HumanoidRootPart") :: BasePart?,
+	}
+	table.insert(_aliveTargets, entry)
 	_aliveTargetIndex[model] = #_aliveTargets
 end
 
@@ -117,7 +136,7 @@ local function _removeAliveTarget(model: Model)
 	if idx ~= last then
 		local moved = _aliveTargets[last]
 		_aliveTargets[idx] = moved
-		_aliveTargetIndex[moved] = idx
+		_aliveTargetIndex[moved.model] = idx
 	end
 	_aliveTargets[last] = nil
 end
@@ -352,6 +371,7 @@ local function _removeBotByName(botName: string)
 	if fakeUserId then
 		_identityByFakeUserId[fakeUserId] = nil
 		_teamByFakeUserId[fakeUserId] = nil
+		_botModelByFakeUserId[fakeUserId] = nil
 	end
 	_botIdentityByName[botName] = nil
 	_botFakeUserIdByName[botName] = nil
@@ -438,6 +458,7 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 	botModel:SetAttribute("DisplayName", identity.name)
 	botModel:SetAttribute("FakeUserId", fakeUserId)
 	botModel:SetAttribute("ProfileImage", identity.image)
+	_botModelByFakeUserId[fakeUserId] = botModel
 	local hum = botModel:FindFirstChildOfClass("Humanoid")
 	if hum then
 		hum.DisplayName = identity.name
@@ -489,7 +510,7 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 		ai = botAIInstance,
 	}
 
-	botAIInstance:Start(mapRoot, _aliveTargets, _roamGraph)
+	botAIInstance:Start(mapRoot, _aliveTargets, _roamGraph, _botModelByFakeUserId)
 
 	record.deathConnection = humanoid.Died:Connect(function()
 		if record.hasDeathBeenReported then
@@ -519,6 +540,8 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 
 		-- 3. Recycle identity so the replacement bot keeps the same fakeUserId+name
 		table.insert(_recycledByTeam[team], { identity = identity, fakeUserId = fakeUserId })
+		-- B6: clear el index — el nuevo bot se asignará en _spawnOneBot.
+		_botModelByFakeUserId[fakeUserId] = nil
 		_botsByName[botName] = nil
 		_refreshAliveLists()
 		_notifyActiveBotCount()

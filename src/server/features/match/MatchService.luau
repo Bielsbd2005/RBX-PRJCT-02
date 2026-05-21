@@ -17,6 +17,9 @@ local NetGuards = require(Shared.networking.NetGuards)
 local SpawnSelector = require(script.Parent:WaitForChild("SpawnSelector"))
 local LoadoutService = require(script.Parent:WaitForChild("LoadoutService"))
 local HealthPickupService = require(script.Parent:WaitForChild("HealthPickupService"))
+local TeamAssignmentService = require(script.Parent:WaitForChild("TeamAssignmentService"))
+local VotingService = require(script.Parent:WaitForChild("VotingService"))
+local KillAttributionService = require(script.Parent:WaitForChild("KillAttributionService"))
 local KillEffectsRegistry = require(Shared.Locker.killEffects.KillEffectsRegistry)
 local CollisionGroups = require(Shared.CollisionGroups)
 local ItemsConfig = require(Shared.constants.ItemsConfig)
@@ -35,24 +38,17 @@ type MapDefinition = {
 	UseIntelligentSpawning: boolean?,
 }
 
-type ActiveVoteState = {
-	options: { MapDefinition },
-	optionNames: { string },
-	optionImages: { [string]: string },
-	optionModes: { [string]: string },
-	voteCounts: { [string]: number },
-	votesByUserId: { [number]: string },
-	endAt: number,
-	duration: number,
-}
-
 local MatchService = {}
 MatchService.__index = MatchService
 
 local _started = false
-local _activeVote: ActiveVoteState? = nil
-local _hasCompletedInitialVote = false
-local _voteCooldownsByUserId: { [number]: number } = {}
+-- Rate limit por-userId para RemoteEvents de match (vote sync / return to menu).
+-- El `_joinDebounceByUserId` y `_respawnDebounceByUserId` ya tenían debounce de
+-- estado; estos timestamps añaden un cooldown duro contra spam de eventos
+-- expensive (VoteSync hace 5 SendTo a un solo player, ReturnToMenu hace LoadCharacter).
+local REMOTE_RATE_LIMIT_SECONDS = 0.5
+local _voteSyncCooldownByUserId: { [number]: number } = {}
+local _returnToMenuCooldownByUserId: { [number]: number } = {}
 local _phase = "Idle"
 
 local _isMapLoading = false
@@ -60,6 +56,11 @@ local _isPlayEnabled = false
 local _activeMapName = ""
 local _activeMapContainer: BasePart? = nil
 local _activeMapModel: Instance? = nil
+-- Caches por-round del mapa activo. Los spawn points y la carpeta de bots no
+-- cambian durante un round, así evitamos escanear `_activeMapModel:GetDescendants()`
+-- (potencialmente miles de instances) en cada respawn/spawn.
+local _cachedSpawnPoints: { BasePart }? = nil
+local _cachedBotsFolder: Instance? = nil
 local _roundId = 0
 local _isRoundActive = false
 local _roundEndAt = 0
@@ -73,16 +74,21 @@ local _joinDebounceByUserId: { [number]: boolean } = {}
 local _pendingSpawnByUserId: { [number]: boolean } = {}
 local _deathConnectionsByUserId: { [number]: RBXScriptConnection } = {}
 local _characterConnectionsByUserId: { [number]: RBXScriptConnection } = {}
+-- Connection a character.DescendantAdded del character vivo actual del jugador.
+-- Se desconecta al respawn (CharacterAdded vuelve a disparar), al morir, y al
+-- salirse del juego — evita acumular listeners en characters viejos que pueden
+-- seguir parented (ragdoll/kill effects) hasta que el GC los barra.
+local _charDescendantConnectionsByUserId: { [number]: RBXScriptConnection } = {}
 local _deathAtByUserId: { [number]: number } = {}
 local _respawnDebounceByUserId: { [number]: boolean } = {}
 local _matchKillsByUserId: { [number]: number } = {}
-local _killStreakByUserId: { [number]: number } = {}
+-- _killStreakByUserId, _killStreakTimeoutByUserId, _lastBroadcastStreakKeyByUserId
+-- viven en KillAttributionService. Acá quedan kills/deaths que son
+-- accesados ampliamente (HUD broadcast, score updates).
 local _matchDeathsByUserId: { [number]: number } = {}
-local _killStreakTimeoutByUserId: { [number]: thread? } = {}
 local _lastMapLoadStateBroadcastKey: string? = nil
 local _lastRoundStateBroadcastKey: string? = nil
 local _lastBotRosterJsonBroadcast: string? = nil
-local _lastBroadcastStreakKeyByUserId: { [number]: string } = {}
 -- Timestamp de la última muerte registrada en cada spawn point. Usado por
 -- SpawnSelector para penalizar respawnear donde alguien acaba de morir y evitar
 -- spawn-trap loops. Se limpia en cada round restart.
@@ -91,14 +97,13 @@ local _recentDeathBySpawn: { [BasePart]: number } = {}
 local _teamA: Team? = nil
 local _teamB: Team? = nil
 local _finishRoundAndScheduleRestart: any = nil
+-- Forward-decl: _endRoundAndRestartVoting + el path de map load fail llaman a
+-- _startVoteIfPossible antes de que su implementación (delegate a VotingService)
+-- esté declarada más abajo. Mantenemos el patrón que ya usa _finishRoundAndScheduleRestart.
+local _startVoteIfPossible: any = nil
 local _AIService: any = nil
 local _dataService: DataService = nil :: any
-local _tieBreakToA = false
 
--- Cooldown entre cambios de voto del mismo jugador. 0.5s permite ~2 cambios/seg
--- — suficiente para UX responsive sin permitir spam que sature broadcasts.
-local VOTE_CHANGE_COOLDOWN = 0.5
-local DEFAULT_PLACEHOLDER_IMAGE = "rbxasset://textures/ui/GuiImagePlaceholder.png"
 
 local function _log(message: string)
 	return
@@ -177,73 +182,15 @@ local function _sendRoundStateToPlayer(player: Player)
 	end
 end
 
-local _sendPlayerStreakToAll: (userId: number) -> ()
-
-local function _resetStreakTimeout(userId: number)
-	if _killStreakTimeoutByUserId[userId] then
-		if type(task.cancel) == "function" then
-			pcall(task.cancel, _killStreakTimeoutByUserId[userId])
-		end
-		_killStreakTimeoutByUserId[userId] = nil
-	end
-end
-
-local function _setupStreakTimeout(userId: number)
-	_resetStreakTimeout(userId)
-	_killStreakTimeoutByUserId[userId] = task.delay(7, function()
-		_killStreakByUserId[userId] = 0
-		_killStreakTimeoutByUserId[userId] = nil
-		_sendPlayerStreakToAll(userId)
-	end)
-end
-
-_sendPlayerStreakToAll = function(userId: number)
-	local streak = _killStreakByUserId[userId] or 0
-	local kills = _matchKillsByUserId[userId] or 0
-	local deaths = _matchDeathsByUserId[userId] or 0
-	local key = string.format("%d|%d|%d", kills, streak, deaths)
-	if _lastBroadcastStreakKeyByUserId[userId] == key then
-		return
-	end
-	_lastBroadcastStreakKeyByUserId[userId] = key
-	Network.Match.PlayerStreakState.SendToAll({
-		userId = tostring(userId),
-		kills = kills,
-		streak = streak,
-		deaths = deaths,
-	})
-end
-
-local function _sendPlayerStreakToPlayer(player: Player, userId: number)
-	local ok, err = pcall(function()
-		Network.Match.PlayerStreakState.SendTo({
-			userId = tostring(userId),
-			kills = _matchKillsByUserId[userId] or 0,
-			streak = _killStreakByUserId[userId] or 0,
-			deaths = _matchDeathsByUserId[userId] or 0,
-		}, player)
-	end)
-
-	if not ok then
-		_log(string.format("Failed PlayerStreakState snapshot to %s for user %d: %s", player.Name, userId, tostring(err)))
-	end
+-- Wrappers que delegan al KillAttributionService. Mantienen los call sites
+-- existentes inmutables — el service owns _killStreakByUserId, los timeouts y
+-- el dedupe del broadcast.
+local function _sendPlayerStreakToAll(userId: number)
+	KillAttributionService:SendStreakBroadcast(userId)
 end
 
 local function _sendAllPlayerStreaksToPlayer(player: Player)
-	for _, otherPlayer in Players:GetPlayers() do
-		_sendPlayerStreakToPlayer(player, otherPlayer.UserId)
-	end
-	-- Para bots, enviar solo si tienen actividad.
-	for botUserId in _matchKillsByUserId do
-		if botUserId < 0 then
-			local kills = _matchKillsByUserId[botUserId] or 0
-			local deaths = _matchDeathsByUserId[botUserId] or 0
-			local streak = _killStreakByUserId[botUserId] or 0
-			if kills > 0 or deaths > 0 or streak > 0 then
-				_sendPlayerStreakToPlayer(player, botUserId)
-			end
-		end
-	end
+	KillAttributionService:SendAllStreaksTo(player)
 end
 
 local function _broadcastBotRoster()
@@ -277,28 +224,36 @@ local function _resolveBotKillerName(attackerUserId: number): string
 	return ""
 end
 
-local function _resetAllPlayerStreakState()
+-- Helper consolidado: limpia todas las tablas con "scope match" (state
+-- por-jugador y por-round) en un orden documentado. Llamado por:
+--   * `_endRoundAndRestartVoting`: cleanup final tras un round.
+--   * `_startMapLoadFlow`: slate limpio antes del siguiente round.
+-- Cualquier tabla nueva con scope match debe agregarse acá — esta es la
+-- fuente de verdad y previene drift entre los dos call sites.
+-- NO toca:
+--   * Vote cooldowns (viven en VotingService).
+--   * `_voteSyncCooldownByUserId` y `_returnToMenuCooldownByUserId` (scope
+--     sesión, no round — limpian en PlayerRemoving).
+--   * Broadcast key caches (`_lastMapLoadStateBroadcastKey`, etc.) — se
+--     manejan al lado de los broadcasts.
+local function _resetMatchScopedState()
+	-- Asignación + spawn flow
+	table.clear(_teamByUserId)
+	table.clear(_isInMenuByUserId)
+	table.clear(_pendingSpawnByUserId)
+	table.clear(_joinDebounceByUserId)
+	table.clear(_deathAtByUserId)
+	table.clear(_respawnDebounceByUserId)
+	table.clear(_roundEndEligibleByUserId)
+	-- Kill/death tracking
 	table.clear(_matchKillsByUserId)
-	table.clear(_killStreakByUserId)
 	table.clear(_matchDeathsByUserId)
-	table.clear(_lastBroadcastStreakKeyByUserId)
-
-	-- Clear all streak timeouts
-	for userId, timeout in _killStreakTimeoutByUserId do
-		if timeout then
-			if type(task.cancel) == "function" then
-				pcall(task.cancel, timeout)
-			end
-		end
-	end
-	table.clear(_killStreakTimeoutByUserId)
-
-	for _, player in Players:GetPlayers() do
-		_matchKillsByUserId[player.UserId] = 0
-		_killStreakByUserId[player.UserId] = 0
-		_matchDeathsByUserId[player.UserId] = 0
-		_sendPlayerStreakToAll(player.UserId)
-	end
+	-- Streak state (counts + timeouts + broadcast keys) vive en KillAttributionService.
+	KillAttributionService:Clear()
+	-- Recent deaths por spawn point (audit fix: antes solo se limpiaba en
+	-- _startMapLoadFlow, no en _endRoundAndRestartVoting → references a
+	-- BaseParts destruidos del round anterior podían quedar como keys).
+	_recentDeathBySpawn = {}
 end
 
 local function _resolveWeaponItem(weaponId: string?): (string?, string?)
@@ -504,13 +459,12 @@ local function _persistAttackerKillStats(attacker: Player, wasHeadshot: boolean,
 end
 
 local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?, attackerWeaponId: string?, attackerWasHeadshot: boolean?)
-	_killStreakByUserId[deadPlayer.UserId] = 0
-	_resetStreakTimeout(deadPlayer.UserId)
+	KillAttributionService:ResetStreak(deadPlayer.UserId)
 	if _matchKillsByUserId[deadPlayer.UserId] == nil then
 		_matchKillsByUserId[deadPlayer.UserId] = 0
 	end
 	_matchDeathsByUserId[deadPlayer.UserId] = (_matchDeathsByUserId[deadPlayer.UserId] or 0) + 1
-	_sendPlayerStreakToAll(deadPlayer.UserId)
+	KillAttributionService:SendStreakBroadcast(deadPlayer.UserId)
 
 	-- Persistir Stats.Deaths lifetime del que muere (siempre que sea jugador).
 	-- C2: si el profile aún no cargó, encolar para flush en ProfileLoaded.
@@ -543,15 +497,14 @@ local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?, a
 	end
 
 	_matchKillsByUserId[attackerUserId] = (_matchKillsByUserId[attackerUserId] or 0) + 1
-	_killStreakByUserId[attackerUserId] = (_killStreakByUserId[attackerUserId] or 0) + 1
-	_setupStreakTimeout(attackerUserId)
-	_sendPlayerStreakToAll(attackerUserId)
+	-- RecordKill: ++streak, programa timeout de decay, devuelve newStreak.
+	local newStreak = KillAttributionService:RecordKill(attackerUserId)
+	KillAttributionService:SendStreakBroadcast(attackerUserId)
 	_registerWeaponKillForAttacker(attackerUserId, attackerWeaponId)
 	_grantActionRewardsToAttacker(attackerUserId, "Kill")
 	if attackerWasHeadshot then
 		_grantActionRewardsToAttacker(attackerUserId, "Headshot")
 	end
-	local newStreak = _killStreakByUserId[attackerUserId] or 0
 	if newStreak == 3 then
 		_grantActionRewardsToAttacker(attackerUserId, "Streak3")
 	elseif newStreak == 5 then
@@ -585,86 +538,14 @@ local function _ensureTeams()
 	_teamB = getOrCreateTeam(GameConfig.Teams.B.Name, GameConfig.Teams.B.Color)
 end
 
+-- _countActiveRealAssignments / _pickBalancedTeam / tie-break extraídos a
+-- TeamAssignmentService. Aquí solo delegamos para mantener call sites estables.
 local function _countActiveRealAssignments(): (number, number)
-	local connectedByUserId = {} :: { [number]: true }
-	for _, player in Players:GetPlayers() do
-		connectedByUserId[player.UserId] = true
-	end
-
-	local a = 0
-	local b = 0
-	for userId, side in _teamByUserId do
-		local isConnected = connectedByUserId[userId] == true
-		local isActiveOrPending = (_isInMenuByUserId[userId] == false) or (_pendingSpawnByUserId[userId] == true)
-		if isConnected and isActiveOrPending then
-			if side == "A" then
-				a += 1
-			else
-				b += 1
-			end
-		end
-	end
-
-	return a, b
+	return TeamAssignmentService:CountActiveRealAssignments()
 end
 
-local function _pickTeamByScoreTieBreak(): "A" | "B"
-	if _roundScoreA < _roundScoreB then
-		return "A"
-	end
-
-	if _roundScoreB < _roundScoreA then
-		return "B"
-	end
-
-	_tieBreakToA = not _tieBreakToA
-	return if _tieBreakToA then "A" else "B"
-end
-
--- INVARIANT: debe permanecer yield-free — es la sección crítica del debounce de _onRequestJoinMatch (un yield aquí permite doble-spawn).
 local function _pickBalancedTeam(userId: number): ("A" | "B")?
-	local assigned = _teamByUserId[userId]
-	local countA, countB = _countActiveRealAssignments()
-	local cap = GameConfig.TeamSizeTarget
-
-	if assigned then
-		if assigned == "A" and countA < cap then
-			return "A"
-		elseif assigned == "B" and countB < cap then
-			return "B"
-		elseif assigned == "A" and countB < cap then
-			_teamByUserId[userId] = "B"
-			return "B"
-		elseif assigned == "B" and countA < cap then
-			_teamByUserId[userId] = "A"
-			return "A"
-		end
-
-		return nil
-	end
-
-	local selected: "A" | "B"
-	local canJoinA = countA < cap
-	local canJoinB = countB < cap
-
-	if canJoinA and canJoinB then
-		if countA < countB then
-			selected = "A"
-		elseif countB < countA then
-			selected = "B"
-		else
-			selected = _pickTeamByScoreTieBreak()
-		end
-	elseif canJoinA then
-		selected = "A"
-	elseif canJoinB then
-		selected = "B"
-	else
-		return nil
-	end
-
-	_teamByUserId[userId] = selected
-	return selected
+	return TeamAssignmentService:PickBalancedTeam(userId)
 end
 
 local function _rebalanceBotsForCurrentRound(reason: string)
@@ -689,9 +570,16 @@ local function _rebalanceBotsForCurrentRound(reason: string)
 end
 
 local function _collectSharedSpawnPoints(activeMapRoot: Instance): { BasePart }
+	-- Cache lazy: el primer call por round paga el escaneo, el resto reusa.
+	-- Se invalida en _clearActiveMap() cuando termina el round.
+	if _cachedSpawnPoints then
+		return _cachedSpawnPoints
+	end
+
 	local spawnsRoot = activeMapRoot:FindFirstChild("Spawns", true)
 	if not spawnsRoot then
-		return {}
+		_cachedSpawnPoints = {}
+		return _cachedSpawnPoints
 	end
 
 	local points = {} :: { BasePart }
@@ -701,6 +589,7 @@ local function _collectSharedSpawnPoints(activeMapRoot: Instance): { BasePart }
 		end
 	end
 
+	_cachedSpawnPoints = points
 	return points
 end
 
@@ -790,27 +679,38 @@ local function _collectCombatantDataForSide(side: "A" | "B", excludePlayer: Play
 		return positions, lookVectors
 	end
 
-	for _, node in (_activeMapModel :: Instance):GetDescendants() do
-		if not node:IsA("Model") then
-			continue
-		end
+	-- Iteramos solo `mapRoot.Bots` (top-level): los bots de IA se parentan ahí
+	-- (ver AIService:_registerBot). Antes era `mapRoot:GetDescendants()` que
+	-- recorría miles de instances del mapa por cada respawn × cada lado (×2).
+	-- Cache lazy del folder, invalidado en _clearActiveMap.
+	if _cachedBotsFolder == nil or _cachedBotsFolder.Parent == nil then
+		_cachedBotsFolder = (_activeMapModel :: Instance):FindFirstChild("Bots")
+	end
+	local botsFolder = _cachedBotsFolder
+	if botsFolder then
+		for _, node in botsFolder:GetChildren() do
+			if not node:IsA("Model") then
+				continue
+			end
 
-		local npcPlayer = Players:GetPlayerFromCharacter(node)
-		if npcPlayer ~= nil then
-			continue
-		end
+			-- Bots de IA no tienen Player asociado; defensivo por si la carpeta
+			-- contiene clones con player tag en el futuro.
+			if Players:GetPlayerFromCharacter(node) ~= nil then
+				continue
+			end
 
-		-- Ignorar NPCs muertos/ragdollados — no son amenaza, no deben influir en la
-		-- elección de spawn point.
-		local npcSide = _resolveNpcSide(node)
-		if not npcSide or npcSide ~= side then
-			continue
-		end
+			-- Ignorar NPCs muertos/ragdollados — no son amenaza, no deben influir en la
+			-- elección de spawn point.
+			local npcSide = _resolveNpcSide(node)
+			if not npcSide or npcSide ~= side then
+				continue
+			end
 
-		local root = _extractCharacterRootPart(node)
-		if root then
-			table.insert(positions, root.Position)
-			table.insert(lookVectors, root.CFrame.LookVector)
+			local root = _extractCharacterRootPart(node)
+			if root then
+				table.insert(positions, root.Position)
+				table.insert(lookVectors, root.CFrame.LookVector)
+			end
 		end
 	end
 
@@ -1082,126 +982,14 @@ local function _clearActiveMap()
 	_activeMapContainer = nil
 	_activeMapModel = nil
 	_activeMapName = ""
+	_cachedSpawnPoints = nil
+	_cachedBotsFolder = nil
 end
 
-local function _containsMode(modes: { string }, mode: string): boolean
-	for _, candidate in modes do
-		if candidate == mode then
-			return true
-		end
-	end
-
-	return false
-end
-
-local function _collectCompatibleMaps(mode: string): { MapDefinition }
-	local compatible = {} :: { MapDefinition }
-
-	for _, mapDef in GameConfig.Maps do
-		if mapDef.Name ~= "" and _containsMode(mapDef.Modes, mode) then
-			table.insert(compatible, mapDef)
-		end
-	end
-
-	return compatible
-end
-
-local function _pickRandomMapOptions(pool: { MapDefinition }, count: number): { MapDefinition }
-	local shuffled = table.clone(pool)
-	for i = #shuffled, 2, -1 do
-		local j = math.random(1, i)
-		shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
-	end
-
-	local picked = {} :: { MapDefinition }
-	for i = 1, math.min(count, #shuffled) do
-		table.insert(picked, shuffled[i])
-	end
-
-	return picked
-end
-
-local function _buildVoteStatePacket(vote: ActiveVoteState, timeLeft: number)
-	return {
-		optionAName = vote.optionNames[1],
-		optionAVotes = vote.voteCounts[vote.optionNames[1]] or 0,
-		optionBName = vote.optionNames[2],
-		optionBVotes = vote.voteCounts[vote.optionNames[2]] or 0,
-		optionCName = vote.optionNames[3],
-		optionCVotes = vote.voteCounts[vote.optionNames[3]] or 0,
-		timeLeft = math.max(0, timeLeft),
-	}
-end
-
--- Dedupe key del último broadcast de voto. Solo enviamos si cambió alguno
--- de los conteos o el segundo de timeLeft. Evita el spam de broadcasts cuando
--- jugadores spamean cambios de voto sin alterar el resultado.
-local _lastVoteBroadcastKey: string? = nil
-
-local function _broadcastVoteState(vote: ActiveVoteState)
-	local timeLeft = math.ceil(math.max(0, vote.endAt - time()))
-	local packet = _buildVoteStatePacket(vote, timeLeft)
-	-- Key compuesta: name|votes|name|votes|name|votes|timeLeft.
-	local key = string.format(
-		"%s|%d|%s|%d|%s|%d|%d",
-		tostring(packet.optionAName), packet.optionAVotes,
-		tostring(packet.optionBName), packet.optionBVotes,
-		tostring(packet.optionCName), packet.optionCVotes,
-		packet.timeLeft
-	)
-	if key == _lastVoteBroadcastKey then
-		return
-	end
-	_lastVoteBroadcastKey = key
-	Network.Match.VoteState.SendToAll(packet)
-end
-
-local function _sendActiveVoteToPlayer(player: Player)
-	local vote = _activeVote
-	if not vote then
-		return
-	end
-
-	local optionAName = vote.optionNames[1]
-	local optionBName = vote.optionNames[2]
-	local optionCName = vote.optionNames[3]
-	if not optionAName or not optionBName or not optionCName then
-		_log("Skipped active vote snapshot: incomplete option names.")
-		return
-	end
-
-	local okStart, errStart = pcall(function()
-		Network.Match.StartVote.SendTo({
-			optionAName = optionAName,
-			optionAImage = vote.optionImages[optionAName] or DEFAULT_PLACEHOLDER_IMAGE,
-			optionAMode = vote.optionModes[optionAName] or "TeamDeathmatch",
-			optionBName = optionBName,
-			optionBImage = vote.optionImages[optionBName] or DEFAULT_PLACEHOLDER_IMAGE,
-			optionBMode = vote.optionModes[optionBName] or "TeamDeathmatch",
-			optionCName = optionCName,
-			optionCImage = vote.optionImages[optionCName] or DEFAULT_PLACEHOLDER_IMAGE,
-			optionCMode = vote.optionModes[optionCName] or "TeamDeathmatch",
-			duration = vote.duration,
-		}, player)
-	end)
-
-	if not okStart then
-		_log(string.format("Failed StartVote snapshot to %s: %s", player.Name, tostring(errStart)))
-		return
-	end
-
-	local timeLeft = math.ceil(math.max(0, vote.endAt - time()))
-	local okState, errState = pcall(function()
-		Network.Match.VoteState.SendTo(_buildVoteStatePacket(vote, timeLeft), player)
-	end)
-
-	if not okState then
-		_log(string.format("Failed VoteState snapshot to %s: %s", player.Name, tostring(errState)))
-		return
-	end
-
-	_log(string.format("Sent active vote snapshot to %s (timeLeft=%ds).", player.Name, timeLeft))
-end
+-- Voting helpers (_buildVoteStatePacket / _broadcastVoteState /
+-- _sendActiveVoteToPlayer / _collectCompatibleMaps / _pickRandomMapOptions)
+-- viven en VotingService. Aquí solo wireamos el callback `onVoteFinished` y
+-- delegamos snapshots vía `VotingService:SendSnapshotTo(player)`.
 
 local function _loadMapCloneWithTimeout(mapName: string, timeoutSec: number): (boolean, string)
 	local mapsFolder = ServerStorage:FindFirstChild("Maps")
@@ -1303,29 +1091,9 @@ local function _endRoundAndRestartVoting(reason: string)
 	for userId in _deathConnectionsByUserId do
 		_disconnectDeathConnection(userId)
 	end
-	table.clear(_teamByUserId)
-	table.clear(_isInMenuByUserId)
-	table.clear(_pendingSpawnByUserId)
-	table.clear(_joinDebounceByUserId)
-	table.clear(_deathAtByUserId)
-	table.clear(_respawnDebounceByUserId)
-	table.clear(_roundEndEligibleByUserId)
-	table.clear(_matchKillsByUserId)
-	table.clear(_matchDeathsByUserId)
-	table.clear(_killStreakByUserId)
-	table.clear(_lastBroadcastStreakKeyByUserId)
+	_resetMatchScopedState()
 
-	-- Clear all streak timeouts
-	for userId, timeout in _killStreakTimeoutByUserId do
-		if timeout then
-			if type(task.cancel) == "function" then
-				pcall(task.cancel, timeout)
-			end
-		end
-	end
-	table.clear(_killStreakTimeoutByUserId)
-
-	_hasCompletedInitialVote = false
+	VotingService:ResetCompletedFlag()
 	_lastMapLoadStateBroadcastKey = nil
 	_lastRoundStateBroadcastKey = nil
 	_lastBotRosterJsonBroadcast = nil
@@ -1446,6 +1214,84 @@ local function _runRoundTimer(roundId: number)
 	end
 end
 
+-- Handler de muerte de un bot de IA. Extraído del callback inline en
+-- _AIService:OnRoundStart para que la lógica de kill attribution / score / win
+-- check no esté embebida dentro del round-start flow. Llamado por AIService
+-- cuando un bot muere — toca state interno de MatchService (scoreA/B, streaks,
+-- match kills/deaths) y dispara broadcasts.
+local function _handleBotDied(botTeam: string, _botName: string, botHumanoid: Humanoid, botFakeUserId: number)
+	if not _isRoundActive then
+		return
+	end
+
+	-- Credit the kill to whoever killed this bot
+	local attackerUserIdAttr = botHumanoid:GetAttribute("LastAttackerUserId")
+	local attackerAtAttr = botHumanoid:GetAttribute("LastAttackerAt")
+	local attackerWeaponIdAttr = botHumanoid:GetAttribute("LastAttackerWeaponId")
+	local attackerHeadshotAttr = botHumanoid:GetAttribute("LastAttackerHeadshot")
+	local attackerUserId = if type(attackerUserIdAttr) == "number" then attackerUserIdAttr else nil
+	local attackerAt = if type(attackerAtAttr) == "number" then attackerAtAttr else 0
+	local attackerWeaponId = if type(attackerWeaponIdAttr) == "string" then attackerWeaponIdAttr else ""
+	local attackerWasHeadshot = attackerHeadshotAttr == true
+	if attackerAt > 0 and time() - attackerAt > GameConfig.KillAttributionWindow then
+		attackerUserId = nil
+	end
+	-- H5 fix: NO descartamos por _isInMenuByUserId aquí. La ventana
+	-- KillAttributionWindow (2s) ya filtra daño viejo de cuando el jugador
+	-- estaba in-match. Si el daño es reciente y el bot muere justo cuando
+	-- vuelve al menú, la kill es legítima — no robarla.
+
+	if attackerUserId and attackerUserId ~= botFakeUserId then
+		_matchKillsByUserId[attackerUserId] = (_matchKillsByUserId[attackerUserId] or 0) + 1
+		-- Solo los jugadores humanos acumulan streak/timer/stats.
+		if attackerUserId > 0 then
+			local attackerPlayer = Players:GetPlayerByUserId(attackerUserId)
+			if attackerPlayer then
+				local newStreak = KillAttributionService:RecordKill(attackerUserId)
+				_registerWeaponKillForAttacker(attackerUserId, attackerWeaponId)
+				_grantActionRewardsToAttacker(attackerUserId, "Kill")
+				if attackerWasHeadshot then
+					_grantActionRewardsToAttacker(attackerUserId, "Headshot")
+				end
+				if newStreak == 3 then
+					_grantActionRewardsToAttacker(attackerUserId, "Streak3")
+				elseif newStreak == 5 then
+					_grantActionRewardsToAttacker(attackerUserId, "Streak5")
+				end
+				-- C1 fix: persistir Stats.Kills/Headshots/KillStreakBest lifetime
+				-- también para kills vs bots. Antes el path PvE solo
+				-- actualizaba contadores en memoria.
+				_persistAttackerKillStats(attackerPlayer, attackerWasHeadshot, newStreak)
+			end
+		end
+		KillAttributionService:SendStreakBroadcast(attackerUserId)
+	end
+
+	-- Los bots no usan streak: solo contabilizar kills/deaths para HUD.
+	if _matchKillsByUserId[botFakeUserId] == nil then
+		_matchKillsByUserId[botFakeUserId] = 0
+	end
+	_matchDeathsByUserId[botFakeUserId] = (_matchDeathsByUserId[botFakeUserId] or 0) + 1
+	_sendPlayerStreakToAll(botFakeUserId)
+
+	-- Sumar score al equipo contrario (igual que cuando muere un jugador)
+	if botTeam == "A" then
+		_roundScoreB += 1
+	else
+		_roundScoreA += 1
+	end
+
+	_broadcastRoundState()
+	_rebalanceBotsForCurrentRound("bot death")
+	_broadcastBotRoster()
+
+	if _roundScoreA >= GameConfig.WinScoreLimit then
+		_finishRoundAndScheduleRestart("win score limit reached", "A")
+	elseif _roundScoreB >= GameConfig.WinScoreLimit then
+		_finishRoundAndScheduleRestart("win score limit reached", "B")
+	end
+end
+
 local function _startMapLoadFlow(winnerMapName: string)
 	_isMapLoading = true
 	_isPlayEnabled = false
@@ -1464,7 +1310,7 @@ local function _startMapLoadFlow(winnerMapName: string)
 		_activeMapName = ""
 		_sendMapLoadStateToAll()
 
-		_hasCompletedInitialVote = false
+		VotingService:ResetCompletedFlag()
 		_setPhase("Idle", "map load failed; retry vote")
 		_startVoteIfPossible()
 		return
@@ -1481,15 +1327,15 @@ local function _startMapLoadFlow(winnerMapName: string)
 	_roundScoreA = 0
 	_roundScoreB = 0
 	_roundEndAt = time() + GameConfig.MaxRoundDuration
-	_resetAllPlayerStreakState()
-	table.clear(_teamByUserId)
-	table.clear(_isInMenuByUserId)
-	table.clear(_pendingSpawnByUserId)
-	table.clear(_joinDebounceByUserId)
-	table.clear(_deathAtByUserId)
-	table.clear(_respawnDebounceByUserId)
-
+	_resetMatchScopedState()
+	-- Tras el clear, re-inicializar kill/death/streak a 0 para los players
+	-- actuales y broadcastear (UI sync); marcar a todos como en-menú (el
+	-- siguiente RequestJoinMatch los moverá a in-round).
 	for _, player in Players:GetPlayers() do
+		_matchKillsByUserId[player.UserId] = 0
+		KillAttributionService:InitStreak(player.UserId)
+		_matchDeathsByUserId[player.UserId] = 0
+		KillAttributionService:SendStreakBroadcast(player.UserId)
 		_isInMenuByUserId[player.UserId] = true
 	end
 	_setPhase("PregameReady", "map loaded; play enabled")
@@ -1498,86 +1344,12 @@ local function _startMapLoadFlow(winnerMapName: string)
 
 	if _AIService then
 		local sharedSpawnPoints = _collectSharedSpawnPoints(_activeMapModel :: Instance)
-		_recentDeathBySpawn = {}
+		-- _recentDeathBySpawn ya quedó limpio por `_resetMatchScopedState()` arriba.
 		local ok, err = pcall(function()
 			_AIService:OnRoundStart({
 				spawnPoints = sharedSpawnPoints,
 				mapRoot = _activeMapModel,
-				onBotDied = function(botTeam: string, _botName: string, botHumanoid: Humanoid, botFakeUserId: number)
-					if not _isRoundActive then
-						return
-					end
-
-					-- Credit the kill to whoever killed this bot
-					local attackerUserIdAttr = botHumanoid:GetAttribute("LastAttackerUserId")
-					local attackerAtAttr = botHumanoid:GetAttribute("LastAttackerAt")
-					local attackerWeaponIdAttr = botHumanoid:GetAttribute("LastAttackerWeaponId")
-					local attackerHeadshotAttr = botHumanoid:GetAttribute("LastAttackerHeadshot")
-					local attackerUserId = if type(attackerUserIdAttr) == "number" then attackerUserIdAttr else nil
-					local attackerAt = if type(attackerAtAttr) == "number" then attackerAtAttr else 0
-					local attackerWeaponId = if type(attackerWeaponIdAttr) == "string" then attackerWeaponIdAttr else ""
-					local attackerWasHeadshot = attackerHeadshotAttr == true
-					if attackerAt > 0 and time() - attackerAt > GameConfig.KillAttributionWindow then
-						attackerUserId = nil
-					end
-					-- H5 fix: NO descartamos por _isInMenuByUserId aquí. La
-					-- ventana KillAttributionWindow (2s) ya filtra daño viejo
-					-- de cuando el jugador estaba in-match. Si el daño es
-					-- reciente y el bot muere justo cuando vuelve al menú,
-					-- la kill es legítima — no robarla.
-
-					if attackerUserId and attackerUserId ~= botFakeUserId then
-						_matchKillsByUserId[attackerUserId] = (_matchKillsByUserId[attackerUserId] or 0) + 1
-						-- Solo los jugadores humanos acumulan streak/timer/stats.
-						if attackerUserId > 0 then
-							local attackerPlayer = Players:GetPlayerByUserId(attackerUserId)
-							if attackerPlayer then
-								_killStreakByUserId[attackerUserId] = (_killStreakByUserId[attackerUserId] or 0) + 1
-								_setupStreakTimeout(attackerUserId)
-								_registerWeaponKillForAttacker(attackerUserId, attackerWeaponId)
-								_grantActionRewardsToAttacker(attackerUserId, "Kill")
-								if attackerWasHeadshot then
-									_grantActionRewardsToAttacker(attackerUserId, "Headshot")
-								end
-								local newStreak = _killStreakByUserId[attackerUserId] or 0
-								if newStreak == 3 then
-									_grantActionRewardsToAttacker(attackerUserId, "Streak3")
-								elseif newStreak == 5 then
-									_grantActionRewardsToAttacker(attackerUserId, "Streak5")
-								end
-								-- C1 fix: persistir Stats.Kills/Headshots/KillStreakBest
-								-- lifetime también para kills vs bots. Antes el path PvE
-								-- solo actualizaba contadores en memoria.
-								_persistAttackerKillStats(attackerPlayer, attackerWasHeadshot, newStreak)
-							end
-						end
-						_sendPlayerStreakToAll(attackerUserId)
-					end
-
-						-- Los bots no usan streak: solo contabilizar kills/deaths para HUD.
-					if _matchKillsByUserId[botFakeUserId] == nil then
-						_matchKillsByUserId[botFakeUserId] = 0
-					end
-					_matchDeathsByUserId[botFakeUserId] = (_matchDeathsByUserId[botFakeUserId] or 0) + 1
-					_sendPlayerStreakToAll(botFakeUserId)
-
-					-- Sumar score al equipo contrario (igual que cuando muere un jugador)
-					if botTeam == "A" then
-						_roundScoreB += 1
-					else
-						_roundScoreA += 1
-					end
-
-					_broadcastRoundState()
-					_rebalanceBotsForCurrentRound("bot death")
-					_broadcastBotRoster()
-
-					if _roundScoreA >= GameConfig.WinScoreLimit then
-						_finishRoundAndScheduleRestart("win score limit reached", "A")
-					elseif _roundScoreB >= GameConfig.WinScoreLimit then
-						_finishRoundAndScheduleRestart("win score limit reached", "B")
-					end
-				end,
+				onBotDied = _handleBotDied,
 			})
 		end)
 		if not ok then
@@ -1591,267 +1363,42 @@ local function _startMapLoadFlow(winnerMapName: string)
 	task.spawn(_runRoundTimer, _roundId)
 end
 
+-- Handler de sync general (vote + map + round + streaks + roster). El bit de
+-- vote lo delega VotingService:SendSnapshotTo; el resto vive aquí.
 local function _onRequestVoteSync(_: {}, player: Player)
+	local now = time()
+	local last = _voteSyncCooldownByUserId[player.UserId] or 0
+	if now - last < REMOTE_RATE_LIMIT_SECONDS then
+		return
+	end
+	_voteSyncCooldownByUserId[player.UserId] = now
+
 	_log(string.format("Received RequestVoteSync from %s.", player.Name))
-	_sendActiveVoteToPlayer(player)
+	VotingService:SendSnapshotTo(player)
 	_sendMapLoadStateToPlayer(player)
 	_sendRoundStateToPlayer(player)
 	_sendAllPlayerStreaksToPlayer(player)
 	_sendBotRosterToPlayer(player)
 end
 
-local function _disconnectVoteForPlayer(userId: number)
-	local vote = _activeVote
-	if not vote then
-		return
-	end
-
-	local previous = vote.votesByUserId[userId]
-	if not previous then
-		return
-	end
-
-	vote.votesByUserId[userId] = nil
-	local oldCount = vote.voteCounts[previous] or 0
-	vote.voteCounts[previous] = math.max(0, oldCount - 1)
-	_log(string.format("Player %d left vote. Removed vote from map '%s'.", userId, previous))
-	_broadcastVoteState(vote)
-end
-
-local function _isVoteChangeAllowed(player: Player): boolean
-	local now = time()
-	local last = _voteCooldownsByUserId[player.UserId] or 0
-	if now - last < VOTE_CHANGE_COOLDOWN then
-		return false
-	end
-
-	_voteCooldownsByUserId[player.UserId] = now
-	return true
-end
-
-local function _isValidOption(vote: ActiveVoteState, mapName: string): boolean
-	for _, optionName in vote.optionNames do
-		if optionName == mapName then
-			return true
-		end
-	end
-
-	return false
-end
-
-local function _onCastVote(data: { mapName: string }, player: Player)
-	-- Cap longitud antes de cualquier processing — protege contra payloads
-	-- arbitrariamente grandes que harían trabajo en _isValidOption / format.
-	if not NetGuards.validate(data, { mapName = NetGuards.MAX.MapName }) then
-		return
-	end
-
-	local vote = _activeVote
-	if not vote then
-		_log(string.format("Ignored vote from %s: no active vote.", player.Name))
-		return
-	end
-
-	if not _isVoteChangeAllowed(player) then
-		_log(string.format("Rate-limited vote from %s.", player.Name))
-		return
-	end
-
-	local mapName = data.mapName
-	if mapName == "" or not _isValidOption(vote, mapName) then
-		_log(string.format("Ignored invalid vote from %s for map '%s'.", player.Name, mapName))
-		return
-	end
-
-	local previous = vote.votesByUserId[player.UserId]
-	if previous == mapName then
-		_log(string.format("Ignored duplicate vote from %s for map '%s'.", player.Name, mapName))
-		return
-	end
-
-	if previous then
-		local oldCount = vote.voteCounts[previous] or 0
-		vote.voteCounts[previous] = math.max(0, oldCount - 1)
-	end
-
-	vote.votesByUserId[player.UserId] = mapName
-	vote.voteCounts[mapName] = (vote.voteCounts[mapName] or 0) + 1
-	_log(string.format("Vote updated: %s -> '%s' (previous: %s)", player.Name, mapName, previous or "none"))
-
-	_broadcastVoteState(vote)
-end
-
-local function _resolveWinner(vote: ActiveVoteState): string
-	local connectedByUserId = {} :: { [number]: true }
-	for _, player in Players:GetPlayers() do
-		connectedByUserId[player.UserId] = true
-	end
-
-	local validCounts = {} :: { [string]: number }
-	for _, optionName in vote.optionNames do
-		validCounts[optionName] = 0
-	end
-
-	for userId, mapName in vote.votesByUserId do
-		if connectedByUserId[userId] and validCounts[mapName] ~= nil then
-			validCounts[mapName] += 1
-		end
-	end
-
-	local maxVotes = -1
-	local tied = {} :: { string }
-	for _, optionName in vote.optionNames do
-		local count = validCounts[optionName] or 0
-		if count > maxVotes then
-			maxVotes = count
-			table.clear(tied)
-			table.insert(tied, optionName)
-		elseif count == maxVotes then
-			table.insert(tied, optionName)
-		end
-	end
-
-	if #tied == 0 then
-		return vote.optionNames[math.random(1, #vote.optionNames)]
-	end
-
-	return tied[math.random(1, #tied)]
-end
-
-local function _runVoteTimer(vote: ActiveVoteState)
-	_setPhase("Voting", string.format("options=[%s, %s, %s], duration=%ds", vote.optionNames[1], vote.optionNames[2], vote.optionNames[3], vote.duration))
-
-	while _activeVote == vote do
-		local remaining = vote.endAt - time()
-		if remaining <= 0 then
-			break
-		end
-
-		_broadcastVoteState(vote)
-		task.wait(1)
-	end
-
-	if _activeVote ~= vote then
-		return
-	end
-
-	_broadcastVoteState(vote)
-	local winner = _resolveWinner(vote)
-	_setPhase("VoteEnded", "winner=" .. winner)
-	_log(string.format("Vote finished. Winner map: '%s'.", winner))
-	Network.Match.EndVote.SendToAll({ winnerMapName = winner })
-
-	_activeVote = nil
-	_hasCompletedInitialVote = true
-	task.defer(function()
-		_startMapLoadFlow(winner)
-	end)
-end
-
-function _startVoteIfPossible()
-	if _activeVote ~= nil or _hasCompletedInitialVote then
-		if _activeVote ~= nil then
-			_log("Vote start skipped: already voting.")
-		else
-			_log("Vote start skipped: initial vote already completed.")
-		end
-		return
-	end
-
-	if _isMapLoading or _isPlayEnabled then
-		_log("Vote start skipped: map flow already active.")
-		return
-	end
-
-	local playerCount = #Players:GetPlayers()
-	if playerCount < GameConfig.MinPlayersToStart then
-		_log(string.format("Vote start blocked: players=%d, required=%d.", playerCount, GameConfig.MinPlayersToStart))
-		return
-	end
-
-	local pool = _collectCompatibleMaps("TeamDeathmatch")
-	if #pool < 3 then
-		_log(string.format("Vote start blocked: compatible maps=%d, required=3.", #pool))
-		warn("[MatchService] Se requieren al menos 3 mapas compatibles para iniciar la votacion.")
-		return
-	end
-
-	local options = _pickRandomMapOptions(pool, 3)
-	if #options < 3 then
-		_log(string.format("Vote start blocked: random option selection returned %d maps.", #options))
-		return
-	end
-
-	_setPhase("VoteStarting", string.format("players=%d", playerCount))
-
-	local optionNames = {
-		options[1].Name,
-		options[2].Name,
-		options[3].Name,
-	}
-
-	local voteCounts = {
-		[optionNames[1]] = 0,
-		[optionNames[2]] = 0,
-		[optionNames[3]] = 0,
-	}
-
-	local optionImages = {
-		[optionNames[1]] = options[1].PlaceholderImage ~= "" and options[1].PlaceholderImage or DEFAULT_PLACEHOLDER_IMAGE,
-		[optionNames[2]] = options[2].PlaceholderImage ~= "" and options[2].PlaceholderImage or DEFAULT_PLACEHOLDER_IMAGE,
-		[optionNames[3]] = options[3].PlaceholderImage ~= "" and options[3].PlaceholderImage or DEFAULT_PLACEHOLDER_IMAGE,
-	}
-
-	local optionModes = {
-		[optionNames[1]] = options[1].Modes[1] or "TeamDeathmatch",
-		[optionNames[2]] = options[2].Modes[1] or "TeamDeathmatch",
-		[optionNames[3]] = options[3].Modes[1] or "TeamDeathmatch",
-	}
-
-	local voteState: ActiveVoteState = {
-		options = options,
-		optionNames = optionNames,
-		optionImages = optionImages,
-		optionModes = optionModes,
-		voteCounts = voteCounts,
-		votesByUserId = {},
-		endAt = time() + GameConfig.VoteDuration,
-		duration = GameConfig.VoteDuration,
-	}
-
-	_activeVote = voteState
-	-- Reset del dedupe key — el nuevo vote tiene otras opciones, debemos
-	-- broadcastear el primer estado aunque numéricamente coincida con basura.
-	_lastVoteBroadcastKey = nil
-	-- Limpiar cooldowns viejos del voto anterior para que el primer voto del nuevo
-	-- ciclo no quede bloqueado.
-	table.clear(_voteCooldownsByUserId)
-	_log(string.format("Vote started with maps: '%s', '%s', '%s'.", optionNames[1], optionNames[2], optionNames[3]))
-
-	Network.Match.StartVote.SendToAll({
-		optionAName = optionNames[1],
-		optionAImage = optionImages[optionNames[1]],
-		optionAMode = optionModes[optionNames[1]],
-		optionBName = optionNames[2],
-		optionBImage = optionImages[optionNames[2]],
-		optionBMode = optionModes[optionNames[2]],
-		optionCName = optionNames[3],
-		optionCImage = optionImages[optionNames[3]],
-		optionCMode = optionModes[optionNames[3]],
-		duration = GameConfig.VoteDuration,
-	})
-
-	_broadcastVoteState(voteState)
-	task.spawn(_runVoteTimer, voteState)
+-- Implementación del forward-decl: delega al VotingService.
+_startVoteIfPossible = function()
+	VotingService:StartVoteIfPossible()
 end
 
 local function _onCharacterAdded(player: Player, character: Model)
 	-- Asignar al grupo CHARACTERS para que jugadores vivos no colisionen con
 	-- cadáveres (ragdolls están en RAGDOLL via los kill effects). Snapshot
 	-- inmediato + DescendantAdded por si accesorios/tools cargan tarde.
-	-- La conexión muere con el modelo del personaje (no leak entre lives).
+	-- Trackeamos la connection por userId para desconectarla en el siguiente
+	-- respawn / muerte / salida — el character viejo puede seguir parented por
+	-- ragdoll/kill effects hasta el GC, lo que acumularía listeners.
 	CollisionGroups.setGroupForCharacter(character, CollisionGroups.CHARACTERS)
-	character.DescendantAdded:Connect(function(descendant)
+	local prev = _charDescendantConnectionsByUserId[player.UserId]
+	if prev then
+		prev:Disconnect()
+	end
+	_charDescendantConnectionsByUserId[player.UserId] = character.DescendantAdded:Connect(function(descendant)
 		if descendant:IsA("BasePart") then
 			-- Si el char ya ragdollizó cuando llega una part nueva (VFX del
 			-- kill effect, p.ej.), tomar el grupo coherente con su estado.
@@ -1904,10 +1451,8 @@ local function _onRequestJoinMatch(_: {}, player: Player)
 	if _matchKillsByUserId[player.UserId] == nil then
 		_matchKillsByUserId[player.UserId] = 0
 	end
-	if _killStreakByUserId[player.UserId] == nil then
-		_killStreakByUserId[player.UserId] = 0
-	end
-	_sendPlayerStreakToAll(player.UserId)
+	KillAttributionService:EnsureStreakInitialized(player.UserId)
+	KillAttributionService:SendStreakBroadcast(player.UserId)
 
 	task.defer(function()
 		if player.Parent ~= Players then
@@ -1994,16 +1539,24 @@ end
 -- Se inicia desde MatchService:Start con predicates inyectados — ver allá.
 
 local function _onRequestReturnToMenu(_: {}, player: Player)
+	-- Cooldown duro: ReturnToMenu llama LoadCharacter (expensive) + teleport +
+	-- rebalance de bots. Sin cap un cliente podría spamearlo entre frames.
+	local now = time()
+	local last = _returnToMenuCooldownByUserId[player.UserId] or 0
+	if now - last < REMOTE_RATE_LIMIT_SECONDS then
+		return
+	end
+	_returnToMenuCooldownByUserId[player.UserId] = now
+
 	_isInMenuByUserId[player.UserId] = true
 	_respawnDebounceByUserId[player.UserId] = nil
 	_pendingSpawnByUserId[player.UserId] = nil
-	_killStreakByUserId[player.UserId] = 0
-	_resetStreakTimeout(player.UserId)
+	KillAttributionService:ResetStreak(player.UserId)
 	_rebalanceBotsForCurrentRound("return to menu")
 	if _matchKillsByUserId[player.UserId] == nil then
 		_matchKillsByUserId[player.UserId] = 0
 	end
-	_sendPlayerStreakToAll(player.UserId)
+	KillAttributionService:SendStreakBroadcast(player.UserId)
 
 	local lobbySpawn = _findLobbySpawn()
 	if lobbySpawn then
@@ -2022,7 +1575,7 @@ end
 
 function MatchService:GetPlayerKillStreak(playerOrUserId: Player | number): number
 	local userId = if typeof(playerOrUserId) == "number" then playerOrUserId else playerOrUserId.UserId
-	return _killStreakByUserId[userId] or 0
+	return KillAttributionService:GetStreak(userId)
 end
 
 function MatchService:Start(dataService: DataService): ()
@@ -2098,14 +1651,14 @@ function MatchService:Start(dataService: DataService): ()
 		_isInMenuByUserId[player.UserId] = true
 		_deathAtByUserId[player.UserId] = 0
 		_matchKillsByUserId[player.UserId] = 0
-		_killStreakByUserId[player.UserId] = 0
-		_sendPlayerStreakToAll(player.UserId)
+		KillAttributionService:InitStreak(player.UserId)
+		KillAttributionService:SendStreakBroadcast(player.UserId)
 		_bindCharacterTracking(player)
 		_startVoteIfPossible()
 
 		task.delay(0.75, function()
 			if player.Parent == Players then
-				_sendActiveVoteToPlayer(player)
+				VotingService:SendSnapshotTo(player)
 				_sendMapLoadStateToPlayer(player)
 				_sendRoundStateToPlayer(player)
 				_sendAllPlayerStreaksToPlayer(player)
@@ -2116,19 +1669,19 @@ function MatchService:Start(dataService: DataService): ()
 	Players.PlayerRemoving:Connect(function(player)
 		local wasActiveReal = _isInMenuByUserId[player.UserId] == false
 		local wasPendingSpawn = _pendingSpawnByUserId[player.UserId] == true
-		_voteCooldownsByUserId[player.UserId] = nil
+		-- _voteCooldownsByUserId vive en VotingService:DisconnectPlayer (más abajo).
+		_voteSyncCooldownByUserId[player.UserId] = nil
+		_returnToMenuCooldownByUserId[player.UserId] = nil
 		_isInMenuByUserId[player.UserId] = nil
 		_deathAtByUserId[player.UserId] = nil
 		_respawnDebounceByUserId[player.UserId] = nil
 		_matchKillsByUserId[player.UserId] = nil
 		_matchDeathsByUserId[player.UserId] = nil
-		_killStreakByUserId[player.UserId] = nil
-		_lastBroadcastStreakKeyByUserId[player.UserId] = nil
+		KillAttributionService:OnPlayerRemoving(player.UserId)
 		_pendingProfileActionsByUserId[player.UserId] = nil
 		_roundEndEligibleByUserId[player.UserId] = nil
-		_resetStreakTimeout(player.UserId)
 		_log(string.format("Player removing: %s (%d).", player.Name, player.UserId))
-		_disconnectVoteForPlayer(player.UserId)
+		VotingService:DisconnectPlayer(player.UserId)
 		_joinDebounceByUserId[player.UserId] = nil
 		_disconnectDeathConnection(player.UserId)
 
@@ -2136,6 +1689,12 @@ function MatchService:Start(dataService: DataService): ()
 		if charConn then
 			charConn:Disconnect()
 			_characterConnectionsByUserId[player.UserId] = nil
+		end
+
+		local charDescConn = _charDescendantConnectionsByUserId[player.UserId]
+		if charDescConn then
+			charDescConn:Disconnect()
+			_charDescendantConnectionsByUserId[player.UserId] = nil
 		end
 
 		if _pendingSpawnByUserId[player.UserId] then
@@ -2150,11 +1709,31 @@ function MatchService:Start(dataService: DataService): ()
 		end
 	end)
 
-	Network.Match.CastVote.Listen(_onCastVote)
 	Network.Match.RequestVoteSync.Listen(_onRequestVoteSync)
 	Network.Match.RequestJoinMatch.Listen(_onRequestJoinMatch)
 	Network.Match.RequestRespawn.Listen(_onRequestRespawn)
 	Network.Match.RequestReturnToMenu.Listen(_onRequestReturnToMenu)
+
+	-- KillAttributionService: owns _killStreakByUserId, timeouts, broadcast keys.
+	-- Necesita refs a kills/deaths para componer el packet del broadcast.
+	KillAttributionService:Start({
+		matchKillsByUserId = _matchKillsByUserId,
+		matchDeathsByUserId = _matchDeathsByUserId,
+	})
+
+	-- VotingService: owns _activeVote, vote cooldowns, vote timer, CastVote
+	-- handler. Wire callback `onVoteFinished` que dispara mapload.
+	VotingService:Start({
+		log = _log,
+		setPhase = function(phase: string, reason: string)
+			_setPhase(phase, reason)
+		end,
+		getIsMapLoading = function() return _isMapLoading end,
+		getIsPlayEnabled = function() return _isPlayEnabled end,
+		onVoteFinished = function(winnerMapName: string)
+			_startMapLoadFlow(winnerMapName)
+		end,
+	})
 
 	-- HealthPickup extraído (Sprint 4 P2 #17). Inyectamos predicates para
 	-- que el service no se acople a state interno de MatchService.
@@ -2165,11 +1744,22 @@ function MatchService:Start(dataService: DataService): ()
 		end,
 	})
 
+	-- TeamAssignment: pasamos tabla `_teamByUserId` por referencia (el service
+	-- escribe asignaciones ahí) y predicates de estado leído.
+	TeamAssignmentService:Start({
+		teamByUserId = _teamByUserId,
+		isInMenuByUserId = _isInMenuByUserId,
+		pendingSpawnByUserId = _pendingSpawnByUserId,
+		getRoundScoreA = function() return _roundScoreA end,
+		getRoundScoreB = function() return _roundScoreB end,
+		teamSizeTarget = GameConfig.TeamSizeTarget,
+	})
+
 	for _, player in Players:GetPlayers() do
 		_isInMenuByUserId[player.UserId] = true
 		_deathAtByUserId[player.UserId] = 0
 		_matchKillsByUserId[player.UserId] = 0
-		_killStreakByUserId[player.UserId] = 0
+		KillAttributionService:InitStreak(player.UserId)
 		_bindCharacterTracking(player)
 	end
 

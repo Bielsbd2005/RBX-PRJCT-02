@@ -13,14 +13,7 @@ local Janitor = require(Packages.janitor) :: any
 local Fusion = require(Packages.fusion)
 local GameConfig = require(Shared.GameConfig)
 local Network = require(Shared.networking.Network)
-local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
-local DailyTasksConfig = require(Shared.constants.DailyTasks)
-local ActionRewards = require(Shared.constants.ActionRewards)
-local LockerCategory = require(Shared.constants.LockerCategory)
 
-local DAILY_TASK_COMPLETED_ICON = "rbxassetid://113694528712529"
-
-local DataController = require(Client.core.data.DataController)
 local IrisTransition = require(Client.core.ui.IrisTransition)
 
 local MatchState = require(script.MatchState)
@@ -28,6 +21,7 @@ local MatchCamera = require(script.MatchCamera)
 local MatchWeapons = require(script.MatchWeapons)
 local MatchMenu = require(script.MatchMenu)
 local MatchHud = require(script.MatchHud)
+local MatchProgressionObserver = require(script.MatchProgressionObserver)
 
 local DeathScreenView = require(script.DeathScreenView)
 local EndResultsView = require(script.EndResultsView)
@@ -91,19 +85,13 @@ local function _resolveKillerCharacter(killerUserIdStr: string): Model?
 		return if player then player.Character else nil
 	end
 
-	-- Bot
-	for _, child in workspace:GetChildren() do
-		if child:IsA("Model") and child:GetAttribute("FakeUserId") == killerUserId then
-			return child
-		end
-		if child:IsA("Folder") or child:IsA("Model") then
-			local botsFolder = if child.Name == "Bots" then child else child:FindFirstChild("Bots")
-			if botsFolder then
-				for _, bot in botsFolder:GetChildren() do
-					if bot:IsA("Model") and bot:GetAttribute("FakeUserId") == killerUserId then
-						return bot
-					end
-				end
+	-- Bot: reusamos el cache de KillCamController (mapRoot.Bots) en lugar de
+	-- escanear workspace:GetChildren() en cada muerte.
+	local botsFolder = KillCamController.getBotsFolder()
+	if botsFolder then
+		for _, bot in botsFolder:GetChildren() do
+			if bot:IsA("Model") and bot:GetAttribute("FakeUserId") == killerUserId then
+				return bot
 			end
 		end
 	end
@@ -174,6 +162,7 @@ function MatchFeature.start(menuController: any): any
 
 	local matchHudGui = playerGui:FindFirstChild("MatchHud")
 	local hud = MatchHud.new(if matchHudGui and matchHudGui:IsA("ScreenGui") then matchHudGui else nil)
+	janitor:Add(hud, "destroy")
 	hud:setScores(0, 0, GameConfig.MaxRoundDuration)
 
 	-- ── Vistas ───────────────────────────────────────────────
@@ -189,8 +178,17 @@ function MatchFeature.start(menuController: any): any
 	local killCam = KillCamController.new(playerGui)
 	janitor:Add(killCam, "Destroy")
 
-	NPCHighlightController:Start()
-	HealthBillboardController:Start()
+	-- Scan compartido de workspace para evitar que cada controller haga su
+	-- propio `workspace:GetDescendants()` (eran dos escaneos secuenciales sobre
+	-- la misma jerarquía gigante).
+	local prescannedModels: { Model } = {}
+	for _, desc in workspace:GetDescendants() do
+		if desc:IsA("Model") then
+			table.insert(prescannedModels, desc)
+		end
+	end
+	NPCHighlightController:Start(prescannedModels)
+	HealthBillboardController:Start(prescannedModels)
 	-- D1+D2: registrar Stop() en el janitor para que un teardown del feature
 	-- (e.g. hot reload) desconecte los PlayerAdded/DescendantAdded/Team
 	-- listeners que de otra forma se duplicarían en el siguiente Start().
@@ -718,187 +716,16 @@ function MatchFeature.start(menuController: any): any
 		menuController:setMapVoteVisible(false)
 	end), true)
 
-	-- ── DataController observer ──────────────────────────────
-	local function findLevelUpUnlock(level: number): any
-		for category, items in ItemsConfig do
-			if type(items) == "table" then
-				for itemId, definition in items do
-					if type(definition) == "table" and tonumber(definition.LevelRequired) == level then
-						local name = if type(definition.Name) == "string" and definition.Name ~= ""
-							then definition.Name
-							else tostring(itemId)
-						local image = if type(definition.Image) == "string" then definition.Image else nil
-						return {
-							name = name,
-							category = tostring(category),
-							image = image,
-						}
-					end
-				end
-			end
-		end
-		return nil
-	end
-
-	local function _isKillChallengeWrap(wrapKey: string): (boolean, any)
-		local weaponWraps = ItemsConfig.WeaponWraps
-		if type(weaponWraps) ~= "table" then
-			return false, nil
-		end
-		local def = weaponWraps[wrapKey]
-		if type(def) ~= "table" then
-			return false, nil
-		end
-		local challenge = def.KillChallenge
-		if type(challenge) == "table" and tonumber(challenge.Kills) and challenge.Kills > 0 then
-			return true, def
-		end
-		return false, nil
-	end
-
-	DataController:WhenReady():andThen(function()
-		local lastSeenLevel: number? = nil
-		local function updateCashAndLevel()
-			local stats = Fusion.peek(DataController.Stats) :: any
-			hud:updateCashLevel(stats)
-
-			local currentLevel = if stats and type(stats.Level) == "number" then math.max(0, math.floor(stats.Level)) else 0
-			if lastSeenLevel ~= nil and currentLevel > lastSeenLevel then
-				local unlock = findLevelUpUnlock(currentLevel)
-				hud:playLevelUpAnimation(currentLevel, unlock)
-			end
-			lastSeenLevel = currentLevel
-		end
-		local statsObserver = fusionScope:Observer(DataController.Stats)
-		janitor:Add(statsObserver:onBind(updateCashAndLevel), true)
-		updateCashAndLevel()
-
-		-- BattlePass tier-up: detecta CurrentTier subiendo y dispara la animación.
-		-- Convención: el jugador percibe "Lvl. N" como el último tier completado,
-		-- así que mostramos `currentTier - 1` (CurrentTier internamente es "el tier
-		-- hacia el que progreso"). Si ocurre cascading tier-up (subir 3 niveles
-		-- en una sola kill), disparamos un único toast con el tier final, igual
-		-- que hace el level up de character.
-		local lastSeenBPTier: number? = nil
-		local function checkBattlePassLevelUp()
-			local bp = Fusion.peek(DataController.BattlePass) :: any
-			if type(bp) ~= "table" then return end
-			local currentTier = if type(bp.CurrentTier) == "number" then math.max(1, math.floor(bp.CurrentTier)) else 1
-			if lastSeenBPTier ~= nil and currentTier > lastSeenBPTier then
-				local displayLevel = math.max(0, currentTier - 1)
-				hud:playBattlePassLevelUpAnimation(displayLevel)
-			end
-			lastSeenBPTier = currentTier
-		end
-		local bpObserver = fusionScope:Observer(DataController.BattlePass)
-		janitor:Add(bpObserver:onBind(checkBattlePassLevelUp), true)
-		checkBattlePassLevelUp()
-
-		-- Snapshot inicial de wraps owned por arma para detectar desbloqueos.
-		local previousByWeapon: { [string]: { [string]: { [string]: boolean } } } = {}
-		local wrapsSeeded = false
-		local function snapshotWrapsOwned(inventory: any): { [string]: { [string]: { [string]: boolean } } }
-			local snapshot: { [string]: { [string]: { [string]: boolean } } } = {}
-			local byWeapon = if type(inventory) == "table" then inventory.WeaponWrapsByWeapon else nil
-			if type(byWeapon) ~= "table" then
-				return snapshot
-			end
-			for category, weaponMap in byWeapon do
-				if type(weaponMap) == "table" then
-					local catSnap: { [string]: { [string]: boolean } } = {}
-					for weaponId, wrapMap in weaponMap do
-						if type(wrapMap) == "table" then
-							local wrapSnap: { [string]: boolean } = {}
-							for wrapKey, owned in wrapMap do
-								if owned == true or (type(owned) == "number" and owned > 0) then
-									wrapSnap[wrapKey] = true
-								end
-							end
-							catSnap[weaponId] = wrapSnap
-						end
-					end
-					snapshot[category] = catSnap
-				end
-			end
-			return snapshot
-		end
-
-		local function updateWrapsAndDetectUnlocks()
-			local inventory = Fusion.peek(DataController.Inventory) :: any
-			local current = snapshotWrapsOwned(inventory)
-
-			if wrapsSeeded then
-				for category, weaponMap in current do
-					local prevCat = previousByWeapon[category] or {}
-					for weaponId, wrapMap in weaponMap do
-						local prevWraps = prevCat[weaponId] or {}
-						for wrapKey, _ in wrapMap do
-							if not prevWraps[wrapKey] then
-								local isChallenge, def = _isKillChallengeWrap(wrapKey)
-								if isChallenge then
-									hud:playChallengeCompletedAnimation({
-										name = if type(def.Name) == "string" and def.Name ~= "" then def.Name else wrapKey,
-										image = if type(def.Image) == "string" and def.Image ~= "" then def.Image else nil,
-										previewWeaponCategory = category,
-										previewWeaponId = weaponId,
-										itemId = wrapKey,
-										category = LockerCategory.WEAPON_WRAPS,
-										textureID = if type(def.TextureID) == "string" then def.TextureID else nil,
-										baseColor = if typeof(def.BaseColor) == "Color3" then def.BaseColor else nil,
-										animated = def.isAnimated == true,
-										studsPerTile = tonumber(def.StudsPerTile),
-									})
-								end
-							end
-						end
-					end
-				end
-			end
-
-			previousByWeapon = current
-			wrapsSeeded = true
-		end
-
-		local inventoryObserver = fusionScope:Observer(DataController.Inventory)
-		janitor:Add(inventoryObserver:onBind(updateWrapsAndDetectUnlocks), true)
-
-		-- ── Daily tasks: detectar transición Claimed false→true ────
-		-- Solo dispara la animación de "Completed" cuando el HUD de partida
-		-- está activo (matchHudGui.Enabled). En menú no se muestra; el frame
-		-- del lobby ya pinta el fill verde como feedback.
-		local prevClaimed: { [string]: boolean } = {}
-		local claimedSeeded = false
-		local function onDailyTasksChanged()
-			local state = Fusion.peek(DataController.DailyTasks) :: any
-			local claimed = if state and type(state.Claimed) == "table" then state.Claimed else {}
-
-			if claimedSeeded and matchHudGui and matchHudGui.Enabled then
-				for _, def in DailyTasksConfig.Tasks do
-					local now = (claimed :: any)[def.Id] == true
-					local before = prevClaimed[def.Id] == true
-					if now and not before then
-						-- Description leerá "You earned Cash"; Reward.Value
-						-- mostrará el monto otorgado por la tarea. Cash vive en
-						-- ActionRewards (clave "Daily"..Id), no en DailyTasks.luau.
-						hud:playChallengeCompletedAnimation({
-							name = "Cash",
-							image = DAILY_TASK_COMPLETED_ICON,
-							cashAmount = ActionRewards.GetCash("Daily" .. def.Id),
-						})
-					end
-				end
-			end
-
-			local snapshot: { [string]: boolean } = {}
-			for _, def in DailyTasksConfig.Tasks do
-				snapshot[def.Id] = (claimed :: any)[def.Id] == true
-			end
-			prevClaimed = snapshot
-			claimedSeeded = true
-		end
-		local dailyTasksObserver = fusionScope:Observer(DataController.DailyTasks)
-		janitor:Add(dailyTasksObserver:onBind(onDailyTasksChanged), true)
-	end)
+	-- ── DataController observers ─────────────────────────────
+	-- Level up / BP tier-up / wrap challenge unlock / daily task claim viven
+	-- en MatchProgressionObserver (extraído de aquí). Wirea sus observers al
+	-- janitor del feature, así un teardown limpia todo.
+	MatchProgressionObserver.attach({
+		hud = hud,
+		matchHudGui = if matchHudGui and matchHudGui:IsA("ScreenGui") then matchHudGui else nil,
+		fusionScope = fusionScope,
+		janitor = janitor,
+	})
 
 	-- ── Cleanup ──────────────────────────────────────────────
 	janitor:Add(function()

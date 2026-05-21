@@ -449,54 +449,68 @@ end
 
 --- Carga el Character del jugador usando el body equipado en Loadout.Outfit.
 --- Bloquea mientras otro swap esté en curso para no contaminar el StarterCharacter.
+-- BODY_SWAP_LOCK_TIMEOUT: cap del busy-wait. Si un swap anterior se cuelga
+-- (yield perdido en LoadCharacter, error fuera del pcall, etc.), el lock se
+-- libera forzado para que respawns posteriores no queden bloqueados para
+-- siempre. 10s cubre incluso un LoadCharacter lento + clone install.
+local BODY_SWAP_LOCK_TIMEOUT = 10
 function LoadoutService.loadCharacterWithBody(player: Player, dataService: any)
 	if player.Parent ~= Players then
 		return
 	end
 
+	local waitDeadline = time() + BODY_SWAP_LOCK_TIMEOUT
 	while _bodySwapBusy do
+		if time() >= waitDeadline then
+			warn("[LoadoutService] _bodySwapBusy lock held >10s; forcing reset to recover.")
+			_bodySwapBusy = false
+			break
+		end
 		task.wait()
 	end
 	_bodySwapBusy = true
 
-	-- Limpieza defensiva: si un swap previo crasheó dejó su clon en StarterPlayer.
-	local leftover = StarterPlayer:FindFirstChild("StarterCharacter")
-	if leftover and leftover:GetAttribute(MATCH_BODY_CLONE_ATTRIBUTE) == true then
-		leftover:Destroy()
-		leftover = nil
-	end
-
-	local previousStarter = leftover
-	local installedClone: Model? = nil
-
-	local profile = if dataService then dataService:GetProfile(player) else nil
-	local outfitId: string? = nil
-	if profile and profile.Data and profile.Data.Loadout then
-		outfitId = _getOptionalString(profile.Data.Loadout.Outfit)
-	end
-
-	local template = _resolveFullBodyTemplate(outfitId)
-	if template then
-		if previousStarter then
-			previousStarter.Parent = nil
-		end
-		local clone = template:Clone()
-		clone.Name = "StarterCharacter"
-		clone:SetAttribute(MATCH_BODY_CLONE_ATTRIBUTE, true)
-		clone.Parent = StarterPlayer
-		installedClone = clone
-	end
-
+	-- Wrap todo el critical section en pcall para garantizar que _bodySwapBusy
+	-- se libera incluso si una operación intermedia (Clone, SetAttribute,
+	-- LoadCharacter, Destroy) tira un error inesperado.
 	local ok, err = pcall(function()
-		player:LoadCharacter()
-	end)
+		-- Limpieza defensiva: si un swap previo crasheó dejó su clon en StarterPlayer.
+		local leftover = StarterPlayer:FindFirstChild("StarterCharacter")
+		if leftover and leftover:GetAttribute(MATCH_BODY_CLONE_ATTRIBUTE) == true then
+			leftover:Destroy()
+			leftover = nil
+		end
 
-	if installedClone and installedClone.Parent then
-		installedClone:Destroy()
-	end
-	if previousStarter and previousStarter.Parent == nil then
-		previousStarter.Parent = StarterPlayer
-	end
+		local previousStarter = leftover
+		local installedClone: Model? = nil
+
+		local profile = if dataService then dataService:GetProfile(player) else nil
+		local outfitId: string? = nil
+		if profile and profile.Data and profile.Data.Loadout then
+			outfitId = _getOptionalString(profile.Data.Loadout.Outfit)
+		end
+
+		local template = _resolveFullBodyTemplate(outfitId)
+		if template then
+			if previousStarter then
+				previousStarter.Parent = nil
+			end
+			local clone = template:Clone()
+			clone.Name = "StarterCharacter"
+			clone:SetAttribute(MATCH_BODY_CLONE_ATTRIBUTE, true)
+			clone.Parent = StarterPlayer
+			installedClone = clone
+		end
+
+		player:LoadCharacter()
+
+		if installedClone and installedClone.Parent then
+			installedClone:Destroy()
+		end
+		if previousStarter and previousStarter.Parent == nil then
+			previousStarter.Parent = StarterPlayer
+		end
+	end)
 
 	_bodySwapBusy = false
 

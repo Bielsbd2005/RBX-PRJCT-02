@@ -51,10 +51,18 @@ local function _isBotModel(instance: Instance): boolean
 	return string.find(name, "^Bot_") ~= nil
 end
 
-local function _scanExisting()
-	-- Una pasada al arrancar / al cambiar el equipo local. El coste es
-	-- aceptable porque ya no se ejecuta en bucle (el rescan periódico cada 2s
-	-- fue eliminado).
+local function _scanExisting(prescannedModels: { Model }?)
+	-- Una pasada al arrancar / al cambiar el equipo local. Si el caller pasa
+	-- `prescannedModels` (init.luau hace un solo scan compartido con
+	-- HealthBillboard), reusamos esa lista.
+	if prescannedModels then
+		for _, model in prescannedModels do
+			if _isBotModel(model) then
+				_colorBotHighlight(model)
+			end
+		end
+		return
+	end
 	for _, desc in workspace:GetDescendants() do
 		if _isBotModel(desc) then
 			_colorBotHighlight(desc :: Model)
@@ -98,13 +106,13 @@ local NPCHighlightController = {}
 local _moduleConns: { RBXScriptConnection } = {}
 local _started = false
 
-function NPCHighlightController:Start()
+function NPCHighlightController:Start(prescannedModels: { Model }?)
 	if _started then
 		return
 	end
 	_started = true
 
-	_scanExisting()
+	_scanExisting(prescannedModels)
 
 	-- DescendantAdded: filtro IsA("Model") + name match descarta de inmediato
 	-- la mayoría de adds (BaseParts, attachments, partículas, beams, etc.).

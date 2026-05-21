@@ -234,10 +234,10 @@ local function trackModel(model: Model)
 	}
 	tracked[model] = state
 
-	-- Conectar eventos
-	table.insert(conns, humanoid.HealthChanged:Connect(function()
-		updateState(state)
-	end))
+	-- Conectar eventos. `HealthChanged` y el property signal de Health disparan
+	-- ambos en el mismo frame en el cambio de vida — antes ejecutábamos
+	-- updateState 2× por daño × N enemigos. Mantenemos solo el property signal
+	-- (cubre Health) + MaxHealth (no expuesto por HealthChanged).
 	table.insert(conns, humanoid:GetPropertyChangedSignal("Health"):Connect(function()
 		updateState(state)
 	end))
@@ -309,7 +309,10 @@ local function _wireCharacterAddedFor(player: Player)
 	end))
 end
 
-function HealthBillboardController:Start()
+-- `prescannedModels` opcional: si el caller ya hizo `workspace:GetDescendants()`
+-- + filtró Models, lo reusamos para evitar un segundo escaneo en `Start`. Si es
+-- nil, escaneamos workspace nosotros (uso standalone).
+function HealthBillboardController:Start(prescannedModels: { Model }?)
 	if _started then
 		return
 	end
@@ -378,11 +381,18 @@ function HealthBillboardController:Start()
 		end
 	end))
 
-	-- Scan inicial: una sola pasada al arrancar, costo aceptable porque no se
-	-- repite (lo que era caro era el rescan periódico cada 2s, eliminado).
-	for _, desc in workspace:GetDescendants() do
-		if desc:IsA("Model") then
-			tryTrack(desc)
+	-- Scan inicial: una sola pasada al arrancar. Si el caller pasa
+	-- `prescannedModels` (init.luau hace un solo scan compartido con NPCHighlight),
+	-- lo reusamos en vez de re-escanear workspace.
+	if prescannedModels then
+		for _, model in prescannedModels do
+			tryTrack(model)
+		end
+	else
+		for _, desc in workspace:GetDescendants() do
+			if desc:IsA("Model") then
+				tryTrack(desc)
+			end
 		end
 	end
 end

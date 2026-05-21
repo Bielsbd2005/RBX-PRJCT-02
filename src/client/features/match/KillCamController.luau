@@ -69,6 +69,9 @@ end
 
 -- Cache de la folder de bots para evitar workspace:GetDescendants() en cada kill.
 -- Se invalida automáticamente si el Parent desaparece (cambio de mapa).
+-- Exportada como `KillCamController.getBotsFolder` para que otros módulos del
+-- feature (init.luau._resolveKillerCharacter) reusen el mismo cache en lugar
+-- de hacer su propio escaneo de workspace por cada muerte.
 local _botsFolderCache: Instance? = nil
 
 local function _getBotsFolder(): Instance?
@@ -91,6 +94,8 @@ local function _getBotsFolder(): Instance?
 	end
 	return nil
 end
+
+KillCamController.getBotsFolder = _getBotsFolder
 
 local function _resolveKillerRoot(killerUserId: number?, fallbackPosition: Vector3?): (BasePart?, Vector3)
 	local fallback = fallbackPosition or Vector3.zero
@@ -212,6 +217,12 @@ function KillCamController:start(data: StartData?)
 
 	local startAt = time()
 	local currentCameraPos = camera.CFrame.Position
+	-- Throttle del re-resolve cuando el focusRoot está destruido: iterar
+	-- botsFolder:GetChildren() cada RenderStepped es desperdicio (60 Hz). Re-
+	-- intentamos cada 100 ms (10 Hz) que es más que suficiente para captar el
+	-- respawn del killer durante el zoom de 5s.
+	local RESOLVE_INTERVAL = 0.1
+	local lastResolveAt = 0
 
 	self._renderConn = RunService.RenderStepped:Connect(function(dt)
 		if not self._active then
@@ -225,7 +236,9 @@ function KillCamController:start(data: StartData?)
 			-- Root is gone — try to re-resolve from killer's character (they may have respawned)
 			-- But we prefer lastKnownPosition (where they died/were) to avoid snapping to their new spawn
 			focusRoot = nil
-			if killerUserId then
+			local now = time()
+			if killerUserId and now - lastResolveAt >= RESOLVE_INTERVAL then
+				lastResolveAt = now
 				local newRoot, _ = _resolveKillerRoot(killerUserId, nil)
 				-- Only use new root if it's near the last known position (same ragdoll area)
 				if newRoot and (newRoot.Position - lastKnownPosition).Magnitude < 20 then

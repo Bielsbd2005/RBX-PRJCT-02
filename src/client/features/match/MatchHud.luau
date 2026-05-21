@@ -12,13 +12,10 @@ local TweenService = game:GetService("TweenService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local GameConfig = require(Shared.GameConfig)
-local LockerConfig = require(Shared.constants.LockerConfig)
-local LockerCategory = require(Shared.constants.LockerCategory)
 local TeamUtils = require(Shared.utils.TeamUtils)
-local Confetti = require(script.Parent.Parent.Parent.core.ui.Confetti)
 local UIUtils = require(script.Parent.Parent.Parent.core.ui.UIUtils)
-local WeaponWrapPreviewer = require(script.Parent.Parent.locker.Previewers.WeaponWrapPreviewer)
 local Janitor = require(ReplicatedStorage:WaitForChild("Packages").janitor) :: any
+local MatchNotificationsQueue = require(script.Parent.MatchNotificationsQueue)
 
 -- ── Colores ──────────────────────────────────────────────────
 local TEAM_A_HUD_COLOR = Color3.fromRGB(0, 161, 251)
@@ -322,25 +319,39 @@ function MatchHud.new(matchHudGui: ScreenGui?): any
 	self._gui = matchHudGui
 	self._hudRefs = _resolveHudRefs(matchHudGui)
 	self._localUserId = Players.LocalPlayer.UserId
+	self._destroyed = false
+	self._janitor = Janitor.new()
+	-- Queue de animaciones in-match (level up / BP level up / challenge done).
+	-- Extraído a su propio módulo para que MatchHud no orqueste tweens y
+	-- confetti; los callers siguen usando `hud:playXxxAnimation(...)`.
+	self._notificationsQueue = MatchNotificationsQueue.new(matchHudGui)
 
 	-- Stats overlay: "vX | Yms | Zfps" en Container.Version cada 1s.
+	-- Trackeamos la RenderStepped + el loop de versión en el janitor para que
+	-- un destroy() (hot reload / return-to-menu) no apile listeners ni deje
+	-- task.spawn infinitos escribiendo en un label cuyo padre fue destruido.
 	if self._hudRefs.version then
 		local versionLabel = self._hudRefs.version
 		local placePrefix = "v" .. tostring(game.PlaceVersion)
 		local localPlayer = Players.LocalPlayer
 		local frameCount = 0
 
-		RunService.RenderStepped:Connect(function()
+		self._janitor:Add(RunService.RenderStepped:Connect(function()
 			frameCount += 1
-		end)
+		end), "Disconnect")
 
 		task.spawn(function()
-			while true do
+			while not self._destroyed do
 				local framesAtStart = frameCount
 				local dt = task.wait(1)
+				if self._destroyed then
+					return
+				end
 				local fps = math.floor((frameCount - framesAtStart) / dt + 0.5)
 				local pingMs = math.floor(localPlayer:GetNetworkPing() * 1000 + 0.5)
-				versionLabel.Text = string.format("%s | %dms | %dfps", placePrefix, pingMs, fps)
+				if versionLabel.Parent then
+					versionLabel.Text = string.format("%s | %dms | %dfps", placePrefix, pingMs, fps)
+				end
 			end
 		end)
 	end
@@ -520,441 +531,31 @@ function MatchHud:setScores(scoreA: number, scoreB: number, timeLeft: number)
 	_alignScoreLabelToFillLeft(refs.teamBScore, refs.teamBBarFill)
 end
 
-local LEVEL_UP_TWEEN_IN_INFO = TweenInfo.new(0.45, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
-local LEVEL_UP_TWEEN_OUT_INFO = TweenInfo.new(0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.In)
-local LEVEL_UP_HOLD_SECONDS = 5.0
+-- Tipos públicos exportados desde MatchNotificationsQueue. Se re-exportan
+-- aquí para mantener la API estable de MatchHud (callers usan estos tipos).
+export type LevelUpUnlock = MatchNotificationsQueue.LevelUpUnlock
+export type ChallengeCompletedReward = MatchNotificationsQueue.ChallengeCompletedReward
 
-local LEVEL_UP_CONFETTI_COLORS = {
-	Color3.fromRGB(40, 130, 255),
-	Color3.fromRGB(80, 170, 255),
-	Color3.fromRGB(120, 200, 255),
-	Color3.fromRGB(20, 90, 200),
-	Color3.fromRGB(170, 220, 255),
-}
-
--- BattlePass usa paleta verde para diferenciar visualmente del level up de
--- character (azul). Mismo timing y animación, distinto frame y color.
-local BATTLEPASS_LEVEL_UP_CONFETTI_COLORS = {
-	Color3.fromRGB(60, 200, 100),
-	Color3.fromRGB(40, 220, 80),
-	Color3.fromRGB(100, 230, 130),
-	Color3.fromRGB(20, 160, 60),
-	Color3.fromRGB(140, 240, 160),
-}
-
-local LEVEL_UP_FILLER_PHRASES = {
-	"Science says you're cool now",
-	"You're doing great (for a human)",
-	"Touch grass?",
-	"Your cat is impressed",
-	"The admin is very proud of you",
-}
-
-export type LevelUpUnlock = {
-	name: string,
-	category: string,
-	image: string?,
-}
-
-local CHALLENGE_CONFETTI_COLORS = {
-	Color3.fromRGB(80, 220, 110),
-	Color3.fromRGB(130, 240, 150),
-	Color3.fromRGB(50, 180, 80),
-	Color3.fromRGB(200, 255, 210),
-	Color3.fromRGB(30, 140, 60),
-}
-
-export type ChallengeCompletedReward = {
-	name: string,
-	image: string?,
-	previewWeaponCategory: string?,
-	previewWeaponId: string?,
-	itemId: string?,
-	category: string?,
-	textureID: string?,
-	baseColor: Color3?,
-	animated: boolean?,
-	studsPerTile: number?,
-	-- Cantidad de cash recompensada. Si se provee, se muestra Reward.Value
-	-- (TextLabel oculto por defecto en el frame para desafíos de wrap).
-	cashAmount: number?,
-}
-
-function MatchHud:_resolveSlideContext(): { container: GuiObject?, hiddenFrames: { GuiObject } }
-	local matchHudGui = self._gui
-	if not matchHudGui then
-		return { container = nil, hiddenFrames = {} }
-	end
-
-	local container = _findChildGuiObject(matchHudGui, "Container")
-	if not container then
-		return { container = nil, hiddenFrames = {} }
-	end
-
-	local matchNode = _findChildGuiObject(container, "Match")
-	local statusNode = _findChildGuiObject(matchNode, "Status")
-	local timerNode = _findChildGuiObject(statusNode, "Timer")
-	local teamANode = _findChildGuiObject(matchNode, "TeamA")
-	local playersANode = _findChildGuiObject(teamANode, "PlayersA")
-	local teamBNode = _findChildGuiObject(matchNode, "TeamB")
-	local playersBNode = _findChildGuiObject(teamBNode, "PlayersB")
-
-	local hiddenFrames: { GuiObject } = {}
-	if timerNode then table.insert(hiddenFrames, timerNode) end
-	if playersANode then table.insert(hiddenFrames, playersANode) end
-	if playersBNode then table.insert(hiddenFrames, playersBNode) end
-
-	return { container = container, hiddenFrames = hiddenFrames }
-end
-
-function MatchHud:_processNotificationQueue()
-	if self._notificationActive then
-		return
-	end
-	self._notificationQueue = self._notificationQueue or {}
-	local nextRun = table.remove(self._notificationQueue, 1)
-	if not nextRun then
-		return
-	end
-
-	self._notificationActive = true
-	task.spawn(function()
-		nextRun(function()
-			self._notificationActive = false
-			self:_processNotificationQueue()
-		end)
-	end)
-end
-
--- Cap defensivo de la queue: si se enchufan muchas notificaciones (drops, level-ups
--- en cadena), tirar las más antiguas todavía sin reproducir antes que dejar crecer
--- la cola indefinidamente. El usuario nunca alcanzaría a ver 20+ notificaciones
--- encoladas — es mejor mostrar las recientes.
-local NOTIFICATION_QUEUE_CAP = 20
-
-function MatchHud:_enqueueNotification(runFn: (onDone: () -> ()) -> ())
-	self._notificationQueue = self._notificationQueue or {}
-	while #self._notificationQueue >= NOTIFICATION_QUEUE_CAP do
-		table.remove(self._notificationQueue, 1)
-	end
-	table.insert(self._notificationQueue, runFn)
-	self:_processNotificationQueue()
-end
+-- Las animaciones de notificación (LevelUp / BPLevelUp / Completed + confetti
+-- + slide context) viven en MatchNotificationsQueue. Mantenemos delegadores
+-- en MatchHud para no romper callers existentes.
 
 function MatchHud:playLevelUpAnimation(newLevel: number, unlock: LevelUpUnlock?)
-	self:_enqueueNotification(function(onDone)
-		local matchHudGui = self._gui
-		if not matchHudGui then onDone() return end
-
-		local ctx = self:_resolveSlideContext()
-		local container = ctx.container
-		if not container then onDone() return end
-
-		local levelUpFrame = _findChildGuiObject(container, "LevelUp")
-		if not levelUpFrame then onDone() return end
-
-		local hiddenFrames = ctx.hiddenFrames
-
-		local originalPosition = self._levelUpOriginalPosition
-		if not originalPosition then
-			originalPosition = levelUpFrame.Position
-			self._levelUpOriginalPosition = originalPosition
-		end
-
-		local aboveScreenPosition = UDim2.new(
-			originalPosition.X.Scale,
-			originalPosition.X.Offset,
-			-1,
-			originalPosition.Y.Offset
-		)
-
-		local resolvedLevel = math.max(0, math.floor(newLevel))
-
-		local levelLabel = _findDescendantTextLabel(levelUpFrame, { "Level" })
-			or _findDescendantTextLabel(levelUpFrame, { "Value" })
-		if levelLabel then
-			levelLabel.Text = tostring(resolvedLevel)
-		end
-
-		local descriptionLabel = _findDescendantTextLabel(levelUpFrame, { "Description" })
-		local rewardNode = _findChildGuiObject(levelUpFrame, "Reward")
-		local rewardItem = _findDescendantGuiObject(rewardNode, { "Item" })
-		local rewardName = _findDescendantTextLabel(rewardNode, { "Name" })
-
-		if unlock then
-			if descriptionLabel then
-				descriptionLabel.Text = unlock.name .. " Is now available in locker!!"
-			end
-			if rewardNode then
-				rewardNode.Visible = true
-			end
-			if rewardItem and (rewardItem:IsA("ImageLabel") or rewardItem:IsA("ImageButton")) then
-				rewardItem.Image = unlock.image or ""
-			end
-			if rewardName then
-				rewardName.Text = unlock.category
-			end
-		else
-			if descriptionLabel then
-				local phrase = LEVEL_UP_FILLER_PHRASES[math.random(1, #LEVEL_UP_FILLER_PHRASES)]
-				descriptionLabel.Text = phrase
-			end
-			if rewardNode then
-				rewardNode.Visible = false
-			end
-		end
-
-		for _, frame in hiddenFrames do
-			frame.Visible = false
-		end
-
-		levelUpFrame.Position = aboveScreenPosition
-		levelUpFrame.Visible = true
-
-		Confetti.Rain(matchHudGui, {
-			colors = LEVEL_UP_CONFETTI_COLORS,
-			count = 60,
-			minLifetime = 0.9,
-			maxLifetime = 1.5,
-			spawnDuration = 1.2,
-		})
-
-		local tweenIn = TweenService:Create(levelUpFrame, LEVEL_UP_TWEEN_IN_INFO, { Position = originalPosition })
-		tweenIn:Play()
-		tweenIn.Completed:Wait()
-
-		task.wait(LEVEL_UP_HOLD_SECONDS)
-
-		local tweenOut = TweenService:Create(levelUpFrame, LEVEL_UP_TWEEN_OUT_INFO, { Position = aboveScreenPosition })
-		tweenOut:Play()
-		tweenOut.Completed:Wait()
-
-		levelUpFrame.Visible = false
-		levelUpFrame.Position = originalPosition
-
-		for _, frame in hiddenFrames do
-			frame.Visible = true
-		end
-
-		onDone()
-	end)
+	if self._notificationsQueue then
+		self._notificationsQueue:playLevelUpAnimation(newLevel, unlock)
+	end
 end
 
 function MatchHud:playBattlePassLevelUpAnimation(newLevel: number)
-	self:_enqueueNotification(function(onDone)
-		local matchHudGui = self._gui
-		if not matchHudGui then onDone() return end
-
-		local ctx = self:_resolveSlideContext()
-		local container = ctx.container
-		if not container then onDone() return end
-
-		local frame = _findChildGuiObject(container, "BattlePassLevelUp")
-		if not frame then onDone() return end
-
-		local hiddenFrames = ctx.hiddenFrames
-
-		local originalPosition = self._battlePassLevelUpOriginalPosition
-		if not originalPosition then
-			originalPosition = frame.Position
-			self._battlePassLevelUpOriginalPosition = originalPosition
-		end
-
-		local aboveScreenPosition = UDim2.new(
-			originalPosition.X.Scale,
-			originalPosition.X.Offset,
-			-1,
-			originalPosition.Y.Offset
-		)
-
-		local resolvedLevel = math.max(0, math.floor(newLevel))
-
-		local levelLabel = _findDescendantTextLabel(frame, { "Level" })
-		if levelLabel then
-			levelLabel.Text = tostring(resolvedLevel)
-		end
-
-		for _, hidden in hiddenFrames do
-			hidden.Visible = false
-		end
-
-		frame.Position = aboveScreenPosition
-		frame.Visible = true
-
-		Confetti.Rain(matchHudGui, {
-			colors = BATTLEPASS_LEVEL_UP_CONFETTI_COLORS,
-			count = 60,
-			minLifetime = 0.9,
-			maxLifetime = 1.5,
-			spawnDuration = 1.2,
-		})
-
-		local tweenIn = TweenService:Create(frame, LEVEL_UP_TWEEN_IN_INFO, { Position = originalPosition })
-		tweenIn:Play()
-		tweenIn.Completed:Wait()
-
-		task.wait(LEVEL_UP_HOLD_SECONDS)
-
-		local tweenOut = TweenService:Create(frame, LEVEL_UP_TWEEN_OUT_INFO, { Position = aboveScreenPosition })
-		tweenOut:Play()
-		tweenOut.Completed:Wait()
-
-		frame.Visible = false
-		frame.Position = originalPosition
-
-		for _, hidden in hiddenFrames do
-			hidden.Visible = true
-		end
-
-		onDone()
-	end)
+	if self._notificationsQueue then
+		self._notificationsQueue:playBattlePassLevelUpAnimation(newLevel)
+	end
 end
 
 function MatchHud:playChallengeCompletedAnimation(reward: ChallengeCompletedReward)
-	self:_enqueueNotification(function(onDone)
-		local matchHudGui = self._gui
-		if not matchHudGui then onDone() return end
-
-		local ctx = self:_resolveSlideContext()
-		local container = ctx.container
-		if not container then onDone() return end
-
-		local completedFrame = _findChildGuiObject(container, "Completed")
-		if not completedFrame then onDone() return end
-
-		local hiddenFrames = ctx.hiddenFrames
-
-		local rewardNode = _findChildGuiObject(completedFrame, "Reward")
-			or _findChildGuiObject(container, "Reward")
-		local itemImage = if rewardNode then rewardNode:FindFirstChild("ItemImage") else nil
-		local itemViewport = if rewardNode then rewardNode:FindFirstChild("ItemViewport") else nil
-		local rewardValueLabel = if rewardNode then rewardNode:FindFirstChild("Value") else nil
-		local descriptionLabel = _findDescendantTextLabel(completedFrame, { "Description" })
-
-		-- Reward.Value está oculto por defecto (no lo usan los challenges de
-		-- wrap). Si llega cashAmount, lo mostramos con la cantidad y lo
-		-- restauramos a oculto al cerrar el frame.
-		local showedRewardValue = false
-		if rewardValueLabel and rewardValueLabel:IsA("TextLabel") and type(reward.cashAmount) == "number" then
-			rewardValueLabel.Text = UIUtils.formatCashAmount(reward.cashAmount)
-			rewardValueLabel.Visible = true
-			showedRewardValue = true
-		end
-
-		local originalPosition = self._completedOriginalPosition
-		if not originalPosition then
-			originalPosition = completedFrame.Position
-			self._completedOriginalPosition = originalPosition
-		end
-
-		local aboveScreenPosition = UDim2.new(
-			originalPosition.X.Scale,
-			originalPosition.X.Offset,
-			-1,
-			originalPosition.Y.Offset
-		)
-
-		if descriptionLabel then
-			descriptionLabel.Text = "You earned " .. tostring(reward.name)
-		end
-
-		local previewJanitor: any = nil
-
-		local hasImage = type(reward.image) == "string" and reward.image ~= ""
-		if itemImage and (itemImage:IsA("ImageLabel") or itemImage:IsA("ImageButton")) then
-			if hasImage then
-				itemImage.Image = reward.image :: string
-				itemImage.Visible = true
-			else
-				itemImage.Visible = false
-			end
-		end
-
-		if itemViewport and itemViewport:IsA("ViewportFrame") then
-			if hasImage then
-				itemViewport.Visible = false
-				for _, child in itemViewport:GetChildren() do
-					if not child:IsA("GuiObject") then
-						child:Destroy()
-					end
-				end
-				itemViewport.CurrentCamera = nil
-			else
-				itemViewport.Visible = true
-				for _, child in itemViewport:GetChildren() do
-					if not child:IsA("GuiObject") then
-						child:Destroy()
-					end
-				end
-				previewJanitor = Janitor.new()
-				local previewItem = {
-					qualifiedId = LockerConfig.makeQualifiedId(reward.category or LockerCategory.WEAPON_WRAPS, tostring(reward.itemId or reward.name)),
-					Category = reward.category or LockerCategory.WEAPON_WRAPS,
-					id = reward.itemId or reward.name,
-					Name = reward.name,
-					Price = 0,
-					LevelRequired = 0,
-					Rarity = "Common",
-					Image = "",
-					CanPurchase = false,
-					TextureID = reward.textureID,
-					BaseColor = reward.baseColor,
-					isAnimated = reward.animated,
-					StudsPerTile = reward.studsPerTile,
-					PreviewWeaponCategory = reward.previewWeaponCategory,
-					PreviewWeaponId = reward.previewWeaponId,
-				}
-				WeaponWrapPreviewer.Render(itemViewport, previewItem :: any, previewJanitor)
-			end
-		end
-
-		for _, frame in hiddenFrames do
-			frame.Visible = false
-		end
-
-		completedFrame.Position = aboveScreenPosition
-		completedFrame.Visible = true
-
-		Confetti.Rain(matchHudGui, {
-			colors = CHALLENGE_CONFETTI_COLORS,
-			count = 60,
-			minLifetime = 0.9,
-			maxLifetime = 1.5,
-			spawnDuration = 0.4,
-		})
-
-		local tweenIn = TweenService:Create(completedFrame, LEVEL_UP_TWEEN_IN_INFO, { Position = originalPosition })
-		tweenIn:Play()
-		tweenIn.Completed:Wait()
-
-		task.wait(LEVEL_UP_HOLD_SECONDS)
-
-		local tweenOut = TweenService:Create(completedFrame, LEVEL_UP_TWEEN_OUT_INFO, { Position = aboveScreenPosition })
-		tweenOut:Play()
-		tweenOut.Completed:Wait()
-
-		completedFrame.Visible = false
-		completedFrame.Position = originalPosition
-
-		if previewJanitor then
-			previewJanitor:Cleanup()
-		end
-		if itemViewport and itemViewport:IsA("ViewportFrame") then
-			itemViewport.CurrentCamera = nil
-		end
-
-		-- Restaurar Reward.Value a oculto si lo habíamos mostrado, para no
-		-- contaminar la próxima notificación que use este mismo frame.
-		if showedRewardValue and rewardValueLabel and rewardValueLabel:IsA("TextLabel") then
-			rewardValueLabel.Visible = false
-		end
-
-		for _, frame in hiddenFrames do
-			frame.Visible = true
-		end
-
-		onDone()
-	end)
+	if self._notificationsQueue then
+		self._notificationsQueue:playChallengeCompletedAnimation(reward)
+	end
 end
 
 function MatchHud:updateCashLevel(stats: any)
@@ -993,7 +594,9 @@ function MatchHud:resetMatchState()
 end
 
 function MatchHud:applyPlayerState(userId: number, kills: number, deaths: number?, streak: number?)
-	self._killsByUserId[userId] = math.max(0, kills)
+	local oldKills = self._killsByUserId[userId] or 0
+	local newKills = math.max(0, kills)
+	self._killsByUserId[userId] = newKills
 	if deaths ~= nil then
 		if userId < 0 then
 			self._deathsByUserId[userId] = math.max(0, deaths)
@@ -1001,6 +604,19 @@ function MatchHud:applyPlayerState(userId: number, kills: number, deaths: number
 	end
 	if streak ~= nil then
 		self._streakByUserId[userId] = math.max(0, streak)
+	end
+
+	-- Fast paths para evitar reconstruir + ordenar las 12 filas en cada kill:
+	-- 1) Si los kills no cambiaron, no hay nada que refrescar en la fila (el
+	--    row sólo muestra totalKills; deaths/streak no aparecen ahí).
+	-- 2) Si los kills cambiaron pero el cambio no cruza el kill-count de ningún
+	--    teammate (no hay reorder), actualizamos solo la fila del userId
+	--    afectado y evitamos el rebuild + sort completo.
+	if oldKills == newKills then
+		return
+	end
+	if self:_tryIncrementalKillUpdate(userId, oldKills, newKills) then
+		return
 	end
 	self:queuePlayerRowsUpdate()
 end
@@ -1109,6 +725,9 @@ function MatchHud:_applyCachedOrFetchThumbnail(rowKey: string, userId: number, p
 	-- Safety timeout: si GetUserThumbnailAsync se cuelga, liberamos el flag tras
 	-- 30s para que un siguiente intento pueda volver a pedir.
 	task.delay(30, function()
+		if self._destroyed then
+			return
+		end
 		if self._thumbnailRequestInFlight[userId] then
 			self._thumbnailRequestInFlight[userId] = nil
 		end
@@ -1117,6 +736,9 @@ function MatchHud:_applyCachedOrFetchThumbnail(rowKey: string, userId: number, p
 		local ok, content = pcall(function()
 			return Players:GetUserThumbnailAsync(userId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size100x100)
 		end)
+		if self._destroyed then
+			return
+		end
 		self._thumbnailRequestInFlight[userId] = nil
 		if not ok or type(content) ~= "string" or content == "" then
 			return
@@ -1152,6 +774,65 @@ function MatchHud:_applyRowEntry(
 		end
 	end
 	self:_setRowStats(rowRef, self._killsByUserId[entry.userId] or 0)
+end
+
+-- Devuelve el team ("A"/"B") del userId si está visible en alguna fila, leyendo
+-- el rowKey ya cacheado en `_rowUserIdByKey`. Más barato que resolver el team
+-- por Players.GetPlayerByUserId + TeamUtils en el hot path de cada kill.
+function MatchHud:_findRowForUserId(userId: number): (HudPlayerRowRefs?, string?)
+	for rowKey, rowUserId in pairs(self._rowUserIdByKey) do
+		if rowUserId == userId then
+			local team = string.sub(rowKey, 1, 1)
+			local idx = tonumber(string.sub(rowKey, 2))
+			if not idx then
+				return nil, nil
+			end
+			local rows = if team == "A" then self._hudRefs.teamAPlayerRows else self._hudRefs.teamBPlayerRows
+			return rows[idx], team
+		end
+	end
+	return nil, nil
+end
+
+-- Si el cambio de kills no altera el orden relativo del team, actualizamos solo
+-- la fila del userId afectado. Devuelve true si se hizo el fast path; false si
+-- el caller debe caer al full rebuild via queuePlayerRowsUpdate().
+function MatchHud:_tryIncrementalKillUpdate(userId: number, oldKills: number, newKills: number): boolean
+	if self._updateQueued then
+		return false
+	end
+	local rowRef, team = self:_findRowForUserId(userId)
+	if not rowRef or not team then
+		return false
+	end
+
+	-- Conservador: cualquier teammate cuyo kill count caiga dentro del rango
+	-- [min(old,new), max(old,new)] (inclusive) podría provocar reorder
+	-- (incluido el tie-break por nombre). En ese caso, full rebuild.
+	local lo = math.min(oldKills, newKills)
+	local hi = math.max(oldKills, newKills)
+
+	for _, p in Players:GetPlayers() do
+		if p.UserId == userId then continue end
+		local side = TeamUtils.getSide(p.Character)
+		if not side and p.Team then side = TeamUtils.normalize(p.Team.Name) end
+		if side ~= team then continue end
+		local pk = self._killsByUserId[p.UserId] or 0
+		if pk >= lo and pk <= hi then
+			return false
+		end
+	end
+	for fakeUserId, botEntry in pairs(self._botRoster) do
+		if fakeUserId == userId then continue end
+		if botEntry.team ~= team then continue end
+		local pk = self._killsByUserId[fakeUserId] or 0
+		if pk >= lo and pk <= hi then
+			return false
+		end
+	end
+
+	self:_setRowStats(rowRef, newKills)
+	return true
 end
 
 function MatchHud:_updatePlayerRows()
@@ -1214,6 +895,22 @@ function MatchHud:queuePlayerRowsUpdate()
 		self._updateQueued = false
 		self:_updatePlayerRows()
 	end)
+end
+
+function MatchHud:destroy()
+	if self._destroyed then
+		return
+	end
+	self._destroyed = true
+	self:_clearTimerEffects()
+	if self._notificationsQueue then
+		self._notificationsQueue:destroy()
+		self._notificationsQueue = nil
+	end
+	if self._janitor then
+		self._janitor:Destroy()
+		self._janitor = nil
+	end
 end
 
 return MatchHud
