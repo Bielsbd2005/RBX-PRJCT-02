@@ -45,7 +45,7 @@ local GameConfig: GameConfigType = {
 	RespawnCooldown = 1,
 	-- Segundos de inmunidad (ForceField) tras spawn — aplica a jugadores y bots.
 	-- El shield NO se rompe al disparar; expira solo por tiempo.
-	SpawnProtectionDuration = 3,
+	SpawnProtectionDuration = 2,
 	MinPlayersToStart = 1,
 	RealPlayerCapPerServer = 6,
 	TeamSizeTarget = 4,
