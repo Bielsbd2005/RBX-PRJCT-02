@@ -116,6 +116,17 @@ Special = {
 			isAnimated = false,
 			StudsPerTile = 3,
 		},
+		Wrap_RPG_Blue = {
+			Name = "RPG Blue",
+			Price = 0,
+			LevelRequired = 0,
+			Rarity = "Rare",
+			CanPurchase = false,
+			isBPExclusive = true,
+			BaseColor = Color3.fromRGB(30, 120, 255),
+			isAnimated = false,
+			StudsPerTile = 3,
+		},
 		Wrap_Gold = {
 			Name = "Gold Wrap",
 			Price = 2500,

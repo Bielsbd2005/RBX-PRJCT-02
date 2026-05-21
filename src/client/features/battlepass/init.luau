@@ -111,17 +111,26 @@ local function _resolveCloseButton(battlepassFrame: GuiObject): GuiButton?
 	return nil
 end
 
-local function _resolveSlotRow(slot: Instance, rowName: string): { frame: GuiObject, icon: ImageLabel?, valueLabel: TextLabel? }?
+type SlotRow = {
+	frame: GuiObject,
+	icon: ImageLabel?,
+	valueLabel: TextLabel?,
+	weaponImage: ImageLabel?,
+}
+
+local function _resolveSlotRow(slot: Instance, rowName: string): SlotRow?
 	local row = slot:FindFirstChild(rowName)
 	if not row or not row:IsA("GuiObject") then
 		return nil
 	end
 	local icon = row:FindFirstChild("Icon")
 	local valueLabel = row:FindFirstChild("Value")
+	local weaponImage = row:FindFirstChild("Weapon")
 	return {
 		frame = row,
 		icon = if icon and icon:IsA("ImageLabel") then icon else nil,
 		valueLabel = if valueLabel and valueLabel:IsA("TextLabel") then valueLabel else nil,
+		weaponImage = if weaponImage and weaponImage:IsA("ImageLabel") then weaponImage else nil,
 	}
 end
 
@@ -168,21 +177,41 @@ local function _formatTimeLeft(seconds: number): string
 end
 
 -- Construye la representación visual de una Reward.
--- Devuelve image (asset id o "") y label (texto).
-local function _resolveRewardVisual(reward: BattlePassConfig.Reward): (string, string)
-	if not reward then return "", "" end
+-- Devuelve:
+--   image       — asset id del icono principal de la reward ("" si ninguno).
+--   label       — texto del Value. Para WeaponWraps: "Global" o "Wrap" según
+--                 sea global o per-weapon; el resto cae a Label override o nombre
+--                 del item.
+--   weaponImage — asset id del arma asignada (solo per-weapon wraps); "" en
+--                 cualquier otro caso. El caller decide la visibilidad del
+--                 ImageLabel "Weapon" de la row.
+local function _resolveRewardVisual(reward: BattlePassConfig.Reward): (string, string, string)
+	if not reward then return "", "", "" end
 
 	if reward.Kind == "Cash" then
 		return reward.Icon or BattlePassConfig.RewardIcons.Cash or "",
-			reward.Label or ("+" .. UIUtils.formatCashAmount(reward.Amount or 0))
+			reward.Label or ("+" .. UIUtils.formatCashAmount(reward.Amount or 0)),
+			""
 	elseif reward.Kind == "Item" then
 		local catalogCategory = ItemsConfig[reward.Category]
 		local itemDef = if type(catalogCategory) == "table" then catalogCategory[reward.ItemId] else nil
 		local image = reward.Icon or (if itemDef and type(itemDef.Image) == "string" then itemDef.Image else "")
+
+		if reward.Category == "WeaponWraps" then
+			if reward.Global == true then
+				return image, reward.Label or "Global", ""
+			elseif reward.WeaponCategory and reward.WeaponId then
+				local weaponCat = ItemsConfig[reward.WeaponCategory]
+				local weaponDef = if type(weaponCat) == "table" then weaponCat[reward.WeaponId] else nil
+				local weaponImage = if weaponDef and type(weaponDef.Image) == "string" then weaponDef.Image else ""
+				return image, reward.Label or "Wrap", weaponImage
+			end
+		end
+
 		local name = reward.Label or (if itemDef and type(itemDef.Name) == "string" then itemDef.Name else (reward.ItemId or "?"))
-		return image, name
+		return image, name, ""
 	end
-	return reward.Icon or "", reward.Label or ""
+	return reward.Icon or "", reward.Label or "", ""
 end
 
 -- ────────────────────────────────────────────────────────────
@@ -299,6 +328,26 @@ function BattlePassFeature.start(menuController: any): any
 						selectedImage = child :: any
 						break
 					end
+				end
+			end
+		end
+	end
+
+	-- SelectedViewPort: paralelo a `Selected` pero para wraps. Misma mecánica
+	-- de animación (slide-up desde abajo hasta la Position autorada) pero el
+	-- contenido es un wrap 3D renderizado por WeaponWrapPreviewer. Se resuelve
+	-- por nombre o por primer ViewportFrame descendiente si el nodo nombrado
+	-- es un contenedor — mismo patrón que `Selected`.
+	local selectedViewport: ViewportFrame? = nil
+	do
+		local node = battlepassFrame:FindFirstChild("SelectedViewPort")
+		if node then
+			if node:IsA("ViewportFrame") then
+				selectedViewport = node
+			else
+				local child = node:FindFirstChildWhichIsA("ViewportFrame", true)
+				if child then
+					selectedViewport = child
 				end
 			end
 		end
@@ -427,15 +476,17 @@ function BattlePassFeature.start(menuController: any): any
 	end
 	janitor:Add(clearRowConnections, true)
 
-	-- Cache de la Position autorada de cada icon. Capturada la primera vez que
-	-- vemos el icon (antes de que cualquier tween la mueva) y reutilizada para
-	-- tweenear de vuelta al estado neutro al salir el cursor.
-	local originalIconPositions: { [ImageLabel]: UDim2 } = {}
-	local function getOriginalIconPos(icon: ImageLabel): UDim2
-		local cached = originalIconPositions[icon]
+	-- Cache de la Position autorada de cada elemento que se mueve en hover.
+	-- Capturada la primera vez que lo vemos (antes de que cualquier tween la
+	-- mueva) y reutilizada para tweenear de vuelta al estado neutro al salir el
+	-- cursor. Comparten cache icon/viewport/weapon image — la key es la
+	-- instancia, no su rol en la row.
+	local originalHoverPositions: { [GuiObject]: UDim2 } = {}
+	local function getOriginalHoverPos(element: GuiObject): UDim2
+		local cached = originalHoverPositions[element]
 		if cached == nil then
-			cached = icon.Position
-			originalIconPositions[icon] = cached
+			cached = element.Position
+			originalHoverPositions[element] = cached
 		end
 		return cached
 	end
@@ -471,9 +522,10 @@ function BattlePassFeature.start(menuController: any): any
 		indicator: GuiObject?,
 		viewport: ViewportFrame?,
 		viewportImageColor: Color3?,
+		weaponImageColor: Color3?,
 	}
 	local rowDefaultsCache: { [GuiObject]: RowDefaults } = {}
-	local function getRowDefaults(row: { frame: GuiObject, icon: ImageLabel?, valueLabel: TextLabel? }): RowDefaults
+	local function getRowDefaults(row: SlotRow): RowDefaults
 		local cached = rowDefaultsCache[row.frame]
 		if cached then return cached end
 
@@ -489,6 +541,7 @@ function BattlePassFeature.start(menuController: any): any
 			indicator = if indicatorChild and indicatorChild:IsA("GuiObject") then indicatorChild else nil,
 			viewport = viewportChild,
 			viewportImageColor = if viewportChild then viewportChild.ImageColor3 else nil,
+			weaponImageColor = if row.weaponImage then row.weaponImage.ImageColor3 else nil,
 		}
 		rowDefaultsCache[row.frame] = cached
 		return cached
@@ -553,6 +606,61 @@ function BattlePassFeature.start(menuController: any): any
 			origPos.Y.Scale, origPos.Y.Offset + SELECTED_LIFT_PIXELS
 		)
 		TweenService:Create(selectedImage, SELECTED_TWEEN_INFO, {
+			Position = origPos,
+		}):Play()
+	end
+
+	-- Preview animado del wrap seleccionado. Análogo a `playSelectedAnimation`
+	-- pero renderiza el wrap 3D en `SelectedViewPort` vía WeaponWrapPreviewer.
+	-- Reusa el render si vuelve a clicarse el mismo wrap (evita recrear modelo +
+	-- cámara). El janitor lo destruye en el cleanup del feature.
+	local selectedViewportOriginalPos: UDim2? = nil
+	type SelectedViewportEntry = { wrapId: string, janitor: any }
+	local selectedViewportEntry: SelectedViewportEntry? = nil
+	local function clearSelectedViewportEntry()
+		if selectedViewportEntry then
+			selectedViewportEntry.janitor:Destroy()
+			selectedViewportEntry = nil
+		end
+	end
+	janitor:Add(clearSelectedViewportEntry, true)
+
+	local function playSelectedViewportAnimation(wrapId: string)
+		if not selectedViewport then return end
+		local wrapsCatalog = ItemsConfig.WeaponWraps
+		local wrapDef = if type(wrapsCatalog) == "table" then wrapsCatalog[wrapId] else nil
+		if type(wrapDef) ~= "table" then return end
+
+		if selectedViewportOriginalPos == nil then
+			selectedViewportOriginalPos = selectedViewport.Position
+		end
+		local origPos = selectedViewportOriginalPos :: UDim2
+
+		-- Reutilizar render si el wrap es el mismo; sino, recrear.
+		if not selectedViewportEntry or selectedViewportEntry.wrapId ~= wrapId then
+			clearSelectedViewportEntry()
+			local previewJanitor = Janitor.new()
+			local ok = WeaponWrapPreviewer.Render(selectedViewport, {
+				TextureID = wrapDef.TextureID,
+				BaseColor = wrapDef.BaseColor,
+				isAnimated = wrapDef.isAnimated,
+				StudsPerTile = wrapDef.StudsPerTile,
+			}, previewJanitor)
+			if ok then
+				WeaponWrapPreviewer.reframeCentered(selectedViewport)
+				selectedViewportEntry = { wrapId = wrapId, janitor = previewJanitor }
+			else
+				previewJanitor:Destroy()
+				return
+			end
+		end
+
+		selectedViewport.Visible = true
+		selectedViewport.Position = UDim2.new(
+			origPos.X.Scale, origPos.X.Offset,
+			origPos.Y.Scale, origPos.Y.Offset + SELECTED_LIFT_PIXELS
+		)
+		TweenService:Create(selectedViewport, SELECTED_TWEEN_INFO, {
 			Position = origPos,
 		}):Play()
 	end
@@ -632,25 +740,40 @@ function BattlePassFeature.start(menuController: any): any
 		notificationFrame.Visible = false
 	end
 
-	-- Hover: tweenea el icon hacia arriba al entrar el mouse y de vuelta al salir.
-	local function bindIconHover(rowFrame: GuiObject, icon: ImageLabel)
-		local originalPos = getOriginalIconPos(icon)
-		local liftedPos = UDim2.new(
-			originalPos.X.Scale, originalPos.X.Offset,
-			originalPos.Y.Scale, originalPos.Y.Offset - HOVER_LIFT_PIXELS
-		)
+	-- Hover: tweenea todos los visuals principales de la row (icon + viewport del
+	-- wrap preview + imagen del arma asignada) hacia arriba al entrar el mouse y
+	-- de vuelta al salir. Un solo MouseEnter/Leave por row dispara los tweens
+	-- en paralelo, así no hay desync visual entre elementos lifteados.
+	type HoverTarget = { element: GuiObject, original: UDim2, lifted: UDim2 }
+	local function bindRowHover(rowFrame: GuiObject, elements: { GuiObject })
+		if #elements == 0 then return end
+
+		local targets: { HoverTarget } = {}
+		for _, element in elements do
+			local original = getOriginalHoverPos(element)
+			local lifted = UDim2.new(
+				original.X.Scale, original.X.Offset,
+				original.Y.Scale, original.Y.Offset - HOVER_LIFT_PIXELS
+			)
+			table.insert(targets, { element = element, original = original, lifted = lifted })
+		end
+
 		local enterConn = rowFrame.MouseEnter:Connect(function()
-			TweenService:Create(icon, HOVER_TWEEN_INFO, { Position = liftedPos }):Play()
+			for _, t in targets do
+				TweenService:Create(t.element, HOVER_TWEEN_INFO, { Position = t.lifted }):Play()
+			end
 		end)
 		local leaveConn = rowFrame.MouseLeave:Connect(function()
-			TweenService:Create(icon, HOVER_TWEEN_INFO, { Position = originalPos }):Play()
+			for _, t in targets do
+				TweenService:Create(t.element, HOVER_TWEEN_INFO, { Position = t.original }):Play()
+			end
 		end)
 		table.insert(rowConnections, enterConn)
 		table.insert(rowConnections, leaveConn)
 	end
 
 	local function applyRow(
-		row: { frame: GuiObject, icon: ImageLabel?, valueLabel: TextLabel? }?,
+		row: SlotRow?,
 		reward: BattlePassConfig.Reward?,
 		track: string,
 		level: number,
@@ -705,7 +828,7 @@ function BattlePassFeature.start(menuController: any): any
 			clearWrapPreview(row.frame)
 		end
 
-		local image, label = _resolveRewardVisual(reward)
+		local image, label, weaponImage = _resolveRewardVisual(reward)
 		-- Siempre reescribimos el Image, incluso si está vacío. Si no, al
 		-- paginar Back un slot que ahora tiene reward Cash sin icon mantendría
 		-- el icon de Item del tier que ocupaba antes ese mismo slot visual.
@@ -714,6 +837,17 @@ function BattlePassFeature.start(menuController: any): any
 		end
 		if row.valueLabel then
 			row.valueLabel.Text = label
+		end
+		-- "Weapon" ImageLabel: solo visible para per-weapon wraps. Paginación
+		-- entre páginas con/sin per-weapon wraps necesita el reset explícito por
+		-- la misma razón que el icon: el slot UI se reutiliza entre tiers.
+		if row.weaponImage then
+			if weaponImage ~= "" then
+				row.weaponImage.Image = weaponImage
+				row.weaponImage.Visible = true
+			else
+				row.weaponImage.Visible = false
+			end
 		end
 
 		-- Estilo según estado: Claimed pinta el row de negro y muestra Check;
@@ -736,6 +870,9 @@ function BattlePassFeature.start(menuController: any): any
 			if defaults.viewport then
 				defaults.viewport.ImageColor3 = CLAIMED_ICON_COLOR
 			end
+			if row.weaponImage then
+				row.weaponImage.ImageColor3 = CLAIMED_ICON_COLOR
+			end
 		else
 			row.frame.BackgroundColor3 = defaults.rowBg
 			row.frame.BackgroundTransparency = defaults.rowBgTransparency
@@ -748,6 +885,9 @@ function BattlePassFeature.start(menuController: any): any
 			if defaults.viewport and defaults.viewportImageColor then
 				defaults.viewport.ImageColor3 = defaults.viewportImageColor
 			end
+			if row.weaponImage and defaults.weaponImageColor then
+				row.weaponImage.ImageColor3 = defaults.weaponImageColor
+			end
 		end
 		if defaults.checkImage then
 			defaults.checkImage.Visible = isClaimed
@@ -756,15 +896,39 @@ function BattlePassFeature.start(menuController: any): any
 			defaults.indicator.Visible = stateName == "Claimable"
 		end
 
-		-- Hover en cualquier estado visible (feedback al cursor).
+		-- Hover en cualquier estado visible (feedback al cursor). Liftea juntos
+		-- el icon principal, el viewport del wrap preview y la imagen del arma
+		-- (cuando se está mostrando un per-weapon wrap), para que toda la
+		-- "card" reaccione como una sola.
+		local hoverTargets: { GuiObject } = {}
 		if row.icon then
-			bindIconHover(row.frame, row.icon)
+			table.insert(hoverTargets, row.icon)
 		end
+		if defaults.viewport then
+			table.insert(hoverTargets, defaults.viewport)
+		end
+		if row.weaponImage and row.weaponImage.Visible then
+			table.insert(hoverTargets, row.weaponImage)
+		end
+		bindRowHover(row.frame, hoverTargets)
 
-		-- Click siempre actualiza el preview de BattlePass.Selected. Si además
-		-- el slot está Claimable, enviamos el claim al servidor.
+		-- Click actualiza el preview seleccionado: para wraps se anima el
+		-- `SelectedViewPort` (render 3D del wrap), para el resto se anima el
+		-- `Selected` (Image). El otro se oculta para que sólo el relevante esté
+		-- visible — Selected y SelectedViewPort son alternativas, no aditivos.
+		-- Si además el slot está Claimable, enviamos el claim al servidor.
+		local isWrapReward = reward.Kind == "Item"
+			and reward.Category == "WeaponWraps"
+			and reward.ItemId ~= nil
 		bindRowClick(row.frame, function()
-			playSelectedAnimation(image)
+			if isWrapReward then
+				if selectedImage then selectedImage.Visible = false end
+				playSelectedViewportAnimation(reward.ItemId :: string)
+			else
+				if selectedViewport then selectedViewport.Visible = false end
+				if selectedImage then selectedImage.Visible = true end
+				playSelectedAnimation(image)
+			end
 			if stateName == "Claimable" then
 				-- Coerción defensiva: si por algún motivo level llegase aquí
 				-- como string/nil, ByteNet codificaría 0 y el server respondería

@@ -763,6 +763,11 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		return getEquippedItemByCategory(category) or ItemDefaults.ITEM_ID
 	end
 
+	-- Mirror del server (LoadoutService._resolveWeaponWrapForLoadout) y del
+	-- preview controller. Equip es per-weapon: la slot `wrapsTable.Default`
+	-- es la del arma con id "Default", no un fallback que se propaga al resto.
+	-- Un wrap global del BP otorga ownership a todas las armas, pero equiparlo
+	-- sigue siendo manual per-arma desde el locker.
 	local function resolveWeaponWrap(loadout: LoadoutData, weaponCategory: WeaponCategory, weaponId: string?): string
 		local normalizedWeaponId = getOptionalString(weaponId) or ItemDefaults.ITEM_ID
 		local wrapsTableKey = if weaponCategory == WeaponCategoryMod.MAIN then "MainWeaponWraps" else "SpecialWeaponWraps"
@@ -770,13 +775,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		if type(wrapsTableAny) == "table" then
 			local wrapsTable = wrapsTableAny :: { [string]: string }
 			local resolvedByWeapon = getOptionalString(wrapsTable[normalizedWeaponId])
-			if resolvedByWeapon then
+			if resolvedByWeapon and isWrapOwnedForWeapon(weaponCategory, normalizedWeaponId, resolvedByWeapon) then
 				return resolvedByWeapon
-			end
-
-			local resolvedDefault = getOptionalString(wrapsTable.Default)
-			if resolvedDefault then
-				return resolvedDefault
 			end
 		end
 
@@ -801,6 +801,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			local categoryLookup = ownedLookup[category]
 			return categoryLookup ~= nil and categoryLookup[itemId] == true
 		end,
+		ownsWeaponWrap = isWrapOwnedForWeapon,
 	})
 	janitor:Add(weaponPreviewController, "Destroy")
 

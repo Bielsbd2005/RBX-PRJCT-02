@@ -149,6 +149,11 @@ local function _clearMatchLoadoutHat(character: Model)
 	end
 end
 
+-- Resuelve el wrap equipado para un arma concreta. Sin fallback al slot
+-- `wrapsTable.Default`: esa entrada es la slot del arma con id "Default", no
+-- un default que se propaga al resto de armas. Equipar es estrictamente
+-- per-weapon. Un wrap global del Battle Pass solo otorga *ownership* para
+-- todas las armas; equiparlo a cada una sigue siendo manual vía el locker.
 local function _resolveWeaponWrapForLoadout(profileData: any, loadoutCategory: WeaponCategory.WeaponCategory, weaponId: string): string
 	local loadout = profileData.Loadout
 	if type(loadout) ~= "table" then
@@ -165,11 +170,6 @@ local function _resolveWeaponWrapForLoadout(profileData: any, loadoutCategory: W
 	local resolvedByWeapon = _getOptionalString(wrapsTable[weaponId])
 	if resolvedByWeapon and _ownsWeaponWrap(profileData, loadoutCategory, weaponId, resolvedByWeapon) then
 		return resolvedByWeapon
-	end
-
-	local resolvedDefault = _getOptionalString(wrapsTable.Default)
-	if resolvedDefault and _ownsWeaponWrap(profileData, loadoutCategory, weaponId, resolvedDefault) then
-		return resolvedDefault
 	end
 
 	return ItemDefaults.ITEM_ID

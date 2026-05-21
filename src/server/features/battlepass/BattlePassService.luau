@@ -212,6 +212,26 @@ local function _grantGlobalWeaponWrap(player: Player, wrapId: string): boolean
 	return _dataService:BatchUpdate(player, updates)
 end
 
+-- Otorga un WeaponWrap a UN arma específica (per-weapon). Mismo set de paths
+-- que el flujo de Shop para WeaponWraps comprados, así InventoryRepository y
+-- el resto de consumidores leen el wrap exactamente igual que uno comprado.
+local function _grantWeaponSpecificWrap(
+	player: Player,
+	wrapId: string,
+	weaponCategory: string,
+	weaponId: string
+): boolean
+	if not _dataService then return false end
+
+	return _dataService:BatchUpdate(player, {
+		{ path = { "InventoryMeta", "WeaponWraps", wrapId },
+			value = { AcquiredAt = os.time(), Source = "BattlePass" } },
+		{ path = { "NewItemFlags", "WeaponWraps", wrapId }, value = true },
+		{ path = { "Inventory", "WeaponWrapsByWeapon", weaponCategory, weaponId, wrapId },
+			value = true },
+	})
+end
+
 -- Resuelve la op de BatchUpdate para una recompensa Cash.
 -- Para Item devuelve nil (el grant se hace fuera vía DataService:GrantItem,
 -- que es la API documentada para crear Inventory + InventoryMeta + NewItemFlags).
@@ -370,6 +390,11 @@ function BattlePassService:ClaimTier(player: Player, tierLevel: number, track: s
 			-- del slot único de GrantItem (que solo escribiría en Inventory.WeaponWraps,
 			-- branch que el loadout per-arma no lee).
 			grantOk = _grantGlobalWeaponWrap(player, reward.ItemId)
+		elseif reward.Category == "WeaponWraps"
+			and reward.WeaponCategory and reward.WeaponId
+		then
+			-- Wrap per-weapon: SOLO al arma indicada en el config (Main/Special + id).
+			grantOk = _grantWeaponSpecificWrap(player, reward.ItemId, reward.WeaponCategory, reward.WeaponId)
 		else
 			grantOk = _dataService:GrantItem(player, reward.Category, reward.ItemId, "BattlePass")
 		end

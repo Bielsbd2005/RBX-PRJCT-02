@@ -80,6 +80,11 @@ export type WeaponPreviewControllerOptions = {
 	getCurrentLoadout: () -> LoadoutData,
 	getEquippedItemByCategory: (category: string) -> string?,
 	isOwned: (category: string, itemId: string) -> boolean,
+	-- Ownership per-weapon de un wrap (Inventory.WeaponWrapsByWeapon[cat][weaponId][wrapId]).
+	-- Necesario para que la preview espeje la resolución del servidor: un wrap
+	-- equipado en una entrada del Loadout (incluida la clave "Default") no debe
+	-- propagarse a previews de armas que no lo poseen.
+	ownsWeaponWrap: (weaponCategory: string, weaponId: string, wrapId: string) -> boolean,
 }
 
 export type WeaponPreviewController = {
@@ -168,20 +173,25 @@ local function cancelTweenFromMap(map: { [any]: Tween }, key: any)
 	end
 end
 
-local function resolveWeaponWrap(loadout: LoadoutData, weaponCategory: WeaponCategory, weaponId: string?): string
+-- Mirror exacto de LoadoutService._resolveWeaponWrapForLoadout: equip es
+-- estrictamente per-weapon. `wrapsTable.Default` es la slot del arma con id
+-- "Default", no un fallback que se propaga. Un wrap global del BP otorga
+-- ownership a todas las armas, pero equiparlo sigue siendo manual per-arma.
+-- El check de ownership es defense-in-depth contra Loadout stale.
+local function resolveWeaponWrap(
+	loadout: LoadoutData,
+	weaponCategory: WeaponCategory,
+	weaponId: string?,
+	ownsWeaponWrap: (weaponCategory: string, weaponId: string, wrapId: string) -> boolean
+): string
 	local normalizedWeaponId = getOptionalString(weaponId) or ItemDefaults.ITEM_ID
 	local wrapsTableKey = if weaponCategory == WeaponCategoryMod.MAIN then "MainWeaponWraps" else "SpecialWeaponWraps"
 	local wrapsTableAny = loadout[wrapsTableKey]
 	if type(wrapsTableAny) == "table" then
 		local wrapsTable = wrapsTableAny :: { [string]: string }
 		local resolvedByWeapon = getOptionalString(wrapsTable[normalizedWeaponId])
-		if resolvedByWeapon then
+		if resolvedByWeapon and ownsWeaponWrap(weaponCategory, normalizedWeaponId, resolvedByWeapon) then
 			return resolvedByWeapon
-		end
-
-		local resolvedDefault = getOptionalString(wrapsTable.Default)
-		if resolvedDefault then
-			return resolvedDefault
 		end
 	end
 
@@ -291,7 +301,7 @@ function WeaponPreviewController:_getStateId(
 	end
 	local resolvedWeaponId = getOptionalString(itemId) or ItemDefaults.ITEM_ID
 	local loadout = self._options.getCurrentLoadout()
-	local resolvedWrapId = resolveWeaponWrap(loadout, category, resolvedWeaponId)
+	local resolvedWrapId = resolveWeaponWrap(loadout, category, resolvedWeaponId, self._options.ownsWeaponWrap)
 	return previewId .. "::" .. resolvedWrapId .. "::unlocked"
 end
 
@@ -527,7 +537,7 @@ function WeaponPreviewController:_applyForCategory(category: string, itemId: str
 	if not previewLocked then
 		local resolvedWeaponId = getOptionalString(itemId) or ItemDefaults.ITEM_ID
 		local loadout = self._options.getCurrentLoadout()
-		local resolvedWrapId = resolveWeaponWrap(loadout, previewCategory, resolvedWeaponId)
+		local resolvedWrapId = resolveWeaponWrap(loadout, previewCategory, resolvedWeaponId, self._options.ownsWeaponWrap)
 		self:_applyWrap(clonedWeapon, previewCategory, resolvedWrapId)
 	end
 
@@ -557,7 +567,7 @@ function WeaponPreviewController:restoreEquippedFor(category: string)
 		local activePreview = self._activePreviewByCategory[category]
 		if activePreview and activePreview.Parent then
 			local loadout = self._options.getCurrentLoadout()
-			local equippedWrapId = resolveWeaponWrap(loadout, previewCategory, equippedItemId)
+			local equippedWrapId = resolveWeaponWrap(loadout, previewCategory, equippedItemId, self._options.ownsWeaponWrap)
 			self:_applyWrap(activePreview, previewCategory, equippedWrapId)
 		end
 	end

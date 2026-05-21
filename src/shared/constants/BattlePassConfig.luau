@@ -33,10 +33,13 @@ export type Reward = {
 	ItemId: string?,    -- Item: id en ItemsConfig
 	Icon: string?,      -- Override de UI (rbxassetid://...). Si nil, fallback a ItemsConfig.
 	Label: string?,     -- Override del texto del Value. Si nil, fallback a "+Amount" o ItemsConfig.Name.
-	-- WeaponWraps: si true, al claimar se otorga el wrap a TODAS las armas
-	-- (Main + Special) en vez de solo al slot WeaponWraps catalog. Ignorado
-	-- para Kind != "Item" o Category != "WeaponWraps".
+	-- WeaponWraps — modos mutuamente excluyentes:
+	--   Global = true                       → grant a TODAS las armas (Main+Special).
+	--   WeaponCategory + WeaponId definidos → grant SÓLO al arma indicada.
+	-- Ambos ignorados si Kind != "Item" o Category != "WeaponWraps".
 	Global: boolean?,
+	WeaponCategory: string?, -- "Main" | "Special" (per-weapon wraps)
+	WeaponId: string?,       -- itemId en ItemsConfig[WeaponCategory] (per-weapon wraps)
 }
 
 export type Tier = {
@@ -107,8 +110,18 @@ local function item(category: string, itemId: string): Reward
 	return { Kind = "Item", Category = category, ItemId = itemId }
 end
 
-local function wrap(itemId: string, global: boolean?): Reward
-	return { Kind = "Item", Category = "WeaponWraps", ItemId = itemId, Global = global }
+local function globalWrap(itemId: string): Reward
+	return { Kind = "Item", Category = "WeaponWraps", ItemId = itemId, Global = true }
+end
+
+local function weaponWrap(itemId: string, weaponCategory: string, weaponId: string): Reward
+	return {
+		Kind = "Item",
+		Category = "WeaponWraps",
+		ItemId = itemId,
+		WeaponCategory = weaponCategory,
+		WeaponId = weaponId,
+	}
 end
 
 BattlePassConfig.Seasons = {
@@ -123,9 +136,9 @@ BattlePassConfig.Seasons = {
 		PremiumProductId = 3583494613, -- TODO: pegar el productId real de Roblox.
 		SkipProductId = 3583700824,             -- TODO: pegar el productId real del "Skip Tier".
 		Tiers = {
-			tier(1,  cash(100),  cash(250)),
+			tier(1,  weaponWrap("Wrap_RPG_Blue", "Special", "RPG"),  cash(250)),
 			tier(2,  cash(100),  cash(300)),
-			tier(3,  cash(150),  wrap("Wrap_Pink", true)),
+			tier(3,  cash(150),  globalWrap("Wrap_Pink")),
 			tier(4,  cash(150),  cash(400)),
 			tier(5,  cash(200),  item("Faces", "Face2")),
 			tier(6,  cash(200),  cash(500)),
