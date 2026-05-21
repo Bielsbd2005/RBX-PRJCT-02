@@ -52,6 +52,7 @@ local DataController = require(Client.core.data.DataController)
 local Network = require(Shared.networking.Network)
 local BattlePassConfig = require(Shared.constants.BattlePassConfig)
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
+local WeaponWrapPreviewer = require(Client.features.locker.Previewers.WeaponWrapPreviewer)
 
 local BLUR_KEY = "BattlePass"
 local SLOTS_PER_PAGE = 6
@@ -439,6 +440,24 @@ function BattlePassFeature.start(menuController: any): any
 		return cached
 	end
 
+	-- Cache de previews de wrap por row. Mantenemos vivo el WorldModel + cámara
+	-- entre renders y solo lo recreamos si el wrapId cambia (paginación) o si la
+	-- row deja de mostrar un wrap. El janitor destruye los recursos del viewport.
+	type WrapPreviewEntry = { wrapId: string, janitor: any, viewport: ViewportFrame }
+	local wrapPreviewByRow: { [GuiObject]: WrapPreviewEntry } = {}
+	local function clearWrapPreview(rowFrame: GuiObject)
+		local entry = wrapPreviewByRow[rowFrame]
+		if not entry then return end
+		entry.janitor:Destroy()
+		entry.viewport.Visible = false
+		wrapPreviewByRow[rowFrame] = nil
+	end
+	janitor:Add(function()
+		for rowFrame in wrapPreviewByRow do
+			clearWrapPreview(rowFrame)
+		end
+	end, true)
+
 	-- Cache de defaults visuales por row. La primera vez que vemos un row,
 	-- guardamos sus colores autorados para poder restaurarlos cuando el
 	-- estado deje de ser "Claimed". Sin esto, no sabríamos a qué color volver
@@ -450,6 +469,8 @@ function BattlePassFeature.start(menuController: any): any
 		valueColor: Color3?,
 		checkImage: GuiObject?,
 		indicator: GuiObject?,
+		viewport: ViewportFrame?,
+		viewportImageColor: Color3?,
 	}
 	local rowDefaultsCache: { [GuiObject]: RowDefaults } = {}
 	local function getRowDefaults(row: { frame: GuiObject, icon: ImageLabel?, valueLabel: TextLabel? }): RowDefaults
@@ -458,6 +479,7 @@ function BattlePassFeature.start(menuController: any): any
 
 		local checkChild = row.frame:FindFirstChild("Check", true)
 		local indicatorChild = row.frame:FindFirstChild("Indicator")
+		local viewportChild = row.frame:FindFirstChildWhichIsA("ViewportFrame", true)
 		cached = {
 			rowBg = row.frame.BackgroundColor3,
 			rowBgTransparency = row.frame.BackgroundTransparency,
@@ -465,6 +487,8 @@ function BattlePassFeature.start(menuController: any): any
 			valueColor = if row.valueLabel then row.valueLabel.TextColor3 else nil,
 			checkImage = if checkChild and checkChild:IsA("GuiObject") then checkChild else nil,
 			indicator = if indicatorChild and indicatorChild:IsA("GuiObject") then indicatorChild else nil,
+			viewport = viewportChild,
+			viewportImageColor = if viewportChild then viewportChild.ImageColor3 else nil,
 		}
 		rowDefaultsCache[row.frame] = cached
 		return cached
@@ -640,7 +664,45 @@ function BattlePassFeature.start(menuController: any): any
 		row.frame.Visible = reward ~= nil
 
 		if not reward then
+			clearWrapPreview(row.frame)
 			return
+		end
+
+		-- Wrap preview: si la reward es un WeaponWrap y la row contiene un
+		-- ViewportFrame, renderizamos el wrap dentro. Resto de UI (Icon, Value,
+		-- estado) se pinta normal — el icon queda vacío para wraps sin Image y
+		-- el viewport actúa como el visual principal.
+		local viewportNode = row.frame:FindFirstChildWhichIsA("ViewportFrame", true)
+		local isWrapReward = reward.Kind == "Item" and reward.Category == "WeaponWraps" and reward.ItemId ~= nil
+		if isWrapReward and viewportNode then
+			local wrapId = reward.ItemId :: string
+			local existing = wrapPreviewByRow[row.frame]
+			if not existing or existing.wrapId ~= wrapId or existing.viewport ~= viewportNode then
+				clearWrapPreview(row.frame)
+				local wrapsCatalog = ItemsConfig.WeaponWraps
+				local wrapDef = if type(wrapsCatalog) == "table" then wrapsCatalog[wrapId] else nil
+				if type(wrapDef) == "table" then
+					local previewJanitor = Janitor.new()
+					local ok = WeaponWrapPreviewer.Render(viewportNode, {
+						TextureID = wrapDef.TextureID,
+						BaseColor = wrapDef.BaseColor,
+						isAnimated = wrapDef.isAnimated,
+						StudsPerTile = wrapDef.StudsPerTile,
+					}, previewJanitor)
+					if ok then
+						WeaponWrapPreviewer.reframeCentered(viewportNode)
+						wrapPreviewByRow[row.frame] = {
+							wrapId = wrapId,
+							janitor = previewJanitor,
+							viewport = viewportNode,
+						}
+					else
+						previewJanitor:Destroy()
+					end
+				end
+			end
+		else
+			clearWrapPreview(row.frame)
 		end
 
 		local image, label = _resolveRewardVisual(reward)
@@ -671,6 +733,9 @@ function BattlePassFeature.start(menuController: any): any
 			if row.valueLabel then
 				row.valueLabel.TextColor3 = CLAIMED_VALUE_COLOR
 			end
+			if defaults.viewport then
+				defaults.viewport.ImageColor3 = CLAIMED_ICON_COLOR
+			end
 		else
 			row.frame.BackgroundColor3 = defaults.rowBg
 			row.frame.BackgroundTransparency = defaults.rowBgTransparency
@@ -679,6 +744,9 @@ function BattlePassFeature.start(menuController: any): any
 			end
 			if row.valueLabel and defaults.valueColor then
 				row.valueLabel.TextColor3 = defaults.valueColor
+			end
+			if defaults.viewport and defaults.viewportImageColor then
+				defaults.viewport.ImageColor3 = defaults.viewportImageColor
 			end
 		end
 		if defaults.checkImage then

@@ -30,6 +30,7 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Network   = require(Shared.networking.Network)
 local NetGuards = require(Shared.networking.NetGuards)
 local BattlePassConfig = require(Shared.constants.BattlePassConfig)
+local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
 
 local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
 type DataService = DataServiceMod.DataServiceModule
@@ -164,6 +165,51 @@ local function _ensureSeason(player: Player): boolean
 		_backfillTotalXPIfNeeded(player, profile.Data.BattlePass, activeSeason)
 	end
 	return true
+end
+
+-- Otorga un WeaponWrap a TODAS las armas del jugador (Main + Special) en una
+-- única BatchUpdate atómica. Cobertura = unión de (catálogo ItemsConfig.<cat>)
+-- ∪ (armas que el jugador posee, Inventory.<cat>): así nuevos catálogo-additions
+-- se cubren automáticamente y armas legacy (e.g. "Default" en Special) que no
+-- aparecen en el catálogo pero sí en el inventario tampoco se pierden el wrap.
+-- Idempotente: claves repetidas se reescriben a `true` y el ClaimedFree/Premium
+-- gate impide invocarlo dos veces para el mismo tier.
+local function _grantGlobalWeaponWrap(player: Player, wrapId: string): boolean
+	if not _dataService then return false end
+
+	local profile = _dataService:GetProfile(player)
+	if not profile or not profile.Data then return false end
+
+	local updates: { any } = {
+		{ path = { "InventoryMeta", "WeaponWraps", wrapId },
+			value = { AcquiredAt = os.time(), Source = "BattlePass" } },
+		{ path = { "NewItemFlags", "WeaponWraps", wrapId }, value = true },
+	}
+
+	local inventory = profile.Data.Inventory
+	for _, category in { "Main", "Special" } do
+		local seen: { [string]: boolean } = {}
+		local catalog = ItemsConfig[category]
+		if type(catalog) == "table" then
+			for weaponId in catalog do
+				seen[weaponId] = true
+			end
+		end
+		local owned = if type(inventory) == "table" then inventory[category] else nil
+		if type(owned) == "table" then
+			for weaponId in owned do
+				seen[weaponId] = true
+			end
+		end
+		for weaponId in seen do
+			table.insert(updates, {
+				path = { "Inventory", "WeaponWrapsByWeapon", category, weaponId, wrapId },
+				value = true,
+			})
+		end
+	end
+
+	return _dataService:BatchUpdate(player, updates)
 end
 
 -- Resuelve la op de BatchUpdate para una recompensa Cash.
@@ -318,7 +364,15 @@ function BattlePassService:ClaimTier(player: Player, tierLevel: number, track: s
 	-- final. Si el grant fallara, el flag queda sin setear y el jugador puede
 	-- reintentar — el item no se pierde en silencio.
 	if reward.Kind == "Item" and reward.Category and reward.ItemId then
-		local grantOk = _dataService:GrantItem(player, reward.Category, reward.ItemId, "BattlePass")
+		local grantOk: boolean
+		if reward.Category == "WeaponWraps" and reward.Global == true then
+			-- Wrap global: aplica el wrap a TODAS las armas del jugador en lugar
+			-- del slot único de GrantItem (que solo escribiría en Inventory.WeaponWraps,
+			-- branch que el loadout per-arma no lee).
+			grantOk = _grantGlobalWeaponWrap(player, reward.ItemId)
+		else
+			grantOk = _dataService:GrantItem(player, reward.Category, reward.ItemId, "BattlePass")
+		end
 		if not grantOk then
 			_respond(player, false, "SaveFailed", tierLevel, track)
 			return

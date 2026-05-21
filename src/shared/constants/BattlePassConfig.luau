@@ -29,10 +29,14 @@ export type RewardKind = "Cash" | "Item"
 export type Reward = {
 	Kind: RewardKind,
 	Amount: number?,    -- Cash
-	Category: string?,  -- Item: "Hats" | "Faces" | "KillEffects" | "Outfits" | "Main" | "Special"
+	Category: string?,  -- Item: "Hats" | "Faces" | "KillEffects" | "Outfits" | "Main" | "Special" | "WeaponWraps"
 	ItemId: string?,    -- Item: id en ItemsConfig
 	Icon: string?,      -- Override de UI (rbxassetid://...). Si nil, fallback a ItemsConfig.
 	Label: string?,     -- Override del texto del Value. Si nil, fallback a "+Amount" o ItemsConfig.Name.
+	-- WeaponWraps: si true, al claimar se otorga el wrap a TODAS las armas
+	-- (Main + Special) en vez de solo al slot WeaponWraps catalog. Ignorado
+	-- para Kind != "Item" o Category != "WeaponWraps".
+	Global: boolean?,
 }
 
 export type Tier = {
@@ -103,6 +107,10 @@ local function item(category: string, itemId: string): Reward
 	return { Kind = "Item", Category = category, ItemId = itemId }
 end
 
+local function wrap(itemId: string, global: boolean?): Reward
+	return { Kind = "Item", Category = "WeaponWraps", ItemId = itemId, Global = global }
+end
+
 BattlePassConfig.Seasons = {
 	{
 		Id = "S1",
@@ -117,7 +125,7 @@ BattlePassConfig.Seasons = {
 		Tiers = {
 			tier(1,  cash(100),  cash(250)),
 			tier(2,  cash(100),  cash(300)),
-			tier(3,  cash(150),  cash(350)),
+			tier(3,  cash(150),  wrap("Wrap_Pink", true)),
 			tier(4,  cash(150),  cash(400)),
 			tier(5,  cash(200),  item("Faces", "Face2")),
 			tier(6,  cash(200),  cash(500)),

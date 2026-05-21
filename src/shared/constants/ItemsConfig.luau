@@ -84,6 +84,16 @@ Special = {
 			isAnimated = false,
 			StudsPerTile = 3,
 		},
+		Wrap_Pink = {
+			Name = "Pink Wrap",
+			Price = 0,
+			LevelRequired = 0,
+			Rarity = "Epic",
+			CanPurchase = false,
+			BaseColor = Color3.fromRGB(255, 105, 180),
+			isAnimated = false,
+			StudsPerTile = 3,
+		},
 		Wrap_Red  = {
 			Name = "SK_0020",
 			Price = 300,
