@@ -92,6 +92,21 @@ function Navigator.new(humanoid: Humanoid, rootPart: BasePart, agentParams: { [s
 		self._generation += 1
 		self._isMoving = false
 		self._currentWaypoints = nil
+		-- Audit fix: limpiar _currentDest. Sin esto, una goTo posterior al
+		-- mismo destino cae en el throttle de same-dest tras expirar el
+		-- cooldown, almacena callbacks nuevas y retorna silently — las
+		-- callbacks nunca firearán porque no hay compute en vuelo.
+		self._currentDest = nil
+		-- Audit fix: notificar al caller con onFailed. Sin esto,
+		-- _moveToLocation hace polling forever esperando un callback que
+		-- ya no llega, y StuckDetector se salta el accum porque
+		-- isMoving()=false → bot atascado hasta enemigo o muerte.
+		local cb = self._onFailed
+		self._onFailed = nil
+		self._onArrived = nil
+		if cb then
+			task.defer(cb)
+		end
 	end))
 
 	return self
@@ -205,6 +220,12 @@ function Navigator:_startWalk(gen: number)
 		-- que es seguro contra interferencia externa.
 		local arrivalRadius = BotConfig.Movement.WaypointSmoothDistance
 		local stallTimeout = 8.0 -- seg sin moverse hacia el wp: forzamos avance
+		-- Delta-gate de humanoid:Move. Cada Move replica MoveDirection al
+		-- cliente de cualquier observador (16 bots × N clientes a 60Hz).
+		-- Si la dir no cambió >~5° desde el último, no escribir. Vector3.zero
+		-- como sentinel hace que el primer Move siempre triggere
+		-- (dot(unit, zero) = 0 < 0.9962).
+		local lastAppliedMoveDir: Vector3 = Vector3.zero
 
 		for i = 2, #waypoints do
 			if self._stopped or self._generation ~= gen then
@@ -251,7 +272,12 @@ function Navigator:_startWalk(gen: number)
 				local toTarget = target - pos
 				local dir = Vector3.new(toTarget.X, 0, toTarget.Z)
 				if dir.Magnitude > 0.001 then
-					self._humanoid:Move(dir.Unit, false)
+					local unit = dir.Unit
+					-- Gate por delta angular: cos(5°) ≈ 0.9962.
+					if unit:Dot(lastAppliedMoveDir) < 0.9962 then
+						self._humanoid:Move(unit, false)
+						lastAppliedMoveDir = unit
+					end
 				end
 
 				task.wait()

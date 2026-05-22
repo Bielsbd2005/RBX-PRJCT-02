@@ -49,6 +49,7 @@ export type BotConfigType = {
 		CombatPauseMax: number,
 		CombatStepMin: number,
 		CombatStepMax: number,
+		MaxLosChecksPerEval: number,
 		VsPlayer: CombatTargetProfile,
 		VsBot: CombatTargetProfile,
 	},
@@ -100,6 +101,7 @@ local BotConfig: BotConfigType = {
 		CombatPauseMax = 0.9,
 		CombatStepMin = 0.5,
 		CombatStepMax = 1.4,
+		MaxLosChecksPerEval = 3,   -- cap de raycasts por _getBestTarget. Candidates ya sorted por distancia → los 3 más cercanos cubren el 99% de casos reales. Worst case antes: 5+ raycasts × 16 bots × 10Hz = 800/seg.
 
 		VsPlayer = {
 			DamageMin = 2,
@@ -135,7 +137,7 @@ local BotConfig: BotConfigType = {
 	},
 
 	Lifecycle = {
-		RagdollCleanupDelay = 5,
+		RagdollCleanupDelay = 3,  -- 5→3s: mitigación móvil. Con 3-5 kills/seg sostenido, 5s mantenía ~15-25 cadáveres rendereados en cualquier momento (replicado a todos los clientes). 3s halvea la población media manteniendo el feel del ragdoll.
 	},
 }
 

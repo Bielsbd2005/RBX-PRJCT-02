@@ -41,6 +41,29 @@ do
 	end
 end
 
+-- Cache del template AR-NPC. Antes ReplicatedStorage:FindFirstChild por
+-- cada spawn (16 bots × respawn-rate). Lookup en root es barato pero el
+-- cache deja el path de spawn limpio.
+local _weaponTemplate: Tool? = nil
+local function _getWeaponTemplate(): Tool?
+	if _weaponTemplate and _weaponTemplate.Parent then
+		return _weaponTemplate
+	end
+	local tpl = ReplicatedStorage:FindFirstChild("AR-NPC")
+	if tpl and tpl:IsA("Tool") then
+		_weaponTemplate = tpl
+		return tpl
+	end
+	return nil
+end
+
+-- Audit: rango efectivo del visual de bala para clientes. Más allá, la
+-- bala nunca se renderiza (sale del view o es demasiado pequeña). Filtra
+-- el firedRemote por distancia para evitar broadcast inútil a móviles —
+-- con 16 bots × 10Hz, FireAllClients enviaba ~160 events/seg × N clientes.
+local BULLET_AUDIBLE_RANGE = 200
+local BULLET_AUDIBLE_RANGE2 = BULLET_AUDIBLE_RANGE * BULLET_AUDIBLE_RANGE
+
 local function _getWeaponFiredRemote(): RemoteEvent?
 	if _weaponFiredRemote and _weaponFiredRemote.Parent then
 		return _weaponFiredRemote
@@ -158,6 +181,9 @@ export type BotAIInstance = typeof(setmetatable({} :: {
 	_navigator: Navigator.Navigator?,
 	_stuckDetector: StuckDetector.StuckDetector?,
 	_roamGraph: RoamGraph.RoamGraph?,
+	-- Tracks cargados por _setupAnimations. Stop los Stop+Destroy para
+	-- evitar zombis durante los 5s del ragdoll cleanup.
+	_animTracks: { [string]: AnimationTrack }?,
 }, BotAI))
 
 function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?, wrapId: string?): BotAIInstance
@@ -196,6 +222,7 @@ function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?, wrapId
 		_navigator = nil,
 		_stuckDetector = nil,
 		_roamGraph = nil,
+		_animTracks = nil,
 	}, BotAI) :: BotAIInstance
 
 	return self
@@ -211,8 +238,8 @@ function BotAI:_setupNetworkOwnership()
 end
 
 function BotAI:_setupTool()
-	local toolTemplate = ReplicatedStorage:FindFirstChild("AR-NPC")
-	if not (toolTemplate and toolTemplate:IsA("Tool")) then
+	local toolTemplate = _getWeaponTemplate()
+	if not toolTemplate then
 		-- Bug invisible que dejaba al bot vivo y caminando sin disparar nunca.
 		-- Sin warn no había forma de notarlo salvo observando que ningún bot
 		-- de un round tiraba balas. Falla ruidosamente.
@@ -268,6 +295,11 @@ function BotAI:_setupAnimations(): { [string]: AnimationTrack }
 		tracks.ToolHold.Looped = true
 		tracks.ToolHold:Play()
 	end
+
+	-- Stop necesita la ref para Destroy explícito (GetPlayingAnimationTracks
+	-- solo devuelve los en marcha; Run/Jump cuando el bot estaba en Idle se
+	-- quedaban zombi en el Animator hasta destrucción del rig).
+	self._animTracks = tracks
 
 	return tracks
 end
@@ -411,13 +443,21 @@ function BotAI:_getBestTarget(): (Model?, boolean)
 		local charTeam = TeamUtils.getSide(char)
 		if charTeam and myTeam and charTeam == myTeam then continue end
 
-		local d = (rootPos - (root :: BasePart).Position).Magnitude
+		-- Audit fix: skip targets en spawn protection. _canSeeTarget pasaría
+		-- pero TakeDamage es no-op durante ForceField → bot dispara 2s a un
+		-- target inmune. FindFirstChildOfClass es top-level (O(N) hijos del
+		-- char, ~10-20).
+		if char:FindFirstChildOfClass("ForceField") then continue end
+
+		-- Reutilizamos delta para FOV (evita la alloc de .Unit). Magnitud y
+		-- dirección comparten el mismo Vector3 → 1 alloc en lugar de 2.
+		local delta = (root :: BasePart).Position - rootPos
+		local d = delta.Magnitude
 		if d > BotConfig.Combat.DetectRange then continue end
 
-		-- FOV check: el target debe estar dentro del cono frontal del bot.
-		-- Si dot(facing, toUnit) < cos(FOV/2), está fuera del cono.
-		local toUnit = ((root :: BasePart).Position - rootPos).Unit
-		if facing:Dot(toUnit) < FOV_COS then continue end
+		-- FOV check: dot(facing, unit) = dot(facing, delta) / d. Si
+		-- < cos(FOV/2), fuera de cono. Evita la alloc del Unit Vector.
+		if d > 0.001 and facing:Dot(delta) / d < FOV_COS then continue end
 
 		table.insert(candidates, { char = char, d = d })
 	end
@@ -426,10 +466,17 @@ function BotAI:_getBestTarget(): (Model?, boolean)
 		return nil, false
 	end
 
-	-- Pass 2: ordenar por distancia, raycastear desde el más cercano.
+	-- Pass 2: ordenar por distancia, raycastear desde el más cercano con
+	-- cap por iteración. Sin cap, un grupo de 5+ enemigos en cono con LOS
+	-- bloqueada producía 5 raycasts × 16 bots × 10Hz = 800/seg en el peor
+	-- caso. Los 3 más cercanos cubren el 99% de los engagements reales —
+	-- si los 3 más cercanos no tienen LOS, ignorar a un 4º distante en
+	-- este tick (volverá a evaluarse 100ms después con candidates frescos).
 	table.sort(candidates, function(a, b) return a.d < b.d end)
 
-	for _, c in candidates do
+	local maxChecks = math.min(#candidates, BotConfig.Combat.MaxLosChecksPerEval)
+	for i = 1, maxChecks do
+		local c = candidates[i]
 		if self:_canSeeTarget(c.char) then
 			return c.char, true
 		end
@@ -549,7 +596,9 @@ function BotAI:_evaluateTarget(now: number)
 				local d = toRoot.Magnitude
 				if d <= BotConfig.Combat.DetectRange then
 					local facing = self._rootPart.CFrame.LookVector
-					if d > 0.001 and facing:Dot(toRoot.Unit) >= FOV_COS then
+					-- dot(facing, unit) = dot(facing, toRoot) / d. Evita
+					-- alloc de toRoot.Unit (1 Vector3 por fast-path eval).
+					if d > 0.001 and facing:Dot(toRoot) / d >= FOV_COS then
 						if self:_canSeeTarget(current) then
 							potentialTarget = current
 							isVisible = true
@@ -731,10 +780,13 @@ function BotAI:Start(
 	local currentTrack: AnimationTrack? = nil
 	local lastShotTime = 0
 	local lastJumpTime = 0
-	-- Throttle de CHASE-visible MoveTo: reemitir solo cuando target se mueva
-	-- >2 studs respecto al último MoveTo. Sin time-gate — MoveTo persiste
-	-- hasta llegada o timeout 8s, no necesita refresh periódico.
+	-- Throttle de CHASE-visible MoveTo: reemitir cuando target se mueva
+	-- >2 studs respecto al último MoveTo, O cada 3s para evitar el timeout
+	-- interno de 8s de Roblox. Si el target orbita al bot manteniéndose
+	-- <2 studs del último MoveTo, el delta nunca refresca y el bot se
+	-- queda quieto a los 8s con LOS activa.
 	local lastDirectMoveTarget = Vector3.zero
+	local lastDirectMoveAt = 0
 
 	-- Animaciones reactivas
 	local connRun = humanoid.Running:Connect(function(speed)
@@ -983,7 +1035,23 @@ function BotAI:Start(
 							id = self._nextShotId,
 						}
 						self._nextShotId += 1
-						firedRemote:FireAllClients(nil, weapon, fireInfo)
+						-- Audit: FireClient selectivo por distancia en lugar de
+						-- FireAllClients. Con 16 bots × 10Hz = 160 events/seg,
+						-- móviles low-end pierden frames decodificando bullets
+						-- fuera de su rango visual. Filtramos por char dentro
+						-- de BULLET_AUDIBLE_RANGE del origen del shot.
+						for _, p in Players:GetPlayers() do
+							local pChar = p.Character
+							if pChar then
+								local pRoot = pChar.PrimaryPart or pChar:FindFirstChild("HumanoidRootPart")
+								if pRoot and pRoot:IsA("BasePart") then
+									local delta = origin - pRoot.Position
+									if delta:Dot(delta) < BULLET_AUDIBLE_RANGE2 then
+										firedRemote:FireClient(p, nil, weapon, fireInfo)
+									end
+								end
+							end
+						end
 					end
 
 					-- Damage + kill attribution + directional indicator: solo en hits.
@@ -1029,12 +1097,16 @@ function BotAI:Start(
 					if self._navigator and self._navigator:isMoving() then
 						self._navigator:cancel()
 					end
-					-- Throttle: reemitir MoveTo solo cuando el target se haya
-					-- movido >2 studs. Sin time-gate — Roblox MoveTo persiste
-					-- hasta llegada o timeout 8s, no necesita refresh.
-					if (targetPos - lastDirectMoveTarget).Magnitude > 2 then
+					-- Throttle: reemitir MoveTo cuando target se haya movido
+					-- >2 studs, O cada 3s. El time-gate evita el timeout interno
+					-- de 8s de Roblox cuando un target orbita el bot a sub-2
+					-- studs del último MoveTo.
+					local nowMv = os.clock()
+					if (targetPos - lastDirectMoveTarget).Magnitude > 2
+						or nowMv - lastDirectMoveAt > 3 then
 						humanoid:MoveTo(targetPos)
 						lastDirectMoveTarget = targetPos
+						lastDirectMoveAt = nowMv
 					end
 					-- Audit P0: gate por tiempo + JumpChance del profile. Antes
 					-- `if math.random() < 0.05` por frame (60Hz) → ~3 jumps/seg
@@ -1050,10 +1122,12 @@ function BotAI:Start(
 					if self._navigator then
 						self._navigator:goTo(targetPos)
 					end
-					-- Reset lastDirectMoveTarget al salir de CHASE-visible:
-					-- evita que el throttle de >2 studs omita el primer MoveTo
-					-- cuando el bot vuelve a tener LOS cerca de la última pos.
+					-- Reset al salir de CHASE-visible: evita que el throttle de
+					-- >2 studs omita el primer MoveTo cuando el bot recupere
+					-- LOS cerca de la última pos. lastDirectMoveAt=0 fuerza
+					-- también el primer refresh por time-gate.
 					lastDirectMoveTarget = Vector3.zero
+					lastDirectMoveAt = 0
 				end
 
 				-- B1: 20Hz. La detección live de target ya está en coroutine
@@ -1158,6 +1232,22 @@ function BotAI:Stop()
 			for _, track in animator:GetPlayingAnimationTracks() do
 				track:Stop(0.1)
 			end
+		end
+		-- Audit: Destroy explícito de los tracks que cargamos. GetPlayingAnimationTracks
+		-- solo devuelve los en marcha — Run/Jump cuando el bot estaba quieto
+		-- quedaban zombis en el Animator hasta que se destruye el rig (5s
+		-- post-muerte). Con 16 bots × respawns/seg, transitorio de ~64 tracks
+		-- innecesarios.
+		local animTracks = self._animTracks
+		if animTracks then
+			for _, track in animTracks do
+				pcall(function()
+					track:Stop(0.1)
+					track:Destroy()
+				end)
+			end
+			table.clear(animTracks)
+			self._animTracks = nil
 		end
 	end
 end
