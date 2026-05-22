@@ -14,10 +14,11 @@ local BotConfig = require(Shared.constants.BotConfig)
 local ItemDefaults = require(Shared.constants.ItemDefaults)
 
 local BotAI = require(script:WaitForChild("BotAI"))
+local BotAppearance = require(script:WaitForChild("BotAppearance"))
 local NavMetrics = require(script:WaitForChild("telemetry"):WaitForChild("NavMetrics"))
 local RoamGraph = require(script:WaitForChild("nav"):WaitForChild("RoamGraph"))
 
-type BotIdentity = { name: string, image: string }
+type BotIdentity = { name: string, image: string, appearance: BotAppearance.BotAppearance }
 
 type RoundStartConfig = {
 	spawnPoints: { BasePart },
@@ -200,17 +201,32 @@ local function _assignIdentity(): (BotIdentity, number)
 			table.insert(available, i)
 		end
 	end
-	local identity: BotIdentity
+	local name: string
+	local image: string
 	if #available > 0 then
 		local idx = available[math.random(1, #available)]
 		_usedIdentityIndices[idx] = true
-		identity = BotNames[idx]
+		local source = BotNames[idx]
+		name = source.name
+		image = source.image
 	else
 		-- Fallback: pool agotado (>20 bots/team). Prefijo "Bot_" en lugar de
 		-- "Player" para evitar colisiones con usernames reales de Roblox que
 		-- empiezan por "Player".
-		identity = { name = "Bot_" .. tostring(math.abs(fakeUserId)), image = "rbxassetid://0" }
+		name = "Bot_" .. tostring(math.abs(fakeUserId))
+		image = "rbxassetid://0"
 	end
+
+	-- Construir identity fresca con apariencia cacheada. La apariencia
+	-- vive en la identity para que el recycle pool tras la muerte del bot
+	-- (init.luau:613) mantenga la misma hat/face/wrap durante todo el match.
+	-- En OnRoundEnd se limpian _usedIdentityIndices y _recycledByTeam, así
+	-- que la siguiente ronda re-rolea automáticamente.
+	local identity: BotIdentity = {
+		name = name,
+		image = image,
+		appearance = BotAppearance.roll(),
+	}
 	return identity, fakeUserId
 end
 
@@ -245,36 +261,6 @@ local function _getRandomSpawnPoint(): BasePart?
 	end
 
 	return _spawnPoints[math.random(1, #_spawnPoints)]
-end
-
-local function _findTemplateBot(): Model?
-	local replicatedDirect = ReplicatedStorage:FindFirstChild("NPC")
-	if replicatedDirect and replicatedDirect:IsA("Model") then
-		return replicatedDirect
-	end
-
-	local replicatedBotsFolder = ReplicatedStorage:FindFirstChild("Bots")
-	if replicatedBotsFolder and replicatedBotsFolder:IsA("Folder") then
-		local replicatedTemplate = replicatedBotsFolder:FindFirstChild("NPC")
-		if replicatedTemplate and replicatedTemplate:IsA("Model") then
-			return replicatedTemplate
-		end
-	end
-
-	local botsFolder = ServerStorage:FindFirstChild("Bots")
-	if botsFolder and botsFolder:IsA("Folder") then
-		local template = botsFolder:FindFirstChild("BotTemplate")
-		if template and template:IsA("Model") then
-			return template
-		end
-	end
-
-	local direct = ServerStorage:FindFirstChild("BotTemplate")
-	if direct and direct:IsA("Model") then
-		return direct
-	end
-
-	return nil
 end
 
 local function _buildFallbackBotModel(botName: string): Model
@@ -335,9 +321,13 @@ local _hasWarnedMissingTemplate = false
 -- Humanoid en estado Dead no se puede revivir limpiamente sin reemplazar el
 -- Humanoid entero. Esta variante mata complejidad pero no la ganancia de
 -- decouplear cloning del spawn moment.
-local _botRigPool: { Model } = {}
+--
+-- Pool por outfit: con apariencia variable, cada outfit es un Model distinto
+-- en ServerStorage.Bodies. Un único pool compartido implicaría todos los bots
+-- con el mismo body. La key del pool es el outfitId.
+local _botRigPoolByKey: { [string]: { Model } } = {}
+local _botRigRefillingByKey: { [string]: boolean } = {}
 local BOT_RIG_POOL_TARGET = 3
-local _botRigRefilling = false
 local _botRigParkFolder: Folder? = nil
 
 local function _ensureParkFolder(): Folder
@@ -357,8 +347,8 @@ local function _ensureParkFolder(): Folder
 	return folder
 end
 
-local function _clonePreparedRig(): Model?
-	local template = _findTemplateBot()
+local function _clonePreparedRig(poolKey: string): Model?
+	local template = BotAppearance.findBodyTemplate(poolKey)
 	if not template then return nil end
 	local clone = template:Clone()
 	-- Parented a ServerStorage para que Roblox no intente streaming/replicación
@@ -367,37 +357,59 @@ local function _clonePreparedRig(): Model?
 	return clone
 end
 
-local function _refillBotRigPoolAsync()
-	if _botRigRefilling then return end
-	_botRigRefilling = true
+local function _refillBotRigPoolAsync(poolKey: string)
+	if _botRigRefillingByKey[poolKey] then return end
+	_botRigRefillingByKey[poolKey] = true
 	task.spawn(function()
-		while #_botRigPool < BOT_RIG_POOL_TARGET do
-			local rig = _clonePreparedRig()
-			if not rig then break end -- template missing → abandona refill
-			table.insert(_botRigPool, rig)
+		local pool = _botRigPoolByKey[poolKey]
+		if not pool then
+			pool = {}
+			_botRigPoolByKey[poolKey] = pool
 		end
-		_botRigRefilling = false
+		while #pool < BOT_RIG_POOL_TARGET do
+			local rig = _clonePreparedRig(poolKey)
+			if not rig then break end -- template missing → abandona refill
+			table.insert(pool, rig)
+		end
+		_botRigRefillingByKey[poolKey] = false
 	end)
 end
 
-local function _takeBotRigFromPool(): Model?
-	local n = #_botRigPool
-	if n > 0 then
-		local rig = _botRigPool[n]
-		_botRigPool[n] = nil
-		_refillBotRigPoolAsync()
+local function _takeBotRigFromPool(poolKey: string): Model?
+	local pool = _botRigPoolByKey[poolKey]
+	if pool and #pool > 0 then
+		local rig = pool[#pool]
+		pool[#pool] = nil
+		_refillBotRigPoolAsync(poolKey)
 		return rig
 	end
-	-- Pool vacío (e.g., burst inicial de spawns) → fallback sync.
-	_refillBotRigPoolAsync()
-	return _clonePreparedRig()
+	-- Pool vacío (e.g., burst inicial de spawns, primer take para este outfit)
+	-- → fallback sync.
+	_refillBotRigPoolAsync(poolKey)
+	return _clonePreparedRig(poolKey)
 end
 
-local function _createBotModel(botName: string): Model
-	local clone = _takeBotRigFromPool()
-	if clone then
-		clone.Name = botName
-		return clone
+-- Resuelve qué pool usar para un outfitId dado. Prefiere el outfit pedido si
+-- su body existe; cae a "Default" si está. Devuelve nil si no hay ningún
+-- body disponible → _createBotModel cae al rig barebones.
+local function _resolvePoolKeyForOutfit(outfitId: string?): string?
+	if outfitId and BotAppearance.findBodyTemplate(outfitId) then
+		return outfitId
+	end
+	if BotAppearance.findBodyTemplate("Default") then
+		return "Default"
+	end
+	return nil
+end
+
+local function _createBotModel(botName: string, outfitId: string?): Model
+	local poolKey = _resolvePoolKeyForOutfit(outfitId)
+	if poolKey then
+		local clone = _takeBotRigFromPool(poolKey)
+		if clone then
+			clone.Name = botName
+			return clone
+		end
 	end
 
 	-- Audit P2: warn una sola vez por proceso. Antes el fallback silencioso
@@ -406,14 +418,19 @@ local function _createBotModel(botName: string): Model
 	-- al fallback — no necesitamos N warns iguales, solo uno con contexto.
 	if not _hasWarnedMissingTemplate then
 		_hasWarnedMissingTemplate = true
-		warn("[AIService] BotTemplate no encontrado (buscado en ReplicatedStorage.NPC, .Bots.NPC, ServerStorage.Bots.BotTemplate, .BotTemplate). Usando modelo barebones — los bots aparecerán en T-pose y sin arma hasta que se restaure el template.")
+		warn("[AIService] BotTemplate no encontrado (esperado en ServerStorage.Bodies.<outfitId> o ServerStorage.Bodies.Default). Usando modelo barebones — los bots aparecerán en T-pose y sin arma hasta que se restaure el template.")
 	end
 	return _buildFallbackBotModel(botName)
 end
 
--- Warm-up: pre-rellena el pool al cargar AIService para que la primera oleada
--- de spawns no pague el coste de Clone en el path crítico.
-_refillBotRigPoolAsync()
+-- Warm-up: pre-rellena un pool por outfit disponible al cargar AIService para
+-- que la primera oleada de spawns no pague el coste de Clone en el path
+-- crítico. Si no hay bodies, _createBotModel cae al rig barebones.
+do
+	for _, outfitId in BotAppearance.getAvailableOutfitIds() do
+		_refillBotRigPoolAsync(outfitId)
+	end
+end
 
 local function _notifyActiveBotCount()
 	local count = 0
@@ -514,7 +531,8 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 	_identityByFakeUserId[fakeUserId] = identity
 	_teamByFakeUserId[fakeUserId] = team
 
-	local botModel = _createBotModel(botName)
+	local outfitId = if identity.appearance then identity.appearance.outfitId else nil
+	local botModel = _createBotModel(botName, outfitId)
 	local humanoid = botModel:FindFirstChildOfClass("Humanoid")
 	local root = botModel:FindFirstChild("HumanoidRootPart")
 	if not humanoid or not root or not root:IsA("BasePart") then
@@ -535,7 +553,12 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 		hum.DisplayName = identity.name
 	end
 
-	local botAIInstance = BotAI.new(botModel, team, fakeUserId)
+	-- Apariencia (hat + face). El wrap se aplica dentro de BotAI:_setupTool
+	-- tras clonar el tool, vía el wrapId que pasamos al constructor.
+	BotAppearance.apply(botModel, identity.appearance)
+
+	local wrapId = if identity.appearance then identity.appearance.wrapId else nil
+	local botAIInstance = BotAI.new(botModel, team, fakeUserId, wrapId)
 
 	local botsFolder = mapRoot:FindFirstChild("Bots")
 	if not botsFolder then

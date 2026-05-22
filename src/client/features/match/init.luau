@@ -26,7 +26,7 @@ local MatchProgressionObserver = require(script.MatchProgressionObserver)
 local DeathScreenView = require(script.DeathScreenView)
 local EndResultsView = require(script.EndResultsView)
 local KillCamController = require(script.KillCamController)
-local NPCHighlightController = require(script.NPCHighlightController)
+local CharacterHighlightController = require(script.CharacterHighlightController)
 local HealthBillboardController = require(script.HealthBillboardController)
 local MapVoteView = require(script.MapVoteView)
 local LightingPresetController = require(Client.core.lighting.LightingPresetController)
@@ -187,13 +187,13 @@ function MatchFeature.start(menuController: any): any
 			table.insert(prescannedModels, desc)
 		end
 	end
-	NPCHighlightController:Start(prescannedModels)
+	CharacterHighlightController:Start(prescannedModels)
 	HealthBillboardController:Start(prescannedModels)
 	-- D1+D2: registrar Stop() en el janitor para que un teardown del feature
 	-- (e.g. hot reload) desconecte los PlayerAdded/DescendantAdded/Team
 	-- listeners que de otra forma se duplicarían en el siguiente Start().
 	janitor:Add(function()
-		NPCHighlightController:Stop()
+		CharacterHighlightController:Stop()
 		HealthBillboardController:Stop()
 	end, true)
 	if deathView then

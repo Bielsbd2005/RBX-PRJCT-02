@@ -13,6 +13,7 @@ local BotConfig = require(Shared.constants.BotConfig)
 local Navigator = require(script.Parent:WaitForChild("nav"):WaitForChild("Navigator"))
 local StuckDetector = require(script.Parent:WaitForChild("nav"):WaitForChild("StuckDetector"))
 local RoamGraph = require(script.Parent:WaitForChild("nav"):WaitForChild("RoamGraph"))
+local BotAppearance = require(script.Parent:WaitForChild("BotAppearance"))
 
 -- B4: tipo compartido con AIService. La tabla _aliveTargets es la misma
 -- instancia (pasada por ref en Start), solo cambia su shape: { Model } →
@@ -146,6 +147,10 @@ export type BotAIInstance = typeof(setmetatable({} :: {
 	-- recursivo por disparo (10/seg × 16 bots).
 	_tool: Tool?,
 	_tipAttachment: Attachment?,
+	-- Wrap del arma asignado por AIService desde la BotIdentity. Aplicado
+	-- una vez al clonar el tool en _setupTool. nil = textura por defecto del
+	-- template AR-NPC (sin override).
+	_wrapId: string?,
 	-- Última CFrame aplicada a AlignOrientation. Permite skip de escritura si
 	-- el target no se movió >0.5 stud (~480 escrituras/seg evitadas).
 	_lastAimPos: Vector3,
@@ -155,7 +160,7 @@ export type BotAIInstance = typeof(setmetatable({} :: {
 	_roamGraph: RoamGraph.RoamGraph?,
 }, BotAI))
 
-function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?): BotAIInstance
+function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?, wrapId: string?): BotAIInstance
 	local humanoid = botModel:FindFirstChildOfClass("Humanoid") :: Humanoid
 	local rootPart = botModel:FindFirstChild("HumanoidRootPart") :: BasePart
 
@@ -186,6 +191,7 @@ function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?): BotAI
 		_targetCandidates = {},
 		_tool = nil,
 		_tipAttachment = nil,
+		_wrapId = wrapId,
 		_lastAimPos = Vector3.zero,
 		_navigator = nil,
 		_stuckDetector = nil,
@@ -217,6 +223,10 @@ function BotAI:_setupTool()
 		return
 	end
 	local tool = toolTemplate:Clone()
+	-- Apariencia visual: aplicar wrap antes de parentar el tool al rig.
+	-- Silent-fails si AR-NPC.WeaponModel.PrimaryPart no existe — combat
+	-- (TipAttachment + fallback) sigue funcionando.
+	BotAppearance.applyWrapToTool(tool, self._wrapId)
 	tool.Parent = self._dummy
 	if not CollectionService:HasTag(tool, WEAPON_TAG) then
 		CollectionService:AddTag(tool, WEAPON_TAG)
@@ -640,18 +650,6 @@ function BotAI:_moveToLocation(location: Vector3, stopCondition: () -> boolean)
 	end
 end
 
-function BotAI:_addHighlight()
-	local highlight = Instance.new("Highlight")
-	highlight.Name = "BotHighlight"
-	highlight.FillTransparency = 0.6
-	highlight.OutlineTransparency = 0
-	highlight.DepthMode = Enum.HighlightDepthMode.Occluded
-	-- Color inicial neutro; el cliente lo ajustará por perspectiva de equipo
-	highlight.FillColor = Color3.fromRGB(128, 128, 128)
-	highlight.OutlineColor = Color3.fromRGB(200, 200, 200)
-	highlight.Parent = self._dummy
-end
-
 function BotAI:Start(
 	mapRoot: Instance?,
 	aliveTargets: { AliveTarget }?,
@@ -665,7 +663,6 @@ function BotAI:Start(
 	self._botModelByFakeUserId = botModelByFakeUserId
 	self:_setupNetworkOwnership()
 	self:_setupTool()
-	self:_addHighlight()
 
 	local humanoid = self._humanoid
 	local rootPart = self._rootPart

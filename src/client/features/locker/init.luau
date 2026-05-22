@@ -32,8 +32,8 @@ local ItemDefaults = require(Shared.constants.ItemDefaults)
 local LockerCategory = require(Shared.constants.LockerCategory)
 local LockerMainCategory = require(Shared.constants.LockerMainCategory)
 local Network = require(Shared.networking.Network)
-local DataController = require(Client.core.data.DataController)
 local KillEffectsRegistry = require(Shared.Locker.killEffects.KillEffectsRegistry)
+local DataController = require(Client.core.data.DataController)
 local StoreProducts = require(Shared.constants.StoreProducts)
 local UITheme = require(Client.core.ui.UITheme)
 local NavTabController = require(Client.core.ui.NavTabController)
@@ -116,12 +116,8 @@ local RARITY_RANK = LockerConfig.RarityRank :: { [string]: number }
 local CAMERA_TARGET_BY_MAIN_CATEGORY = {
 	Style = "clothing",
 	Arsenal = "weapons",
-	Effects = "weapons",
+	Effects = "killEffects",
 } :: { [LockerCategoryKey]: string }
-local KILL_EFFECTS_CAMERA_TARGET = "killEffects"
-local KILL_EFFECTS_DUMMY_NAME = "LockerKillEffectsDummy"
-local KILL_EFFECTS_DUMMY_RESTORE_DELAY = 1.25
-local KILL_EFFECTS_PREVIEW_COOLDOWN = 1
 local MAIN_CATEGORY_SWITCH_COOLDOWN = 0.2
 
 function LockerFeature.start(menuController: any, options: { autoOpen: boolean? }?): any
@@ -138,6 +134,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local menuGui = menuController:getGui()
 	local lockerBodiesFolder = Shared:WaitForChild("LockerBodies") :: Folder
 	local defaultLockerBodyTemplate = lockerBodiesFolder:WaitForChild("Default") :: Instance
+	local killEffectDummyTemplate = lockerBodiesFolder:WaitForChild("KillEffectDummy") :: Model
 
 	local function resolveLockerBodyTemplate(outfitId: string?): Model?
 		local byId = if outfitId and outfitId ~= "" then lockerBodiesFolder:FindFirstChild(outfitId) else nil
@@ -150,10 +147,9 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local lockerFolder = Workspace:WaitForChild("Locker")
 	local lockerWeaponsFolder = lockerFolder:WaitForChild("weapons")
 	local characterSpawn = lockerFolder:WaitForChild("CharacterSpawn")
+	local dummySpawn = lockerFolder:WaitForChild("DummySpawn")
 	local mainWeaponSpawn = lockerFolder:WaitForChild("MainSpawn")
 	local specialWeaponSpawn = lockerFolder:WaitForChild("SpecialSpawn")
-	local dummySpawn = lockerFolder:WaitForChild("DummySpawn") :: LockerPreviewSpawnTarget
-	local killEffectsDummyTemplate = ReplicatedStorage:WaitForChild("Dummy")
 	local mainIndicator = lockerWeaponsFolder:FindFirstChild("MainIndicator")
 	local specialIndicator = lockerWeaponsFolder:FindFirstChild("SpecialIndicator")
 
@@ -240,10 +236,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local nav2Stagger: NavStaggerController.NavStaggerController? = nil
 	local isOpen = false
 	local dirtyWhileClosed = false
-	local activeKillEffectsDummy: Model? = nil
-	local killEffectsRestoreToken = 0
-	local nextAllowedKillEffectPreviewAt = 0
-	local skipNextKillEffectSelectionPreview = false
 	local nextAllowedMainCategorySwitchAt = 0
 	local sharedLockerAssets = Shared:WaitForChild("Locker")
 	local sharedWeaponAssets = sharedLockerAssets:WaitForChild("weapons")
@@ -355,7 +347,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		previewModel:MoveTo(spawnTarget.Position)
 	end
 
-	local function playPreviewIdleAnimation(previewModel: Model)
+	local function playPreviewIdleAnimation(previewModel: Model, ownerJanitor: any?)
 		local animator = previewModel:FindFirstChildWhichIsA("Animator", true)
 		if not animator then
 			local humanoid = previewModel:FindFirstChildWhichIsA("Humanoid", true)
@@ -395,7 +387,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		animationTrack.Priority = Enum.AnimationPriority.Idle
 		animationTrack:Play(0.1)
 
-		janitor:Add(function()
+		local cleanupTarget = ownerJanitor or janitor
+		cleanupTarget:Add(function()
 			animationTrack:Stop(0.1)
 			animationTrack:Destroy()
 			animation:Destroy()
@@ -441,6 +434,96 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		hatApplier = HatApplier.new(clone, ItemsConfig)
 		lastPreviewOutfitId = outfitId
 	end
+
+	local KILL_EFFECT_PREVIEW_COOLDOWN = 0.4
+
+	local currentKillEffectDummy: Model? = nil
+	local killEffectIdleJanitor: any = nil
+	local killEffectRespawnTask: thread? = nil
+	local currentlyPreviewingEffectId: string? = nil
+	local nextAllowedPreviewAt = 0
+	-- Al entrar a la nav KillEffects el grid auto-selecciona el primer item y
+	-- dispara onSelectionChanged sin que el usuario haya clickeado. Esta flag
+	-- consume esa primera notificación para que el preview solo arranque por clic.
+	local suppressNextKillEffectPreview = false
+
+	local function destroyKillEffectDummy()
+		if killEffectRespawnTask then
+			task.cancel(killEffectRespawnTask)
+			killEffectRespawnTask = nil
+		end
+		if killEffectIdleJanitor then
+			killEffectIdleJanitor:Destroy()
+			killEffectIdleJanitor = nil
+		end
+		if currentKillEffectDummy and currentKillEffectDummy.Parent then
+			currentKillEffectDummy:Destroy()
+		end
+		currentKillEffectDummy = nil
+		currentlyPreviewingEffectId = nil
+	end
+
+	-- Reposiciona cada Part1 a la pose canónica del Motor6D
+	-- (Part0.CFrame * C0 * C1:Inverse). Si el template guardado en RS tiene
+	-- partes desplazadas físicamente (ej: Transform aplicado al guardar), el
+	-- ragdoll aparece deformado al destruir los Motor6Ds. 4 pasadas cubren la
+	-- profundidad del rig R15 (HRP → LowerTorso → UpperTorso → extremidades →
+	-- manos/pies).
+	local function snapPartsToCanonicalPose(char: Model)
+		for _ = 1, 4 do
+			for _, m in char:GetDescendants() do
+				if m:IsA("Motor6D") and m.Part0 and m.Part1 then
+					m.Part1.CFrame = m.Part0.CFrame * m.C0 * m.C1:Inverse()
+				end
+			end
+		end
+	end
+
+	local function spawnKillEffectDummy()
+		destroyKillEffectDummy()
+		local clone = killEffectDummyTemplate:Clone()
+		clone.Name = "KillEffectDummy"
+		clone.Parent = lockerFolder
+		placePreviewCharacter(clone, dummySpawn :: LockerPreviewSpawnTarget)
+		snapPartsToCanonicalPose(clone)
+
+		-- Anclar HRP para que el dummy no caiga por gravedad antes del clic.
+		-- El killEffect desancla todo en su paso final (Utils.anchor false).
+		local hrp = clone:FindFirstChild("HumanoidRootPart")
+		if hrp and hrp:IsA("BasePart") then
+			hrp.Anchored = true
+		end
+
+		killEffectIdleJanitor = Janitor.new()
+		playPreviewIdleAnimation(clone, killEffectIdleJanitor)
+		currentKillEffectDummy = clone
+	end
+
+	local function previewKillEffect(effectId: string)
+		if currentlyPreviewingEffectId == effectId and killEffectRespawnTask then
+			return
+		end
+		local now = os.clock()
+		if now < nextAllowedPreviewAt then
+			return
+		end
+		nextAllowedPreviewAt = now + KILL_EFFECT_PREVIEW_COOLDOWN
+
+		spawnKillEffectDummy()
+		-- Parar idle antes del apply: el effect destruye los Motor6Ds y la
+		-- AnimationTrack quedaría apuntando a joints inexistentes.
+		killEffectIdleJanitor:Destroy()
+		killEffectIdleJanitor = nil
+		currentlyPreviewingEffectId = effectId
+		KillEffectsRegistry.apply(effectId, currentKillEffectDummy :: Model)
+		killEffectRespawnTask = task.delay(2, function()
+			killEffectRespawnTask = nil
+			currentlyPreviewingEffectId = nil
+			spawnKillEffectDummy()
+		end)
+	end
+
+	janitor:Add(destroyKillEffectDummy, true)
 
 	local applyEquippedFacePreview: () -> ()
 	local applyEquippedHatPreview: () -> ()
@@ -516,105 +599,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			previewCharacter:Destroy()
 		end
 	end, true)
-
-	local function resolveKillEffectId(): string
-		return getOptionalString(equippedLookup.KillEffects) or getOptionalString(getCurrentLoadout().KillEffect) or ItemDefaults.ITEM_ID
-	end
-
-	local killEffectsDummyTemplateModel = if killEffectsDummyTemplate:IsA("Model")
-			and killEffectsDummyTemplate:FindFirstChildWhichIsA("Humanoid", true)
-		then killEffectsDummyTemplate
-		else if defaultLockerBodyTemplate:IsA("Model") and defaultLockerBodyTemplate:FindFirstChildWhichIsA("Humanoid", true)
-			then defaultLockerBodyTemplate
-			else nil
-
-	local function replaceKillEffectsDummy(): Model?
-		if activeKillEffectsDummy and activeKillEffectsDummy.Parent then
-			activeKillEffectsDummy:Destroy()
-		end
-
-		activeKillEffectsDummy = nil
-
-		if not killEffectsDummyTemplateModel then
-			return nil
-		end
-
-		local clonedDummy = killEffectsDummyTemplateModel:Clone()
-		clonedDummy.Name = KILL_EFFECTS_DUMMY_NAME
-		clonedDummy.Parent = dummySpawn :: Instance
-		placePreviewCharacter(clonedDummy, dummySpawn)
-		playPreviewIdleAnimation(clonedDummy)
-		activeKillEffectsDummy = clonedDummy
-		return clonedDummy
-	end
-
-	local function destroyKillEffectsDummy()
-		killEffectsRestoreToken += 1
-		nextAllowedKillEffectPreviewAt = 0
-
-		if activeKillEffectsDummy and activeKillEffectsDummy.Parent then
-			activeKillEffectsDummy:Destroy()
-		end
-
-		activeKillEffectsDummy = nil
-	end
-
-	local function previewKillEffect(effectId: string?)
-		if not isOpen or selectedMainCategory ~= LockerMainCategory.EFFECTS or selectedNavKey ~= LockerCategory.KILL_EFFECTS then
-			return
-		end
-
-		local now = os.clock()
-		if now < nextAllowedKillEffectPreviewAt then
-			return
-		end
-		nextAllowedKillEffectPreviewAt = now + KILL_EFFECTS_PREVIEW_COOLDOWN
-
-		local dummy = replaceKillEffectsDummy()
-		if not dummy then
-			return
-		end
-
-		local resolvedEffectId = if type(effectId) == "string" and effectId ~= "" then effectId else resolveKillEffectId()
-		if not KillEffectsRegistry.apply(resolvedEffectId, dummy) then
-			return
-		end
-
-		killEffectsRestoreToken += 1
-		local restoreToken = killEffectsRestoreToken
-		task.delay(KILL_EFFECTS_DUMMY_RESTORE_DELAY, function()
-			if restoreToken ~= killEffectsRestoreToken then
-				return
-			end
-
-			if not isOpen or selectedMainCategory ~= LockerMainCategory.EFFECTS or selectedNavKey ~= LockerCategory.KILL_EFFECTS then
-				return
-			end
-
-			replaceKillEffectsDummy()
-		end)
-	end
-
-	local function updateKillEffectsPreviewState(categoryKey: LockerCategoryKey, navKey: string)
-		if categoryKey == LockerMainCategory.EFFECTS and navKey == LockerCategory.KILL_EFFECTS then
-			cameraController:setTargetPartName(KILL_EFFECTS_CAMERA_TARGET)
-			if isOpen then
-				if selectedCatalogItem and selectedCatalogItem.Category == LockerCategory.KILL_EFFECTS then
-					previewKillEffect(selectedCatalogItem.id)
-				else
-					replaceKillEffectsDummy()
-				end
-			else
-				destroyKillEffectsDummy()
-			end
-			return
-		end
-
-		destroyKillEffectsDummy()
-		cameraController:setTargetPartName(CAMERA_TARGET_BY_MAIN_CATEGORY[categoryKey])
-	end
-
-	janitor:Add(destroyKillEffectsDummy, true)
 
 	-- WeaponPreviewController se inicializa después de las funciones que necesita como dependencia.
 	local weaponPreviewController: any = nil
@@ -1023,14 +1007,11 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			applySelectedHatPreview(item)
 			applySelectedWeaponPreview(item)
 			if item and item.Category == LockerCategory.KILL_EFFECTS then
-				if skipNextKillEffectSelectionPreview then
-					skipNextKillEffectSelectionPreview = false
-					replaceKillEffectsDummy()
+				if suppressNextKillEffectPreview then
+					suppressNextKillEffectPreview = false
 				else
 					previewKillEffect(item.id)
 				end
-			elseif selectedMainCategory == LockerMainCategory.EFFECTS and selectedNavKey == LockerCategory.KILL_EFFECTS then
-					replaceKillEffectsDummy()
 			end
 			updateActionFrameForSelected()
 		end,
@@ -1181,12 +1162,13 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		local previousNavKey = selectedNavKey
 		selectedNavKey = navKey
 		updateWeaponCategoryIndicators()
-		skipNextKillEffectSelectionPreview = categoryKey == LockerMainCategory.EFFECTS
-			and navKey == LockerCategory.KILL_EFFECTS
-			and previousNavKey ~= navKey
-		updateKillEffectsPreviewState(categoryKey, navKey)
 		if categoryKey ~= LockerMainCategory.ARSENAL or previousNavKey ~= navKey then
 			restoreEquippedWeaponPreviews()
+		end
+
+		if navKey == LockerCategory.KILL_EFFECTS and previousNavKey ~= LockerCategory.KILL_EFFECTS then
+			spawnKillEffectDummy()
+			suppressNextKillEffectPreview = true
 		end
 		local preferredSelectedQualifiedId = getPreferredSelectedQualifiedId(categoryKey, navKey, selectedQualifiedId)
 
@@ -1290,6 +1272,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	clearItemGrid = function()
 		grid:Clear()
 		restoreEquippedWeaponPreviews()
+		destroyKillEffectDummy()
 	end
 
 	local function selectItem(selectedKey: LockerCategoryKey)
@@ -1588,13 +1571,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			applyEquippedFacePreview()
 			applyEquippedHatPreview()
 			syncWeaponPreviewsFromLoadout()
-			if selectedMainCategory == LockerMainCategory.EFFECTS and selectedNavKey == LockerCategory.KILL_EFFECTS then
-				if selectedCatalogItem and selectedCatalogItem.Category == LockerCategory.KILL_EFFECTS then
-					previewKillEffect(selectedCatalogItem.id)
-				else
-					replaceKillEffectsDummy()
-				end
-			end
 			refreshGridSelectionState()
 		end), true)
 	end)
@@ -1608,7 +1584,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	local function restoreLockerSceneState()
-		destroyKillEffectsDummy()
 		restoreEquippedWeaponPreviews()
 		applyEquippedBodyPreview()
 		applyEquippedFacePreview()
@@ -1667,6 +1642,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		hideActionFrame()
 		restoreLockerSceneState()
 		setWrapsMode(false)
+		destroyKillEffectDummy()
 		lockerFrame.Visible = false
 		LightingPresetController.apply("Lobby")
 	end
@@ -1706,7 +1682,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end), "Disconnect")
 
 	janitor:Add(function()
-		destroyKillEffectsDummy()
 		if isOpen then
 			restoreLockerSceneState()
 		end

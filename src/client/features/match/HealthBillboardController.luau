@@ -382,7 +382,7 @@ function HealthBillboardController:Start(prescannedModels: { Model }?)
 	end))
 
 	-- Scan inicial: una sola pasada al arrancar. Si el caller pasa
-	-- `prescannedModels` (init.luau hace un solo scan compartido con NPCHighlight),
+	-- `prescannedModels` (init.luau hace un solo scan compartido con CharacterHighlight),
 	-- lo reusamos en vez de re-escanear workspace.
 	if prescannedModels then
 		for _, model in prescannedModels do
