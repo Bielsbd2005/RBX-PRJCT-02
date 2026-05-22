@@ -50,6 +50,81 @@ type ProjectileEntry = { active: boolean, callback: ((number) -> ())? }
 local activeProjectiles: { ProjectileEntry } = {}
 local projectileLoopConn: RBXScriptConnection? = nil
 
+-- W5: buffer reusado para serializar hitInfo al servidor. Antes cada impacto
+-- (shotgun → 8/shot) creaba una tabla nueva + bucle de copia. FireServer
+-- serializa de forma síncrona, así que es seguro mutar el buffer entre llamadas.
+local _hitInfoSendBuffer: { [string]: any } = {}
+
+-- W13: pool de bulletEffect clones por template. Antes shotgun (8 proj/shot)
+-- × autofire 10 RPS = 80 clones/seg de modelos complejos (beams, sounds,
+-- particles). Cada clone es un árbol Instance.new + property copies por
+-- descendant — caro en mobile. El pool reusa instancias inactive (Parent=nil)
+-- y solo clona cuando se vacía. Al release: stop sounds, disable beams,
+-- park con Parent=nil. Próximo acquire reusa el mismo árbol — beam/sound/
+-- particle refs vía FindFirstChild devuelven los mismos objetos.
+local _bulletEffectPool: { [Instance]: { Instance } } = {}
+local BULLET_EFFECT_POOL_MAX_PER_TEMPLATE = 32
+
+local function _acquireBulletEffect(template: Instance, parent: Instance): Instance
+	local pool = _bulletEffectPool[template]
+	if pool then
+		local n = #pool
+		if n > 0 then
+			local effect = pool[n]
+			pool[n] = nil
+			effect.Parent = parent
+			return effect
+		end
+	end
+	local effect = template:Clone()
+	effect.Parent = parent
+	CollectionService:AddTag(effect, "WeaponsSystemIgnore")
+	return effect
+end
+
+local function _releaseBulletEffect(template: Instance, effect: Instance)
+	-- Limpiar estado audible/visual antes de parquear. Beams quedan apagados
+	-- (siguiente acquire los re-enable), sonidos paran (siguiente Play arranca
+	-- de cero), CFrame se sobrescribe en simulateProjectile.
+	local beam0 = effect:FindFirstChild("Beam0")
+	if beam0 and beam0:IsA("Beam") then beam0.Enabled = false end
+	local beam1 = effect:FindFirstChild("Beam1")
+	if beam1 and beam1:IsA("Beam") then beam1.Enabled = false end
+	local flyingSound = effect:FindFirstChild("Flying", true)
+	if flyingSound and flyingSound:IsA("Sound") then flyingSound:Stop() end
+	local hitSound = effect:FindFirstChild("HitSound", true)
+	if hitSound and hitSound:IsA("Sound") then hitSound:Stop() end
+
+	-- W13b: restaurar propiedades que mutamos durante la vida del proyectil
+	-- a los valores del template. Sin esto, el siguiente acquire saldría con
+	-- Transparency=1 (la bala se ve invisible) y leadingParticles.Rate=0
+	-- (no emite trail). El template nunca se muta, así que es la fuente
+	-- canónica de los defaults.
+	if template:IsA("BasePart") and effect:IsA("BasePart") then
+		effect.Transparency = template.Transparency
+	end
+	local effectLeading = effect:FindFirstChild("LeadingParticles", true)
+	local templateLeading = template:FindFirstChild("LeadingParticles", true)
+	if effectLeading and templateLeading
+		and effectLeading:IsA("ParticleEmitter")
+		and templateLeading:IsA("ParticleEmitter")
+	then
+		effectLeading.Rate = templateLeading.Rate
+	end
+
+	local pool = _bulletEffectPool[template]
+	if not pool then
+		pool = {}
+		_bulletEffectPool[template] = pool
+	end
+	if #pool >= BULLET_EFFECT_POOL_MAX_PER_TEMPLATE then
+		effect:Destroy()
+		return
+	end
+	effect.Parent = nil
+	table.insert(pool, effect)
+end
+
 local function _projectileLoopTick(dt: number)
 	local i = 1
 	while i <= #activeProjectiles do
@@ -135,7 +210,10 @@ function BulletWeapon.new(weaponsSystem, instance)
 	self.handAlignRot = nil
 
 	self.chargingParticles = {}
-	self.instance.DescendantAdded:Connect(function(descendant)
+	-- W15: guardar la conexión en self.connections para que onDestroyed la
+	-- limpie. Antes era orphan: si BulletWeapon se destruía antes del Tool
+	-- (re-equip, switch de arma), el listener seguía vivo con upvalue stale.
+	self.connections.chargingParticlesAdded = self.instance.DescendantAdded:Connect(function(descendant)
 		if descendant.Name == "ChargingParticles" and descendant:IsA("ParticleEmitter") then
 			table.insert(self.chargingParticles, descendant)
 		end
@@ -379,10 +457,11 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 	dir = Roblox.applySpread(dir, randomGenerator, math.rad(minSpread), math.rad(maxSpread))
 
 	-- Initialize variables for visuals/particle effects
-	local bulletEffect = self.bulletEffectTemplate:Clone()
+	-- W13: pool en lugar de Clone+Destroy por proyectil. Mismo template/instance
+	-- vuelve al pool al destruir y se reusa en el próximo disparo.
+	local bulletEffectTemplate = self.bulletEffectTemplate
+	local bulletEffect = _acquireBulletEffect(bulletEffectTemplate, workspace.CurrentCamera)
 	bulletEffect.CFrame = CFrame.new(origin, origin + dir)
-	bulletEffect.Parent = workspace.CurrentCamera
-	CollectionService:AddTag(bulletEffect, "WeaponsSystemIgnore")
 
 	local leadingParticles = bulletEffect:FindFirstChild("LeadingParticles", true)
 
@@ -501,11 +580,14 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 				-- Notify the server that this projectile hit something from client that initiated the shot
 				-- Show hit indicators on gui of client that shot projectile
 				if localPlayerInitiatedShot then
-					local hitInfoClone = {}
+					-- W5: reuse del buffer module-level. FireServer serializa
+					-- sincronamente, así que el contenido se envía antes de
+					-- volver y podemos sobrescribir en el siguiente impacto.
+					table.clear(_hitInfoSendBuffer)
 					for hitInfoKey, value in pairs(hitInfo) do
-						hitInfoClone[hitInfoKey] = value
+						_hitInfoSendBuffer[hitInfoKey] = value
 					end
-					WeaponsNetwork.fireWeaponHit(self.instance, hitInfoClone)
+					WeaponsNetwork.fireWeaponHit(self.instance, _hitInfoSendBuffer)
 				end
 
 
@@ -672,7 +754,9 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 		local timeSinceParticleEffectsFinished = now - visualEffectsFinishTime
 		if (flyingVisualEffectsFinished and timeSinceParticleEffectsFinished > 0) or timeSinceStart > MAX_BULLET_TIME then
 			if bulletEffect then
-				bulletEffect:Destroy()
+				-- W13: devolver al pool en lugar de :Destroy(). El pool resetea
+				-- sounds/beams; CFrame se sobrescribe en el próximo acquire.
+				_releaseBulletEffect(bulletEffectTemplate, bulletEffect)
 				bulletEffect = nil
 			end
 
@@ -921,14 +1005,17 @@ function BulletWeapon:onRenderStepped(dt)
 				end
 			end
 
-			local MIN_ANGLE = -80
-			local MAX_ANGLE = 80
-			local aimYAngle = math.deg(self.recoilIntensity)
+			-- W6: trabajamos directamente en radianes. Antes hacíamos math.deg(...)
+			-- 2× por frame (la rama del camera enabled siempre se toma con
+			-- ShoulderCamera activa) y luego normalizábamos contra [-80,80] grados.
+			-- Equivalente en radianes: [math.rad(-80), math.rad(80)] ≈ [-1.396, 1.396].
+			local MIN_ANGLE_RAD = -1.3962634015954636 -- math.rad(-80)
+			local MAX_ANGLE_RAD = 1.3962634015954636  -- math.rad(80)
+			local aimYAngle = self.recoilIntensity
 			if self.weaponsSystem.camera.enabled then
-				-- Gets pitch and recoil from camera to figure out how high/low to aim the gun
-				aimYAngle = math.deg(self.weaponsSystem.camera:getRelativePitch() + self.weaponsSystem.camera.currentRecoil.Y + self.recoilIntensity)
+				aimYAngle = self.weaponsSystem.camera:getRelativePitch() + self.weaponsSystem.camera.currentRecoil.Y + self.recoilIntensity
 			end
-			local aimTimePos = 2 * ((aimYAngle - MIN_ANGLE) / (MAX_ANGLE - MIN_ANGLE))
+			local aimTimePos = 2 * ((aimYAngle - MIN_ANGLE_RAD) / (MAX_ANGLE_RAD - MIN_ANGLE_RAD))
 
 			aimTrack:AdjustSpeed(0.001)
 			aimTrack.TimePosition = math.clamp(aimTimePos, 0.001, 1.97)

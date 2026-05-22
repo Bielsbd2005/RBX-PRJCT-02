@@ -25,6 +25,34 @@ raycastParams.IgnoreWater = true
 -- FilterDescendantsInstances al mismo array — evita el table literal por call.
 local visibilityFilter: { Instance } = table.create(1)
 
+-- W9: tablas reusadas para el sweep de targets. findBestTarget corre 20Hz por
+-- arma equipada local. Antes cada call alocaba charactersToCheck = {} +
+-- 2 closures (addNpcModelIfEnemy, scanBotsIn). Ahora reusamos el buffer y
+-- las funciones son module-level con un upvalue mutable (_localCharacter).
+local _charactersBuffer: { Model } = {}
+local _localCharacter: Model? = nil
+
+local function _addNpcModelIfEnemy(model: Instance)
+	if not model:IsA("Model") then return end
+	if model == _localCharacter then return end
+	if Players:GetPlayerFromCharacter(model) then return end
+
+	local hum = model:FindFirstChildOfClass("Humanoid")
+	if not hum or hum.Health <= 0 then return end
+	if _localCharacter and TeamUtils.isSameTeam(_localCharacter, model) then return end
+
+	table.insert(_charactersBuffer, model)
+end
+
+local function _scanBotsIn(container: Instance)
+	local botsFolder = if container.Name == "Bots" then container else container:FindFirstChild("Bots")
+	if botsFolder and (botsFolder:IsA("Folder") or botsFolder:IsA("Model")) then
+		for _, botModel in ipairs(botsFolder:GetChildren()) do
+			_addNpcModelIfEnemy(botModel)
+		end
+	end
+end
+
 -- Find the best enemy target near the screen center
 function AutoAimSystem.findBestTarget(weaponsSystem)
 	local camera = workspace.CurrentCamera
@@ -44,19 +72,10 @@ function AutoAimSystem.findBestTarget(weaponsSystem)
 	local bestScreenDist = math.huge
 	local bestWorldPos = nil
 
-	local charactersToCheck = {}
-
-	local function addNpcModelIfEnemy(model: Instance)
-		if not model:IsA("Model") then return end
-		if model == localPlayer.Character then return end
-		if Players:GetPlayerFromCharacter(model) then return end
-
-		local hum = model:FindFirstChildOfClass("Humanoid")
-		if not hum or hum.Health <= 0 then return end
-		if TeamUtils.isSameTeam(localPlayer.Character, model) then return end
-
-		table.insert(charactersToCheck, model)
-	end
+	-- Setup upvalue para los helpers + limpiar buffer reusado.
+	_localCharacter = localPlayer.Character
+	table.clear(_charactersBuffer)
+	local charactersToCheck = _charactersBuffer
 
 	-- Add enemy players
 	for _, player in ipairs(Players:GetPlayers()) do
@@ -70,25 +89,16 @@ function AutoAimSystem.findBestTarget(weaponsSystem)
 	-- Add NPCs: una sola pasada por workspace:GetChildren(); cada hijo cuenta
 	-- como NPC potencial Y se inspecciona su carpeta "Bots" directa (sin
 	-- FindFirstChild recursivo, que escanearía subárboles enteros).
-	local function scanBotsIn(container: Instance)
-		local botsFolder = if container.Name == "Bots" then container else container:FindFirstChild("Bots")
-		if botsFolder and (botsFolder:IsA("Folder") or botsFolder:IsA("Model")) then
-			for _, botModel in ipairs(botsFolder:GetChildren()) do
-				addNpcModelIfEnemy(botModel)
-			end
-		end
-	end
-
 	for _, child in ipairs(workspace:GetChildren()) do
-		addNpcModelIfEnemy(child)
-		scanBotsIn(child)
+		_addNpcModelIfEnemy(child)
+		_scanBotsIn(child)
 		-- Los bots reales viven en workspace.ActiveMap.<mapModel>.Bots (MatchService
 		-- clona el mapa dentro del contenedor ActiveMap), así que necesitamos un
 		-- nivel extra de profundidad solo dentro de ese contenedor — barato porque
 		-- ActiveMap suele tener un único hijo (el mapModel cargado).
 		if child.Name == "ActiveMap" then
 			for _, sub in ipairs(child:GetChildren()) do
-				scanBotsIn(sub)
+				_scanBotsIn(sub)
 			end
 		end
 	end

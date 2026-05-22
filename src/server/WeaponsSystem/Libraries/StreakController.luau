@@ -27,6 +27,13 @@ local STREAK_COLORS = {
 
 local TI_BAR_DRAIN = TweenInfo.new(STREAK_DURATION, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut)
 
+-- W14: TweenInfo cacheados por evento. Antes cada kill alocaba TweenInfo.new
+-- inline (punch, slam scale, slam alpha) — struct ligero pero medible en
+-- spree de kills en mobile.
+local TI_PUNCH = TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+local TI_SLAM_SCALE = TweenInfo.new(0.25, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+local TI_SLAM_ALPHA = TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
 local StreakController = {}
 
 local currentStreak = 0
@@ -155,11 +162,7 @@ local function playScalePunch(streak: number)
 	local intensity = math.clamp(1.12 + (streak - 1) * 0.025, 1.12, 1.25)
 	frameUIScale.Scale = intensity
 
-	punchTween = TweenService:Create(
-		frameUIScale,
-		TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
-		{ Scale = 1 }
-	)
+	punchTween = TweenService:Create(frameUIScale, TI_PUNCH, { Scale = 1 })
 	punchTween:Play()
 end
 
@@ -261,17 +264,8 @@ local function playTitleSlam(streak: number)
 	slamScale.Scale = math.clamp(1.4 + math.min(streak, 5) * 0.06, 1.4, 1.7)
 	valueLabel.TextTransparency = 0.2
 
-	local scaleTween = TweenService:Create(
-		slamScale,
-		TweenInfo.new(0.25, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
-		{ Scale = 1 }
-	)
-
-	local alphaTween = TweenService:Create(
-		valueLabel,
-		TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-		{ TextTransparency = 0 }
-	)
+	local scaleTween = TweenService:Create(slamScale, TI_SLAM_SCALE, { Scale = 1 })
+	local alphaTween = TweenService:Create(valueLabel, TI_SLAM_ALPHA, { TextTransparency = 0 })
 
 	scaleTween:Play()
 	alphaTween:Play()

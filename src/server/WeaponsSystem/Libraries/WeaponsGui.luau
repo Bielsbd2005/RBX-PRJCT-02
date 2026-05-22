@@ -34,6 +34,13 @@ local HIT_HIGHLIGHT_TO_OUTLINE_TWEEN = TweenInfo.new(0.12, Enum.EasingStyle.Quad
 local HIT_HIGHLIGHT_FADE_TWEEN = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local VIGNETTE_KILL_COLOR = Color3.fromRGB(0, 172, 237)
 local VIGNETTE_HEALTH_COLOR = Color3.fromRGB(255, 0, 0)
+-- W7: constantes módulo para hit marker. Antes Color3.new(...) y Vector2.new(...)
+-- por hit (en OnHitOtherPlayer) y por frame (en _layoutShotgunCrosshairCorners).
+local CENTER_ANCHOR_V2 = Vector2.new(0.5, 0.5)
+local HIT_MARKER_CENTER_POS = UDim2.new(0.5, 0, 0.5, 0)
+local HIT_COLOR_INITIAL = Color3.new(1, 0.3, 0.3)
+local HIT_COLOR_PEAK = Color3.new(1, 0, 0)
+local HIT_COLOR_FADE = Color3.new(1, 1, 0.7)
 local MOBILE_HAPTIC_HIT_INTENSITY = 0.18
 local MOBILE_HAPTIC_HEADSHOT_INTENSITY = 0.4
 local MOBILE_HAPTIC_HIT_DURATION = 0.04
@@ -1652,19 +1659,22 @@ function WeaponsGui:_layoutShotgunCrosshairCorners()
 	if not (self.crosshairShotgunFrame and self._isShotgun) then return end
 	local s = self.crosshairSpread
 	local size = math.floor(self.crosshairNormalSize.Y * 0.45)
-	local ox = s
-	local oy = s
-	self.crosshairShotgunTopLeft.AnchorPoint = Vector2.new(0.5,0.5)
-	self.crosshairShotgunTopLeft.Position = UDim2.new(0.5,-ox,0.5,-oy)
+	-- W7: AnchorPoint solo se asigna una vez por corner (no cambia entre frames).
+	-- Antes se reasignaba el mismo Vector2.new(0.5,0.5) cada frame.
+	if not self._shotgunAnchorsSet then
+		self.crosshairShotgunTopLeft.AnchorPoint = CENTER_ANCHOR_V2
+		self.crosshairShotgunTopRight.AnchorPoint = CENTER_ANCHOR_V2
+		self.crosshairShotgunBottomLeft.AnchorPoint = CENTER_ANCHOR_V2
+		self.crosshairShotgunBottomRight.AnchorPoint = CENTER_ANCHOR_V2
+		self._shotgunAnchorsSet = true
+	end
+	self.crosshairShotgunTopLeft.Position = UDim2.new(0.5,-s,0.5,-s)
 	self.crosshairShotgunTopLeft.Size = UDim2.new(0, size, 0, size)
-	self.crosshairShotgunTopRight.AnchorPoint = Vector2.new(0.5,0.5)
-	self.crosshairShotgunTopRight.Position = UDim2.new(0.5,ox,0.5,-oy)
+	self.crosshairShotgunTopRight.Position = UDim2.new(0.5,s,0.5,-s)
 	self.crosshairShotgunTopRight.Size = UDim2.new(0, size, 0, size)
-	self.crosshairShotgunBottomLeft.AnchorPoint = Vector2.new(0.5,0.5)
-	self.crosshairShotgunBottomLeft.Position = UDim2.new(0.5,-ox,0.5,oy)
+	self.crosshairShotgunBottomLeft.Position = UDim2.new(0.5,-s,0.5,s)
 	self.crosshairShotgunBottomLeft.Size = UDim2.new(0, size, 0, size)
-	self.crosshairShotgunBottomRight.AnchorPoint = Vector2.new(0.5,0.5)
-	self.crosshairShotgunBottomRight.Position = UDim2.new(0.5,ox,0.5,oy)
+	self.crosshairShotgunBottomRight.Position = UDim2.new(0.5,s,0.5,s)
 	self.crosshairShotgunBottomRight.Size = UDim2.new(0, size, 0, size)
 end
 
@@ -1705,21 +1715,23 @@ function WeaponsGui:_pulseMobileHaptics(isHeadshot)
 	local pulseId = (self._mobileHapticPulseId or 0) + 1
 	self._mobileHapticPulseId = pulseId
 
-	for _, target in ipairs(targets) do
-		pcall(function()
+	-- W12: pcall fuera del loop. Antes N exception frames por hit
+	-- (1 pcall × cada target × cada fase). Headshot doblaba el coste.
+	pcall(function()
+		for _, target in ipairs(targets) do
 			HapticService:SetMotor(target.inputType, target.motor, intensity)
-		end)
-	end
+		end
+	end)
 
 	task.delay(duration, function()
 		if self._mobileHapticPulseId ~= pulseId then
 			return
 		end
-		for _, target in ipairs(targets) do
-			pcall(function()
+		pcall(function()
+			for _, target in ipairs(targets) do
 				HapticService:SetMotor(target.inputType, target.motor, 0)
-			end)
-		end
+			end
+		end)
 	end)
 end
 
@@ -1728,23 +1740,27 @@ function WeaponsGui:OnHitOtherPlayer(damage, humanoidHit, hitPart)
 	if self.currentFadeTween then self.currentFadeTween:Cancel() end
 	local isHeadshot = hitPart and hitPart.Name == "Head"
 	self:_pulseMobileHaptics(isHeadshot)
-	self.hitMarker.AnchorPoint = Vector2.new(0.5, 0.5)
-	self.hitMarker.Position = UDim2.new(0.5, 0, 0.5, 0)
+	-- W7: AnchorPoint solo se setea la primera vez (no cambia).
+	if not self._hitMarkerAnchorSet then
+		self.hitMarker.AnchorPoint = CENTER_ANCHOR_V2
+		self._hitMarkerAnchorSet = true
+	end
+	self.hitMarker.Position = HIT_MARKER_CENTER_POS
 	self.hitMarker.ImageTransparency = 0
 	self.hitMarker.Size = UDim2.new(0.03, 0, 0, 0)
-	self.hitMarker.ImageColor3 = Color3.new(1, 0.3, 0.3)
+	self.hitMarker.ImageColor3 = HIT_COLOR_INITIAL
 	self.hitMarker.Rotation = 0
 	local minSize = 30
 	local initialSize = math.max(self.hitMarker.AbsoluteSize.X, minSize)
 	self.hitMarker.Size = UDim2.new(0, initialSize, 0, initialSize)
 	local hitTweenInfo = TweenInfo.new(0.12, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out)
 	local maxSize = math.max(self.hitMarker.AbsoluteSize.X * 2, minSize * 2)
-	local hitGoal = { Size = UDim2.new(0, maxSize, 0, maxSize), ImageColor3 = Color3.new(1, 0, 0), Rotation = math.random(-15, 15) }
+	local hitGoal = { Size = UDim2.new(0, maxSize, 0, maxSize), ImageColor3 = HIT_COLOR_PEAK, Rotation = math.random(-15, 15) }
 	self.currentHitTween = TweenService:Create(self.hitMarker, hitTweenInfo, hitGoal)
 	self.currentHitTween:Play()
 	local fadeTweenInfo = TweenInfo.new(0.5, Enum.EasingStyle.Quint, Enum.EasingDirection.Out, 0, false, 0.15)
 	local midSize = math.max(maxSize * 0.75, minSize * 1.5)
-	local fadeGoal = { Size = UDim2.new(0, midSize, 0, midSize), ImageTransparency = 1, ImageColor3 = Color3.new(1, 1, 0.7), Rotation = 0 }
+	local fadeGoal = { Size = UDim2.new(0, midSize, 0, midSize), ImageTransparency = 1, ImageColor3 = HIT_COLOR_FADE, Rotation = 0 }
 	self.currentFadeTween = TweenService:Create(self.hitMarker, fadeTweenInfo, fadeGoal)
 	self.currentFadeTween:Play()
 	self:_playLocalHitHighlight(humanoidHit)
@@ -1768,7 +1784,9 @@ function WeaponsGui:onRenderStepped(dt)
 		self:_refreshHotbar()
 	end
 	self:_updateAmmoDisplay()
-	if self._isShotgun then
+	-- W8: cache local. Antes self._isShotgun se releía 3× por frame.
+	local isShotgun = self._isShotgun
+	if isShotgun then
 		if os.clock() >= (self._kickCooldownEnd or 0) then
 			local want = self.isZoomed and self.crosshairSpreadAim or self.crosshairSpreadBase
 			if math.abs(self.crosshairSpreadTarget - want) > 0.1 then
@@ -1947,6 +1965,10 @@ function WeaponsGui:_setReloadProgressVisible(isVisible)
 end
 
 function WeaponsGui:_stopReloadProgressAnimation(hideProgress)
+	local ownerName = self._reloadProgressOwner and self._reloadProgressOwner.instance and self._reloadProgressOwner.instance.Name or "nil"
+	print(string.format("[RELOAD-DEBUG] [GUI] _stopReloadProgressAnimation(hide=%s) | wasAnimating=%s owner=%s",
+		tostring(hideProgress), tostring(self._isReloadProgressAnimating), ownerName))
+
 	self._reloadProgressRunId = (self._reloadProgressRunId or 0) + 1
 
 	if self._reloadProgressTween then
@@ -1964,10 +1986,37 @@ function WeaponsGui:_stopReloadProgressAnimation(hideProgress)
 
 	if hideProgress ~= false then
 		self:_setReloadProgressVisible(false)
+		-- Reset owner/timer al ocultar — el siguiente reload arranca limpio.
+		self._reloadProgressOwner = nil
+		self._reloadProgressStartedAt = nil
 	end
 end
 
 function WeaponsGui:playReloadProgressAnimation(reloadTime)
+	local currentWeapon = self.weaponsSystem and self.weaponsSystem.currentWeapon
+	local cwName = currentWeapon and currentWeapon.instance and currentWeapon.instance.Name or "nil"
+	local prevOwnerName = self._reloadProgressOwner and self._reloadProgressOwner.instance and self._reloadProgressOwner.instance.Name or "nil"
+	print(string.format("[RELOAD-DEBUG] [GUI] playReloadProgressAnimation(reloadTime=%.2f) | currentWeapon=%s prevOwner=%s isAnimating=%s",
+		reloadTime, cwName, prevOwnerName, tostring(self._isReloadProgressAnimating)))
+
+	-- Dedupe defensivo: si ya hay una animación corriendo iniciada hace muy
+	-- poco (< 150ms) y para el mismo currentWeapon, ignorar. Esto previene
+	-- restarts visuales por dos paths concurrentes (e.g., auto-reload del
+	-- handler Equipped + broadcast tardío del server, o Equipped + Activated
+	-- ambos disparando reload en re-equip rápido).
+	local now = os.clock()
+	if self._isReloadProgressAnimating
+		and self._reloadProgressOwner == currentWeapon
+		and self._reloadProgressStartedAt
+		and (now - self._reloadProgressStartedAt) < 0.15
+	then
+		print(string.format("[RELOAD-DEBUG] [GUI]   ↳ DEDUPED (same owner %s within 150ms)", cwName))
+		return
+	end
+	self._reloadProgressStartedAt = now
+	self._reloadProgressOwner = currentWeapon
+	print(string.format("[RELOAD-DEBUG] [GUI]   ↳ STARTING new tween for owner=%s", cwName))
+
 	-- Limpiar antes de bumpear runId. Si lo hacemos al revés, el _stop interno
 	-- vuelve a incrementar _reloadProgressRunId y deja stale el `runId` local
 	-- que capturan los callbacks Changed/Completed → barra congelada en 0% y
@@ -2015,7 +2064,14 @@ function WeaponsGui:playReloadProgressAnimation(reloadTime)
 	self._reloadProgressTween:Play()
 
 	local activeTween = self._reloadProgressTween
-	activeTween.Completed:Connect(function()
+	local capturedOwner = self._reloadProgressOwner
+	activeTween.Completed:Connect(function(playbackState)
+		local cwNow = self.weaponsSystem and self.weaponsSystem.currentWeapon
+		local cwNowName = cwNow and cwNow.instance and cwNow.instance.Name or "nil"
+		local capName = capturedOwner and capturedOwner.instance and capturedOwner.instance.Name or "nil"
+		print(string.format("[RELOAD-DEBUG] [GUI] tween.Completed fired | playbackState=%s | capturedOwner=%s currentWeapon=%s | runId match=%s",
+			tostring(playbackState), capName, cwNowName, tostring(runId == self._reloadProgressRunId)))
+
 		if runId ~= self._reloadProgressRunId then
 			return
 		end
@@ -2029,6 +2085,8 @@ function WeaponsGui:playReloadProgressAnimation(reloadTime)
 		self:_refreshCrosshairVisibility()
 		self:_updateReloadProgressBar(0)
 		self:_setReloadProgressVisible(false)
+		self._reloadProgressOwner = nil
+		self._reloadProgressStartedAt = nil
 		progressValue.Value = 0
 	end)
 end

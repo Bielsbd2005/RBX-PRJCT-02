@@ -4,6 +4,48 @@ local TweenService = game:GetService("TweenService")
 local DirectionalIndicatorGuiManager = {}
 DirectionalIndicatorGuiManager.__index = DirectionalIndicatorGuiManager
 
+-- W11: bucle único compartido para actualizar la rotación de todos los DIs
+-- activos. Antes cada activación creaba su propio coroutine con
+-- RenderStepped:Wait() (4 atacantes simultáneos = 4 loops paralelos en mobile).
+-- Ahora un sólo RenderStepped:Connect itera _activeDIs y los retira cuando
+-- la imagen alcanza ImageTransparency=1.
+type ActiveDI = {
+	manager: any,
+	diInfo: any,
+	otherPosition: Vector3,
+}
+local _activeDIs: { ActiveDI } = {}
+local _diLoopConn: RBXScriptConnection? = nil
+
+local function _diLoopTick()
+	local i = 1
+	while i <= #_activeDIs do
+		local entry = _activeDIs[i]
+		local diInfo = entry.diInfo
+		local image = diInfo and diInfo.image
+		if not image or image.ImageTransparency >= 1 or not diInfo.frame.Parent then
+			-- Cleanup: marcar inactivo, destruir clones, swap-remove
+			if diInfo then
+				diInfo.active = false
+				if diInfo.dieOnFade and diInfo.frame and diInfo.frame.Parent then
+					diInfo.frame:Destroy()
+				end
+			end
+			local n = #_activeDIs
+			_activeDIs[i] = _activeDIs[n]
+			_activeDIs[n] = nil
+		else
+			diInfo.frame.Rotation = entry.manager:CalculateDIRotation(entry.otherPosition)
+			i += 1
+		end
+	end
+end
+
+local function _ensureDILoop()
+	if _diLoopConn then return end
+	_diLoopConn = RunService.RenderStepped:Connect(_diLoopTick)
+end
+
 local function GetConfigValue(config, propertyName, default)
 	if config then
 		local property = config:FindFirstChild(propertyName)
@@ -75,19 +117,15 @@ function DirectionalIndicatorGuiManager:ActivateDirectionalIndicator(DIName, oth
 	diInfo.frame.Rotation = self:CalculateDIRotation(otherPosition)
 	diInfo.image.ImageTransparency = GetConfigValue(diInfo.config, "TransparencyBeforeFade", 0)
 
-	-- Update rotation of indicator as player rotates
-	coroutine.wrap(function()
-		while diInfo.image.ImageTransparency < 1 do
-			diInfo.frame.Rotation = self:CalculateDIRotation(otherPosition)
-			RunService.RenderStepped:Wait()
-		end
-
-		diInfo.active = false
-		if diInfo.dieOnFade then
-			diInfo.frame:Destroy()
-			diInfo = nil
-		end
-	end)()
+	-- W11: push al bucle único. La rotación se actualiza junto con todos los
+	-- otros DIs activos en un solo RenderStepped global; cleanup ocurre cuando
+	-- ImageTransparency llega a 1.
+	_ensureDILoop()
+	table.insert(_activeDIs, {
+		manager = self,
+		diInfo = diInfo,
+		otherPosition = otherPosition,
+	})
 
 	-- Show indicator for a bit, then fade out
 	coroutine.wrap(function()

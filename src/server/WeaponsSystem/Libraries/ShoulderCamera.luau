@@ -595,7 +595,32 @@ function ShoulderCamera:onRenderStep(dt)
 	self.currentCamera.CFrame = self.currentCFrame
 
 	-- Handle occlusion
-	local occlusionDistance = self.currentCamera:GetLargestCutoffDistance(self.raycastIgnoreList)
+	-- W10: GetLargestCutoffDistance es caro (raycast contra ignore list). Cuando
+	-- yaw, pitch y rootPartPos no cambian frame-a-frame (jugador idle, mirando
+	-- fijo) reusamos el último resultado. Cualquier movimiento de cámara o
+	-- personaje fuerza recompute, así que rotar/andar mantiene la respuesta
+	-- completa. Geometría dinámica con jugador inmóvil tiene 1-frame de delay
+	-- hasta el primer micro-movimiento — aceptable visualmente.
+	local occlusionDistance
+	local lastYaw = self._occlusionLastYaw
+	local lastPitch = self._occlusionLastPitch
+	local lastRootPos = self._occlusionLastRootPos
+	if lastYaw == self.yaw
+		and lastPitch == self.pitch
+		and lastRootPos
+		and lastRootPos.X == rootPartPos.X
+		and lastRootPos.Y == rootPartPos.Y
+		and lastRootPos.Z == rootPartPos.Z
+		and self._occlusionLastResult
+	then
+		occlusionDistance = self._occlusionLastResult
+	else
+		occlusionDistance = self.currentCamera:GetLargestCutoffDistance(self.raycastIgnoreList)
+		self._occlusionLastResult = occlusionDistance
+		self._occlusionLastYaw = self.yaw
+		self._occlusionLastPitch = self.pitch
+		self._occlusionLastRootPos = rootPartPos
+	end
 	if occlusionDistance > 1e-5 then
 		occlusionDistance = occlusionDistance + collisionRadius
 	end
