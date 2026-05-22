@@ -71,6 +71,8 @@ export type BotRosterEntry = {
 	displayName: string,
 	team: string,
 	image: string,
+	level: number,
+	historicalKills: number,
 }
 
 export type EndResultsPlayerEntry = {

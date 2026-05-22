@@ -21,10 +21,9 @@ end
 
 local localRandom = Random.new()
 
--- W3: throttle del path mobile-only de auto-aim/auto-fire. Antes corría
--- a 60Hz: workspace barrer + 2 raycasts + RaycastParams.new() por frame.
--- 20Hz (50ms) es imperceptible para el aim-assist (pull usa elapsed time,
--- mantiene desplazamiento total).
+-- W3: throttle del path mobile-only de autoshoot. Antes corría a 60Hz:
+-- workspace barrer + 2 raycasts + RaycastParams.new() por frame. 20Hz (50ms)
+-- es imperceptible para detectar enemigo bajo el crosshair.
 local AUTO_AIM_TICK_INTERVAL = 0.05
 
 local BaseWeapon = {}
@@ -105,10 +104,19 @@ function BaseWeapon:doInitialSetup()
 	if self.instanceIsTool then
 		self.connections.equipped = self.instance.Equipped:Connect(function()
 			if IsServer or (Players.LocalPlayer and (self.instance:IsDescendantOf(Players.LocalPlayer.Backpack) or self.instance:IsDescendantOf(Players.LocalPlayer.Character))) then
+				-- Generación invalida delays/defers obsoletos cuando user cambia
+				-- de arma rápido — sin esto, auto-reload encolaba barras fantasma.
+				self._equipGeneration = (self._equipGeneration or 0) + 1
+				local gen = self._equipGeneration
+
 				self:setEquipped(true)
 				if self:getAmmoInWeapon() <= 0 then
-					-- Esperar un frame: si no, la animación de recarga no se reproduce.
-					task.defer(function()
+					-- 200ms: requiere que user "se quede" en el arma antes de
+					-- auto-recargar. Switches rápidos no triggean auto-reload.
+					task.delay(0.2, function()
+						if gen ~= self._equipGeneration then return end
+						if not self.equipped then return end
+						if self:getAmmoInWeapon() > 0 then return end
 						self:reload()
 					end)
 				end
@@ -116,10 +124,14 @@ function BaseWeapon:doInitialSetup()
 		end)
 		self.connections.unequipped = self.instance.Unequipped:Connect(function()
 			if IsServer or (Players.LocalPlayer and (self.instance:IsDescendantOf(Players.LocalPlayer.Backpack) or self.instance:IsDescendantOf(Players.LocalPlayer.Character))) then
-				self:setEquipped(false)
+				self._equipGeneration = (self._equipGeneration or 0) + 1
+
+				-- Cancelar ANTES de setEquipped(false): onEquippedChanged invoca
+				-- setWeaponEquipped que toca currentWeapon/GUI.
 				if self.reloading then
 					self:cancelReload()
 				end
+				self:setEquipped(false)
 			end
 		end)
 		if self.instance:IsDescendantOf(workspace) and self.player then
@@ -667,60 +679,78 @@ function BaseWeapon:onStepped(dt)
 	local selfClass = getmetatable(self)
 	if not selfClass.CanBeFired then return end
 
-	-- Aim assist + auto-fire son exclusivos de móvil. En PC no hay nada que
-	-- calcular: nos saltamos los raycasts de target-finding por completo.
+	-- Autoshoot es exclusivo de móvil. En PC nos saltamos los raycasts de
+	-- target-finding por completo.
 	if not _isTouchPrimaryInput() then return end
 
-	-- W3: gate por tiempo. El pull usa `elapsed` (tiempo real desde el último
-	-- tick), no `dt` del Heartbeat — así el desplazamiento total del aim assist
-	-- es independiente de la frecuencia del gate.
+	-- Rocket launcher: nunca autoshoot (riesgo de splash al teammate / al jugador).
+	if self:getConfigValue("ExplodeOnImpact", false) then return end
+
+	-- Sniper: solo autoshoot cuando el jugador esta apuntando (ADS).
+	if self:getConfigValue("HasScope", false) then
+		local cam = self.weaponsSystem and self.weaponsSystem.camera
+		if not (cam and cam.isZoomed and cam:isZoomed()) then return end
+	end
+
+	-- Detección de target throttled a 20Hz (caro: findBestTarget + 2 raycasts).
+	-- El camera pull NO está throttled — corre cada frame con el target cacheado
+	-- para evitar el efecto a trompicones al moverse en pasos discretos de 50ms.
 	local now = os.clock()
 	local lastTickAt = self._autoAimLastTickAt or 0
-	if now - lastTickAt < AUTO_AIM_TICK_INTERVAL then return end
-	local elapsed = if lastTickAt == 0 then dt else now - lastTickAt
-	self._autoAimLastTickAt = now
+	local shouldRefreshTarget = (now - lastTickAt) >= AUTO_AIM_TICK_INTERVAL
 
-	local targetPart, targetPos = AutoAimSystem.findBestTarget(self.weaponsSystem)
-	if not targetPart or not targetPos then return end
+	if shouldRefreshTarget then
+		self._autoAimLastTickAt = now
 
-	-- Verify line of sight from camera
+		local targetPart, targetPos = AutoAimSystem.findBestTarget(self.weaponsSystem)
+		local camera = workspace.CurrentCamera
+
+		if targetPart and targetPos and camera and AutoAimSystem.isTargetVisible(camera.CFrame.Position, targetPart) then
+			local cameraRay = camera:ViewportPointToRay(camera.ViewportSize.X * 0.5, camera.ViewportSize.Y * 0.5)
+
+			-- W3: RaycastParams + filter cacheados en self. Antes new() + table
+			-- literal por frame → GC churn constante. Solo mutamos filter[1] que
+			-- cambia con el character (respawn).
+			local raycastParams = self._autoAimRaycastParams
+			if not raycastParams then
+				raycastParams = RaycastParams.new()
+				raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+				self._autoAimRaycastParams = raycastParams
+			end
+			local filter = self._autoAimFilter
+			if not filter then
+				filter = table.create(1)
+				self._autoAimFilter = filter
+			end
+			filter[1] = self.player and self.player.Character or self.instance.Parent
+			raycastParams.FilterDescendantsInstances = filter
+			local result = workspace:Raycast(cameraRay.Origin, cameraRay.Direction * 1000, raycastParams)
+
+			local isAimingAtEnemy = result and targetPart.Parent
+				and result.Instance:IsDescendantOf(targetPart.Parent) or false
+
+			self._autoAimTargetPart = targetPart
+			self._autoAimTargetPos = targetPos
+			self._autoAimResultPos = result and result.Position or nil
+			self._autoAimIsAimingAtEnemy = isAimingAtEnemy
+		else
+			self._autoAimTargetPart = nil
+			self._autoAimTargetPos = nil
+			self._autoAimResultPos = nil
+			self._autoAimIsAimingAtEnemy = false
+		end
+	end
+
+	local targetPart = self._autoAimTargetPart
+	local targetPos = self._autoAimTargetPos
+	if not targetPart or not targetPart.Parent or not targetPos then return end
+
 	local camera = workspace.CurrentCamera
 	if not camera then return end
 	local cameraOrigin = camera.CFrame.Position
 
-	if not AutoAimSystem.isTargetVisible(cameraOrigin, targetPart) then return end
-
-	local cameraRay = camera:ViewportPointToRay(camera.ViewportSize.X * 0.5, camera.ViewportSize.Y * 0.5)
-	local targetHitPoint = cameraRay.Origin + cameraRay.Direction * 1000
-
-	-- W3: RaycastParams + filter cacheados en self. Antes new() + table literal
-	-- por frame → GC churn constante. Solo mutamos filter[1] que cambia con el
-	-- character (respawn).
-	local raycastParams = self._autoAimRaycastParams
-	if not raycastParams then
-		raycastParams = RaycastParams.new()
-		raycastParams.FilterType = Enum.RaycastFilterType.Exclude
-		self._autoAimRaycastParams = raycastParams
-	end
-	local filter = self._autoAimFilter
-	if not filter then
-		filter = table.create(1)
-		self._autoAimFilter = filter
-	end
-	filter[1] = self.player and self.player.Character or self.instance.Parent
-	raycastParams.FilterDescendantsInstances = filter
-	local result = workspace:Raycast(cameraRay.Origin, cameraRay.Direction * 1000, raycastParams)
-
-	local isAimingAtEnemy = false
-	if result then
-		targetHitPoint = result.Position
-		if targetPart and targetPart.Parent and result.Instance:IsDescendantOf(targetPart.Parent) then
-			isAimingAtEnemy = true
-		end
-	end
-
-	-- Soft camera pull (Aim Assist). El early-return arriba garantiza
-	-- _isTouchPrimaryInput(); este bloque ya no corre en PC.
+	-- Tracking continuo cada frame (no throttled). Usa `dt` real del Heartbeat
+	-- para que el desplazamiento por segundo sea independiente del framerate.
 	if self.weaponsSystem and self.weaponsSystem.camera then
 		local directionToTarget = (targetPos - cameraOrigin).Unit
 		local desiredYaw = math.atan2(-directionToTarget.X, -directionToTarget.Z)
@@ -735,7 +765,10 @@ function BaseWeapon:onStepped(dt)
 
 		local deltaPitch = desiredPitch - currentPitch
 
-		local pullStrength = if isAimingAtEnemy then (1.5 * elapsed) else (4.5 * elapsed)
+		-- Interpolación `delta * (strength * dt)` por frame: asintótica (nunca snap),
+		-- y al correr a cada frame en vez de cada 50ms el movimiento se siente
+		-- continuo en lugar de a trompicones.
+		local pullStrength = if self._autoAimIsAimingAtEnemy then (4.5 * dt) else (7.0 * dt)
 
 		self.weaponsSystem.camera.yaw = currentYaw + deltaYaw * pullStrength
 		self.weaponsSystem.camera.pitch = math.clamp(
@@ -745,9 +778,14 @@ function BaseWeapon:onStepped(dt)
 		)
 	end
 
+	-- Path de auto-fire: corre cada frame (no gated por el refresh de target) para
+	-- igualar la cadencia del disparo manual, que también chequea nextFireTime
+	-- cada frame en BulletWeapon:onStepped. Si lo gateamos a 20Hz, hasta 50ms de
+	-- latencia se suman cuando nextFireTime cae entre ticks → autoshoot percibido
+	-- como más lento. nextFireTime ya bloquea el spam de cadencia.
+	if not self._autoAimIsAimingAtEnemy then return end
+
 	-- Shotgun: no auto-disparar si el target esta fuera del rango optimo.
-	-- El aim assist de arriba sigue corriendo (mantener el suave tirón) pero el
-	-- disparo se inhibe para que no malgaste balas a distancia inutil.
 	if self.instance and self.instance:GetAttribute("Shotgun") == true then
 		local optimalRange = self.instance:GetAttribute("OptimalRange")
 		if type(optimalRange) ~= "number" or optimalRange <= 0 then
@@ -796,15 +834,10 @@ function BaseWeapon:onStepped(dt)
 		end
 	end
 
-	local crosshairDirection = (targetHitPoint - weaponOrigin).Unit
-	local enemyDirection = (targetPos - weaponOrigin).Unit
-
-	-- Soft aim assist: blend bullet trajectory if not already aiming precisely at the body
-	local direction = crosshairDirection
-	if not isAimingAtEnemy then
-		direction = crosshairDirection:Lerp(enemyDirection, 0.4).Unit
-	end
-
+	-- Trayectoria directa: del muzzle al punto exacto del raycast del crosshair,
+	-- sin blend hacia el cuerpo del enemigo (no aimbot en las balas).
+	local resultPos = self._autoAimResultPos or targetPos
+	local direction = (resultPos - weaponOrigin).Unit
 	local charge = self.charge or 0
 	self:fire(weaponOrigin, direction, charge)
 end
@@ -892,6 +925,14 @@ function BaseWeapon:reload(player, fromNetwork)
 		return false
 	end
 
+	-- Solo la weapon actualmente equipada puede iniciar reload en cliente.
+	if not IsServer then
+		local cw = self.weaponsSystem and self.weaponsSystem.currentWeapon
+		if cw ~= self then
+			return false
+		end
+	end
+
 	if not IsServer then
 		if self.player ~= nil and self.player ~= Players.LocalPlayer then
 			return
@@ -935,12 +976,11 @@ function BaseWeapon:onReloaded(player, fromNetwork)
 	local reloadTime = self:getConfigValue("ReloadTime", 2)
 	local startTime = tick()
 
-	-- Trigger reload progress bar animation on client
-	if not IsServer and self.weaponsSystem.gui then
-		--print("[BaseWeapon] Calling playReloadProgressAnimation with reloadTime:", reloadTime, "on weapon:", self.instance:GetFullName())
+	-- GUI solo si esta weapon es la currentWeapon del LocalPlayer.
+	if not IsServer and self.weaponsSystem.gui
+		and self.player == Players.LocalPlayer
+		and self.weaponsSystem.currentWeapon == self then
 		self.weaponsSystem.gui:playReloadProgressAnimation(reloadTime)
-	else
-		--print("[BaseWeapon] Not calling animation - IsServer:", IsServer, "gui exists:", self.weaponsSystem.gui ~= nil)
 	end
 
 	-- Token-based: en vez de un Heartbeat ejecutándose 60 veces/seg verificando
@@ -969,7 +1009,9 @@ function BaseWeapon:cancelReload(player, fromNetwork)
 		return
 	end
 
-	if not IsServer and not fromNetwork and player == Players.LocalPlayer then
+	-- `not fromNetwork` (no `player == LocalPlayer`) — cancelReload se llama
+	-- desde Unequipped sin args, así garantizamos que server recibe el cancel.
+	if not IsServer and not fromNetwork then
 		WeaponsNetwork.fireReloadCanceled(self.instance)
 	elseif IsServer and fromNetwork then
 		WeaponsNetwork.broadcastReloadCanceled(player, self.instance)
@@ -977,20 +1019,22 @@ function BaseWeapon:cancelReload(player, fromNetwork)
 
 	self.reloading = false
 	self.instance:SetAttribute("IsReloading", false)
-
+	self._reloadToken = (self._reloadToken or 0) + 1
 	self.canReload = true
 
 	if not IsServer and self.reloadTrack and self.reloadTrack.IsPlaying then
-		warn("Stopping reloadTrack")
 		self.reloadTrack:Stop()
 	end
+
 	if self.curReloadSound then
 		self.curReloadSound:Stop()
 		self.curReloadSound:Destroy()
 		self.curReloadSound = nil
 	end
 
-	if not IsServer and self.weaponsSystem.gui and self.weaponsSystem.gui.stopReloadProgressAnimation then
+	if not IsServer and self.player == Players.LocalPlayer
+		and self.weaponsSystem and self.weaponsSystem.gui
+		and self.weaponsSystem.gui.stopReloadProgressAnimation then
 		self.weaponsSystem.gui:stopReloadProgressAnimation()
 	end
 end

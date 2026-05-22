@@ -27,6 +27,7 @@ local ServerStorage = game:GetService("ServerStorage")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ItemsConfig = require(Shared.constants.ItemsConfig)
 local CosmeticsTemplates = require(Shared.Locker.CosmeticsTemplates)
+local BotPersonality = require(script.Parent:WaitForChild("BotPersonality"))
 
 local BotAppearance = {}
 
@@ -123,10 +124,6 @@ local _facePool = _buildFacePool()
 local _wrapPool = _buildWrapPool()
 local _outfitPool = _buildOutfitPool()
 
--- Probabilidad de que un bot lleve sombrero. Sin esto, todos los bots
--- llevarían siempre uno (los 3 .rbxm actuales), poco creíble.
-local HAT_PROBABILITY = 0.65
-
 local function _pickRandom(pool: { string }): string?
 	local n = #pool
 	if n == 0 then
@@ -137,17 +134,26 @@ end
 
 -- ── API ───────────────────────────────────────────────────────────
 
-function BotAppearance.roll(): BotAppearance
+function BotAppearance.roll(personality: BotPersonality.Personality): BotAppearance
+	-- Filtra cada pool por las rarities permitidas por la personality.
+	-- Si tras el filtro un pool queda vacío, _pickRandom devuelve nil y el
+	-- código aguas abajo lo trata como "sin override" (face stays template
+	-- default, wrap stays AR-NPC default, hat se omite).
+	local hatPool    = BotPersonality.filterByRarity(_hatPool,    "Hats",        personality)
+	local facePool   = BotPersonality.filterByRarity(_facePool,   "Faces",       personality)
+	local wrapPool   = BotPersonality.filterByRarity(_wrapPool,   "WeaponWraps", personality)
+	local outfitPool = BotPersonality.filterByRarity(_outfitPool, "Outfits",     personality)
+
 	local hatId: string? = nil
-	if #_hatPool > 0 and math.random() < HAT_PROBABILITY then
-		hatId = _pickRandom(_hatPool)
+	if #hatPool > 0 and math.random() < personality.hatProbability then
+		hatId = _pickRandom(hatPool)
 	end
 
 	return {
-		outfitId = _pickRandom(_outfitPool),
+		outfitId = _pickRandom(outfitPool),
 		hatId = hatId,
-		faceId = _pickRandom(_facePool),
-		wrapId = _pickRandom(_wrapPool),
+		faceId = _pickRandom(facePool),
+		wrapId = _pickRandom(wrapPool),
 	}
 end
 

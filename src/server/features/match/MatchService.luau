@@ -842,6 +842,19 @@ local function _registerDeathListener(player: Player, character: Model)
 					end
 				end
 			end
+
+			-- Killer es bot: sustituir stats por las fingidas de la identidad
+			-- (level + historicalKills del tier de personalidad). Mantiene la
+			-- ilusión de que el bot tiene "carrera" propia. Para players reales
+			-- el branch anterior ya cubrió los stats.
+			if attackerUserId and attackerUserId < 0 and _AIService and _AIService.GetBotIdentity then
+				local botIdentity = _AIService:GetBotIdentity(attackerUserId)
+				if botIdentity then
+					killerLevel = botIdentity.level
+					killerKills = botIdentity.historicalKills
+				end
+			end
+
 			Network.Match.DeathScreenShow.SendTo({
 				respawnCooldown = GameConfig.RespawnCooldown,
 				killerUserId = if attackerUserId then tostring(attackerUserId) else "",
@@ -1356,6 +1369,15 @@ local function _startMapLoadFlow(winnerMapName: string)
 			warn("[MatchService] Failed to start AI round: " .. tostring(err))
 		else
 			_rebalanceBotsForCurrentRound("round start")
+			-- Debug dump: muestra qué identidad + apariencia + stats fingidas se
+			-- asignó a cada bot del round. Defer para que llegue después de los
+			-- spawns iniciales (algunos paths internos del rebalance pueden ser
+			-- async-friendly).
+			if _AIService and _AIService.LogBotRoster then
+				task.defer(function()
+					_AIService:LogBotRoster()
+				end)
+			end
 		end
 	end
 

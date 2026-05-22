@@ -1965,10 +1965,6 @@ function WeaponsGui:_setReloadProgressVisible(isVisible)
 end
 
 function WeaponsGui:_stopReloadProgressAnimation(hideProgress)
-	local ownerName = self._reloadProgressOwner and self._reloadProgressOwner.instance and self._reloadProgressOwner.instance.Name or "nil"
-	print(string.format("[RELOAD-DEBUG] [GUI] _stopReloadProgressAnimation(hide=%s) | wasAnimating=%s owner=%s",
-		tostring(hideProgress), tostring(self._isReloadProgressAnimating), ownerName))
-
 	self._reloadProgressRunId = (self._reloadProgressRunId or 0) + 1
 
 	if self._reloadProgressTween then
@@ -1993,29 +1989,21 @@ function WeaponsGui:_stopReloadProgressAnimation(hideProgress)
 end
 
 function WeaponsGui:playReloadProgressAnimation(reloadTime)
-	local currentWeapon = self.weaponsSystem and self.weaponsSystem.currentWeapon
-	local cwName = currentWeapon and currentWeapon.instance and currentWeapon.instance.Name or "nil"
-	local prevOwnerName = self._reloadProgressOwner and self._reloadProgressOwner.instance and self._reloadProgressOwner.instance.Name or "nil"
-	print(string.format("[RELOAD-DEBUG] [GUI] playReloadProgressAnimation(reloadTime=%.2f) | currentWeapon=%s prevOwner=%s isAnimating=%s",
-		reloadTime, cwName, prevOwnerName, tostring(self._isReloadProgressAnimating)))
-
 	-- Dedupe defensivo: si ya hay una animación corriendo iniciada hace muy
 	-- poco (< 150ms) y para el mismo currentWeapon, ignorar. Esto previene
-	-- restarts visuales por dos paths concurrentes (e.g., auto-reload del
-	-- handler Equipped + broadcast tardío del server, o Equipped + Activated
-	-- ambos disparando reload en re-equip rápido).
+	-- restarts visuales por dos paths concurrentes (e.g., auto-reload + broadcast
+	-- tardío del server, o Equipped + Activated ambos disparando reload).
+	local currentWeapon = self.weaponsSystem and self.weaponsSystem.currentWeapon
 	local now = os.clock()
 	if self._isReloadProgressAnimating
 		and self._reloadProgressOwner == currentWeapon
 		and self._reloadProgressStartedAt
 		and (now - self._reloadProgressStartedAt) < 0.15
 	then
-		print(string.format("[RELOAD-DEBUG] [GUI]   ↳ DEDUPED (same owner %s within 150ms)", cwName))
 		return
 	end
 	self._reloadProgressStartedAt = now
 	self._reloadProgressOwner = currentWeapon
-	print(string.format("[RELOAD-DEBUG] [GUI]   ↳ STARTING new tween for owner=%s", cwName))
 
 	-- Limpiar antes de bumpear runId. Si lo hacemos al revés, el _stop interno
 	-- vuelve a incrementar _reloadProgressRunId y deja stale el `runId` local
@@ -2064,14 +2052,7 @@ function WeaponsGui:playReloadProgressAnimation(reloadTime)
 	self._reloadProgressTween:Play()
 
 	local activeTween = self._reloadProgressTween
-	local capturedOwner = self._reloadProgressOwner
-	activeTween.Completed:Connect(function(playbackState)
-		local cwNow = self.weaponsSystem and self.weaponsSystem.currentWeapon
-		local cwNowName = cwNow and cwNow.instance and cwNow.instance.Name or "nil"
-		local capName = capturedOwner and capturedOwner.instance and capturedOwner.instance.Name or "nil"
-		print(string.format("[RELOAD-DEBUG] [GUI] tween.Completed fired | playbackState=%s | capturedOwner=%s currentWeapon=%s | runId match=%s",
-			tostring(playbackState), capName, cwNowName, tostring(runId == self._reloadProgressRunId)))
-
+	activeTween.Completed:Connect(function()
 		if runId ~= self._reloadProgressRunId then
 			return
 		end

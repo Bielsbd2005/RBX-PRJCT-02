@@ -22,6 +22,11 @@ local COLOR_ENEMY  = Color3.fromRGB(220, 40, 40)
 local FILL_ALPHA   = 0.65
 local OUTLINE_ALPHA = 0.1
 
+-- Atributos que indican team — mismos que TeamUtils.getSide consulta. Cuando
+-- cualquiera de estos cambia (incluido el primer set vía replicación tardía
+-- desde el server), re-evaluamos el color del highlight.
+local TEAM_ATTRS_TO_WATCH = { "Team", "TeamSide", "BotTeam", "Side", "TeamAffinity" }
+
 local localPlayer = Players.LocalPlayer
 
 local CharacterHighlightController = {}
@@ -37,22 +42,36 @@ local _started = false
 -- Helpers
 -- ────────────────────────────────────────────────────────────────
 
-local function _isBotModel(model: Model): boolean
-	-- AIService stampea `BotTeam` antes de parentar al workspace, así que
-	-- en DescendantAdded ya está disponible. Más fiable que el name match.
-	return model:GetAttribute("BotTeam") ~= nil
+local function _hasAnyTeamAttribute(model: Model): boolean
+	for _, attrName in TEAM_ATTRS_TO_WATCH do
+		if model:GetAttribute(attrName) ~= nil then
+			return true
+		end
+	end
+	return false
 end
 
 local function _shouldTrack(model: Model): boolean
+	if model == localPlayer.Character then
+		return false
+	end
 	local owner = Players:GetPlayerFromCharacter(model)
 	if owner == localPlayer then
 		-- LocalPlayer nunca se trackea a sí mismo.
 		return false
 	end
+	if not model:FindFirstChildOfClass("Humanoid") then
+		return false
+	end
+	-- Players reales: trackear siempre.
 	if owner then
 		return true
 	end
-	return _isBotModel(model)
+	-- NPCs/bots: requerir algún atributo de team. Esto distingue chars de
+	-- gameplay (siempre llevan team) de dummies de UI (locker preview, kill
+	-- effect dummy, menu) que tienen Humanoid pero no team. Si el atributo aún
+	-- no replicó, _onDescendantAdded reintenta vía GetAttributeChangedSignal.
+	return _hasAnyTeamAttribute(model)
 end
 
 local function _refreshColor(model: Model)
@@ -102,11 +121,20 @@ local function _attach(model: Model)
 
 	local conns: { RBXScriptConnection } = {}
 
-	-- Players reales pueden cambiar de team mid-match. Bots no (su attribute
-	-- BotTeam se setea al spawn y no muta), así que solo conectamos para players.
+	-- Players reales pueden cambiar de team mid-match.
 	local player = Players:GetPlayerFromCharacter(model)
 	if player then
 		table.insert(conns, player:GetPropertyChangedSignal("Team"):Connect(function()
+			_refreshColor(model)
+		end))
+	end
+
+	-- Re-evaluar color cuando llegue/cambie cualquier atributo de team. Para
+	-- bots los atributos no mutan, pero el primer set vía replicación puede
+	-- llegar después del _attach inicial — sin este listener el color quedaría
+	-- rojo (default cuando getSide devuelve nil).
+	for _, attrName in TEAM_ATTRS_TO_WATCH do
+		table.insert(conns, model:GetAttributeChangedSignal(attrName):Connect(function()
 			_refreshColor(model)
 		end))
 	end
@@ -133,10 +161,85 @@ end
 -- Wiring
 -- ────────────────────────────────────────────────────────────────
 
-local function _onDescendantAdded(instance: Instance)
-	if instance:IsA("Model") then
-		_attach(instance :: Model)
+-- Pending retries para Models que entraron al workspace sin Humanoid aún.
+-- Mantenemos las conns para limpiarlas cuando el model sale o se attacha.
+local _pendingRetryConns: { [Model]: { RBXScriptConnection } } = {}
+
+local function _cleanupRetry(model: Model)
+	local conns = _pendingRetryConns[model]
+	if not conns then return end
+	for _, c in conns do
+		c:Disconnect()
 	end
+	_pendingRetryConns[model] = nil
+end
+
+local function _onDescendantAdded(instance: Instance)
+	if not instance:IsA("Model") then
+		return
+	end
+	local model = instance :: Model
+
+	_attach(model)
+	if _trackedHighlights[model] then
+		return
+	end
+	if _pendingRetryConns[model] then
+		return
+	end
+
+	-- Casos que NO requieren retry:
+	-- 1. Ya tiene Humanoid + algún team attr + owner check ya falló → no es un
+	--    target válido (dummy del locker/menu, NPC sin team, etc.). Skip.
+	-- 2. Es local player char (filtrado en _shouldTrack).
+	-- En cualquier otro caso quedan dos posibles deltas: Humanoid o team attr
+	-- llegando tarde por replicación. Conectamos ambos retries.
+	local hasHumanoid = model:FindFirstChildOfClass("Humanoid") ~= nil
+	local hasTeamAttr = _hasAnyTeamAttribute(model)
+	if hasHumanoid and hasTeamAttr then
+		-- Tiene todo lo que necesita pero _shouldTrack lo descartó (e.g. owner ==
+		-- localPlayer). No reintentar.
+		return
+	end
+
+	local conns: { RBXScriptConnection } = {}
+	_pendingRetryConns[model] = conns
+
+	local function tryRetry()
+		_attach(model)
+		if _trackedHighlights[model] then
+			_cleanupRetry(model)
+		end
+	end
+
+	-- Humanoid llegando tarde
+	if not hasHumanoid then
+		table.insert(conns, model.ChildAdded:Connect(function(child)
+			if child:IsA("Humanoid") then
+				tryRetry()
+			end
+		end))
+	end
+
+	-- Atributos de team llegando tarde (típico en bots: el Model replica antes
+	-- que BotTeam/Team/TeamSide). Conectar a los 5 attrs que TeamUtils consulta.
+	for _, attrName in TEAM_ATTRS_TO_WATCH do
+		table.insert(conns, model:GetAttributeChangedSignal(attrName):Connect(tryRetry))
+	end
+
+	table.insert(conns, model.AncestryChanged:Connect(function(_, parent)
+		if parent == nil then
+			_cleanupRetry(model)
+		end
+	end))
+
+	-- Fallback temporal: GetAttributeChangedSignal a veces NO dispara cuando un
+	-- atributo se "establece" por replicación inicial (vs cuando muta en runtime).
+	-- Reintentamos a 100ms, 500ms y 2s para cubrir replicación lenta sin polling
+	-- continuo. Si ya se attachó, los retries son no-ops.
+	task.delay(0.1, tryRetry)
+	task.delay(0.5, tryRetry)
+	task.delay(2.0, tryRetry)
 end
 
 local function _wirePlayer(player: Player)
@@ -161,14 +264,19 @@ function CharacterHighlightController:Start(prescannedModels: { Model }?)
 	-- Scan compartido inicial (Models del workspace en el momento del Start).
 	-- prescannedModels viene de match/init.luau para evitar un GetDescendants
 	-- propio (compartido con HealthBillboardController).
+	--
+	-- Usamos _onDescendantAdded en vez de _attach directo: el pre-scan recoge
+	-- models que pueden tener attrs aún no replicados (cliente entra a un match
+	-- con bots ya spawneados). _attach fallaría silenciosamente; _onDescendantAdded
+	-- conecta retries para volver a intentar cuando llegue Humanoid/team attr.
 	if prescannedModels then
 		for _, model in prescannedModels do
-			_attach(model)
+			_onDescendantAdded(model)
 		end
 	else
 		for _, desc in workspace:GetDescendants() do
 			if desc:IsA("Model") then
-				_attach(desc :: Model)
+				_onDescendantAdded(desc :: Model)
 			end
 		end
 	end
@@ -205,6 +313,16 @@ function CharacterHighlightController:Stop()
 	end
 	for _, model in toDetach do
 		_detach(model)
+	end
+
+	-- Limpiar también los retries pendientes (chars que entraron sin Humanoid
+	-- y aún no lo recibieron).
+	local pendingModels: { Model } = {}
+	for model in _pendingRetryConns do
+		table.insert(pendingModels, model)
+	end
+	for _, model in pendingModels do
+		_cleanupRetry(model)
 	end
 end
 

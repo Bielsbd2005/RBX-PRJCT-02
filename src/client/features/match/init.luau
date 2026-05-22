@@ -512,6 +512,8 @@ function MatchFeature.start(menuController: any): any
 					displayName = entry.displayName or "",
 					team = entry.team or "",
 					image = entry.image or "",
+					level = if type(entry.level) == "number" then entry.level else 1,
+					historicalKills = if type(entry.historicalKills) == "number" then entry.historicalKills else 0,
 				}
 			end
 		end

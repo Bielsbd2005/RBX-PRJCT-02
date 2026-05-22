@@ -792,6 +792,13 @@ function WeaponsSystem.setWeaponEquipped(weapon, equipped)
 	end
 
 	if weaponChanged then
+		-- HARD KILL del reload progress bar al cambiar de arma. Cualquier reload
+		-- en progreso de la weapon anterior pierde su GUI inmediatamente — sin
+		-- esto, defers/broadcasts tardíos podían dejar barras encoladas para
+		-- weapons ya no equipadas tras cambios rápidos.
+		if WeaponsSystem.gui and WeaponsSystem.gui.stopReloadProgressAnimation then
+			WeaponsSystem.gui:stopReloadProgressAnimation()
+		end
 		WeaponsSystem.CurrentWeaponChanged:Fire(weapon.instance, lastWeapon and lastWeapon.instance)
 	end
 end
