@@ -91,17 +91,34 @@ local function applyTransparency(obj, info, target)
 	end
 end
 
+-- Audit mobile: cache de descendants por instancia (frame de notification).
+-- tweenChildrenTransparency se invoca 2× por notification (fade-in + fade-out),
+-- antes hacía GetDescendants() en cada llamada → 2× iter por notification.
+-- Con KO/Headshot/Assist en cadena el cost se acumula.
+local _descendantsCache: { [Instance]: { Instance } } = setmetatable({}, { __mode = "k" }) :: any
+
+local function _getCachedDescendants(parent: Instance): { Instance }
+	local cached = _descendantsCache[parent]
+	if cached then
+		return cached
+	end
+	local list: { Instance } = { parent }
+	for _, d in parent:GetDescendants() do
+		table.insert(list, d)
+	end
+	_descendantsCache[parent] = list
+	return list
+end
+
 local function tweenChildrenTransparency(parent, info, target)
-	applyTransparency(parent, info, target)
-	for _, d in ipairs(parent:GetDescendants()) do
-		applyTransparency(d, info, target)
+	for _, obj in _getCachedDescendants(parent) do
+		applyTransparency(obj, info, target)
 	end
 end
 
 local function setInitialTransparency(parent)
-	setObjTransparency(parent, 1)
-	for _, d in ipairs(parent:GetDescendants()) do
-		setObjTransparency(d, 1)
+	for _, obj in _getCachedDescendants(parent) do
+		setObjTransparency(obj, 1)
 	end
 end
 

@@ -5,6 +5,11 @@
 	jugador local mata a alguien. El orbe orbita en su sitio durante unos
 	segundos; si el jugador se acerca se imanta hacia el. Si nadie lo recoge
 	se desvanece con un tween de tamano.
+
+	W4-style: bucle único compartido (Heartbeat) para TODOS los pickups
+	activos. Antes cada pickup creaba su propio RunService.RenderStepped:Connect
+	+ closure pesada; en una kill streak coexistían N conexiones simultáneas
+	hasta que cada pickup expirara (5s+). Mismo patrón que BonusEffect.
 ]]
 
 local RunService = game:GetService("RunService")
@@ -33,6 +38,34 @@ local LAUNCH_HORIZONTAL_SPEED = 22
 local LAUNCH_VERTICAL_SPEED = 26
 
 local TEMPLATE_NAME = "Health"
+
+type PickupEntry = {
+	item: Instance,
+	character: Model,
+	rootPart: BasePart,
+	primary: BasePart?,
+	basePartSizes: { [BasePart]: Vector3 },
+	baseScale: number,
+	state: string,
+	fallElapsed: number,
+	restFrames: number,
+	floatTime: number,
+	riseElapsed: number,
+	waitElapsed: number,
+	restingPos: Vector3,
+	floatAnchorPos: Vector3,
+	p0: Vector3?,
+	p1: Vector3?,
+	p2: Vector3?,
+	duration: number?,
+	t: number,
+	picked: boolean,
+	despawnElapsed: number,
+	active: boolean,
+}
+
+local activePickups: { PickupEntry } = {}
+local pickupLoopConn: RBXScriptConnection? = nil
 
 local function _resolveTemplate(): Instance?
 	local template = ReplicatedStorage:FindFirstChild(TEMPLATE_NAME)
@@ -135,15 +168,153 @@ local function _captureBaseSizes(item: Instance): { [BasePart]: Vector3 }
 	return sizes
 end
 
-local function _getItemHeight(item: Instance): number
-	if item:IsA("Model") then
-		local size = item:GetExtentsSize()
-		return math.max(0, size.Y)
+local function _settleAndStartFloat(entry: PickupEntry)
+	_setAnchored(entry.item, true, false)
+	local landedPivot = _getPivotPosition(entry.item) or entry.restingPos
+
+	-- restingPos = posicion fisica al aterrizar (sirve de inicio del rise).
+	-- floatAnchorPos = centro de la orbita, elevado lo suficiente para que la
+	-- oscilacion mas baja quede claramente sobre el suelo. El rise interpola
+	-- de uno a otro suavemente, sin saltos.
+	local lift = FLOAT_GROUND_OFFSET + 1.4
+	entry.restingPos = landedPivot
+	entry.floatAnchorPos = landedPivot + Vector3.new(0, lift + FLOAT_AMPLITUDE, 0)
+	entry.state = "Waiting"
+	entry.floatTime = 0
+	entry.riseElapsed = 0
+	entry.waitElapsed = 0
+end
+
+local function _pickupTickEntry(entry: PickupEntry, dt: number)
+	local item = entry.item
+	local rootPart = entry.rootPart
+	if not item.Parent or not rootPart.Parent then
+		entry.active = false
+		return
 	end
-	if item:IsA("BasePart") then
-		return math.max(0, item.Size.Y)
+
+	local state = entry.state
+	if state == "Falling" then
+		entry.fallElapsed += dt
+		local primary = entry.primary
+		local speed = if primary then primary.AssemblyLinearVelocity.Magnitude else 0
+		if speed < FALL_REST_SPEED then
+			entry.restFrames += 1
+		else
+			entry.restFrames = 0
+		end
+
+		if entry.restFrames >= FALL_REST_FRAMES or entry.fallElapsed >= FALL_MAX_SECONDS then
+			_settleAndStartFloat(entry)
+		end
+		return
 	end
-	return 0
+
+	if state == "Waiting" then
+		entry.floatTime += dt
+		entry.riseElapsed = math.min(FLOAT_RISE_SECONDS, entry.riseElapsed + dt)
+		entry.waitElapsed += dt
+
+		local riseRatio = if FLOAT_RISE_SECONDS > 0 then entry.riseElapsed / FLOAT_RISE_SECONDS else 1
+		local riseSmoothT = TweenService:GetValue(riseRatio, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
+		local centerPos = entry.restingPos:Lerp(entry.floatAnchorPos, riseSmoothT)
+		local bob = math.sin(entry.floatTime * FLOAT_FREQUENCY * math.pi * 2) * FLOAT_AMPLITUDE * riseSmoothT
+		_setPivot(item, CFrame.new(centerPos + Vector3.new(0, bob, 0)))
+
+		local distToPlayer = (entry.floatAnchorPos - rootPart.Position).Magnitude
+		if distToPlayer <= MAGNET_RADIUS and _canPickupHealth(entry.character) then
+			entry.state = "Magnet"
+			local p0 = _getPivotPosition(item) or entry.floatAnchorPos
+			entry.p0 = p0
+			local randomOffset = Vector3.new(
+				(math.random() - 0.5) * 8,
+				math.random(4, 10),
+				(math.random() - 0.5) * 8
+			)
+			entry.p1 = p0 + randomOffset
+			local individualSpeed = math.random(85, 115) / 100
+			entry.duration = math.clamp(distToPlayer / 35, 0.3, 0.7) * individualSpeed
+			entry.t = 0
+			return
+		end
+
+		if entry.waitElapsed >= EXPIRE_AFTER_SECONDS then
+			entry.state = "Despawning"
+			entry.despawnElapsed = 0
+		end
+		return
+	end
+
+	if state == "Magnet" then
+		local duration = entry.duration or 0.5
+		entry.t += dt / duration
+		entry.p2 = rootPart.Position
+		if entry.t >= 1 then
+			entry.active = false
+
+			if not entry.picked then
+				entry.picked = true
+
+				local sound = Instance.new("Sound")
+				sound.SoundId = PICKUP_SOUND_ID
+				sound.Volume = 0.25
+				sound.PlaybackSpeed = math.random(95, 135) / 100
+				sound.Parent = rootPart
+				sound:Play()
+				Debris:AddItem(sound, 1.5)
+
+				Network.Match.RequestPickup.Send({ kind = "Health" })
+			end
+
+			Debris:AddItem(item, 0.1)
+			return
+		end
+
+		local smoothT = TweenService:GetValue(entry.t, Enum.EasingStyle.Exponential, Enum.EasingDirection.In)
+		local p0, p1, p2 = entry.p0 :: Vector3, entry.p1 :: Vector3, entry.p2 :: Vector3
+		local currentPos = (1 - smoothT) ^ 2 * p0 + 2 * (1 - smoothT) * smoothT * p1 + smoothT ^ 2 * p2
+		_setPivot(item, CFrame.new(currentPos))
+		return
+	end
+
+	if state == "Despawning" then
+		entry.floatTime += dt
+		entry.despawnElapsed = math.min(DESPAWN_TWEEN_SECONDS, entry.despawnElapsed + dt)
+		local ratio = if DESPAWN_TWEEN_SECONDS > 0 then entry.despawnElapsed / DESPAWN_TWEEN_SECONDS else 1
+		local easedRatio = TweenService:GetValue(ratio, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+		local scaleRatio = 1 - easedRatio
+		_scaleItem(item, scaleRatio, entry.baseScale, entry.basePartSizes)
+
+		local bob = math.sin(entry.floatTime * FLOAT_FREQUENCY * math.pi * 2) * FLOAT_AMPLITUDE
+		_setPivot(item, CFrame.new(entry.floatAnchorPos + Vector3.new(0, bob, 0)))
+
+		if entry.despawnElapsed >= DESPAWN_TWEEN_SECONDS then
+			entry.active = false
+			item:Destroy()
+		end
+	end
+end
+
+local function _pickupLoopTick(dt: number)
+	local i = 1
+	while i <= #activePickups do
+		local entry = activePickups[i]
+		if entry.active then
+			_pickupTickEntry(entry, dt)
+		end
+		if not entry.active then
+			local n = #activePickups
+			activePickups[i] = activePickups[n]
+			activePickups[n] = nil
+		else
+			i += 1
+		end
+	end
+end
+
+local function _ensurePickupLoop()
+	if pickupLoopConn then return end
+	pickupLoopConn = RunService.Heartbeat:Connect(_pickupLoopTick)
 end
 
 local function _spawnHealth(victimPos: Vector3, folder: Folder, character: Model, rootPart: BasePart)
@@ -180,142 +351,32 @@ local function _spawnHealth(victimPos: Vector3, folder: Folder, character: Model
 		)
 	end
 
-	local restingPos: Vector3 = victimPos
-	local floatAnchorPos: Vector3 = victimPos
+	_ensurePickupLoop()
 
-	local state = "Falling"
-	local fallElapsed = 0
-	local restFrames = 0
-	local floatTime = 0
-	local riseElapsed = 0
-	local waitElapsed = 0
-	local despawnElapsed = 0
-	local t = 0
-	local p0, p1, p2, duration
-	local connection: RBXScriptConnection? = nil
-	local picked = false
-
-	local function _settleAndStartFloat()
-		_setAnchored(item, true, false)
-		local landedPivot = _getPivotPosition(item) or victimPos
-
-		-- restingPos = posicion fisica al aterrizar (sirve de inicio del rise).
-		-- floatAnchorPos = centro de la orbita, elevado lo suficiente para que la
-		-- oscilacion mas baja quede claramente sobre el suelo. El rise interpola
-		-- de uno a otro suavemente, sin saltos.
-		local lift = FLOAT_GROUND_OFFSET + 1.4
-		restingPos = landedPivot
-		floatAnchorPos = landedPivot + Vector3.new(0, lift + FLOAT_AMPLITUDE, 0)
-		state = "Waiting"
-		floatTime = 0
-		riseElapsed = 0
-		waitElapsed = 0
-	end
-
-	connection = RunService.RenderStepped:Connect(function(dt)
-		if not item.Parent or not rootPart.Parent then
-			if connection then
-				connection:Disconnect()
-				connection = nil
-			end
-			return
-		end
-
-		if state == "Falling" then
-			fallElapsed += dt
-			local speed = if primary then primary.AssemblyLinearVelocity.Magnitude else 0
-			if speed < FALL_REST_SPEED then
-				restFrames += 1
-			else
-				restFrames = 0
-			end
-
-			if restFrames >= FALL_REST_FRAMES or fallElapsed >= FALL_MAX_SECONDS then
-				_settleAndStartFloat()
-			end
-			return
-		end
-
-		if state == "Waiting" then
-			floatTime += dt
-			riseElapsed = math.min(FLOAT_RISE_SECONDS, riseElapsed + dt)
-			waitElapsed += dt
-
-			local riseRatio = if FLOAT_RISE_SECONDS > 0 then riseElapsed / FLOAT_RISE_SECONDS else 1
-			local riseSmoothT = TweenService:GetValue(riseRatio, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
-			local centerPos = restingPos:Lerp(floatAnchorPos, riseSmoothT)
-			local bob = math.sin(floatTime * FLOAT_FREQUENCY * math.pi * 2) * FLOAT_AMPLITUDE * riseSmoothT
-			_setPivot(item, CFrame.new(centerPos + Vector3.new(0, bob, 0)))
-
-			local distToPlayer = (floatAnchorPos - rootPart.Position).Magnitude
-			if distToPlayer <= MAGNET_RADIUS and _canPickupHealth(character) then
-				state = "Magnet"
-				p0 = _getPivotPosition(item) or floatAnchorPos
-				local randomOffset = Vector3.new(
-					(math.random() - 0.5) * 8,
-					math.random(4, 10),
-					(math.random() - 0.5) * 8
-				)
-				p1 = p0 + randomOffset
-				local individualSpeed = math.random(85, 115) / 100
-				duration = math.clamp(distToPlayer / 35, 0.3, 0.7) * individualSpeed
-				return
-			end
-
-			if waitElapsed >= EXPIRE_AFTER_SECONDS then
-				state = "Despawning"
-				despawnElapsed = 0
-			end
-		elseif state == "Magnet" then
-			t += dt / duration
-			p2 = rootPart.Position
-			if t >= 1 then
-				if connection then
-					connection:Disconnect()
-					connection = nil
-				end
-
-				if not picked then
-					picked = true
-
-					local sound = Instance.new("Sound")
-					sound.SoundId = PICKUP_SOUND_ID
-					sound.Volume = 0.25
-					sound.PlaybackSpeed = math.random(95, 135) / 100
-					sound.Parent = rootPart
-					sound:Play()
-					Debris:AddItem(sound, 1.5)
-
-					Network.Match.RequestPickup.Send({ kind = "Health" })
-				end
-
-				Debris:AddItem(item, 0.1)
-				return
-			end
-
-			local smoothT = TweenService:GetValue(t, Enum.EasingStyle.Exponential, Enum.EasingDirection.In)
-			local currentPos = (1 - smoothT)^2 * p0 + 2 * (1 - smoothT) * smoothT * p1 + smoothT^2 * p2
-			_setPivot(item, CFrame.new(currentPos))
-		elseif state == "Despawning" then
-			floatTime += dt
-			despawnElapsed = math.min(DESPAWN_TWEEN_SECONDS, despawnElapsed + dt)
-			local ratio = if DESPAWN_TWEEN_SECONDS > 0 then despawnElapsed / DESPAWN_TWEEN_SECONDS else 1
-			local easedRatio = TweenService:GetValue(ratio, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
-			local scaleRatio = 1 - easedRatio
-			_scaleItem(item, scaleRatio, baseScale, basePartSizes)
-
-			local bob = math.sin(floatTime * FLOAT_FREQUENCY * math.pi * 2) * FLOAT_AMPLITUDE
-			_setPivot(item, CFrame.new(floatAnchorPos + Vector3.new(0, bob, 0)))
-
-			if despawnElapsed >= DESPAWN_TWEEN_SECONDS then
-				if connection then
-					connection:Disconnect()
-					connection = nil
-				end
-				item:Destroy()
-			end
-		end
-	end)
+	table.insert(activePickups, {
+		item = item,
+		character = character,
+		rootPart = rootPart,
+		primary = primary,
+		basePartSizes = basePartSizes,
+		baseScale = baseScale,
+		state = "Falling",
+		fallElapsed = 0,
+		restFrames = 0,
+		floatTime = 0,
+		riseElapsed = 0,
+		waitElapsed = 0,
+		restingPos = victimPos,
+		floatAnchorPos = victimPos,
+		p0 = nil,
+		p1 = nil,
+		p2 = nil,
+		duration = nil,
+		t = 0,
+		picked = false,
+		despawnElapsed = 0,
+		active = true,
+	})
 end
 
 function PickupDropEffect.Cleanup()
@@ -327,6 +388,9 @@ function PickupDropEffect.Cleanup()
 			end
 		end
 	end
+	-- El loop se queda conectado (idle si activePickups está vacío) — el
+	-- coste de un Heartbeat:Connect ocioso es negligible y evita el churn
+	-- de connect/disconnect entre kills. Mismo trade-off que BonusEffect.
 end
 
 function PickupDropEffect.Play(victimPos: Vector3?)

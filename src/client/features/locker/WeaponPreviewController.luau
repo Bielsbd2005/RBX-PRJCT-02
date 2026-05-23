@@ -217,6 +217,15 @@ function WeaponPreviewController.new(options: WeaponPreviewControllerOptions): W
 		[string]: { activePreview: Instance, basePivot: CFrame, elapsed: number }
 	}
 
+	-- Pool persistente de CFrameValue + listener por categoría. Antes cada
+	-- selección del locker (tap-tap-tap) alocaba 2× Instance.new("CFrameValue")
+	-- + 2× GetPropertyChangedSignal:Connect (1 down + 1 rise). En browsing
+	-- intensivo era GC pressure visible. Con el pool, el alloc ocurre 1 vez
+	-- por categoría y el listener lee el preview target via _motionTargetByCategory.
+	self._motionCFrameByCategory = {} :: { [string]: CFrameValue }
+	self._motionTargetByCategory = {} :: { [string]: Instance }
+	self._motionConnByCategory = {} :: { [string]: RBXScriptConnection }
+
 	-- Un único Heartbeat compartido para todas las animaciones del preview.
 	self._sharedHeartbeat = RunService.Heartbeat:Connect(function(dt)
 		for _, data in self._wrapAnimDataByCategory do
@@ -340,9 +349,14 @@ function WeaponPreviewController:_applyWrap(previewInstance: Instance, weaponCat
 	local animated = validDef and wrapDefinition.isAnimated == true
 	local animatedTextures = {} :: { Texture }
 
-	for _, child in primaryPart:GetChildren() do
-		if child:IsA("Texture") and string.sub(child.Name, 1, 14) == "ScrollTexture_" then
-			if not textureId then
+	-- Audit mobile: GetChildren() solo necesario al QUITAR un wrap (para
+	-- destruir scroll textures viejas). Cuando se aplica un wrap nuevo
+	-- iteramos directamente WEAPON_WRAP_TEXTURE_ORDER vía FindFirstChild,
+	-- evitando la alocación de la tabla de GetChildren() en cada tap del
+	-- locker browsing.
+	if not textureId then
+		for _, child in primaryPart:GetChildren() do
+			if child:IsA("Texture") and string.sub(child.Name, 1, 14) == "ScrollTexture_" then
 				child:Destroy()
 			end
 		end
@@ -424,6 +438,28 @@ function WeaponPreviewController:_stopMotion(category: string, restoreToBase: bo
 	end
 end
 
+-- Devuelve el CFrameValue cacheado para la categoría (creándolo + conectando
+-- el listener una sola vez por categoría). El listener lee
+-- `_motionTargetByCategory[category]` cada update, así que cambiar el preview
+-- activo no requiere reconectar.
+function WeaponPreviewController:_ensureMotionDriver(category: string): CFrameValue
+	local existing = self._motionCFrameByCategory[category]
+	if existing then
+		return existing
+	end
+
+	local cv = Instance.new("CFrameValue")
+	cv.Name = "MotionCFrame_" .. category
+	self._motionCFrameByCategory[category] = cv
+	self._motionConnByCategory[category] = cv:GetPropertyChangedSignal("Value"):Connect(function()
+		local target = self._motionTargetByCategory[category]
+		if target and target.Parent then
+			setWeaponPreviewPivot(target, cv.Value)
+		end
+	end)
+	return cv
+end
+
 function WeaponPreviewController:_startMotion(category: WeaponCategory, startOffsetY: number?)
 	local hasExplicitStartOffset = type(startOffsetY) == "number"
 	self:_stopMotion(category, not hasExplicitStartOffset)
@@ -438,38 +474,23 @@ function WeaponPreviewController:_startMotion(category: WeaponCategory, startOff
 	local startPivot = basePivot * CFrame.new(0, initialOffsetY, 0)
 	local liftPivot = basePivot * CFrame.new(0, SELECTED_WEAPON_RISE_HEIGHT, 0)
 	setWeaponPreviewPivot(activePreview, startPivot)
-	local cframeValue = Instance.new("CFrameValue")
+
+	self._motionTargetByCategory[category] = activePreview
+	local cframeValue = self:_ensureMotionDriver(category)
 	cframeValue.Value = startPivot
-	local valueChangedConnection: RBXScriptConnection? = nil
-
-	valueChangedConnection = cframeValue:GetPropertyChangedSignal("Value"):Connect(function()
-		if not activePreview.Parent then
-			if valueChangedConnection then
-				valueChangedConnection:Disconnect()
-				valueChangedConnection = nil
-			end
-			return
-		end
-
-		setWeaponPreviewPivot(activePreview, cframeValue.Value)
-	end)
 
 	local riseTween = TweenService:Create(cframeValue, SELECTED_WEAPON_RISE_TWEEN_INFO, {
 		Value = liftPivot,
 	})
 	self._activeMotionTweenByCategory[category] = riseTween
 
-	riseTween.Completed:Connect(function(playbackState)
+	-- `:Once` auto-desconecta tras el primer fire (Completed se llama una vez,
+	-- tanto en finalización natural como en :Cancel). Antes este Connect
+	-- quedaba "vivo" hasta GC del closure capturado.
+	riseTween.Completed:Once(function(playbackState)
 		if self._activeMotionTweenByCategory[category] == riseTween then
 			self._activeMotionTweenByCategory[category] = nil
 		end
-
-		if valueChangedConnection then
-			valueChangedConnection:Disconnect()
-			valueChangedConnection = nil
-		end
-
-		cframeValue:Destroy()
 
 		if playbackState ~= Enum.PlaybackState.Completed then
 			return
@@ -646,38 +667,23 @@ function WeaponPreviewController:applySelected(item: LockerCatalogItem?)
 
 	local downPivot = currentBasePivot * CFrame.new(0, -SELECTED_WEAPON_SWITCH_DOWN_STUDS, 0)
 	local startPivot = getWeaponPreviewPivot(currentPreview) or currentBasePivot
-	local cframeValue = Instance.new("CFrameValue")
+
+	-- Reusa el CFrameValue + listener cacheado por categoría. Antes 1 alloc
+	-- + 1 conexión efímera por click; ahora cero allocs (el listener leerá
+	-- _motionTargetByCategory[selectedCategory] = currentPreview).
+	self._motionTargetByCategory[selectedCategory] = currentPreview
+	local cframeValue = self:_ensureMotionDriver(selectedCategory)
 	cframeValue.Value = startPivot
-	local valueChangedConnection: RBXScriptConnection? = nil
-
-	valueChangedConnection = cframeValue:GetPropertyChangedSignal("Value"):Connect(function()
-		if not currentPreview.Parent then
-			if valueChangedConnection then
-				valueChangedConnection:Disconnect()
-				valueChangedConnection = nil
-			end
-			return
-		end
-
-		setWeaponPreviewPivot(currentPreview, cframeValue.Value)
-	end)
 
 	local downTween = TweenService:Create(cframeValue, SELECTED_WEAPON_SWITCH_DOWN_TWEEN_INFO, {
 		Value = downPivot,
 	})
 	self._activeMotionTweenByCategory[selectedCategory] = downTween
 
-	downTween.Completed:Connect(function(playbackState)
+	downTween.Completed:Once(function(playbackState)
 		if self._activeMotionTweenByCategory[selectedCategory] == downTween then
 			self._activeMotionTweenByCategory[selectedCategory] = nil
 		end
-
-		if valueChangedConnection then
-			valueChangedConnection:Disconnect()
-			valueChangedConnection = nil
-		end
-
-		cframeValue:Destroy()
 
 		if playbackState ~= Enum.PlaybackState.Completed then
 			return
@@ -745,6 +751,15 @@ function WeaponPreviewController:Destroy()
 	for _, tween in self._activeMotionTweenByCategory do
 		tween:Cancel()
 	end
+	for _, conn in self._motionConnByCategory do
+		conn:Disconnect()
+	end
+	for _, cv in self._motionCFrameByCategory do
+		cv:Destroy()
+	end
+	table.clear(self._motionConnByCategory)
+	table.clear(self._motionCFrameByCategory)
+	table.clear(self._motionTargetByCategory)
 	table.clear(self._wrapAnimDataByCategory)
 	table.clear(self._motionDataByCategory)
 	table.clear(self._activeMotionTweenByCategory)

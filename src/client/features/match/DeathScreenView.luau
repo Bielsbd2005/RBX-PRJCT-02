@@ -239,6 +239,10 @@ function DeathScreenView.new(gui: ScreenGui): any
 	self._respawnReady = false
 	self._destroyed = false
 	self._viewportTrack = nil :: AnimationTrack?
+	-- Tween nativo de la barra de respawn (sustituye el while task.wait(0.03)
+	-- que allocaba UDim2.new ~33×/s justo cuando el cliente carga killcam +
+	-- viewport). Lo cancelamos en show/hide/Destroy.
+	self._countdownTween = nil :: Tween?
 
 	refs.root.Enabled = false
 	refs.root.ResetOnSpawn = false
@@ -331,44 +335,53 @@ function DeathScreenView:show(respawnCooldown: number, killer: KillerInfo?)
 		)
 	end
 
-	task.spawn(function()
-		local duration = math.max(0, respawnCooldown)
-		local startAt = time()
+	-- Animación nativa: un solo Tween lineal de la barra + un task.delay para
+	-- habilitar el botón cuando llegue al 100%. El token sirve como cancel:
+	-- show()/hide()/Destroy() lo bumpean y la task.delay tardía no hace nada.
+	if self._countdownTween then
+		self._countdownTween:Cancel()
+		self._countdownTween = nil
+	end
 
-		while self._countdownToken == token do
-			-- Defensa adicional: si la view se destruyó o el GUI perdió parent
-			-- (cleanup en cascada), salimos sin tocar referencias muertas.
-			if self._destroyed then
-				return
-			end
-			local barFill = self._refs and self._refs.barFill
-			if not barFill or not barFill.Parent then
-				return
-			end
-
-			local elapsed = time() - startAt
-			local progress = math.clamp(if duration > 0 then elapsed / duration else 1, 0, 1)
-
-			barFill.Size = UDim2.new(progress, 0, 1, 0)
-
-			if progress >= 1 then
-				barFill.Size = UDim2.new(1, 0, 1, 0)
-				if self._countdownToken == token and not self._destroyed then
-					self._respawnReady = true
-					_setButtonEnabled(self._refs.respawnButton, true)
-				end
-				return
-			end
-
-			task.wait(0.03)
+	local duration = math.max(0, respawnCooldown)
+	local barFill = self._refs.barFill
+	if duration <= 0 then
+		if barFill then
+			barFill.Size = UDim2.new(1, 0, 1, 0)
 		end
-	end)
+		self._respawnReady = true
+		_setButtonEnabled(self._refs.respawnButton, true)
+	else
+		if barFill then
+			local tween = TweenService:Create(
+				barFill,
+				TweenInfo.new(duration, Enum.EasingStyle.Linear, Enum.EasingDirection.Out),
+				{ Size = UDim2.new(1, 0, 1, 0) }
+			)
+			self._countdownTween = tween
+			tween:Play()
+		end
+		task.delay(duration, function()
+			if self._destroyed or self._countdownToken ~= token then
+				return
+			end
+			if barFill and barFill.Parent then
+				barFill.Size = UDim2.new(1, 0, 1, 0)
+			end
+			self._respawnReady = true
+			_setButtonEnabled(self._refs.respawnButton, true)
+		end)
+	end
 end
 
 function DeathScreenView:hide()
 	self._countdownToken += 1
 	self._respawnReady = false
 	_setButtonEnabled(self._refs.respawnButton, false)
+	if self._countdownTween then
+		self._countdownTween:Cancel()
+		self._countdownTween = nil
+	end
 	if self._refs.barFill then
 		self._refs.barFill.Size = UDim2.new(0, 0, 1, 0)
 	end
@@ -395,6 +408,10 @@ end
 function DeathScreenView:Destroy()
 	self._destroyed = true
 	self._countdownToken += 1
+	if self._countdownTween then
+		self._countdownTween:Cancel()
+		self._countdownTween = nil
+	end
 	for _, connection in self._connections do
 		connection:Disconnect()
 	end

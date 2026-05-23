@@ -342,6 +342,19 @@ function HealthBillboardController:Start(prescannedModels: { Model }?)
 		-- Heurística rápida: si el padre es un Model, NO es un character.
 		if instance.Parent and instance.Parent:IsA("Model") then return end
 
+		-- Audit mobile: filter heurística adicional para mapas grandes con
+		-- props decorativos. Solo procedemos si es bot (parent.Name == "Bots")
+		-- o ya parece char (tiene Humanoid o es player char). Sin esto el
+		-- listener + task.delay se enganchaba a cualquier Model decorativo
+		-- entrando al workspace.
+		local parent = instance.Parent
+		local isBotChild = parent ~= nil and parent.Name == "Bots"
+		local hasHumanoid = instance:FindFirstChildOfClass("Humanoid") ~= nil
+		local isPlayerChar = Players:GetPlayerFromCharacter(instance) ~= nil
+		if not (isBotChild or hasHumanoid or isPlayerChar) then
+			return
+		end
+
 		local function attemptTrack()
 			if not instance.Parent then return end
 			tryTrack(instance :: Model)

@@ -624,21 +624,21 @@ function BattlePassService:Start(dataService: DataService): ()
 		task.spawn(_ensureSeason, player)
 	end
 
-	-- Reset al cargar nuevos perfiles. PlayerAdded se dispara antes de que
-	-- el profile esté listo; reintentamos hasta que GetProfile devuelva no-nil
-	-- (mismo patrón que DailyTasksService).
+	-- Audit mobile: signal-driven en lugar de polling cada 1s × 30 iteraciones.
+	-- DataService.ProfileLoaded dispara una vez por player cuando su Replica
+	-- está lista. Si el profile ya está cargado al subscribir, fast-path.
 	Players.PlayerAdded:Connect(function(player)
-		task.spawn(function()
-			for _ = 1, 30 do
-				if not player.Parent then return end
-				if _dataService:GetProfile(player) then
-					_ensureSeason(player)
-					return
-				end
-				task.wait(1)
+		if _dataService:GetProfile(player) then
+			_ensureSeason(player)
+		end
+	end)
+	if _dataService.ProfileLoaded then
+		_dataService.ProfileLoaded:Connect(function(player)
+			if player and player.Parent then
+				_ensureSeason(player)
 			end
 		end)
-	end)
+	end
 
 	-- Cleanup de cooldowns.
 	Players.PlayerRemoving:Connect(function(player: Player)

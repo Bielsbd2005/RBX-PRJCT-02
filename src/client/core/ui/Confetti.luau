@@ -35,7 +35,11 @@ local DEFAULT_COLORS = {
 -- POOL_CAP limita la huella en memoria (256 × ~Frame ≈ pocos KB).
 -- ────────────────────────────────────────────────────────────────
 
-local POOL_CAP = 256
+-- Audit mobile: cap reducido de 256 a 80. Una Rain típica usa 80 piezas y
+-- las llamadas sucesivas no se solapan (la siguiente Rain empieza después
+-- de la anterior). 256 × Frame quietos ocupaban ~400 KB residente; 80
+-- son ~125 KB.
+local POOL_CAP = 80
 local _pool: { Frame } = {}
 
 local function _acquireFrame(): Frame

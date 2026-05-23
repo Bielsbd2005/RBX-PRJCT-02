@@ -1153,9 +1153,16 @@ function WeaponsGui.new(weaponsSystem)
 		self:_refreshHotbar()
 
 		self.gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
-		self.gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function() self:onScreenSizeChanged() end)
-		workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function() self:onScreenSizeChanged() end)
-		self.gui:GetPropertyChangedSignal("Enabled"):Connect(function()
+		-- Audit mobile: trackear estas 3 conexiones en self.connections para que
+		-- setEnabled(false)/Destroy las desconecte. Antes quedaban colgadas y,
+		-- si setEnabled(true) se re-llamaba, duplicaban listeners. Disconnect
+		-- previo defensivo por idempotencia.
+		if self.connections.absoluteSize then self.connections.absoluteSize:Disconnect() end
+		if self.connections.currentCamera then self.connections.currentCamera:Disconnect() end
+		if self.connections.guiEnabled then self.connections.guiEnabled:Disconnect() end
+		self.connections.absoluteSize = self.gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function() self:onScreenSizeChanged() end)
+		self.connections.currentCamera = workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function() self:onScreenSizeChanged() end)
+		self.connections.guiEnabled = self.gui:GetPropertyChangedSignal("Enabled"):Connect(function()
 			if self.gui.Enabled then
 				self:onScreenSizeChanged()
 			end
@@ -1579,8 +1586,12 @@ function WeaponsGui:_updateShotgunRangeState()
 	local outOfRange = false
 	local distance: number? = nil
 
-	local cameraOrigin = camera.CFrame.Position
-	local cameraRay = camera:ViewportPointToRay(camera.ViewportSize.X * 0.5, camera.ViewportSize.Y * 0.5)
+	-- Audit mobile: el centro de viewport siempre coincide con
+	-- camera.CFrame.LookVector (no necesita ViewportPointToRay, que aloca
+	-- un Ray + Vector3 por tick del shotgun range check).
+	local cameraCFrame = camera.CFrame
+	local cameraOrigin = cameraCFrame.Position
+	local cameraDir = cameraCFrame.LookVector
 
 	-- W1: RaycastParams + filter cacheados en self. Mutamos slots in-place.
 	local rayParams = self._shotgunRangeParams
@@ -1610,7 +1621,7 @@ function WeaponsGui:_updateShotgunRangeState()
 	rayParams.FilterDescendantsInstances = filter
 
 	local maxRay = AutoAimSystem.MAX_DISTANCE or 300
-	local result = workspace:Raycast(cameraRay.Origin, cameraRay.Direction * maxRay, rayParams)
+	local result = workspace:Raycast(cameraOrigin, cameraDir * maxRay, rayParams)
 	if result and result.Instance then
 		local hitChar = result.Instance:FindFirstAncestorOfClass("Model")
 		if hitChar and hitChar:FindFirstChildOfClass("Humanoid") then

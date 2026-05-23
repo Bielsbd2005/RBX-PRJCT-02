@@ -121,6 +121,62 @@ end
 -- así que evitamos re-calcularlo por candidate evaluation.
 local FOV_COS = math.cos(math.rad(BotConfig.Combat.FOVDegrees / 2))
 
+-- Eye offset desde el HRP (usado en raycast LoS + fallback de origin de
+-- disparo cuando no hay TipAttachment). Antes Vector3.new(0,1.5,0) se
+-- alocaba en cada call → ~480 allocs/s con 16 bots × 10Hz × 3 candidates.
+local EYE_OFFSET = Vector3.new(0, 1.5, 0)
+
+-- Cache de Player → HumanoidRootPart para el filtro de FireClient selectivo
+-- (audible range de balas de bots). Antes Players:GetPlayers() + FindFirstChild
+-- por SHOT (10/s × 16 bots = 160 shots/s × N players lookups). Mantenido vía
+-- PlayerAdded/CharacterAdded/CharacterRemoving + Players.PlayerRemoving.
+local _playerRootByPlayer: { [Player]: BasePart } = {}
+
+local function _updateCachedPlayerRoot(player: Player, char: Model)
+	local root = char:FindFirstChild("HumanoidRootPart")
+	if root and root:IsA("BasePart") then
+		_playerRootByPlayer[player] = root
+		return
+	end
+	-- HRP aún no parented al char. Escuchar una sola vez (auto-disconnect).
+	local conn: RBXScriptConnection?
+	conn = char.ChildAdded:Connect(function(child)
+		if child.Name == "HumanoidRootPart" and child:IsA("BasePart") then
+			if player.Character == char then
+				_playerRootByPlayer[player] = child :: BasePart
+			end
+			if conn then conn:Disconnect(); conn = nil end
+		end
+	end)
+	-- Safety: si el char se destruye sin recibir HRP, liberar el listener.
+	char.AncestryChanged:Connect(function(_, parent)
+		if parent == nil and conn then
+			conn:Disconnect()
+			conn = nil
+		end
+	end)
+end
+
+local function _wirePlayerRootCache(player: Player)
+	if player.Character then
+		_updateCachedPlayerRoot(player, player.Character)
+	end
+	player.CharacterAdded:Connect(function(char)
+		_updateCachedPlayerRoot(player, char)
+	end)
+	player.CharacterRemoving:Connect(function()
+		_playerRootByPlayer[player] = nil
+	end)
+end
+
+Players.PlayerAdded:Connect(_wirePlayerRootCache)
+for _, _existingPlayer in Players:GetPlayers() do
+	_wirePlayerRootCache(_existingPlayer)
+end
+Players.PlayerRemoving:Connect(function(p)
+	_playerRootByPlayer[p] = nil
+end)
+
 local STATES = {
 	PATROL = "PATROL",
 	CHASE = "CHASE",
@@ -270,36 +326,44 @@ function BotAI:_setupTool()
 end
 
 function BotAI:_setupAnimations(): { [string]: AnimationTrack }
+	-- Audit mobile: el LoadAnimation por bot × 4 anims al round-start (16 bots
+	-- = 64 LoadAnimation síncronos) se difiere a task.spawn. La tabla `tracks`
+	-- se devuelve vacía y se rellena async; _playAnimation hace no-op cuando
+	-- tracks[name] es nil, así que el FSM no rompe — visualmente los bots
+	-- aparecen sin animación durante <100ms en el peor caso y el siguiente
+	-- state change ya tiene la track. ToolHold también se diferre, no es
+	-- crítico (el rig sostiene la tool en idle por defecto).
 	local tracks = {} :: { [string]: AnimationTrack }
-	local animator = self._humanoid:FindFirstChildOfClass("Animator")
-	if not animator then
-		animator = Instance.new("Animator")
-		animator.Parent = self._humanoid
-	end
-
-	for name, id in ANIM_IDS do
-		-- B5 (partial): instance compartida entre todos los bots. LoadAnimation
-		-- crea un AnimationTrack nuevo por Animator (per-rig), pero el asset
-		-- queda warm tras el primer load.
-		local anim = _getCachedAnimation(id)
-		local ok, track = pcall(function()
-			return (animator :: Animator):LoadAnimation(anim)
-		end)
-		if ok then
-			tracks[name] = track :: AnimationTrack
-		end
-	end
-
-	if tracks.ToolHold then
-		tracks.ToolHold.Priority = Enum.AnimationPriority.Action
-		tracks.ToolHold.Looped = true
-		tracks.ToolHold:Play()
-	end
-
-	-- Stop necesita la ref para Destroy explícito (GetPlayingAnimationTracks
-	-- solo devuelve los en marcha; Run/Jump cuando el bot estaba en Idle se
-	-- quedaban zombi en el Animator hasta destrucción del rig).
 	self._animTracks = tracks
+
+	task.spawn(function()
+		if not self._isAlive then return end
+		local animator = self._humanoid:FindFirstChildOfClass("Animator")
+		if not animator then
+			animator = Instance.new("Animator")
+			animator.Parent = self._humanoid
+		end
+
+		for name, id in ANIM_IDS do
+			if not self._isAlive then return end
+			-- B5 (partial): instance compartida entre todos los bots. LoadAnimation
+			-- crea un AnimationTrack nuevo por Animator (per-rig), pero el asset
+			-- queda warm tras el primer load.
+			local anim = _getCachedAnimation(id)
+			local ok, track = pcall(function()
+				return (animator :: Animator):LoadAnimation(anim)
+			end)
+			if ok then
+				tracks[name] = track :: AnimationTrack
+			end
+		end
+
+		if tracks.ToolHold and self._isAlive then
+			tracks.ToolHold.Priority = Enum.AnimationPriority.Action
+			tracks.ToolHold.Looped = true
+			tracks.ToolHold:Play()
+		end
+	end)
 
 	return tracks
 end
@@ -352,8 +416,8 @@ function BotAI:_canSeeTarget(target: Model): boolean
 		return false
 	end
 
-	local origin = self._rootPart.Position + Vector3.new(0, 1.5, 0)
-	local targetPos = (targetRoot :: BasePart).Position + Vector3.new(0, 1.5, 0)
+	local origin = self._rootPart.Position + EYE_OFFSET
+	local targetPos = (targetRoot :: BasePart).Position + EYE_OFFSET
 	local direction = targetPos - origin
 
 	if direction.Magnitude > BotConfig.Combat.DetectRange then
@@ -412,6 +476,9 @@ function BotAI:_getBestTarget(): (Model?, boolean)
 	local rootPos = self._rootPart.Position
 	local myTeam = TeamUtils.normalize(self._team)
 	local facing = self._rootPart.CFrame.LookVector
+	-- 1 lookup compartido para el filtro de spawn protection (en lugar de
+	-- llamar time() por candidato).
+	local now = time()
 
 	-- Reusar buffer: clear es O(n) pero no alloca, y vacía la tabla para
 	-- la próxima iter sin tirar la backing storage.
@@ -445,15 +512,22 @@ function BotAI:_getBestTarget(): (Model?, boolean)
 
 		-- Audit fix: skip targets en spawn protection. _canSeeTarget pasaría
 		-- pero TakeDamage es no-op durante ForceField → bot dispara 2s a un
-		-- target inmune. FindFirstChildOfClass es top-level (O(N) hijos del
-		-- char, ~10-20).
-		if char:FindFirstChildOfClass("ForceField") then continue end
+		-- target inmune. Attribute SpawnProtectedUntil es stampeado al
+		-- añadir el ForceField (MatchService + AI/init.luau) — O(1) vs
+		-- FindFirstChildOfClass que itera todos los hijos del Character.
+		local protectedUntil = char:GetAttribute("SpawnProtectedUntil")
+		if type(protectedUntil) == "number" and protectedUntil > now then continue end
 
-		-- Reutilizamos delta para FOV (evita la alloc de .Unit). Magnitud y
-		-- dirección comparten el mismo Vector3 → 1 alloc en lugar de 2.
+		-- Reutilizamos delta para FOV (evita la alloc de .Unit). Audit mobile:
+		-- comparar primero d² vs DetectRange² (Dot sin sqrt) y solo pagar el
+		-- sqrt cuando el candidato pasa el filtro de rango. En PATROL con
+		-- mapas grandes la mayoría de candidatos quedan fuera de rango.
 		local delta = (root :: BasePart).Position - rootPos
-		local d = delta.Magnitude
-		if d > BotConfig.Combat.DetectRange then continue end
+		local d2 = delta:Dot(delta)
+		local detectRange = BotConfig.Combat.DetectRange
+		if d2 > detectRange * detectRange then continue end
+
+		local d = math.sqrt(d2)
 
 		-- FOV check: dot(facing, unit) = dot(facing, delta) / d. Si
 		-- < cos(FOV/2), fuera de cono. Evita la alloc del Unit Vector.
@@ -547,8 +621,9 @@ function BotAI:_getForcedTarget(): Model?
 		self._forcedTarget = nil
 		return nil
 	end
-	local d = (self._rootPart.Position - (root :: BasePart).Position).Magnitude
-	if d > BotConfig.Combat.DetectRange + 20 then
+	local rangeExt = BotConfig.Combat.DetectRange + 20
+	local fd = self._rootPart.Position - (root :: BasePart).Position
+	if fd:Dot(fd) > rangeExt * rangeExt then
 		self._forcedTarget = nil
 		return nil
 	end
@@ -593,8 +668,10 @@ function BotAI:_evaluateTarget(now: number)
 			local root = current:FindFirstChild("HumanoidRootPart")
 			if hum and (hum :: Humanoid).Health > 0 and root then
 				local toRoot = (root :: BasePart).Position - self._rootPart.Position
-				local d = toRoot.Magnitude
-				if d <= BotConfig.Combat.DetectRange then
+				local d2 = toRoot:Dot(toRoot)
+				local detectRange = BotConfig.Combat.DetectRange
+				if d2 <= detectRange * detectRange then
+					local d = math.sqrt(d2)
 					local facing = self._rootPart.CFrame.LookVector
 					-- dot(facing, unit) = dot(facing, toRoot) / d. Evita
 					-- alloc de toRoot.Unit (1 Vector3 por fast-path eval).
@@ -626,8 +703,9 @@ function BotAI:_evaluateTarget(now: number)
 		if prev.Parent
 			and prevHum and (prevHum :: Humanoid).Health > 0
 			and prevRoot then
-			local d = (self._rootPart.Position - (prevRoot :: BasePart).Position).Magnitude
-			if d <= BotConfig.Combat.DetectRange + 15 then
+			local graceRange = BotConfig.Combat.DetectRange + 15
+			local gd = self._rootPart.Position - (prevRoot :: BasePart).Position
+			if gd:Dot(gd) <= graceRange * graceRange then
 				potentialTarget = prev
 				isVisible = false
 			end
@@ -748,7 +826,14 @@ function BotAI:Start(
 		self._dummy.Name,
 		if mapRoot then mapRoot.Name else "?"
 	)
+	-- Jitter inicial random sobre el intervalo del tick para desfasar las
+	-- coroutines de N bots. Sin esto, los 16 bots spawneados al round-start
+	-- arrancan en el mismo instante → Roblox quantiza el task.wait(0.1) al
+	-- siguiente Heartbeat común y los 32 coroutines (StuckDetector +
+	-- _evaluateTarget) resumen en el mismo frame causando spikes periódicos
+	-- del scheduler.
 	task.spawn(function()
+		task.wait(math.random() * 0.1)
 		while self._isAlive and humanoid.Health > 0 do
 			if self._stuckDetector then
 				self._stuckDetector:tick(os.clock())
@@ -764,6 +849,7 @@ function BotAI:Start(
 	-- 100ms es invisible al jugador (reacción humana ~200ms) y reduce
 	-- raycasts ~6× vs un tick a 60Hz.
 	task.spawn(function()
+		task.wait(math.random() * 0.1)
 		while self._isAlive and humanoid.Health > 0 do
 			self:_evaluateTarget(os.clock())
 			task.wait(0.1)
@@ -780,13 +866,11 @@ function BotAI:Start(
 	local currentTrack: AnimationTrack? = nil
 	local lastShotTime = 0
 	local lastJumpTime = 0
-	-- Throttle de CHASE-visible MoveTo: reemitir cuando target se mueva
-	-- >2 studs respecto al último MoveTo, O cada 3s para evitar el timeout
-	-- interno de 8s de Roblox. Si el target orbita al bot manteniéndose
-	-- <2 studs del último MoveTo, el delta nunca refresca y el bot se
-	-- queda quieto a los 8s con LOS activa.
-	local lastDirectMoveTarget = Vector3.zero
-	local lastDirectMoveAt = 0
+	-- B2-style: tracking de la última dir aplicada via humanoid:Move en
+	-- CHASE-visible. Move() es cheap (setea MoveDirection) y no programa
+	-- MoveToFinished timer de 8s; antes humanoid:MoveTo competía con el
+	-- walk loop del Navigator (ver [[feedback_movetofinished_global]]).
+	local lastChaseMoveDir: Vector3 = Vector3.new(math.huge, 0, 0)
 
 	-- Animaciones reactivas
 	local connRun = humanoid.Running:Connect(function(speed)
@@ -869,7 +953,10 @@ function BotAI:Start(
 			-- bot con target estático.
 			if alignOrientation then
 				if potentialTarget and targetRoot then
-					if (targetPos - self._lastAimPos).Magnitude > 0.5 then
+					-- 0.5² = 0.25. Dot evita el sqrt de Magnitude (~320 sqrt/s
+					-- con 16 bots a 20Hz solo para este gate).
+					local aimDelta = targetPos - self._lastAimPos
+					if aimDelta:Dot(aimDelta) > 0.25 then
 						local lookPos = Vector3.new(targetPos.X, rootPart.Position.Y, targetPos.Z)
 						alignOrientation.CFrame = CFrame.lookAt(rootPart.Position, lookPos)
 						self._lastAimPos = targetPos
@@ -1010,7 +1097,7 @@ function BotAI:Start(
 						if tipAttach and tipAttach.Parent then
 							origin = tipAttach.WorldPosition
 						else
-							origin = rootPart.Position + Vector3.new(0, 1.5, 0)
+							origin = rootPart.Position + EYE_OFFSET
 						end
 						local trueDir = (targetPos - origin).Unit
 						local dir = trueDir
@@ -1039,16 +1126,15 @@ function BotAI:Start(
 						-- FireAllClients. Con 16 bots × 10Hz = 160 events/seg,
 						-- móviles low-end pierden frames decodificando bullets
 						-- fuera de su rango visual. Filtramos por char dentro
-						-- de BULLET_AUDIBLE_RANGE del origen del shot.
-						for _, p in Players:GetPlayers() do
-							local pChar = p.Character
-							if pChar then
-								local pRoot = pChar.PrimaryPart or pChar:FindFirstChild("HumanoidRootPart")
-								if pRoot and pRoot:IsA("BasePart") then
-									local delta = origin - pRoot.Position
-									if delta:Dot(delta) < BULLET_AUDIBLE_RANGE2 then
-										firedRemote:FireClient(p, nil, weapon, fireInfo)
-									end
+						-- de BULLET_AUDIBLE_RANGE del origen del shot. Audit
+						-- mobile: iteramos el cache _playerRootByPlayer (módulo)
+						-- en lugar de Players:GetPlayers() + FindFirstChild HRP
+						-- por shot (~2.5K lookups/s en peak combat).
+						for p, pRoot in _playerRootByPlayer do
+							if pRoot.Parent then
+								local delta = origin - pRoot.Position
+								if delta:Dot(delta) < BULLET_AUDIBLE_RANGE2 then
+									firedRemote:FireClient(p, nil, weapon, fireInfo)
 								end
 							end
 						end
@@ -1090,23 +1176,32 @@ function BotAI:Start(
 				-- AutoRotate ya está OFF desde el bloque AlignOrientation arriba
 				-- (hay target). Mantenemos AlignOrientation como única fuente
 				-- de orientación.
-				-- Sprint 4: con LOS vamos en línea recta (MoveTo directo) sin
-				-- pathfinding — más barato y reactivo. Sin LOS, Navigator
-				-- computa path con throttle interno (1s + target-moved-5-studs).
+				-- Sprint 4: con LOS aplicamos humanoid:Move(unit) directo (sin
+				-- pathfinding) — Move solo escribe MoveDirection y no programa
+				-- MoveToFinished timer; antes humanoid:MoveTo competía con el
+				-- walk loop del Navigator (ver [[feedback_movetofinished_global]])
+				-- y, a 22 studs/s, refresh-rate de 11/seg generaba ~176 MoveTo/s
+				-- al servidor con 16 bots cazando. Sin LOS, Navigator computa
+				-- path con throttle interno (1s + target-moved-5-studs).
 				if isVisible then
 					if self._navigator and self._navigator:isMoving() then
 						self._navigator:cancel()
 					end
-					-- Throttle: reemitir MoveTo cuando target se haya movido
-					-- >2 studs, O cada 3s. El time-gate evita el timeout interno
-					-- de 8s de Roblox cuando un target orbita el bot a sub-2
-					-- studs del último MoveTo.
-					local nowMv = os.clock()
-					if (targetPos - lastDirectMoveTarget).Magnitude > 2
-						or nowMv - lastDirectMoveAt > 3 then
-						humanoid:MoveTo(targetPos)
-						lastDirectMoveTarget = targetPos
-						lastDirectMoveAt = nowMv
+					-- Dirección hacia el target en plano XZ. Move() acepta unit
+					-- (cualquier magnitud >0 cuenta como "andar full speed"),
+					-- pero unit deja la dirección estable frente a un Magnitude
+					-- variable. Skip si dir no cambió respecto al frame previo.
+					local toTarget = targetPos - rootPart.Position
+					local planar = Vector3.new(toTarget.X, 0, toTarget.Z)
+					local chaseDir: Vector3
+					if planar.Magnitude > 0.01 then
+						chaseDir = planar.Unit
+					else
+						chaseDir = Vector3.zero
+					end
+					if chaseDir ~= lastChaseMoveDir then
+						humanoid:Move(chaseDir, false)
+						lastChaseMoveDir = chaseDir
 					end
 					-- Audit P0: gate por tiempo + JumpChance del profile. Antes
 					-- `if math.random() < 0.05` por frame (60Hz) → ~3 jumps/seg
@@ -1122,17 +1217,16 @@ function BotAI:Start(
 					if self._navigator then
 						self._navigator:goTo(targetPos)
 					end
-					-- Reset al salir de CHASE-visible: evita que el throttle de
-					-- >2 studs omita el primer MoveTo cuando el bot recupere
-					-- LOS cerca de la última pos. lastDirectMoveAt=0 fuerza
-					-- también el primer refresh por time-gate.
-					lastDirectMoveTarget = Vector3.zero
-					lastDirectMoveAt = 0
+					-- Reset al salir de CHASE-visible: el Navigator toma el
+					-- control de MoveDirection durante CHASE/no-visible. El
+					-- sentinel huge fuerza un Move() la próxima vez que volvamos
+					-- a CHASE-visible aunque la dirección coincida.
+					lastChaseMoveDir = Vector3.new(math.huge, 0, 0)
 				end
 
 				-- B1: 20Hz. La detección live de target ya está en coroutine
-				-- separado; aquí solo hay gates baratos (MoveTo throttled por
-				-- 2 studs, jump por intervalo 2-5s).
+				-- separado; aquí solo hay gates baratos (Move skipped si la
+				-- dir no cambió, jump por intervalo 2-5s).
 				task.wait(0.05)
 
 			-- ── PATROL ──────────────────────────────────────────────
@@ -1220,12 +1314,13 @@ function BotAI:Stop()
 	local humanoid = self._humanoid
 	if humanoid then
 		-- Force movement state to idle so NPCs don't keep run/weapon poses while frozen.
+		-- Move(Vector3.zero) ya pone MoveDirection en cero; un MoveTo extra solo
+		-- armaba un timer interno de 8s sobre un bot moribundo (footgun de
+		-- [[feedback_movetofinished_global]] aunque Navigator ya no use su
+		-- MoveToFinished global).
 		humanoid:Move(Vector3.zero, false)
 		humanoid.AutoRotate = true
 		humanoid.Jump = false
-		pcall(function()
-			humanoid:MoveTo(self._rootPart.Position)
-		end)
 
 		local animator = humanoid:FindFirstChildOfClass("Animator")
 		if animator then

@@ -1,7 +1,9 @@
-local RunService = game:GetService("RunService")
-
 local MIN_HORZ_SPEED = 0.01 --The minimum X and Z velocity for a physical-launch parabola to be considered vertical, helps avoid numerical instability
-local DEFAULT_NUM_SAMPLES = RunService:IsServer() and 32 or 32
+-- Default = 1 (cast lineal único). Antes 32 era footgun: cualquier Parabola.new()
+-- sin override hacía 32 raycasts/bala/frame de vuelo. BulletWeapon llama
+-- setNumSamples explícitamente justo después de new(), así que el cambio
+-- no afecta callers actuales — solo previene la trampa para futuros.
+local DEFAULT_NUM_SAMPLES = 1
 local DEFAULT_NORMAL = Vector3.new(0, 1, 0)
 local ROT_OFFSET = {
 	[0] = CFrame.Angles(0, math.rad(90), 0) * CFrame.Angles(math.rad(90), 0, 0),
@@ -107,15 +109,38 @@ function Parabola:sampleVelocity(t)
 	return self.referenceFrame:vectorToWorldSpace(Vector3.new(0, yVelocity, -xVelocity))
 end
 
+-- RaycastParams cacheado a nivel módulo. Antes FindPartOnRayWithIgnoreList
+-- (deprecated) por sample × shotgun proyectil × frame; ahora workspace:Raycast.
+local _parabolaCastParams: RaycastParams? = nil
+
 function Parabola:_penetrateCast(ray, ignoreList)
 	debug.profilebegin("penetrateCast")
+	local params = _parabolaCastParams
+	if not params then
+		params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		params.IgnoreWater = true
+		_parabolaCastParams = params
+	end
+	params.FilterDescendantsInstances = ignoreList
+
 	local tries = 0
-	local hitPart, hitPoint, hitNormal, hitMaterial = nil, ray.Origin + ray.Direction, UP_VECTOR, Enum.Material.Air
+	local hitPart, hitPoint, hitNormal, hitMaterial =
+		nil, ray.Origin + ray.Direction, UP_VECTOR, Enum.Material.Air
 	while tries < 50 do
 		tries = tries + 1
-		hitPart, hitPoint, hitNormal, hitMaterial = workspace:FindPartOnRayWithIgnoreList(ray, ignoreList, false, true)
+		local result = workspace:Raycast(ray.Origin, ray.Direction, params)
+		if not result then
+			hitPart = nil
+			break
+		end
+		hitPart = result.Instance
+		hitPoint = result.Position
+		hitNormal = result.Normal
+		hitMaterial = result.Material
 		if hitPart and not hitPart.CanCollide and hitPart.Parent:FindFirstChildOfClass("Humanoid") == nil then
 			table.insert(ignoreList, hitPart)
+			params.FilterDescendantsInstances = ignoreList
 		else
 			break
 		end

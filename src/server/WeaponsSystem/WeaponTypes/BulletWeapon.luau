@@ -915,10 +915,15 @@ function BulletWeapon:onConfigValueChanged(valueName, newValue, oldValue)
 			end
 
 			local beam0 = self.bulletEffectTemplate:FindFirstChild("Beam0")
-			if beam0 then
-				coroutine.wrap(function()
+			-- Audit mobile: preload una sola vez por beam0 (cacheado al nivel
+			-- de la instancia). Antes cada onConfigValueChanged disparaba un
+			-- coroutine de PreloadAsync (yield real al backend), incluso si
+			-- ya habíamos pedido ese mismo beam0 previamente.
+			if beam0 and self._preloadedBeam0 ~= beam0 then
+				self._preloadedBeam0 = beam0
+				task.spawn(function()
 					ContentProvider:PreloadAsync({ beam0 })
-				end)()
+				end)
 			end
 		end
 	elseif valueName == "HitMarkEffect" then
@@ -983,10 +988,19 @@ function BulletWeapon:onRenderStepped(dt)
 
 			if not aimTrack.IsPlaying and not self.reloading then
 				aimTrack:Play(0.15)
-				coroutine.wrap(function() -- prevent player from firing until gun is fully out
-					wait(self:getConfigValue("StartupTime", 0.2))
-					self.startupFinished = true
-				end)()
+				-- Audit mobile: generation token + task.delay. Antes
+				-- coroutine.wrap+wait(0.2) usaba el `wait` global legacy y, si
+				-- el render path entraba aquí 2× rápidamente (rebote de
+				-- IsPlaying), arrancaba múltiples coroutines redundantes que
+				-- seteaban startupFinished=true por turno. El token corta los
+				-- pendientes cuando se inicia uno nuevo.
+				self._startupToken = (self._startupToken or 0) + 1
+				local thisToken = self._startupToken
+				task.delay(self:getConfigValue("StartupTime", 0.2), function()
+					if self._startupToken == thisToken then
+						self.startupFinished = true
+					end
+				end)
 			end
 
 			if aimZoomTrack and not self.reloading then

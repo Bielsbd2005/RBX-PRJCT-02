@@ -57,6 +57,33 @@ local WEAPON_WRAP_TEXTURE_ORDER = {
 local activeAnimatedWrapTextures = {} :: { [Texture]: boolean }
 local activeAnimatedWrapConnection: RBXScriptConnection? = nil
 
+-- Audit mobile: cache de templates preprocesados (ya anclados). Antes cada
+-- Render iteraba GetDescendants() del clone para Anchored = true; con
+-- 30+ wraps visibles + notifications + battlepass eran muchos iter loops.
+-- Clonamos UNA vez con todos los BaseParts anchored y guardamos el clone
+-- preparado en la cache; Render solo hace `prepared:Clone()` (Roblox copia
+-- Anchored intacto en el nuevo clone).
+local _preparedTemplateCache: { [Instance]: Instance } = {}
+
+local function _getPreparedTemplate(template: Instance): Instance
+	local cached = _preparedTemplateCache[template]
+	if cached then
+		return cached
+	end
+	local prepared = template:Clone()
+	prepared.Parent = nil
+	if prepared:IsA("BasePart") then
+		(prepared :: BasePart).Anchored = true
+	end
+	for _, desc in prepared:GetDescendants() do
+		if desc:IsA("BasePart") then
+			desc.Anchored = true
+		end
+	end
+	_preparedTemplateCache[template] = prepared
+	return prepared
+end
+
 local function stopActiveAnimatedWrapLoopIfIdle(): ()
     if next(activeAnimatedWrapTextures) ~= nil then
         return
@@ -273,15 +300,13 @@ function WeaponWrapPreviewer.Render(viewportNode: ViewportFrame, item: WeaponWra
     previewJanitor:Add(worldModel, "Destroy")
 
     local previewTemplate = resolveWeaponTemplate(item) or wrapPreviewTemplate
-    local clonedWrap = previewTemplate:Clone()
+    -- Clonamos desde la copia preprocesada (todos los BaseParts ya anchored).
+    -- Roblox preserva Anchored en el Clone; el iterar GetDescendants en
+    -- cada Render era pago por las 30+ cards visibles del locker.
+    local preparedTemplate = _getPreparedTemplate(previewTemplate)
+    local clonedWrap = preparedTemplate:Clone()
     clonedWrap.Parent = worldModel
     previewJanitor:Add(clonedWrap, "Destroy")
-
-    for _, descendant in clonedWrap:GetDescendants() do
-        if descendant:IsA("BasePart") then
-            descendant.Anchored = true
-        end
-    end
 
     local previewPrimaryPart = getWrapPreviewPrimaryPart(clonedWrap)
     if not previewPrimaryPart then

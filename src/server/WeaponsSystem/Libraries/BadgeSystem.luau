@@ -62,6 +62,11 @@ local activeBadges  = {}
 local pendingQueue  = {}
 local isProcessing  = false
 local badgeFrame    = nil
+-- Audit mobile: generation token. Antes los task.delay(BADGE_LIFESPAN, ...)
+-- programados antes de clear() seguían disparándose y manipulaban activeBadges
+-- (que clear acababa de vaciar). El token corta esos delays + el processQueue
+-- en curso si clear() entra a mitad del drenado.
+local runId = 0
 
 local function sizeForIndex(index: number, total: number): UDim2
 	if total == 1 then
@@ -114,8 +119,13 @@ end
 local function processQueue()
 	if isProcessing then return end
 	isProcessing = true
+	local startRun = runId
 
 	while #pendingQueue > 0 do
+		-- Si clear() bumpea runId en medio del drenado, abortamos.
+		if runId ~= startRun then
+			break
+		end
 		local actionName = table.remove(pendingQueue, 1)
 		local imageId    = BADGE_MAP[actionName]
 
@@ -145,7 +155,11 @@ local function processQueue()
 
 		refreshBadgeSizes()
 
+		local badgeRun = startRun
 		task.delay(CONFIG.BADGE_LIFESPAN, function()
+			-- Token guard: si hubo clear() entre el insert y este disparo,
+			-- el badge ya fue destruido por clear → no tocar activeBadges.
+			if runId ~= badgeRun then return end
 			local index = table.find(activeBadges, badge)
 			if index then
 				table.remove(activeBadges, index)
@@ -172,6 +186,8 @@ function BadgeSystem.showBadge(actionName: string)
 end
 
 function BadgeSystem.clear()
+	-- Bump del token corta task.delay tardías y el while de processQueue.
+	runId += 1
 	for _, badge in activeBadges do
 		badge:Destroy()
 	end

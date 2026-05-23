@@ -23,12 +23,14 @@
 
 local TweenService     = game:GetService("TweenService")
 local Players          = game:GetService("Players")
-local Lighting         = game:GetService("Lighting")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Packages = ReplicatedStorage:WaitForChild("Packages")
 local Janitor  = require(Packages.janitor) :: any
 local MenuHover = require(script.Parent.Parent.Parent.core.ui.MenuHover)
+local BlurController = require(script.Parent.Parent.Parent.core.ui.BlurController)
+
+local BLUR_OWNER = "EndResultsView"
 
 -- ── Colores ──────────────────────────────────────────────────
 local VICTORY_COLOR   = Color3.fromRGB(0,   152, 246)
@@ -124,9 +126,13 @@ local function _setGradient(frame: GuiObject, colorA: Color3, colorB: Color3)
 end
 
 local function _setResultsBlurEnabled(enabled: boolean)
-	local blur = Lighting:FindFirstChild("Blur")
-	if blur and blur:IsA("BlurEffect") then
-		blur.Enabled = enabled
+	-- Audit mobile: usar BlurController.acquire/release con refcount en lugar
+	-- de toggle directo. Antes apagaba el blur incluso si otro panel (Settings,
+	-- Store) lo tenía activo simultáneamente.
+	if enabled then
+		BlurController.acquire(BLUR_OWNER)
+	else
+		BlurController.release(BLUR_OWNER)
 	end
 end
 
@@ -161,10 +167,15 @@ local function _populateList(
 
 	template.Visible = false
 
-	-- Limpiar clones previos
+	-- Audit mobile: reusar clones existentes (de matches anteriores) en lugar
+	-- de Destroy + Clone por match end. Antes 12 destroy + 12 clone + 12
+	-- UIGradient.new por matchEnd. Ahora 0 allocs en steady state (mismo
+	-- número de jugadores) y solo allocs adicionales cuando crece el roster.
+	local existingClones: { GuiObject } = {}
 	for _, child in listNode:GetChildren() do
 		if child ~= template and child:IsA("GuiObject") then
-			child:Destroy()
+			table.insert(existingClones, child)
+			child.Visible = false
 		end
 	end
 
@@ -179,8 +190,15 @@ local function _populateList(
 		return a.kills > b.kills
 	end)
 
-	for _, entry in filtered do
-		local clone = (template :: GuiObject):Clone()
+	for i, entry in filtered do
+		local clone: GuiObject
+		if i <= #existingClones then
+			clone = existingClones[i]
+			clone.LayoutOrder = i
+		else
+			clone = (template :: GuiObject):Clone()
+			clone.Parent = listNode
+		end
 		clone.Name    = "PlayerLabel_" .. entry.userId
 		clone.Visible = true
 
@@ -194,7 +212,8 @@ local function _populateList(
 		if killsLabel  then killsLabel.Text  = tostring(entry.kills)  end
 		if deathsLabel then deathsLabel.Text = tostring(entry.deaths) end
 
-		-- Gradiente según equipo / jugador local
+		-- Gradiente según equipo / jugador local. _setGradient reusa UIGradient
+		-- existente si lo hay, evitando Instance.new por reuso.
 		local gradA: Color3
 		local gradB: Color3
 		if entry.userId == localUserId then
@@ -205,8 +224,11 @@ local function _populateList(
 			gradA, gradB = GRADIENT_TEAM_B[1], GRADIENT_TEAM_B[2]
 		end
 		_setGradient(clone, gradA, gradB)
+	end
 
-		clone.Parent = listNode
+	-- Sobrantes (clones de matches con más jugadores que el actual): destruir.
+	for i = #filtered + 1, #existingClones do
+		existingClones[i]:Destroy()
 	end
 end
 
@@ -350,31 +372,11 @@ function EndResultsView.new(gui: ScreenGui): any
 end
 
 function EndResultsView:show(data: ShowData, onFinished: (() -> ())?)
-	-- Guard de reentrada: si ya hay un show activo, cancelamos los listas previas
-	-- antes de empezar para evitar clones duplicados visibles durante el yield
-	-- de _playSummaryPhase.
+	-- Guard de reentrada: si ya hay un show activo, abortamos el spawn previo
+	-- vía token. No hace falta destruir los clones — _populateList reusa los
+	-- existentes y los sobra/falta se ajustan ahí mismo (audit mobile A24).
 	if self._showing then
-		self._token += 1 -- aborta el spawn anterior en su próximo check
-		-- Limpiar listas de jugadores que pudieran quedar del show previo.
-		-- Path real (ver doc del header): Summary.Main.Container.List{A,B}.PlayerList
-		-- "Main" here is a Frame name in the UI tree, unrelated to WeaponCategory.
-		local summary = _guiChild(self._canvas, "Summary")
-		local main = summary and _guiChild(summary, "Main")
-		local container = main and _guiChild(main, "Container")
-		if container then
-			for _, side in { "A", "B" } do
-				local listKey = "List" .. side
-				local listNode = _guiChild(_guiChild(container, listKey), "PlayerList")
-					or _guiChild(container, listKey)
-				if listNode then
-					for _, child in listNode:GetChildren() do
-						if child:IsA("GuiObject") and child.Name ~= "PlayerLabel" then
-							child:Destroy()
-						end
-					end
-				end
-			end
-		end
+		self._token += 1
 	end
 	self._showing = true
 

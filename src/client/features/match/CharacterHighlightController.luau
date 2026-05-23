@@ -1,7 +1,9 @@
 --!strict
 -- CharacterHighlightController: aplica un Highlight client-side a cada
--- character (player o bot) distinto del LocalPlayer, coloreado según si
--- es aliado (verde) o enemigo (rojo) desde la perspectiva local.
+-- character (player o bot), coloreado según relación con el LocalPlayer:
+--   · aliado → verde (fill semi-transparente)
+--   · enemigo → rojo  (fill semi-transparente)
+--   · self    → outline negro, sin fill
 --
 -- Diseño:
 -- - El Highlight se crea EN CLIENTE — no se replica al servidor ni a otros
@@ -19,6 +21,7 @@ local TeamUtils = require(Shared.utils.TeamUtils)
 local HIGHLIGHT_NAME = "CharacterHighlight"
 local COLOR_ALLY   = Color3.fromRGB(0, 210, 80)
 local COLOR_ENEMY  = Color3.fromRGB(220, 40, 40)
+local COLOR_LOCAL  = Color3.fromRGB(0, 0, 0)
 local FILL_ALPHA   = 0.65
 local OUTLINE_ALPHA = 0.1
 
@@ -52,18 +55,11 @@ local function _hasAnyTeamAttribute(model: Model): boolean
 end
 
 local function _shouldTrack(model: Model): boolean
-	if model == localPlayer.Character then
-		return false
-	end
-	local owner = Players:GetPlayerFromCharacter(model)
-	if owner == localPlayer then
-		-- LocalPlayer nunca se trackea a sí mismo.
-		return false
-	end
 	if not model:FindFirstChildOfClass("Humanoid") then
 		return false
 	end
-	-- Players reales: trackear siempre.
+	local owner = Players:GetPlayerFromCharacter(model)
+	-- Players reales (incluido localPlayer): trackear siempre.
 	if owner then
 		return true
 	end
@@ -77,6 +73,14 @@ end
 local function _refreshColor(model: Model)
 	local highlight = _trackedHighlights[model]
 	if not highlight then
+		return
+	end
+	-- LocalPlayer's own char: outline negro, sin fill.
+	if model == localPlayer.Character then
+		highlight.FillColor = COLOR_LOCAL
+		highlight.OutlineColor = COLOR_LOCAL
+		highlight.FillTransparency = 1
+		highlight.OutlineTransparency = OUTLINE_ALPHA
 		return
 	end
 	local localChar = localPlayer.Character
@@ -180,6 +184,18 @@ local function _onDescendantAdded(instance: Instance)
 	end
 	local model = instance :: Model
 
+	-- Audit mobile: filter heurística. Sin esto, _attach + 7 conns + 3
+	-- task.delay se enganchaban a CADA Model que entra al workspace
+	-- (props decorativos del mapa incluidos). Solo nos interesan
+	-- characters de gameplay (player chars o bots en workspace.Bots).
+	local parent = model.Parent
+	local isBotChild = parent ~= nil and parent.Name == "Bots"
+	local hasHumanoid = model:FindFirstChildOfClass("Humanoid") ~= nil
+	local isPlayerChar = Players:GetPlayerFromCharacter(model) ~= nil
+	if not (isBotChild or hasHumanoid or isPlayerChar) then
+		return
+	end
+
 	_attach(model)
 	if _trackedHighlights[model] then
 		return
@@ -243,11 +259,13 @@ local function _onDescendantAdded(instance: Instance)
 end
 
 local function _wirePlayer(player: Player)
-	if player == localPlayer then
-		return
-	end
 	local function onChar(char: Model)
 		_attach(char)
+		-- Si es el LocalPlayer, refrescar TODOS los highlights porque cambió la
+		-- referencia local — los enemigos/aliados pueden necesitar re-color.
+		if player == localPlayer then
+			_refreshAll()
+		end
 	end
 	if player.Character then
 		onChar(player.Character)

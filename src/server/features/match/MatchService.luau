@@ -92,7 +92,10 @@ local _lastBotRosterJsonBroadcast: string? = nil
 -- Timestamp de la última muerte registrada en cada spawn point. Usado por
 -- SpawnSelector para penalizar respawnear donde alguien acaba de morir y evitar
 -- spawn-trap loops. Se limpia en cada round restart.
-local _recentDeathBySpawn: { [BasePart]: number } = {}
+-- Audit mobile: weak keys → si un spawn point se destruye (cambio de mapa
+-- mid-round, race con vote.onVoteFinished), el GC libera la entry sola en
+-- vez de mantener un BasePart huérfano referenciado para siempre.
+local _recentDeathBySpawn: { [BasePart]: number } = setmetatable({}, { __mode = "k" }) :: any
 
 local _teamA: Team? = nil
 local _teamB: Team? = nil
@@ -253,7 +256,8 @@ local function _resetMatchScopedState()
 	-- Recent deaths por spawn point (audit fix: antes solo se limpiaba en
 	-- _startMapLoadFlow, no en _endRoundAndRestartVoting → references a
 	-- BaseParts destruidos del round anterior podían quedar como keys).
-	_recentDeathBySpawn = {}
+	-- table.clear preserva la metatable de weak keys.
+	table.clear(_recentDeathBySpawn)
 end
 
 local function _resolveWeaponItem(weaponId: string?): (string?, string?)
@@ -289,12 +293,23 @@ end
 ]]
 local _pendingProfileActionsByUserId: { [number]: { () -> () } } = {}
 
+-- Audit mobile: cap por jugador para evitar acumulación si el profile nunca
+-- carga (backend caído). Con 50 kills/min × 5 min de round = 250 closures por
+-- jugador retenidas. Si 16 jugadores caen así, son 4000 closures vivos. El
+-- cap drop-oldest mantiene los últimos N que es lo que más probablemente
+-- importa cuando el profile finalmente cargue.
+local PROFILE_ACTION_QUEUE_CAP = 50
+
 local function _deferUntilProfile(player: Player, fn: () -> ()): ()
 	local userId = player.UserId
 	local queue = _pendingProfileActionsByUserId[userId]
 	if not queue then
 		queue = {}
 		_pendingProfileActionsByUserId[userId] = queue
+	end
+	if #queue >= PROFILE_ACTION_QUEUE_CAP then
+		-- Drop oldest (FIFO): table.remove(queue, 1) es O(n) pero N <= cap.
+		table.remove(queue, 1)
 	end
 	table.insert(queue, fn)
 end
@@ -303,25 +318,24 @@ local function _hasProfile(player: Player): boolean
 	return _dataService ~= nil and _dataService:GetProfile(player) ~= nil
 end
 
-local function _grantActionRewardsToAttacker(attackerUserId: number?, action: string)
-	if not _dataService or not attackerUserId or attackerUserId <= 0 then
-		return
-	end
-
-	local attackerPlayer = Players:GetPlayerByUserId(attackerUserId)
-	if not attackerPlayer then
+-- Audit mobile: signature acepta Player directo en lugar de userId. Antes el
+-- kill chain (línea ~519+) ya tenía `attacker` resuelto y la función hacía
+-- GetPlayerByUserId redundante por cada call (4 calls por kill: Kill +
+-- Headshot? + Streak3? + Streak5?). Ahora 1 lookup en el caller, 4 reuses.
+local function _grantActionRewardsToAttacker(attacker: Player?, action: string)
+	if not _dataService or not attacker then
 		return
 	end
 
 	-- C2: si el profile aún no cargó, encolar y reintentar tras ProfileLoaded.
-	if not _hasProfile(attackerPlayer) then
-		_deferUntilProfile(attackerPlayer, function()
-			_grantActionRewardsToAttacker(attackerUserId, action)
+	if not _hasProfile(attacker) then
+		_deferUntilProfile(attacker, function()
+			_grantActionRewardsToAttacker(attacker, action)
 		end)
 		return
 	end
 
-	RewardService.Award(attackerPlayer, action)
+	RewardService.Award(attacker, action)
 end
 
 local function _grantMasteryWrapsIfEligible(player: Player, weaponCategory: string, weaponId: string, newKillCount: number)
@@ -501,14 +515,14 @@ local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?, a
 	local newStreak = KillAttributionService:RecordKill(attackerUserId)
 	KillAttributionService:SendStreakBroadcast(attackerUserId)
 	_registerWeaponKillForAttacker(attackerUserId, attackerWeaponId)
-	_grantActionRewardsToAttacker(attackerUserId, "Kill")
+	_grantActionRewardsToAttacker(attacker, "Kill")
 	if attackerWasHeadshot then
-		_grantActionRewardsToAttacker(attackerUserId, "Headshot")
+		_grantActionRewardsToAttacker(attacker, "Headshot")
 	end
 	if newStreak == 3 then
-		_grantActionRewardsToAttacker(attackerUserId, "Streak3")
+		_grantActionRewardsToAttacker(attacker, "Streak3")
 	elseif newStreak == 5 then
-		_grantActionRewardsToAttacker(attackerUserId, "Streak5")
+		_grantActionRewardsToAttacker(attacker, "Streak5")
 	end
 
 	_persistAttackerKillStats(attacker, attackerWasHeadshot == true, newStreak)
@@ -548,7 +562,15 @@ local function _pickBalancedTeam(userId: number): ("A" | "B")?
 	return TeamAssignmentService:PickBalancedTeam(userId)
 end
 
-local function _rebalanceBotsForCurrentRound(reason: string)
+-- Audit mobile: coalescer múltiples calls a rebalance al mismo frame.
+-- Con kill chains rápidas (3-5/s) y joins/leaves simultáneos, el camino sin
+-- debounce hacía SetBotTargets + scan completo + JSONEncode roster por cada
+-- evento. El dedupe interno de _broadcastBotRoster cubre el broadcast pero
+-- no el SetBotTargets ni el _refreshAliveLists.
+local _rebalancePending = false
+local _rebalanceLastReason: string? = nil
+
+local function _doRebalanceNow(reason: string)
 	if not _isRoundActive or not _AIService then
 		return
 	end
@@ -565,8 +587,22 @@ local function _rebalanceBotsForCurrentRound(reason: string)
 		return
 	end
 
-	-- Enviar BotRoster de forma asincrónica para no bloquear
-	task.defer(_broadcastBotRoster)
+	_broadcastBotRoster()
+end
+
+local function _rebalanceBotsForCurrentRound(reason: string)
+	if _rebalancePending then
+		_rebalanceLastReason = reason
+		return
+	end
+	_rebalancePending = true
+	_rebalanceLastReason = reason
+	task.defer(function()
+		local reasonNow = _rebalanceLastReason or reason
+		_rebalancePending = false
+		_rebalanceLastReason = nil
+		_doRebalanceNow(reasonNow)
+	end)
 end
 
 local function _collectSharedSpawnPoints(activeMapRoot: Instance): { BasePart }
@@ -649,9 +685,21 @@ end
 -- Recolecta posiciones + lookVectors de combatientes vivos en un lado determinado
 -- (excluyendo opcionalmente al jugador que pide el respawn). Combina jugadores
 -- humanos y NPCs en una sola pasada por el mapa.
-local function _collectCombatantDataForSide(side: "A" | "B", excludePlayer: Player?): ({ Vector3 }, { Vector3 })
-	local positions = {} :: { Vector3 }
-	local lookVectors = {} :: { Vector3 }
+-- Audit mobile: single-pass por lado. Antes se llamaba 2 veces por respawn
+-- (una por enemySide + una por allySide), cada una iterando Players +
+-- botsFolder. Una sola pasada reduce las ~128 lookups del path crítico a 64.
+local function _collectAllCombatantData(excludePlayer: Player?): (
+	{ A: { Vector3 }, B: { Vector3 } },
+	{ A: { Vector3 }, B: { Vector3 } }
+)
+	local positionsBySide = {
+		A = {} :: { Vector3 },
+		B = {} :: { Vector3 },
+	}
+	local lookVectorsBySide = {
+		A = {} :: { Vector3 },
+		B = {} :: { Vector3 },
+	}
 
 	for _, candidatePlayer in Players:GetPlayers() do
 		if candidatePlayer == excludePlayer then
@@ -659,7 +707,7 @@ local function _collectCombatantDataForSide(side: "A" | "B", excludePlayer: Play
 		end
 
 		local candidateSide = _teamByUserId[candidatePlayer.UserId]
-		if not candidateSide or candidateSide ~= side then
+		if candidateSide ~= "A" and candidateSide ~= "B" then
 			continue
 		end
 
@@ -670,13 +718,13 @@ local function _collectCombatantDataForSide(side: "A" | "B", excludePlayer: Play
 
 		local root = _extractCharacterRootPart(character)
 		if root then
-			table.insert(positions, root.Position)
-			table.insert(lookVectors, root.CFrame.LookVector)
+			table.insert(positionsBySide[candidateSide], root.Position)
+			table.insert(lookVectorsBySide[candidateSide], root.CFrame.LookVector)
 		end
 	end
 
 	if not _activeMapModel then
-		return positions, lookVectors
+		return positionsBySide, lookVectorsBySide
 	end
 
 	-- Iteramos solo `mapRoot.Bots` (top-level): los bots de IA se parentan ahí
@@ -702,19 +750,19 @@ local function _collectCombatantDataForSide(side: "A" | "B", excludePlayer: Play
 			-- Ignorar NPCs muertos/ragdollados — no son amenaza, no deben influir en la
 			-- elección de spawn point.
 			local npcSide = _resolveNpcSide(node)
-			if not npcSide or npcSide ~= side then
+			if npcSide ~= "A" and npcSide ~= "B" then
 				continue
 			end
 
 			local root = _extractCharacterRootPart(node)
 			if root then
-				table.insert(positions, root.Position)
-				table.insert(lookVectors, root.CFrame.LookVector)
+				table.insert(positionsBySide[npcSide], root.Position)
+				table.insert(lookVectorsBySide[npcSide], root.CFrame.LookVector)
 			end
 		end
 	end
 
-	return positions, lookVectors
+	return positionsBySide, lookVectorsBySide
 end
 
 local function _disconnectDeathConnection(userId: number)
@@ -926,8 +974,15 @@ local function _spawnPlayerOnAssignedTeam(player: Player): boolean
 	local mapDefinition = _getMapDefinitionByName(_activeMapName)
 	local useIntelligentSpawning = mapDefinition ~= nil and mapDefinition.UseIntelligentSpawning == true
 	local enemySide: "A" | "B" = if side == "A" then "B" else "A"
-	local enemyPositions, enemyLookVectors = _collectCombatantDataForSide(enemySide, nil)
-	local allyPositions, _allyLooks = _collectCombatantDataForSide(side, player)
+	-- Single-pass sobre Players + botsFolder, devuelve datos de ambos lados.
+	-- excludePlayer omite al jugador respawnando de su propio side (allies).
+	-- En el lado enemigo nunca aparecería de todas formas porque su team es
+	-- `side`, así que el efecto neto coincide con el viejo
+	-- `_collectCombatantDataForSide(enemySide, nil)` + `(side, player)`.
+	local positionsBySide, lookVectorsBySide = _collectAllCombatantData(player)
+	local enemyPositions = positionsBySide[enemySide]
+	local enemyLookVectors = lookVectorsBySide[enemySide]
+	local allyPositions = positionsBySide[side]
 	local chosenSpawn = SpawnSelector.select(spawnPoints, {
 		enemyPositions = enemyPositions,
 		enemyLookVectors = enemyLookVectors,
@@ -948,11 +1003,15 @@ local function _spawnPlayerOnAssignedTeam(player: Player): boolean
 	-- la ruta que usan WeaponsSystem y BotAI), así que no toca cambiar nada en
 	-- el pipeline de daño. Duración configurada en GameConfig; el shield no se
 	-- rompe al disparar — expira solo por tiempo vía Debris.
+	-- Audit mobile: stampear attribute SpawnProtectedUntil = expiry timestamp.
+	-- BotAI lo lee en _getBestTarget en lugar de FindFirstChildOfClass("ForceField")
+	-- por candidato (~2.5K lookups/seg con 16 bots × 16 candidates × 10Hz).
 	if GameConfig.SpawnProtectionDuration > 0 then
 		local forceField = Instance.new("ForceField")
 		forceField.Visible = true
 		forceField.Parent = spawnedCharacter
 		Debris:AddItem(forceField, GameConfig.SpawnProtectionDuration)
+		spawnedCharacter:SetAttribute("SpawnProtectedUntil", time() + GameConfig.SpawnProtectionDuration)
 	end
 
 	LoadoutService.applyCosmetics(player, spawnedCharacter, _dataService)
@@ -1262,14 +1321,14 @@ local function _handleBotDied(botTeam: string, _botName: string, botHumanoid: Hu
 			if attackerPlayer then
 				local newStreak = KillAttributionService:RecordKill(attackerUserId)
 				_registerWeaponKillForAttacker(attackerUserId, attackerWeaponId)
-				_grantActionRewardsToAttacker(attackerUserId, "Kill")
+				_grantActionRewardsToAttacker(attackerPlayer, "Kill")
 				if attackerWasHeadshot then
-					_grantActionRewardsToAttacker(attackerUserId, "Headshot")
+					_grantActionRewardsToAttacker(attackerPlayer, "Headshot")
 				end
 				if newStreak == 3 then
-					_grantActionRewardsToAttacker(attackerUserId, "Streak3")
+					_grantActionRewardsToAttacker(attackerPlayer, "Streak3")
 				elseif newStreak == 5 then
-					_grantActionRewardsToAttacker(attackerUserId, "Streak5")
+					_grantActionRewardsToAttacker(attackerPlayer, "Streak5")
 				end
 				-- C1 fix: persistir Stats.Kills/Headshots/KillStreakBest lifetime
 				-- también para kills vs bots. Antes el path PvE solo
@@ -1369,15 +1428,6 @@ local function _startMapLoadFlow(winnerMapName: string)
 			warn("[MatchService] Failed to start AI round: " .. tostring(err))
 		else
 			_rebalanceBotsForCurrentRound("round start")
-			-- Debug dump: muestra qué identidad + apariencia + stats fingidas se
-			-- asignó a cada bot del round. Defer para que llegue después de los
-			-- spawns iniciales (algunos paths internos del rebalance pueden ser
-			-- async-friendly).
-			if _AIService and _AIService.LogBotRoster then
-				task.defer(function()
-					_AIService:LogBotRoster()
-				end)
-			end
 		end
 	end
 

@@ -328,19 +328,25 @@ function MatchHud.new(matchHudGui: ScreenGui?): any
 	-- confetti; los callers siguen usando `hud:playXxxAnimation(...)`.
 	self._notificationsQueue = MatchNotificationsQueue.new(matchHudGui)
 
-	-- Stats overlay: "vX | Yms | Zfps" en Container.Version cada 1s.
-	-- Trackeamos la RenderStepped + el loop de versión en el janitor para que
-	-- un destroy() (hot reload / return-to-menu) no apile listeners ni deje
-	-- task.spawn infinitos escribiendo en un label cuyo padre fue destruido.
+	-- Stats overlay: "vX | Yms[ | Zfps]" en Container.Version cada 1s.
+	-- En producción NO conectamos RenderStepped (cada conexión tiene overhead
+	-- fijo y este FPS counter solo es útil en dev). En Studio sí contamos
+	-- frames para mostrar el campo "Zfps". Trackeamos la RenderStepped + el
+	-- loop de versión en el janitor para que un destroy() no apile listeners
+	-- ni deje task.spawn infinitos escribiendo en un label cuyo padre fue
+	-- destruido.
 	if self._hudRefs.version then
 		local versionLabel = self._hudRefs.version
 		local placePrefix = "v" .. tostring(game.PlaceVersion)
 		local localPlayer = Players.LocalPlayer
+		local showFps = RunService:IsStudio()
 		local frameCount = 0
 
-		self._janitor:Add(RunService.RenderStepped:Connect(function()
-			frameCount += 1
-		end), "Disconnect")
+		if showFps then
+			self._janitor:Add(RunService.RenderStepped:Connect(function()
+				frameCount += 1
+			end), "Disconnect")
+		end
 
 		task.spawn(function()
 			while not self._destroyed do
@@ -349,10 +355,14 @@ function MatchHud.new(matchHudGui: ScreenGui?): any
 				if self._destroyed then
 					return
 				end
-				local fps = math.floor((frameCount - framesAtStart) / dt + 0.5)
 				local pingMs = math.floor(localPlayer:GetNetworkPing() * 1000 + 0.5)
 				if versionLabel.Parent then
-					versionLabel.Text = string.format("%s | %dms | %dfps", placePrefix, pingMs, fps)
+					if showFps then
+						local fps = math.floor((frameCount - framesAtStart) / dt + 0.5)
+						versionLabel.Text = string.format("%s | %dms | %dfps", placePrefix, pingMs, fps)
+					else
+						versionLabel.Text = string.format("%s | %dms", placePrefix, pingMs)
+					end
 				end
 			end
 		end)
@@ -735,6 +745,17 @@ function MatchHud:_applyCachedOrFetchThumbnail(rowKey: string, userId: number, p
 		end
 	end)
 	task.spawn(function()
+		-- Audit mobile: jitter inicial 0-0.4s para desfasar el batch de
+		-- 6+ thumbnails que se piden en el mismo frame al entrar al match.
+		-- GetUserThumbnailAsync hace yield real (request al backend Roblox);
+		-- en conexiones flaky de móvil, 6 fires simultáneos pueden bloquear
+		-- task scheduler slots en cascada. Los thumbnails son cosméticos —
+		-- 0-400ms de retraso es invisible.
+		task.wait(math.random() * 0.4)
+		if self._destroyed then
+			self._thumbnailRequestInFlight[userId] = nil
+			return
+		end
 		local ok, content = pcall(function()
 			return Players:GetUserThumbnailAsync(userId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size100x100)
 		end)

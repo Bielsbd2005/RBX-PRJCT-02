@@ -451,10 +451,10 @@ local function renderNumber(billboard: BillboardGui, value: number, isHeadshot: 
 
 	local moveTween = TweenService:Create(label, TI_NUM_MOVE, moveProps)
 
-	-- Cleanup + reduce overdraw at end: fade stroke out for both
-	local conn
-	conn = moveTween.Completed:Connect(function()
-		conn:Disconnect()
+	-- Cleanup + reduce overdraw at end. Audit mobile: :Once auto-disconnect
+	-- (Completed dispara una sola vez por tween, tanto en finalización como
+	-- en cancel). Elimina la conn local + el disconnect manual.
+	moveTween.Completed:Once(function()
 		if stroke then
 			stroke.Transparency = 1
 		end

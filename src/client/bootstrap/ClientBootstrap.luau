@@ -87,10 +87,14 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 		WeaponWrapAnimator.stop()
 	end, true)
 
+	-- Audit mobile: timeout en WaitForChild para que la replicación lenta
+	-- del workspace (común en móvil flaky) no bloquee el bootstrap entero.
+	-- Si Cameras/lobby no llegan en 10s, dejamos la cámara con su CFrame
+	-- por defecto (default camera type) — UX degradada pero no hang.
 	local camera = Workspace.CurrentCamera
-	local camerasFolder = Workspace:WaitForChild("Cameras")
-	local lobbyPart = camerasFolder:WaitForChild("lobby")
-	if camera and lobbyPart:IsA("BasePart") then
+	local camerasFolder = Workspace:WaitForChild("Cameras", 10)
+	local lobbyPart = camerasFolder and camerasFolder:WaitForChild("lobby", 10)
+	if camera and lobbyPart and lobbyPart:IsA("BasePart") then
 		camera.CameraType = Enum.CameraType.Scriptable
 		camera.CFrame = lobbyPart.CFrame
 	end

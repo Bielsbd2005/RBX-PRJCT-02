@@ -23,7 +23,14 @@ local DEFAULT_WRAP_SCROLL_SPEED_V = 0
 type TrackedTexture = {
 	speedU: number,
 	speedV: number,
+	tileU: number,
+	tileV: number,
 	attrConn: RBXScriptConnection,
+	-- Audit mobile: cacheamos StudsPerTileU/V vía GetPropertyChangedSignal en
+	-- lugar de leerlos por frame. Antes con 72 textures (12 jugadores × 6 caras)
+	-- eran ~17K property reads/seg solo para los wraps animados.
+	tileUConn: RBXScriptConnection,
+	tileVConn: RBXScriptConnection,
 }
 
 local _connection: RBXScriptConnection? = nil
@@ -60,12 +67,26 @@ local function _track(instance: Instance)
 	local entry: TrackedTexture = {
 		speedU = DEFAULT_WRAP_SCROLL_SPEED_U,
 		speedV = DEFAULT_WRAP_SCROLL_SPEED_V,
+		tileU = _resolveTile(texture.StudsPerTileU),
+		tileV = _resolveTile(texture.StudsPerTileV),
 		attrConn = texture.AttributeChanged:Connect(function(name)
 			if name == "WrapScrollSpeedU" or name == "WrapScrollSpeedV" then
 				local cached = _tracked[texture]
 				if cached then
 					_refreshAttrs(texture, cached)
 				end
+			end
+		end),
+		tileUConn = texture:GetPropertyChangedSignal("StudsPerTileU"):Connect(function()
+			local cached = _tracked[texture]
+			if cached then
+				cached.tileU = _resolveTile(texture.StudsPerTileU)
+			end
+		end),
+		tileVConn = texture:GetPropertyChangedSignal("StudsPerTileV"):Connect(function()
+			local cached = _tracked[texture]
+			if cached then
+				cached.tileV = _resolveTile(texture.StudsPerTileV)
 			end
 		end),
 	}
@@ -79,6 +100,8 @@ local function _untrack(instance: Instance)
 	local entry = _tracked[texture]
 	if not entry then return end
 	entry.attrConn:Disconnect()
+	entry.tileUConn:Disconnect()
+	entry.tileVConn:Disconnect()
 	_tracked[texture] = nil
 end
 
@@ -101,10 +124,10 @@ function WeaponWrapAnimator.start()
 				_untrack(texture)
 				continue
 			end
-			local tileU = _resolveTile(texture.StudsPerTileU)
-			local tileV = _resolveTile(texture.StudsPerTileV)
-			texture.OffsetStudsU = (texture.OffsetStudsU + entry.speedU * dt) % tileU
-			texture.OffsetStudsV = (texture.OffsetStudsV + entry.speedV * dt) % tileV
+			-- tileU/V cacheados en entry, refrescados solo vía
+			-- GetPropertyChangedSignal cuando el wrap config cambia (raro).
+			texture.OffsetStudsU = (texture.OffsetStudsU + entry.speedU * dt) % entry.tileU
+			texture.OffsetStudsV = (texture.OffsetStudsV + entry.speedV * dt) % entry.tileV
 		end
 	end)
 end
@@ -124,6 +147,8 @@ function WeaponWrapAnimator.stop()
 	end
 	for texture, entry in _tracked do
 		entry.attrConn:Disconnect()
+		entry.tileUConn:Disconnect()
+		entry.tileVConn:Disconnect()
 		_tracked[texture] = nil
 	end
 end

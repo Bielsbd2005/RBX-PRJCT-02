@@ -42,6 +42,7 @@ type BotRecord = {
 	deathConnection: RBXScriptConnection?,
 	hasDeathBeenReported: boolean,
 	ai: typeof(BotAI.new(({} :: any), "A")),
+	descendantConn: RBXScriptConnection?,
 }
 
 local _dataServiceRef: any = nil
@@ -164,6 +165,13 @@ local function _wirePlayerAliveTracking(player: Player)
 	_wiredPlayers[player] = true
 
 	local function onChar(char: Model)
+		-- Audit mobile: remove defensivo del char anterior. _addAliveTarget
+		-- ya dedupea por index, pero el char del respawn previo puede no
+		-- haber salido todavía (AncestryChanged tarda un frame) → la nueva
+		-- entry quedaría apuntando al char correcto pero la vieja seguiría
+		-- referenciada por _aliveTargetIndex con el mismo Model si Roblox
+		-- recicla la ref (raro pero posible al reusar rigs del LoadCharacter).
+		_removeAliveTarget(char)
 		_addAliveTarget(char)
 		-- El char puede ser destruido sin Died (respawn instantáneo, kick, etc.).
 		-- AncestryChanged lo cubre todos los casos sin duplicar lógica.
@@ -606,7 +614,11 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 	-- vivos no choquen con cadáveres. Al morir, el kill effect migra al grupo
 	-- RAGDOLL. Watcher cubre tools/accesorios que se parenten después.
 	CollisionGroups.setGroupForCharacter(botModel, CollisionGroups.CHARACTERS)
-	botModel.DescendantAdded:Connect(function(descendant)
+	-- Audit mobile: guardar la conexión para desconectarla en el Died handler
+	-- antes del kill effect. El ragdoll/VFX parentea ~10 nuevos BaseParts y
+	-- el listener se dispararía para cada uno (se ejecuta el switch
+	-- CollisionGroup innecesario sobre un modelo en cleanup).
+	local descendantConn = botModel.DescendantAdded:Connect(function(descendant)
 		if descendant:IsA("BasePart") then
 			descendant.CollisionGroup = CollisionGroups.groupForNewPart(botModel)
 		end
@@ -619,11 +631,14 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 	-- recién spawneados clutterean móviles low-end sin valor de UX. El
 	-- jugador que dispare a un bot recién spawneado ve "0 daño visible"
 	-- durante 2s; el bot se mueve rápido y la situación se resuelve sola.
+	-- Attribute SpawnProtectedUntil para que BotAI._getBestTarget skipee
+	-- bots inmunes sin hacer FindFirstChildOfClass por candidato.
 	if GameConfig.SpawnProtectionDuration > 0 then
 		local forceField = Instance.new("ForceField")
 		forceField.Visible = false
 		forceField.Parent = botModel
 		Debris:AddItem(forceField, GameConfig.SpawnProtectionDuration)
+		botModel:SetAttribute("SpawnProtectedUntil", time() + GameConfig.SpawnProtectionDuration)
 	end
 
 	-- Registrar el bot en la cache global de targets para que otros bots
@@ -637,6 +652,7 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 		deathConnection = nil,
 		hasDeathBeenReported = false,
 		ai = botAIInstance,
+		descendantConn = descendantConn,
 	}
 
 	botAIInstance:Start(mapRoot, _aliveTargets, _roamGraph, _botModelByFakeUserId)
@@ -652,6 +668,14 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 		-- algo entre medias throws, el bot queda "corriendo tumbado" para
 		-- siempre. Cada una en pcall por separado para que un fallo no cancele
 		-- las demás.
+
+		-- 0a-pre. Cortar el listener de CollisionGroup antes del kill effect:
+		-- éste parentea N parts nuevos al ragdoll y dispararía el handler
+		-- innecesariamente sobre un modelo en cleanup.
+		if record.descendantConn then
+			record.descendantConn:Disconnect()
+			record.descendantConn = nil
+		end
 
 		-- 0a. Destrucción programada SIEMPRE. Aunque todo lo demás falle, el
 		-- bot eventualmente desaparece.
@@ -687,13 +711,11 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 			-- B6: clear el index — el nuevo bot se asignará en _spawnOneBot.
 			_botModelByFakeUserId[fakeUserId] = nil
 			_botsByName[botName] = nil
-			-- Audit fix: limpiar dicts por nombre. _removeBotByName lo hace
-			-- pero este path (death) lo omitía → entries residuales en
-			-- _botIdentityByName y _botFakeUserIdByName durante todo el
-			-- round (LogBotRoster mostraba ghosts; _botFakeUserIdByName
-			-- [oldName] apuntaba a un fakeUserId reciclado por otro bot).
-			-- _identityByFakeUserId NO se limpia: lo necesita el recycle
-			-- pool y GetBotIdentity para kill attribution post-respawn.
+			-- Limpiar dicts por nombre. _removeBotByName lo hace pero este path
+			-- (death) lo omitía → _botFakeUserIdByName[oldName] apuntaba a un
+			-- fakeUserId reciclado por otro bot. _identityByFakeUserId NO se
+			-- limpia: lo necesita el recycle pool y GetBotIdentity para kill
+			-- attribution post-respawn.
 			_botIdentityByName[botName] = nil
 			_botFakeUserIdByName[botName] = nil
 			_refreshAliveLists()
@@ -855,38 +877,6 @@ end
 --- de killer cuando el atacante es un bot. Devuelve nil si no se conoce.
 function AIService:GetBotIdentity(fakeUserId: number): BotIdentity?
 	return _identityByFakeUserId[fakeUserId]
-end
-
---- Vuelca al output todos los bots vivos con su identidad asignada
---- (name, image, team, personality, level, historical kills, appearance).
---- Pensado para debugging al inicio de un match.
-function AIService:LogBotRoster()
-	local count = 0
-	for _ in _botsByName do
-		count += 1
-	end
-	print(string.format("[AIService] Bot roster — %d bot(s) activos:", count))
-
-	for botName, record in _botsByName do
-		local fakeUserId = _botFakeUserIdByName[botName]
-		local identity = if fakeUserId then _identityByFakeUserId[fakeUserId] else nil
-		if not identity then
-			print(string.format("  %s (team=%s) — identidad no encontrada", botName, record.team))
-			continue
-		end
-		local appearance = identity.appearance
-		local outfit = (appearance and appearance.outfitId) or "<none>"
-		local hat = (appearance and appearance.hatId) or "<none>"
-		local face = (appearance and appearance.faceId) or "<none>"
-		local wrap = (appearance and appearance.wrapId) or "<none>"
-		print(string.format(
-			"  %s [team=%s fakeUserId=%d]\n    name=%q image=%s\n    personality=%s level=%d historicalKills=%d\n    outfit=%s hat=%s face=%s wrap=%s",
-			botName, record.team, fakeUserId,
-			identity.name, identity.image,
-			identity.personalityId, identity.level, identity.historicalKills,
-			outfit, hat, face, wrap
-		))
-	end
 end
 
 return AIService

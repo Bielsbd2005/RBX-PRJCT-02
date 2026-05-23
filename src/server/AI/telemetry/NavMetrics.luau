@@ -21,6 +21,15 @@
 	  AIService llama SetActiveBotCount(n) cada vez que cambia el roster.
 ]]
 
+local RunService = game:GetService("RunService")
+
+-- Audit mobile: telemetría desactivada en producción. En Studio sí grabamos
+-- ring buffer + counters + summary cada 30s. En servidores live `record` es
+-- no-op (cero allocs de payload tables, cero string concats). Counters de
+-- lifecycle siguen siendo baratos cuando enabled = false porque el early
+-- return ocurre antes de la insertion.
+local ENABLED = RunService:IsStudio()
+
 local SUMMARY_INTERVAL_SECONDS = 30
 local RING_CAPACITY = 256
 
@@ -61,6 +70,9 @@ local function _payloadToString(payload: { [string]: any }): string
 end
 
 function NavMetrics.record(tag: string, payload: { [string]: any }, immediate: boolean?)
+	if not ENABLED then
+		return
+	end
 	local event: Event = {
 		tag = tag,
 		payload = payload,
@@ -130,26 +142,33 @@ function NavMetrics.GetSnapshot(): { counts: { [string]: number }, recent: { Eve
 	return { counts = countsCopy, recent = recent }
 end
 
--- Resumen periódico. Si todos los contadores están en 0, silencio.
-task.spawn(function()
-	while true do
-		task.wait(SUMMARY_INTERVAL_SECONDS)
-		local any = false
-		local parts = {} :: { string }
-		for tag, n in _counts do
-			if n > 0 then
-				any = true
-				table.insert(parts, tag .. "=" .. tostring(n))
+-- Resumen periódico. Solo activo en Studio (ENABLED). En producción este
+-- coroutine nunca se crea — el while no corre y los contadores quedan vacíos.
+if ENABLED then
+	task.spawn(function()
+		while true do
+			task.wait(SUMMARY_INTERVAL_SECONDS)
+			-- Skip si no hay bots activos: en lobby/menu el summary no aporta.
+			if _activeBotCount == 0 then
+				continue
 			end
+			local any = false
+			local parts = {} :: { string }
+			for tag, n in _counts do
+				if n > 0 then
+					any = true
+					table.insert(parts, tag .. "=" .. tostring(n))
+				end
+			end
+			if any then
+				table.sort(parts)
+				print(string.format("[NavMetrics] summary (%ds): %s", SUMMARY_INTERVAL_SECONDS, table.concat(parts, ", ")))
+			end
+			-- No vaciamos los contadores — son acumulados de ronda. AIService los
+			-- limpia en OnRoundEnd vía ResetCounts().
 		end
-		if any then
-			table.sort(parts)
-			print(string.format("[NavMetrics] summary (%ds): %s", SUMMARY_INTERVAL_SECONDS, table.concat(parts, ", ")))
-		end
-		-- No vaciamos los contadores — son acumulados de ronda. AIService los
-		-- limpia en OnRoundEnd vía ResetCounts().
-	end
-end)
+	end)
+end
 
 function NavMetrics.ResetCounts()
 	table.clear(_counts)

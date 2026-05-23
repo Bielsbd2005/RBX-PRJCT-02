@@ -77,17 +77,20 @@ end
 
 
 -- Remove back accessories since they frequently block the camera
+-- Audit mobile: check síncrono. Antes WaitForChild("Handle",5) +
+-- WaitForChild("BodyBackAttachment",5) + WaitForChild("WaistBackAttachment",5)
+-- por cada descendant del character (~150 al respawn → ~150 coroutines
+-- pendientes con yields hasta 5s en mobile spawn). Los Accessory de Roblox
+-- llegan con su Handle ya parented cuando se añaden al character; un check
+-- síncrono cubre el caso normal sin yields.
 local function isBackAccessory(instance)
 	if instance and instance:IsA("Accessory") then
-		local handle = instance:WaitForChild("Handle", 5)
+		local handle = instance:FindFirstChild("Handle")
 		if handle and handle:IsA("Part") then
-			local bodyBackAttachment = handle:WaitForChild("BodyBackAttachment", 5)
-			if bodyBackAttachment and bodyBackAttachment:IsA("Attachment") then
+			if handle:FindFirstChild("BodyBackAttachment") then
 				return true
 			end
-
-			local waistBackAttachment = handle:WaitForChild("WaistBackAttachment", 5)
-			if waistBackAttachment and waistBackAttachment:IsA("Attachment") then
+			if handle:FindFirstChild("WaistBackAttachment") then
 				return true
 			end
 		end
@@ -98,23 +101,26 @@ end
 
 local function removeBackAccessoriesFromCharacter(character)
 	for _, child in ipairs(character:GetChildren()) do
-		coroutine.wrap(function()
-			if isBackAccessory(child) then
-				child:Destroy()
-			end
-		end)()
+		if isBackAccessory(child) then
+			child:Destroy()
+		end
 	end
 end
 
 local descendantAddedConnection = nil
 local function onCharacterAdded(character)
+	-- Disconnect defensivo: en respawns rápidos CharacterRemoving del char
+	-- anterior puede no haber disparado todavía; sin esto, el listener viejo
+	-- queda enganchado al character destruido (leak).
+	if descendantAddedConnection then
+		descendantAddedConnection:Disconnect()
+		descendantAddedConnection = nil
+	end
 	removeBackAccessoriesFromCharacter(character)
 	descendantAddedConnection = character.DescendantAdded:Connect(function(descendant)
-		coroutine.wrap(function()
-			if isBackAccessory(descendant) then
-				descendant:Destroy()
-			end
-		end)()
+		if isBackAccessory(descendant) then
+			descendant:Destroy()
+		end
 	end)
 end
 
@@ -243,6 +249,14 @@ function ShoulderCamera.new(weaponsSystem)
 	-- hijos (Tool/Accoutrement). Saltamos el O(N·M) cuando no hay nada que hacer.
 	self._transparencyDirty = true
 	self._transparencyChildConns = {} :: { RBXScriptConnection }
+	-- Audit mobile: cache de arrays { BasePart } por Accoutrement/Tool. Antes
+	-- handlePartTransparencies iteraba GetDescendants() de cada Accoutrement/
+	-- Tool en CADA dirty-cycle (zoom toggle, hasScope, child added). Con 6
+	-- hats + Tool en mobile con tap-aim, eso son 7 GetDescendants() por tap.
+	-- El cache se invalida vía DescendantAdded/Removed por instancia, y se
+	-- libera cuando el char cambia (junto con _transparencyChildConns).
+	self._partsCacheByInstance = {} :: { [Instance]: { BasePart } }
+	self._partsCacheConns = {} :: { [Instance]: { RBXScriptConnection } }
 	self.controlModule = nil -- used to get player's touch input for moving character
 	self.random = Random.new()
 	self.shakeSeed = self.random:NextInteger(1, 10000)
@@ -743,7 +757,34 @@ function ShoulderCamera:onCurrentCharacterChanged(character)
 		conn:Disconnect()
 	end
 	table.clear(self._transparencyChildConns)
+	-- Vaciar cache de parts por instancia (Accoutrements/Tools del char
+	-- anterior). Las conns por-instancia se desconectan vía AncestryChanged
+	-- al destruirse el char, pero invalidamos defensivamente. Snapshot de
+	-- keys primero para no mutar la tabla durante la iteración.
+	local toInvalidate: { Instance } = {}
+	for instance in self._partsCacheByInstance do
+		table.insert(toInvalidate, instance)
+	end
+	for _, instance in toInvalidate do
+		self:_invalidatePartsCache(instance)
+	end
 	self._transparencyDirty = true
+	-- Audit mobile: cleanup defensivo SIEMPRE de listeners ligados al char
+	-- anterior. En respawn rápido CharacterAdded del nuevo puede llegar
+	-- antes que CharacterRemoving del anterior, dejando humanoidDied y los
+	-- ChildAdded/Removed apuntando a un Humanoid/char destruido.
+	if self.eventConnections.humanoidDied then
+		self.eventConnections.humanoidDied:Disconnect()
+		self.eventConnections.humanoidDied = nil
+	end
+	if self.eventConnections.characterChildAdded then
+		self.eventConnections.characterChildAdded:Disconnect()
+		self.eventConnections.characterChildAdded = nil
+	end
+	if self.eventConnections.characterChildRemoved then
+		self.eventConnections.characterChildRemoved:Disconnect()
+		self.eventConnections.characterChildRemoved = nil
+	end
 	if character then
 		local function _markDirty()
 			self._transparencyDirty = true
@@ -815,19 +856,8 @@ function ShoulderCamera:onCurrentCharacterChanged(character)
 			end
 		end
 	else
-		if self.eventConnections.humanoidDied then
-			self.eventConnections.humanoidDied:Disconnect()
-			self.eventConnections.humanoidDied = nil
-		end
-		if self.eventConnections.characterChildAdded then
-			self.eventConnections.characterChildAdded:Disconnect()
-			self.eventConnections.characterChildAdded = nil
-		end
-		if self.eventConnections.characterChildRemoved then
-			self.eventConnections.characterChildRemoved:Disconnect()
-			self.eventConnections.characterChildRemoved = nil
-		end
-
+		-- humanoidDied/characterChildAdded/characterChildRemoved ya se
+		-- desconectaron en el cleanup defensivo al inicio de esta función.
 		self.currentTool = nil
 		self.currentHumanoid = nil
 		self.currentRootPart = nil
@@ -897,16 +927,41 @@ end
 
 local PENETRATE_MAX_TRIES = 8
 
+-- RaycastParams cacheado a nivel módulo. Antes FindPartOnRayWithIgnoreList
+-- (deprecated) por frame del RenderStep para occlusion del shoulder cam;
+-- workspace:Raycast es la ruta optimizada. Mutamos FilterDescendantsInstances
+-- in-place (reasignación obligatoria por Roblox; mutar la tabla no se propaga).
+local _shoulderCastParams: RaycastParams? = nil
+
 function ShoulderCamera:penetrateCast(ray, ignoreList)
 	-- W7: mutar ignoreList in-place y restaurar al final. Antes table.clone()
 	-- por frame en RenderStep alocaba un array completo + GC churn. No hay
 	-- reentrancia (penetrateCast no yield) → mutación temporal es segura.
+	local params = _shoulderCastParams
+	if not params then
+		params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		params.IgnoreWater = true
+		_shoulderCastParams = params
+	end
+	params.FilterDescendantsInstances = ignoreList
+
 	local originalSize = #ignoreList
-	local hitPart, hitPoint, hitNormal, hitMaterial = nil, ray.Origin + ray.Direction, Vector3.new(0, 1, 0), Enum.Material.Air
+	local hitPart, hitPoint, hitNormal, hitMaterial =
+		nil, ray.Origin + ray.Direction, Vector3.new(0, 1, 0), Enum.Material.Air
 	for _ = 1, PENETRATE_MAX_TRIES do
-		hitPart, hitPoint, hitNormal, hitMaterial = workspace:FindPartOnRayWithIgnoreList(ray, ignoreList, false, true)
+		local result = workspace:Raycast(ray.Origin, ray.Direction, params)
+		if not result then
+			hitPart = nil
+			break
+		end
+		hitPart = result.Instance
+		hitPoint = result.Position
+		hitNormal = result.Normal
+		hitMaterial = result.Material
 		if hitPart and not hitPart.CanCollide then
 			table.insert(ignoreList, hitPart)
+			params.FilterDescendantsInstances = ignoreList
 		else
 			break
 		end
@@ -937,6 +992,49 @@ function ShoulderCamera:getCurrentFieldOfView()
 	end
 end
 
+function ShoulderCamera:_invalidatePartsCache(instance: Instance)
+	self._partsCacheByInstance[instance] = nil
+	local conns = self._partsCacheConns[instance]
+	if conns then
+		for _, conn in conns do
+			conn:Disconnect()
+		end
+		self._partsCacheConns[instance] = nil
+	end
+end
+
+function ShoulderCamera:_getCachedBaseParts(instance: Instance): { BasePart }
+	local cached = self._partsCacheByInstance[instance]
+	if cached then
+		return cached
+	end
+
+	local parts: { BasePart } = {}
+	for _, desc in instance:GetDescendants() do
+		if desc:IsA("BasePart") then
+			table.insert(parts, desc)
+		end
+	end
+	self._partsCacheByInstance[instance] = parts
+
+	-- Invalidate on DescendantAdded/Removed: si llegan/salen parts del
+	-- accoutrement/tool, recomputar en el próximo dirty cycle.
+	local conns = {} :: { RBXScriptConnection }
+	local function invalidate()
+		self._partsCacheByInstance[instance] = nil
+	end
+	table.insert(conns, instance.DescendantAdded:Connect(invalidate))
+	table.insert(conns, instance.DescendantRemoving:Connect(invalidate))
+	table.insert(conns, instance.AncestryChanged:Connect(function(_, parent)
+		if parent == nil then
+			self:_invalidatePartsCache(instance)
+		end
+	end))
+	self._partsCacheConns[instance] = conns
+
+	return parts
+end
+
 function ShoulderCamera:handlePartTransparencies()
 	if not self._transparencyDirty then return end
 	if not self.currentCharacter then return end
@@ -952,16 +1050,21 @@ function ShoulderCamera:handlePartTransparencies()
 			child.LocalTransparencyModifier = hidden and 1 or 0
 		elseif child:IsA("Accoutrement") then
 			local isMatchLoadoutHat = child:GetAttribute(MATCH_LOADOUT_HAT_ATTRIBUTE) == true
-			local descendants = child:GetDescendants()
-			local accoutrementParts = {}
-			for _, desc in pairs(descendants) do
-				if desc:IsA("Attachment") and accoutrementsLookup[desc.Name] then
-					hidden = true
-				elseif desc:IsA("BasePart") then
-					table.insert(accoutrementParts, desc)
+			-- Detección de hidden vía attachments: el dict accoutrementsLookup
+			-- está vacío en la práctica pero conservamos la rama para no
+			-- cambiar comportamiento si algún flujo futuro lo poblara. El
+			-- check de Attachment es O(descendants) — para hacerlo cheap,
+			-- itera solo cuando el dict tiene alguna entrada.
+			if next(accoutrementsLookup) then
+				for _, desc in child:GetDescendants() do
+					if desc:IsA("Attachment") and accoutrementsLookup[desc.Name] then
+						hidden = true
+						break
+					end
 				end
 			end
-			for _, part in pairs(accoutrementParts) do
+			local accoutrementParts = self:_getCachedBaseParts(child)
+			for _, part in accoutrementParts do
 				if hidden then
 					part.LocalTransparencyModifier = 1
 				elseif isMatchLoadoutHat and self.zoomState then
@@ -972,10 +1075,9 @@ function ShoulderCamera:handlePartTransparencies()
 			end
 		elseif child:IsA("Tool") then
 			hidden = self.zoomState and (self.hasScope or self.hideToolWhileZoomed)
-			for _, part in pairs(child:GetDescendants()) do
-				if part:IsA("BasePart") then
-					part.LocalTransparencyModifier = hidden and 1 or 0
-				end
+			local toolParts = self:_getCachedBaseParts(child)
+			for _, part in toolParts do
+				part.LocalTransparencyModifier = hidden and 1 or 0
 			end
 		end
 	end

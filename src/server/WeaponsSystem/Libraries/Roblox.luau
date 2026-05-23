@@ -39,22 +39,28 @@ function Roblox.waitForDescendant(instance, descendantName, timeout)
 		return found
 	end
 
-	if timeout < 1e6 and timeout > 0 then
-		coroutine.wrap(function()
-			wait(timeout)
-			if not found then
-				warn("Roblox.waitForDescendant(%s, %s) is taking too long")
-			end
-		end)()
-	end
+	-- Audit mobile: si timeout expira, romper el bucle infinito. Antes el
+	-- coroutine de warn imprimía pero el while quedaba ESPERANDO forever
+	-- contra DescendantAdded, manteniendo el coroutine y el listener
+	-- implícito vivos indefinidamente para un name que nunca llega.
+	local deadline = if timeout < 1e6 and timeout > 0 then os.clock() + timeout else math.huge
+	local warned = false
 
 	while not found do
+		if os.clock() >= deadline then
+			if not warned then
+				warn(string.format("Roblox.waitForDescendant(%s, %s) timed out", tostring(instance), tostring(descendantName)))
+				warned = true
+			end
+			return nil
+		end
 		local newDescendant = instance.DescendantAdded:Wait()
 		if newDescendant.Name == descendantName then
 			found = newDescendant
 			return newDescendant
 		end
 	end
+	return found
 end
 
 function Roblox.create(className)
@@ -345,15 +351,46 @@ function Roblox.waitForInstance(root, path)
 	return findInstanceImpl(root, path, waitForChildImpl)
 end
 
+-- RaycastParams cacheado a nivel módulo. Antes la API legacy
+-- FindPartOnRayWithIgnoreList (deprecated por Roblox) se llamaba por cada
+-- bala × jugador × frame de vuelo. workspace:Raycast es la ruta optimizada
+-- actual y se beneficia del JIT. Mutamos FilterDescendantsInstances in-place
+-- cada call (Roblox requiere reasignación de la propiedad para tomar la
+-- lista nueva, así que no podemos solo mutar la tabla por referencia).
+local _penetrateCastParams: RaycastParams? = nil
+
 function Roblox.penetrateCast(ray, ignoreList)
 	debug.profilebegin("penetrateCast")
+	local params = _penetrateCastParams
+	if not params then
+		params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		params.IgnoreWater = true
+		_penetrateCastParams = params
+	end
+	params.FilterDescendantsInstances = ignoreList
+
 	local tries = 0
-	local hitPart, hitPoint, hitNormal, hitMaterial = nil, ray.Origin + ray.Direction, Vector3.new(0, 1, 0), Enum.Material.Air
+	local hitPart, hitPoint, hitNormal, hitMaterial =
+		nil, ray.Origin + ray.Direction, Vector3.new(0, 1, 0), Enum.Material.Air
 	while tries < 50 do
 		tries = tries + 1
-		hitPart, hitPoint, hitNormal, hitMaterial = workspace:FindPartOnRayWithIgnoreList(ray, ignoreList, false, true)
-		if hitPart and (not hitPart.CanCollide or CollectionService:HasTag(hitPart, "DroppedItemPart") or CollectionService:HasTag(hitPart, "Hidden")) and hitPart.Parent:FindFirstChildOfClass("Humanoid") == nil then
+		local result = workspace:Raycast(ray.Origin, ray.Direction, params)
+		if not result then
+			hitPart = nil
+			break
+		end
+		hitPart = result.Instance
+		hitPoint = result.Position
+		hitNormal = result.Normal
+		hitMaterial = result.Material
+		if hitPart
+			and (not hitPart.CanCollide or CollectionService:HasTag(hitPart, "DroppedItemPart") or CollectionService:HasTag(hitPart, "Hidden"))
+			and hitPart.Parent:FindFirstChildOfClass("Humanoid") == nil
+		then
 			table.insert(ignoreList, hitPart)
+			-- Reasignar: mutar la lista subyacente no se propaga al RaycastParams.
+			params.FilterDescendantsInstances = ignoreList
 		else
 			break
 		end

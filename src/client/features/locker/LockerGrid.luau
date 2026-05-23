@@ -164,6 +164,11 @@ function LockerGrid.new(
 	}
 	self._currentTemplateKey = nil
 	self._cachedGridCardRefs = {}
+	-- Audit mobile: lockedTemplate compartido por templateKey en vez de un
+	-- clone por card. Antes 50+ cards mantenían cada una su propio clone del
+	-- template Locked (pool memory bloat). El clone único se hace lazy en el
+	-- primer card construido y se reusa por todos.
+	self._lockedTemplateByKey = {} :: { [string]: GuiObject }
 	self._cardPreviewJanitors = {}
 	self._gridButtonItems = {}
 	self._selectedCatalogButton = nil
@@ -269,7 +274,8 @@ function LockerGrid:_buildGridCardRefs(card: GuiObject, templateKey: TemplateKey
 		equippedNode = if equippedNode and equippedNode:IsA("GuiObject") then equippedNode else nil,
 		lockedNode = lockedGui,
 		lockedLevelNode = if lockedLevelNode and lockedLevelNode:IsA("TextLabel") then lockedLevelNode else nil,
-		lockedTemplate = if lockedGui then lockedGui:Clone() else nil,
+		-- Template lazy + compartido por templateKey (ver _lockedTemplateByKey).
+		lockedTemplate = nil,
 		lockedParent = if lockedGui then lockedGui.Parent else nil,
 		titleNode = nil,
 		barNode = nil,
@@ -480,10 +486,18 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 
 	if isLevelLocked then
 		if refs.lockedNode == nil or refs.lockedNode.Parent == nil then
-			local lockedTemplate = refs.lockedTemplate
+			-- Resolver el template compartido lazy. Si ya existe uno cacheado
+			-- por templateKey, reusarlo; sino, clonar el lockedNode que tenga
+			-- otra card actualmente o el original (refs.lockedNode previo).
+			local sharedTemplate = self._lockedTemplateByKey[refs.templateKey]
+			if not sharedTemplate and refs.lockedNode then
+				sharedTemplate = refs.lockedNode:Clone()
+				sharedTemplate.Parent = nil
+				self._lockedTemplateByKey[refs.templateKey] = sharedTemplate
+			end
 			local lockedParent = refs.lockedParent
-			if lockedTemplate and lockedParent and lockedParent:IsDescendantOf(card) then
-				local clonedLocked = lockedTemplate:Clone()
+			if sharedTemplate and lockedParent and lockedParent:IsDescendantOf(card) then
+				local clonedLocked = sharedTemplate:Clone()
 				clonedLocked.Parent = lockedParent
 				refs.lockedNode = clonedLocked
 
@@ -765,18 +779,26 @@ end
 function LockerGrid:PlayStagger()
 	self:_cancelStaggerTweens()
 
+	-- Audit mobile: usar el delayTime nativo de TweenInfo (param 6) en lugar
+	-- de task.delay por card. Antes con 50-100 cards eran 50-100 task.delay
+	-- simultáneas; ahora 0 (TweenService gestiona el delay internamente y
+	-- :Cancel limpia tanto los que ya empezaron como los pendientes).
 	for index, card in self._activeGridCards do
 		if not card.Visible then continue end
 		local scale = self:_ensureCardScale(card)
 		scale.Scale = 0
-		local tween = TweenService:Create(scale, GRID_STAGGER_TWEEN_INFO, { Scale = 1 })
+		local delayTime = (index - 1) * GRID_STAGGER_DELAY
+		local info = TweenInfo.new(
+			GRID_STAGGER_TWEEN_INFO.Time,
+			GRID_STAGGER_TWEEN_INFO.EasingStyle,
+			GRID_STAGGER_TWEEN_INFO.EasingDirection,
+			0,
+			false,
+			delayTime
+		)
+		local tween = TweenService:Create(scale, info, { Scale = 1 })
 		self._gridStaggerTweens[card] = tween
-		local thisTween = tween
-		local thisCard = card
-		task.delay((index - 1) * GRID_STAGGER_DELAY, function()
-			if self._gridStaggerTweens[thisCard] ~= thisTween then return end
-			thisTween:Play()
-		end)
+		tween:Play()
 	end
 end
 
