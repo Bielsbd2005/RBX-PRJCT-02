@@ -51,7 +51,6 @@ export type Stats = {
 	MatchesPlayed: number,
 	TimePlayedSeconds: number,
 	Cash: number,
-	Gems: number,
 }
 
 -- Cada categoría es un mapa string → bool (true = desbloqueado).
@@ -276,7 +275,6 @@ local DEFAULT: PlayerProfile = {
 		MatchesPlayed = 0,
 		TimePlayedSeconds = 0,
 		Cash = 500,
-		Gems = 0,
 	},
 
 	Inventory = {
