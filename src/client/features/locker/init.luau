@@ -347,6 +347,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		previewModel:MoveTo(spawnTarget.Position)
 	end
 
+	local _cachedIdleAnimation: Animation? = nil
+
 	local function playPreviewIdleAnimation(previewModel: Model, ownerJanitor: any?)
 		local animator = previewModel:FindFirstChildWhichIsA("Animator", true)
 		if not animator then
@@ -377,11 +379,13 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			return
 		end
 
-		local animation = Instance.new("Animation")
-		animation.Name = "LockerPreviewIdle"
-		animation.AnimationId = LOCKER_PREVIEW_IDLE_ANIMATION_ID
+		if not _cachedIdleAnimation then
+			_cachedIdleAnimation = Instance.new("Animation")
+			_cachedIdleAnimation.Name = "LockerPreviewIdle"
+			_cachedIdleAnimation.AnimationId = LOCKER_PREVIEW_IDLE_ANIMATION_ID
+		end
 
-		local animationTrack = animator:LoadAnimation(animation)
+		local animationTrack = animator:LoadAnimation(_cachedIdleAnimation)
 		animationTrack.Name = "LockerPreviewIdle"
 		animationTrack.Looped = true
 		animationTrack.Priority = Enum.AnimationPriority.Idle
@@ -391,7 +395,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		cleanupTarget:Add(function()
 			animationTrack:Stop(0.1)
 			animationTrack:Destroy()
-			animation:Destroy()
 		end, true)
 	end
 
@@ -470,11 +473,15 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	-- profundidad del rig R15 (HRP → LowerTorso → UpperTorso → extremidades →
 	-- manos/pies).
 	local function snapPartsToCanonicalPose(char: Model)
+		local motors = {}
+		for _, m in char:GetDescendants() do
+			if m:IsA("Motor6D") and m.Part0 and m.Part1 then
+				table.insert(motors, m)
+			end
+		end
 		for _ = 1, 4 do
-			for _, m in char:GetDescendants() do
-				if m:IsA("Motor6D") and m.Part0 and m.Part1 then
-					m.Part1.CFrame = m.Part0.CFrame * m.C0 * m.C1:Inverse()
-				end
+			for _, m in motors do
+				m.Part1.CFrame = m.Part0.CFrame * m.C0 * m.C1:Inverse()
 			end
 		end
 	end
@@ -898,7 +905,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			Position = targetPosition,
 		})
 		activeActionFrameTween = tween
-		tween.Completed:Connect(function()
+		tween.Completed:Once(function()
 			if activeActionFrameTween == tween then
 				activeActionFrameTween = nil
 				if not visible then
@@ -1525,7 +1532,13 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		restoreEquippedWeaponPreviews()
 
 		local statsObserver = fusionScope:Observer(DataController.Stats)
-		janitor:Add(statsObserver:onBind(updateStatsUiFromData), true)
+		janitor:Add(statsObserver:onBind(function()
+			if not isOpen then
+				dirtyWhileClosed = true
+				return
+			end
+			updateStatsUiFromData()
+		end), true)
 
 		local weaponKillsObserver = fusionScope:Observer(DataController.WeaponKills)
 		janitor:Add(weaponKillsObserver:onBind(function()
@@ -1541,11 +1554,11 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 		local inventoryObserver = fusionScope:Observer(DataController.Inventory)
 		janitor:Add(inventoryObserver:onBind(function()
-			rebuildOwnedLookup()
 			if not isOpen then
 				dirtyWhileClosed = true
 				return
 			end
+			rebuildOwnedLookup()
 			if selectedMainCategory and selectedNavKey then
 				local selectedQualifiedId = if selectedCatalogItem then selectedCatalogItem.qualifiedId else nil
 				populateMainContentForNavItem(selectedMainCategory, selectedNavKey, selectedQualifiedId)
@@ -1554,19 +1567,16 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 		local loadoutObserver = fusionScope:Observer(DataController.Loadout)
 		janitor:Add(loadoutObserver:onBind(function()
+			if not isOpen then
+				dirtyWhileClosed = true
+				return
+			end
 			rebuildEquippedLookup()
-			-- Solo revertir el body al equipado si NO hay un body en preview no-comprometido.
-			-- En otro caso, un cambio de loadout (p.ej. equipar un hat) sobreescribiría
-			-- el preview del body que el usuario está mirando.
 			local previewingBody = selectedCatalogItem ~= nil
 				and selectedCatalogItem.Category == LockerCategory.OUTFITS
 			local currentOutfit = getOptionalString(getCurrentLoadout().Outfit)
 			if not previewingBody and currentOutfit ~= lastPreviewOutfitId then
 				rebuildPreviewCharacter(currentOutfit)
-			end
-			if not isOpen then
-				dirtyWhileClosed = true
-				return
 			end
 			applyEquippedFacePreview()
 			applyEquippedHatPreview()

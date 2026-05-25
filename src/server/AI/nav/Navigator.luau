@@ -280,7 +280,7 @@ function Navigator:_startWalk(gen: number)
 					end
 				end
 
-				task.wait()
+				task.wait(0.05)
 			end
 		end
 

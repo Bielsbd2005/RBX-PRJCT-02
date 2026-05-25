@@ -59,6 +59,7 @@ type TrackState = {
 	model: Model,
 	conns: { RBXScriptConnection },
 	baseFillSize: UDim2,
+	lastIsAlly: boolean?,
 }
 
 local tracked: { [Model]: TrackState } = {}
@@ -134,8 +135,11 @@ local function updateState(state: TrackState)
 		local localChar = localPlayer.Character
 		local isAlly = localChar ~= nil and TeamUtils.isSameTeam(localChar, model)
 
-		local gradient = ensureFillGradient(state.fill)
-		gradient.Color = if isAlly then ALLY_GRADIENT else ENEMY_GRADIENT
+		if state.lastIsAlly ~= isAlly then
+			state.lastIsAlly = isAlly
+			local gradient = ensureFillGradient(state.fill)
+			gradient.Color = if isAlly then ALLY_GRADIENT else ENEMY_GRADIENT
+		end
 
 		state.fill.Visible = true
 		local maxHp = math.max(1, humanoid.MaxHealth)

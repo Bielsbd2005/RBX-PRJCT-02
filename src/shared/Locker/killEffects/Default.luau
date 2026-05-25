@@ -90,11 +90,17 @@ function RagdollModule.apply(char: Model): boolean
 
 	hum.BreakJointsOnDeath = false
 
-	-- 1. Prepare for physics
-	Utils.anchor(char, true)
-	Utils.destroyMotors(char)
+	local parts = {}
+	for _, desc in char:GetDescendants() do
+		if desc:IsA("BasePart") then
+			desc.Anchored = true
+			table.insert(parts, desc)
+		elseif desc:IsA("Motor6D") then
+			desc:Destroy()
+		end
+	end
 
-	-- 2. Clean up
+	-- Clean up
 	local root = char:FindFirstChild("HumanoidRootPart", true)
 	if root then
 		root:ClearAllChildren()
@@ -103,16 +109,13 @@ function RagdollModule.apply(char: Model): boolean
 	hum:ChangeState(Enum.HumanoidStateType.Dead)
 	hum:SetStateEnabled(Enum.HumanoidStateType.GettingUp, false)
 
-	-- 3. Build ragdoll
 	buildRagdoll(char)
 
-	-- 4. Mover baseparts al grupo RAGDOLL para que jugadores vivos no choquen
-	-- con el cadáver. Antes este kill effect NO asignaba grupo, así que los
-	-- corpses con kill effect Default bloqueaban a los players vivos.
 	CollisionGroups.setGroupForCharacter(char, CollisionGroups.RAGDOLL)
 
-	-- 5. Apply force and release
-	Utils.anchor(char, false)
+	for _, part in parts do
+		part.Anchored = false
+	end
 
 	local lowerTorso = char:FindFirstChild("LowerTorso", true)
 	if lowerTorso and lowerTorso:IsA("BasePart") then

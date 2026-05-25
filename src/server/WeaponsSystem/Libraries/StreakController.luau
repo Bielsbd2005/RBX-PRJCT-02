@@ -123,7 +123,7 @@ local function restartBarDrainTween()
 	stopBarTween()
 	fillBar.Size = UDim2.new(1, 0, 1, 0)
 	barTween = TweenService:Create(fillBar, TI_BAR_DRAIN, { Size = UDim2.new(0, 0, 1, 0) })
-	barTween.Completed:Connect(function(playbackState)
+	barTween.Completed:Once(function(playbackState)
 		if playbackState == Enum.PlaybackState.Completed then
 			StreakController.reset()
 		end

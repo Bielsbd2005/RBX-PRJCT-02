@@ -21,9 +21,34 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Network = require(Shared:WaitForChild("networking"):WaitForChild("Network"))
 
+local SoundService = game:GetService("SoundService")
+
 local PickupDropEffect = {}
 
 local PICKUP_SOUND_ID = "rbxassetid://5728423829"
+
+local _pickupSoundPool: { Sound } = {}
+local _PICKUP_SOUND_POOL_SIZE = 2
+
+local function _playPickupSound()
+	for _, s in _pickupSoundPool do
+		if not s.IsPlaying then
+			s.PlaybackSpeed = math.random(95, 135) / 100
+			s:Play()
+			return
+		end
+	end
+
+	if #_pickupSoundPool < _PICKUP_SOUND_POOL_SIZE then
+		local s = Instance.new("Sound")
+		s.SoundId = PICKUP_SOUND_ID
+		s.Volume = 0.25
+		s.PlaybackSpeed = math.random(95, 135) / 100
+		s.Parent = SoundService
+		table.insert(_pickupSoundPool, s)
+		s:Play()
+	end
+end
 local MAGNET_RADIUS = 16
 local EXPIRE_AFTER_SECONDS = 5
 local DESPAWN_TWEEN_SECONDS = 0.45
@@ -255,13 +280,7 @@ local function _pickupTickEntry(entry: PickupEntry, dt: number)
 			if not entry.picked then
 				entry.picked = true
 
-				local sound = Instance.new("Sound")
-				sound.SoundId = PICKUP_SOUND_ID
-				sound.Volume = 0.25
-				sound.PlaybackSpeed = math.random(95, 135) / 100
-				sound.Parent = rootPart
-				sound:Play()
-				Debris:AddItem(sound, 1.5)
+				_playPickupSound()
 
 				Network.Match.RequestPickup.Send({ kind = "Health" })
 			end

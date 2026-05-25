@@ -124,6 +124,7 @@ function Parabola:_penetrateCast(ray, ignoreList)
 	end
 	params.FilterDescendantsInstances = ignoreList
 
+	local originalLen = #ignoreList
 	local tries = 0
 	local hitPart, hitPoint, hitNormal, hitMaterial =
 		nil, ray.Origin + ray.Direction, UP_VECTOR, Enum.Material.Air
@@ -145,6 +146,11 @@ function Parabola:_penetrateCast(ray, ignoreList)
 			break
 		end
 	end
+
+	for i = #ignoreList, originalLen + 1, -1 do
+		ignoreList[i] = nil
+	end
+
 	debug.profileend()
 	return hitPart, hitPoint, hitNormal, hitMaterial
 end

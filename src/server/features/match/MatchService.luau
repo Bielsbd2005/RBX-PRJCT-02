@@ -211,13 +211,17 @@ end
 
 local function _sendBotRosterToPlayer(player: Player)
 	if not _AIService then return end
-	local roster = _AIService:GetBotRoster()
-	local ok, json = pcall(HttpService.JSONEncode, HttpService, roster)
-	if ok then
-		pcall(function()
-			Network.Match.BotRoster.SendTo({ json = json }, player)
-		end)
+	local json = _lastBotRosterJsonBroadcast
+	if not json then
+		local roster = _AIService:GetBotRoster()
+		local ok, encoded = pcall(HttpService.JSONEncode, HttpService, roster)
+		if not ok then return end
+		json = encoded
+		_lastBotRosterJsonBroadcast = json
 	end
+	pcall(function()
+		Network.Match.BotRoster.SendTo({ json = json }, player)
+	end)
 end
 
 local function _resolveBotKillerName(attackerUserId: number): string
@@ -738,12 +742,6 @@ local function _collectAllCombatantData(excludePlayer: Player?): (
 	if botsFolder then
 		for _, node in botsFolder:GetChildren() do
 			if not node:IsA("Model") then
-				continue
-			end
-
-			-- Bots de IA no tienen Player asociado; defensivo por si la carpeta
-			-- contiene clones con player tag en el futuro.
-			if Players:GetPlayerFromCharacter(node) ~= nil then
 				continue
 			end
 
@@ -1355,7 +1353,6 @@ local function _handleBotDied(botTeam: string, _botName: string, botHumanoid: Hu
 
 	_broadcastRoundState()
 	_rebalanceBotsForCurrentRound("bot death")
-	_broadcastBotRoster()
 
 	if _roundScoreA >= GameConfig.WinScoreLimit then
 		_finishRoundAndScheduleRestart("win score limit reached", "A")

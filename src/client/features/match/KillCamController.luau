@@ -7,6 +7,9 @@ local TweenService = game:GetService("TweenService")
 local KillCamController = {}
 KillCamController.__index = KillCamController
 
+local VEC3_UP = Vector3.new(0, 1, 0)
+local VEC3_RIGHT = Vector3.new(1, 0, 0)
+
 local CONFIG = {
 	-- Posición inicial: elevada y lejana
 	initialHeight = 8,
@@ -263,7 +266,7 @@ function KillCamController:start(data: StartData?)
 
 		-- Determinar dirección hacia dónde "mira" el killer
 		-- Si el killer está mirando a una dirección específica, usarla; de lo contrario, usar dirección arbitraria
-		local killerDirection = Vector3.new(1, 0, 0) -- Dirección predeterminada
+		local killerDirection = VEC3_RIGHT
 		if focusRoot then
 			-- Intentar obtener orientación del killer
 			local killerCFrame = focusRoot.CFrame
@@ -272,9 +275,8 @@ function KillCamController:start(data: StartData?)
 
 		-- Posición de cámara: enfrente del killer (con offset lateral sutil)
 		-- Usar cross product para obtener vector perpendicular
-		local upVector = Vector3.new(0, 1, 0)
-		local rightRaw = killerDirection:Cross(upVector)
-		local rightVector = if rightRaw.Magnitude > 0.001 then rightRaw.Unit else Vector3.new(1, 0, 0)
+		local rightRaw = killerDirection:Cross(VEC3_UP)
+		local rightVector = if rightRaw.Magnitude > 0.001 then rightRaw.Unit else VEC3_RIGHT
 
 		local targetPos = pivot
 			+ killerDirection * currentDistance          -- Distancia enfrente

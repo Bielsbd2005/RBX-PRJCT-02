@@ -61,6 +61,42 @@ local RELOAD_PROGRESS_STYLE = {
 	TransOfMissingPart = 0.25,
 }
 
+-- Pre-built sequences for _updateReloadProgressBar — style is constant so these
+-- never need to change. Avoids ~480 userdata allocs per reload.
+local _reloadSeqCache: {
+	colorSeq: ColorSequence?,
+	transSeq: NumberSequence?,
+	whiteColor: ColorSequence?,
+	zeroTrans: NumberSequence?,
+}
+do
+	local s = RELOAD_PROGRESS_STYLE
+	local colorKp = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, s.ColorOfPercentPart),
+		ColorSequenceKeypoint.new(0.5, s.ColorOfPercentPart),
+		ColorSequenceKeypoint.new(0.501, s.ColorOfMissingPart),
+		ColorSequenceKeypoint.new(1, s.ColorOfMissingPart),
+	})
+	local transKp = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, s.TransOfPercentPart),
+		NumberSequenceKeypoint.new(0.5, s.TransOfPercentPart),
+		NumberSequenceKeypoint.new(0.501, s.TransOfMissingPart),
+		NumberSequenceKeypoint.new(1, s.TransOfMissingPart),
+	})
+	local white = ColorSequence.new(Color3.new(1, 1, 1))
+	local zero = NumberSequence.new(0)
+
+	if s.MissingPartType == "Color" then
+		_reloadSeqCache = { colorSeq = colorKp, transSeq = nil, whiteColor = nil, zeroTrans = zero }
+	elseif s.MissingPartType == "Trans" then
+		_reloadSeqCache = { colorSeq = nil, transSeq = transKp, whiteColor = white, zeroTrans = nil }
+	elseif s.MissingPartType == "TransAndColor" then
+		_reloadSeqCache = { colorSeq = colorKp, transSeq = transKp, whiteColor = nil, zeroTrans = nil }
+	else
+		_reloadSeqCache = { colorSeq = nil, transSeq = transKp, whiteColor = white, zeroTrans = nil }
+	end
+end
+
 local WeaponsGui = {}
 WeaponsGui.__index = WeaponsGui
 local getJumpButton
@@ -177,7 +213,12 @@ local function isMobileTouchDevice()
     return UserInputService.TouchEnabled
 end
 
+local _cachedHapticTargets: { { inputType: Enum.UserInputType, motor: Enum.VibrationMotor } }? = nil
+
 local function getSupportedHapticTargets()
+    if _cachedHapticTargets then
+        return _cachedHapticTargets
+    end
     local targets = {}
     for _, inputType in ipairs(MOBILE_HAPTIC_INPUT_TYPES) do
         for _, motor in ipairs(MOBILE_HAPTIC_MOTORS) do
@@ -189,6 +230,7 @@ local function getSupportedHapticTargets()
             end
         end
     end
+    _cachedHapticTargets = targets
     return targets
 end
 
@@ -919,7 +961,7 @@ function WeaponsGui.new(weaponsSystem)
 
 	self.referenceViewportSize = Vector2.new(1000, 1000)
 	self.scaleWeight = 0.75
-	self.originalScaleAmounts = {}
+	self.originalScaleAmounts = setmetatable({}, { __mode = "k" })
 
 	self.crosshairDampingRatio = 0.9
 	self.crosshairFrequency = 3
@@ -1806,13 +1848,21 @@ function WeaponsGui:onRenderStepped(dt)
 			end
 		end
 		if self.crosshairShotgunFrame and self.crosshairEnabled then
-			self:_layoutShotgunCrosshairCorners()
+			local s = self.crosshairSpread
+			if s ~= self._lastShotgunSpread then
+				self._lastShotgunSpread = s
+				self:_layoutShotgunCrosshairCorners()
+			end
 		end
 		self:_updateShotgunRangeState()
 	else
 		if self.crosshairFrame and self.crosshairEnabled then
-			local crosshairSize = self.crosshairNormalSize * self.crosshairScale * self.crosshairWeaponScale
-			self.crosshairFrame.Size = UDim2.new(0, crosshairSize.X, 0, crosshairSize.Y)
+			local cs = self.crosshairScale * self.crosshairWeaponScale
+			if cs ~= self._lastCrosshairComputedScale then
+				self._lastCrosshairComputedScale = cs
+				local crosshairSize = self.crosshairNormalSize * cs
+				self.crosshairFrame.Size = UDim2.new(0, crosshairSize.X, 0, crosshairSize.Y)
+			end
 		end
 	end
 end
@@ -2048,6 +2098,45 @@ function WeaponsGui:playReloadProgressAnimation(reloadTime)
 	end
 
 	progressValue.Value = 0
+
+	-- Set constant style properties once per reload (not per tick)
+	local frame1 = progressFrame:FindFirstChild("Frame1")
+	local frame2 = progressFrame:FindFirstChild("Frame2")
+	if frame1 and frame2 then
+		local f1img = frame1:FindFirstChildOfClass("ImageLabel") or frame1
+		local f2img = frame2:FindFirstChildOfClass("ImageLabel") or frame2
+		local style = RELOAD_PROGRESS_STYLE
+		local imageAsset = "rbxassetid://" .. style.ImageId
+		for _, img in { f1img, f2img } do
+			if img:IsA("ImageLabel") or img:IsA("ImageButton") then
+				img.ImageColor3 = style.ImageColor
+				img.ImageTransparency = style.ImageTrans
+				img.Image = imageAsset
+			end
+		end
+		local g1 = f1img:FindFirstChildOfClass("UIGradient")
+		local g2 = f2img:FindFirstChildOfClass("UIGradient")
+		if g1 and g2 then
+			local cache = _reloadSeqCache
+			if cache.colorSeq then
+				g1.Color = cache.colorSeq
+				g2.Color = cache.colorSeq
+			end
+			if cache.whiteColor then
+				g1.Color = cache.whiteColor
+				g2.Color = cache.whiteColor
+			end
+			if cache.transSeq then
+				g1.Transparency = cache.transSeq
+				g2.Transparency = cache.transSeq
+			end
+			if cache.zeroTrans then
+				g1.Transparency = cache.zeroTrans
+				g2.Transparency = cache.zeroTrans
+			end
+		end
+	end
+
 	self:_updateReloadProgressBar(0)
 
 	local tweenInfo = TweenInfo.new(math.max(0.01, tonumber(reloadTime) or 0.01), Enum.EasingStyle.Linear, Enum.EasingDirection.InOut)
@@ -2110,74 +2199,14 @@ function WeaponsGui:_updateReloadProgressBar(progressPercent)
 		return
 	end
 
-	local style = RELOAD_PROGRESS_STYLE
 	local percentNumber = math.clamp(progressPercent * 3.6, 0, 360)
 
-	g1.Rotation = (style.FlipProgress == false)
+	g1.Rotation = (RELOAD_PROGRESS_STYLE.FlipProgress == false)
 		and math.clamp(percentNumber, 180, 360)
 		or 180 - math.clamp(percentNumber, 0, 180)
-	g2.Rotation = (style.FlipProgress == false)
+	g2.Rotation = (RELOAD_PROGRESS_STYLE.FlipProgress == false)
 		and math.clamp(percentNumber, 0, 180)
 		or 180 - math.clamp(percentNumber, 180, 360)
-
-	frame1ImageLabel.ImageColor3 = style.ImageColor
-	frame2ImageLabel.ImageColor3 = style.ImageColor
-	frame1ImageLabel.ImageTransparency = style.ImageTrans
-	frame2ImageLabel.ImageTransparency = style.ImageTrans
-	frame1ImageLabel.Image = "rbxassetid://" .. style.ImageId
-	frame2ImageLabel.Image = "rbxassetid://" .. style.ImageId
-
-	if style.MissingPartType == "Color" then
-		g1.Color = ColorSequence.new({
-			ColorSequenceKeypoint.new(0, style.ColorOfPercentPart),
-			ColorSequenceKeypoint.new(0.5, style.ColorOfPercentPart),
-			ColorSequenceKeypoint.new(0.501, style.ColorOfMissingPart),
-			ColorSequenceKeypoint.new(1, style.ColorOfMissingPart),
-		})
-		g2.Color = g1.Color
-		g1.Transparency = NumberSequence.new(0)
-		g2.Transparency = NumberSequence.new(0)
-	elseif style.MissingPartType == "Trans" then
-		local transSeq = NumberSequence.new({
-			NumberSequenceKeypoint.new(0, style.TransOfPercentPart),
-			NumberSequenceKeypoint.new(0.5, style.TransOfPercentPart),
-			NumberSequenceKeypoint.new(0.501, style.TransOfMissingPart),
-			NumberSequenceKeypoint.new(1, style.TransOfMissingPart),
-		})
-		g1.Transparency = transSeq
-		g2.Transparency = transSeq
-		g1.Color = ColorSequence.new(Color3.new(1, 1, 1))
-		g2.Color = ColorSequence.new(Color3.new(1, 1, 1))
-	elseif style.MissingPartType == "TransAndColor" then
-		local transSeq = NumberSequence.new({
-			NumberSequenceKeypoint.new(0, style.TransOfPercentPart),
-			NumberSequenceKeypoint.new(0.5, style.TransOfPercentPart),
-			NumberSequenceKeypoint.new(0.501, style.TransOfMissingPart),
-			NumberSequenceKeypoint.new(1, style.TransOfMissingPart),
-		})
-		local colorSeq = ColorSequence.new({
-			ColorSequenceKeypoint.new(0, style.ColorOfPercentPart),
-			ColorSequenceKeypoint.new(0.5, style.ColorOfPercentPart),
-			ColorSequenceKeypoint.new(0.501, style.ColorOfMissingPart),
-			ColorSequenceKeypoint.new(1, style.ColorOfMissingPart),
-		})
-		g1.Transparency = transSeq
-		g2.Transparency = transSeq
-		g1.Color = colorSeq
-		g2.Color = colorSeq
-	else
-		warn("Unknown MissingPartType. Only Trans, Color, TransAndColor are allowed. Falling back to Trans.")
-		local fallbackSeq = NumberSequence.new({
-			NumberSequenceKeypoint.new(0, style.TransOfPercentPart),
-			NumberSequenceKeypoint.new(0.5, style.TransOfPercentPart),
-			NumberSequenceKeypoint.new(0.501, style.TransOfMissingPart),
-			NumberSequenceKeypoint.new(1, style.TransOfMissingPart),
-		})
-		g1.Transparency = fallbackSeq
-		g2.Transparency = fallbackSeq
-		g1.Color = ColorSequence.new(Color3.new(1, 1, 1))
-		g2.Color = ColorSequence.new(Color3.new(1, 1, 1))
-	end
 end
 
 return WeaponsGui

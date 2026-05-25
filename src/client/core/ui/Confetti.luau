@@ -142,7 +142,7 @@ function Confetti.Rain(parent: Instance, options: RainOptions?)
 				BackgroundTransparency = 1,
 			})
 			tween:Play()
-			tween.Completed:Connect(function()
+			tween.Completed:Once(function()
 				_releaseFrame(piece)
 			end)
 		end)

@@ -48,7 +48,7 @@ function Retween.run(
 	local tween = TweenService:Create(instance, tweenInfo, goal)
 	slot.current = tween
 
-	tween.Completed:Connect(function()
+	tween.Completed:Once(function()
 		if slot.current == tween then
 			slot.current = nil
 		end

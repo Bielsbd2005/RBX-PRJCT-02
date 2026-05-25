@@ -8,9 +8,34 @@ local Network = require(Shared:WaitForChild("networking"):WaitForChild("Network"
 
 local BonusEffect = {}
 
+local SoundService = game:GetService("SoundService")
+
 local PICKUP_SOUND_ID = "rbxassetid://5728423829"
 local MAGNET_RADIUS = 15
 local GUI_COIN_CLONE_ATTR = "IsBonusGuiCoinClone"
+
+local _coinSoundPool: { Sound } = {}
+local _COIN_SOUND_POOL_SIZE = 4
+
+local function _playCoinPickupSound()
+	for _, s in _coinSoundPool do
+		if not s.IsPlaying then
+			s.PlaybackSpeed = math.random(95, 135) / 100
+			s:Play()
+			return
+		end
+	end
+
+	if #_coinSoundPool < _COIN_SOUND_POOL_SIZE then
+		local s = Instance.new("Sound")
+		s.SoundId = PICKUP_SOUND_ID
+		s.Volume = 0.25
+		s.PlaybackSpeed = math.random(95, 135) / 100
+		s.Parent = SoundService
+		table.insert(_coinSoundPool, s)
+		s:Play()
+	end
+end
 
 local isRoundEndedCleanupBound = false
 
@@ -82,13 +107,7 @@ local function _coinTickEntry(entry: CoinEntry, dt: number)
 		if entry.t >= 1 then
 			entry.active = false
 
-			local sound = Instance.new("Sound")
-			sound.SoundId = PICKUP_SOUND_ID
-			sound.Volume = 0.25
-			sound.PlaybackSpeed = math.random(95, 135) / 100
-			sound.Parent = rootPart
-			sound:Play()
-			Debris:AddItem(sound, 1.5)
+			_playCoinPickupSound()
 
 			spawnGuiCoin(entry.player)
 

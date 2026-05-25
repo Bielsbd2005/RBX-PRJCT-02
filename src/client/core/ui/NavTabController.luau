@@ -65,7 +65,7 @@ function NavTabController:setActive(key: string?)
 		cancelTween(self._scaleTweens, button)
 		local scaleTween = TweenService:Create(scaleNode, UITheme.NavTweenInfo, { Scale = targetScale })
 		self._scaleTweens[button] = scaleTween
-		scaleTween.Completed:Connect(function()
+		scaleTween.Completed:Once(function()
 			if self._scaleTweens[button] == scaleTween then
 				self._scaleTweens[button] = nil
 			end
@@ -76,7 +76,7 @@ function NavTabController:setActive(key: string?)
 			cancelTween(self._colorTweens, button)
 			local colorTween = TweenService:Create(button, UITheme.NavTweenInfo, { ImageColor3 = targetColor })
 			self._colorTweens[button] = colorTween
-			colorTween.Completed:Connect(function()
+			colorTween.Completed:Once(function()
 				if self._colorTweens[button] == colorTween then
 					self._colorTweens[button] = nil
 				end

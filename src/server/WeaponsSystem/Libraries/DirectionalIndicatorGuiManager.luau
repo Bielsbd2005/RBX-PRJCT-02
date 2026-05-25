@@ -24,7 +24,6 @@ local function _diLoopTick()
 		local diInfo = entry.diInfo
 		local image = diInfo and diInfo.image
 		if not image or image.ImageTransparency >= 1 or not diInfo.frame.Parent then
-			-- Cleanup: marcar inactivo, destruir clones, swap-remove
 			if diInfo then
 				diInfo.active = false
 				if diInfo.dieOnFade and diInfo.frame and diInfo.frame.Parent then
@@ -38,6 +37,11 @@ local function _diLoopTick()
 			diInfo.frame.Rotation = entry.manager:CalculateDIRotation(entry.otherPosition)
 			i += 1
 		end
+	end
+
+	if #_activeDIs == 0 and _diLoopConn then
+		_diLoopConn:Disconnect()
+		_diLoopConn = nil
 	end
 end
 

@@ -410,8 +410,8 @@ function BotAI:_playAnimation(name: string, tracks: { [string]: AnimationTrack }
 	return currentTrack
 end
 
-function BotAI:_canSeeTarget(target: Model): boolean
-	local targetRoot = target:FindFirstChild("HumanoidRootPart")
+function BotAI:_canSeeTarget(target: Model, preResolvedRoot: BasePart?): boolean
+	local targetRoot = preResolvedRoot or target:FindFirstChild("HumanoidRootPart")
 	if not targetRoot then
 		return false
 	end
@@ -533,7 +533,7 @@ function BotAI:_getBestTarget(): (Model?, boolean)
 		-- < cos(FOV/2), fuera de cono. Evita la alloc del Unit Vector.
 		if d > 0.001 and facing:Dot(delta) / d < FOV_COS then continue end
 
-		table.insert(candidates, { char = char, d = d })
+		table.insert(candidates, { char = char, d = d, root = root :: BasePart })
 	end
 
 	if #candidates == 0 then
@@ -551,7 +551,7 @@ function BotAI:_getBestTarget(): (Model?, boolean)
 	local maxChecks = math.min(#candidates, BotConfig.Combat.MaxLosChecksPerEval)
 	for i = 1, maxChecks do
 		local c = candidates[i]
-		if self:_canSeeTarget(c.char) then
+		if self:_canSeeTarget(c.char, c.root) then
 			return c.char, true
 		end
 	end
@@ -676,7 +676,7 @@ function BotAI:_evaluateTarget(now: number)
 					-- dot(facing, unit) = dot(facing, toRoot) / d. Evita
 					-- alloc de toRoot.Unit (1 Vector3 por fast-path eval).
 					if d > 0.001 and facing:Dot(toRoot) / d >= FOV_COS then
-						if self:_canSeeTarget(current) then
+						if self:_canSeeTarget(current, root :: BasePart) then
 							potentialTarget = current
 							isVisible = true
 							fastPath = true

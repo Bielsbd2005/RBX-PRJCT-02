@@ -85,11 +85,10 @@ local function _resolveOptionRefs(optionsRoot: Instance): { OptionRefs }
 	return refs
 end
 
-local function _clearVoteIcons(optionRef: OptionRefs)
+local function _hideVoteIcons(optionRef: OptionRefs)
 	for _, voteIcon in optionRef.spawnedVotes do
-		voteIcon:Destroy()
+		voteIcon.Visible = false
 	end
-	table.clear(optionRef.spawnedVotes)
 end
 
 function MapVoteView.new(mapVoteFrame: GuiObject, optionsRoot: GuiObject): any
@@ -172,7 +171,7 @@ function MapVoteView:show(optionsByKey: { [string]: OptionModel }, duration: num
 			optionRef.button.Image = image
 		end
 
-		_clearVoteIcons(optionRef)
+		_hideVoteIcons(optionRef)
 	end
 
 	self:updateTimer(duration)
@@ -189,7 +188,7 @@ function MapVoteView:hide()
 		if optionRef.indicator then
 			optionRef.indicator.Visible = false
 		end
-		_clearVoteIcons(optionRef)
+		_hideVoteIcons(optionRef)
 	end
 end
 
@@ -211,22 +210,29 @@ end
 
 function MapVoteView:updateVotes(votesByMapName: { [string]: number })
 	for _, optionRef in self._options do
-		_clearVoteIcons(optionRef)
+		_hideVoteIcons(optionRef)
 
 		if not optionRef.voteCountRoot then
 			continue
 		end
 
 		local voteCount = math.max(0, votesByMapName[optionRef.mapName] or 0)
-		for _ = 1, voteCount do
-			local icon = Instance.new("ImageLabel")
-			icon.Name = "VoteIndicator"
-			icon.Image = VOTE_INDICATOR_IMAGE
-			icon.Size = VOTE_INDICATOR_SIZE
-			icon.BackgroundTransparency = 1
-			icon.Visible = true
-			icon.Parent = optionRef.voteCountRoot
-			table.insert(optionRef.spawnedVotes, icon)
+		local pool = optionRef.spawnedVotes
+
+		for i = 1, voteCount do
+			local icon = pool[i]
+			if icon then
+				icon.Visible = true
+			else
+				icon = Instance.new("ImageLabel")
+				icon.Name = "VoteIndicator"
+				icon.Image = VOTE_INDICATOR_IMAGE
+				icon.Size = VOTE_INDICATOR_SIZE
+				icon.BackgroundTransparency = 1
+				icon.Visible = true
+				icon.Parent = optionRef.voteCountRoot
+				pool[i] = icon
+			end
 		end
 	end
 end

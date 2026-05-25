@@ -226,15 +226,19 @@ function WeaponPreviewController.new(options: WeaponPreviewControllerOptions): W
 	self._motionTargetByCategory = {} :: { [string]: Instance }
 	self._motionConnByCategory = {} :: { [string]: RBXScriptConnection }
 
-	-- Un único Heartbeat compartido para todas las animaciones del preview.
+	self._sharedHeartbeat = nil :: RBXScriptConnection?
+	return self
+end
+
+function WeaponPreviewController:_ensureHeartbeat()
+	if self._sharedHeartbeat then return end
 	self._sharedHeartbeat = RunService.Heartbeat:Connect(function(dt)
 		for _, data in self._wrapAnimDataByCategory do
+			local tU, tV = data.tileU, data.tileV
 			for _, texture in data.textures do
 				if texture.Parent then
-					local tileU = if texture.StudsPerTileU ~= 0 then texture.StudsPerTileU else 1
-					local tileV = if texture.StudsPerTileV ~= 0 then texture.StudsPerTileV else 1
-					texture.OffsetStudsU = (texture.OffsetStudsU + WEAPON_WRAP_TEXTURE_SCROLL_SPEED_U * dt) % tileU
-					texture.OffsetStudsV = (texture.OffsetStudsV + WEAPON_WRAP_TEXTURE_SCROLL_SPEED_V * dt) % tileV
+					texture.OffsetStudsU = (texture.OffsetStudsU + WEAPON_WRAP_TEXTURE_SCROLL_SPEED_U * dt) % tU
+					texture.OffsetStudsV = (texture.OffsetStudsV + WEAPON_WRAP_TEXTURE_SCROLL_SPEED_V * dt) % tV
 				end
 			end
 		end
@@ -248,8 +252,14 @@ function WeaponPreviewController.new(options: WeaponPreviewControllerOptions): W
 				+ math.sin(data.elapsed * SELECTED_WEAPON_BOB_SPEED * math.pi * 2) * SELECTED_WEAPON_BOB_AMPLITUDE
 			setWeaponPreviewPivot(data.activePreview, data.basePivot * CFrame.new(0, bobY, 0))
 		end
+
+		if next(self._wrapAnimDataByCategory) == nil and next(self._motionDataByCategory) == nil then
+			if self._sharedHeartbeat then
+				self._sharedHeartbeat:Disconnect()
+				self._sharedHeartbeat = nil
+			end
+		end
 	end)
-	return self
 end
 
 -- ── Métodos privados ───────────────────────────────────────────
@@ -388,7 +398,10 @@ function WeaponPreviewController:_applyWrap(previewInstance: Instance, weaponCat
 	end
 
 	if textureId and animated and #animatedTextures > 0 then
-		self._wrapAnimDataByCategory[weaponCategory] = { textures = animatedTextures }
+		local tileU = if studsPerTile > 0.001 then studsPerTile else 1
+		local tileV = tileU
+		self._wrapAnimDataByCategory[weaponCategory] = { textures = animatedTextures, tileU = tileU, tileV = tileV }
+		self:_ensureHeartbeat()
 	end
 end
 
@@ -505,6 +518,7 @@ function WeaponPreviewController:_startMotion(category: WeaponCategory, startOff
 			basePivot = basePivot,
 			elapsed = 0,
 		}
+		self:_ensureHeartbeat()
 	end)
 
 	riseTween:Play()

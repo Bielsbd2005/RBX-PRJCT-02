@@ -417,9 +417,9 @@ function BattlePassFeature.start(menuController: any): any
 	janitor:Add(function() timeLeftRunning = false end, true)
 	local currentPage = 0
 
-	-- Forward decl: render lo definimos más abajo, pero `onOpen` necesita
-	-- llamarlo (Lua captura el upvalue, así que se resuelve al invocarse).
 	local render: (() -> ())? = nil
+	local _bpIsOpen = false
+	local _bpDirtyWhileClosed = false
 
 	-- Devuelve la página 0-indexed que contiene el tier hacia el que está
 	-- progresando el jugador. Capeada a [0, pageCount-1] para que en MAX
@@ -449,16 +449,15 @@ function BattlePassFeature.start(menuController: any): any
 	local panel = PanelController.new(menuController, battlepassFrame, battlepassButton, closeButton, {
 		animationMode = "fade",
 		onOpen = function()
+			_bpIsOpen = true
 			BlurController.acquire(BLUR_KEY)
 			fovEffect:expand()
-			-- Cada vez que se abre el panel, snapeamos a la página del
-			-- progreso actual del jugador. Reabrir el panel reinicia la
-			-- paginación al estado "primera vez" sin perder el resto del
-			-- estado replicado.
 			currentPage = pageForCurrentTier()
 			if render then render() end
+			_bpDirtyWhileClosed = false
 		end,
 		onClose = function()
+			_bpIsOpen = false
 			BlurController.release(BLUR_KEY)
 			fovEffect:restore()
 		end,
@@ -744,7 +743,7 @@ function BattlePassFeature.start(menuController: any): any
 	-- wrap preview + imagen del arma asignada) hacia arriba al entrar el mouse y
 	-- de vuelta al salir. Un solo MouseEnter/Leave por row dispara los tweens
 	-- en paralelo, así no hay desync visual entre elementos lifteados.
-	type HoverTarget = { element: GuiObject, original: UDim2, lifted: UDim2 }
+	type HoverTarget = { element: GuiObject, original: UDim2, lifted: UDim2, tween: Tween? }
 	local function bindRowHover(rowFrame: GuiObject, elements: { GuiObject })
 		if #elements == 0 then return end
 
@@ -755,17 +754,21 @@ function BattlePassFeature.start(menuController: any): any
 				original.X.Scale, original.X.Offset,
 				original.Y.Scale, original.Y.Offset - HOVER_LIFT_PIXELS
 			)
-			table.insert(targets, { element = element, original = original, lifted = lifted })
+			table.insert(targets, { element = element, original = original, lifted = lifted, tween = nil })
 		end
 
 		local enterConn = rowFrame.MouseEnter:Connect(function()
 			for _, t in targets do
-				TweenService:Create(t.element, HOVER_TWEEN_INFO, { Position = t.lifted }):Play()
+				if t.tween then t.tween:Cancel() end
+				t.tween = TweenService:Create(t.element, HOVER_TWEEN_INFO, { Position = t.lifted })
+				t.tween:Play()
 			end
 		end)
 		local leaveConn = rowFrame.MouseLeave:Connect(function()
 			for _, t in targets do
-				TweenService:Create(t.element, HOVER_TWEEN_INFO, { Position = t.original }):Play()
+				if t.tween then t.tween:Cancel() end
+				t.tween = TweenService:Create(t.element, HOVER_TWEEN_INFO, { Position = t.original })
+				t.tween:Play()
 			end
 		end)
 		table.insert(rowConnections, enterConn)
@@ -943,6 +946,11 @@ function BattlePassFeature.start(menuController: any): any
 	end
 
 	render = function()
+		if not _bpIsOpen then
+			_bpDirtyWhileClosed = true
+			return
+		end
+
 		clearRowConnections()
 
 		local state = Fusion.peek(DataController.BattlePass)

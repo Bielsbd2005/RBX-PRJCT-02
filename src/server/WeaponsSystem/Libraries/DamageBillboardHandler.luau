@@ -213,7 +213,7 @@ local function playUIAudio(name: string, pitch: number)
 end
 
 --// Billboard pools per adornee
-local adorneeToBillboardGui = {}
+local adorneeToBillboardGui = setmetatable({}, { __mode = "k" })
 local billboardLabelPool    = setmetatable({}, { __mode = "k" }) -- billboard -> {labels}
 local billboardActiveCount  = setmetatable({}, { __mode = "k" }) -- billboard -> int
 

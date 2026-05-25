@@ -829,26 +829,13 @@ function MatchHud:_tryIncrementalKillUpdate(userId: number, oldKills: number, ne
 		return false
 	end
 
-	-- Conservador: cualquier teammate cuyo kill count caiga dentro del rango
-	-- [min(old,new), max(old,new)] (inclusive) podría provocar reorder
-	-- (incluido el tie-break por nombre). En ese caso, full rebuild.
 	local lo = math.min(oldKills, newKills)
 	local hi = math.max(oldKills, newKills)
 
-	for _, p in Players:GetPlayers() do
-		if p.UserId == userId then continue end
-		local side = TeamUtils.getSide(p.Character)
-		if not side and p.Team then side = TeamUtils.normalize(p.Team.Name) end
-		if side ~= team then continue end
-		local pk = self._killsByUserId[p.UserId] or 0
-		if pk >= lo and pk <= hi then
-			return false
-		end
-	end
-	for fakeUserId, botEntry in pairs(self._botRoster) do
-		if fakeUserId == userId then continue end
-		if botEntry.team ~= team then continue end
-		local pk = self._killsByUserId[fakeUserId] or 0
+	for rowKey, rowUserId in pairs(self._rowUserIdByKey) do
+		if rowUserId == userId then continue end
+		if string.sub(rowKey, 1, 1) ~= team then continue end
+		local pk = self._killsByUserId[rowUserId] or 0
 		if pk >= lo and pk <= hi then
 			return false
 		end

@@ -146,18 +146,20 @@ function RoamGraph:pickRandomNavigablePoint(originPos: Vector3, minDist: number,
 	end
 
 	local function _pickInRing(lo: number, hi: number): Vector3?
-		local candidates: { Vector3 } = {}
 		local lo2, hi2 = lo * lo, hi * hi
+		local pick: Vector3? = nil
+		local count = 0
 		for _, p in points do
-			local d2 = (p - originPos):Dot(p - originPos)
+			local delta = p - originPos
+			local d2 = delta:Dot(delta)
 			if d2 >= lo2 and d2 <= hi2 then
-				table.insert(candidates, p)
+				count += 1
+				if math.random(1, count) == 1 then
+					pick = p
+				end
 			end
 		end
-		if #candidates == 0 then
-			return nil
-		end
-		return candidates[math.random(1, #candidates)]
+		return pick
 	end
 
 	local pick = _pickInRing(minDist, maxDist)
@@ -179,7 +181,8 @@ function RoamGraph:nearestPoint(pos: Vector3): Vector3?
 	local best: Vector3? = nil
 	local bestD2 = math.huge
 	for _, p in points do
-		local d2 = (p - pos):Dot(p - pos)
+		local delta = p - pos
+		local d2 = delta:Dot(delta)
 		if d2 < bestD2 then
 			bestD2 = d2
 			best = p

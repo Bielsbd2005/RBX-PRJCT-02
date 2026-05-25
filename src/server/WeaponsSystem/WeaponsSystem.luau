@@ -653,7 +653,7 @@ function WeaponsSystem.createWeaponForInstance(weaponInstance)
 end
 
 function WeaponsSystem.getWeaponForInstance(weaponInstance)
-	if not typeof(weaponInstance) == "Instance" then
+	if typeof(weaponInstance) ~= "Instance" then
 		warn("WeaponsSystem.getWeaponForInstance(weaponInstance): 'weaponInstance' was not an instance.")
 		return nil
 	end

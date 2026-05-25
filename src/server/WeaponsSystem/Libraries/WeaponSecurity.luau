@@ -46,17 +46,23 @@ type ShotData = {
 
 -- userId → sid → ShotData
 local pendingShots: { [number]: { [number]: ShotData } } = {}
+local pendingCounts: { [number]: number } = {}
 
 local function getOrCreateBucket(userId: number): { [number]: ShotData }
 	local bucket = pendingShots[userId]
 	if not bucket then
 		bucket = {}
 		pendingShots[userId] = bucket
+		pendingCounts[userId] = 0
 	end
 	return bucket
 end
 
-local function purgeBucket(bucket: { [number]: ShotData }, now: number): number
+local function getBucketCount(userId: number): number
+	return pendingCounts[userId] or 0
+end
+
+local function purgeBucket(bucket: { [number]: ShotData }, userId: number, now: number): number
 	local count = 0
 	for sid, data in bucket do
 		if now - data.time > SHOT_TTL then
@@ -65,10 +71,11 @@ local function purgeBucket(bucket: { [number]: ShotData }, now: number): number
 			count += 1
 		end
 	end
+	pendingCounts[userId] = count
 	return count
 end
 
-local function dropOldest(bucket: { [number]: ShotData })
+local function dropOldest(bucket: { [number]: ShotData }, userId: number)
 	local oldestSid, oldestTime = nil, math.huge
 	for sid, data in bucket do
 		if data.time < oldestTime then
@@ -78,6 +85,7 @@ local function dropOldest(bucket: { [number]: ShotData })
 	end
 	if oldestSid ~= nil then
 		bucket[oldestSid] = nil
+		pendingCounts[userId] = math.max(0, (pendingCounts[userId] or 1) - 1)
 	end
 end
 
@@ -98,16 +106,15 @@ function WeaponSecurity.registerShot(player: Player, weapon: any, fireInfo: any)
 	if typeof(fireInfo.origin) ~= "Vector3" or typeof(fireInfo.dir) ~= "Vector3" then return end
 	if fireInfo.dir.Magnitude < 1e-4 then return end
 
-	local bucket = getOrCreateBucket(player.UserId)
+	local userId = player.UserId
+	local bucket = getOrCreateBucket(userId)
 	local now = os.clock()
 
-	-- Si el bucket está lleno, purgamos expirados; si sigue lleno, sacamos el más viejo.
-	local count = 0
-	for _ in bucket do count += 1 end
+	local count = getBucketCount(userId)
 	if count >= MAX_PENDING_PER_PLAYER then
-		count = purgeBucket(bucket, now)
+		count = purgeBucket(bucket, userId, now)
 		while count >= MAX_PENDING_PER_PLAYER do
-			dropOldest(bucket)
+			dropOldest(bucket, userId)
 			count -= 1
 		end
 	end
@@ -128,6 +135,9 @@ function WeaponSecurity.registerShot(player: Player, weapon: any, fireInfo: any)
 		end
 	end
 
+	if not bucket[sid] then
+		pendingCounts[userId] = (pendingCounts[userId] or 0) + 1
+	end
 	bucket[sid] = {
 		origin = fireInfo.origin,
 		dir = fireInfo.dir.Unit,
@@ -145,7 +155,8 @@ function WeaponSecurity.validateHit(player: Player, weapon: any, hitInfo: any): 
 	if typeof(sid) ~= "number" then return false, "no sid" end
 	if typeof(hitInfo.p) ~= "Vector3" then return false, "no hit point" end
 
-	local bucket = pendingShots[player.UserId]
+	local uid = player.UserId
+	local bucket = pendingShots[uid]
 	if not bucket then return false, "no shots" end
 
 	local data = bucket[sid]
@@ -153,6 +164,7 @@ function WeaponSecurity.validateHit(player: Player, weapon: any, hitInfo: any): 
 
 	if os.clock() - data.time > SHOT_TTL then
 		bucket[sid] = nil
+		pendingCounts[uid] = math.max(0, (pendingCounts[uid] or 1) - 1)
 		return false, "expired"
 	end
 
@@ -162,6 +174,7 @@ function WeaponSecurity.validateHit(player: Player, weapon: any, hitInfo: any): 
 
 	if data.hitsRemaining <= 0 then
 		bucket[sid] = nil
+		pendingCounts[uid] = math.max(0, (pendingCounts[uid] or 1) - 1)
 		return false, "no hits remaining"
 	end
 
@@ -181,15 +194,16 @@ function WeaponSecurity.validateHit(player: Player, weapon: any, hitInfo: any): 
 	data.hitsRemaining -= 1
 	if data.hitsRemaining <= 0 then
 		bucket[sid] = nil
+		pendingCounts[uid] = math.max(0, (pendingCounts[uid] or 1) - 1)
 	end
 
 	return true
 end
 
--- Limpieza al salir el jugador.
 if RunService:IsServer() then
 	Players.PlayerRemoving:Connect(function(player)
 		pendingShots[player.UserId] = nil
+		pendingCounts[player.UserId] = nil
 	end)
 end
 

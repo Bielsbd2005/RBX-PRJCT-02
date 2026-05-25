@@ -1,7 +1,7 @@
 local KillEffectUtils = {}
 
 function KillEffectUtils.anchor(char: Instance, anchored: boolean)
-	for _, desc in ipairs(char:GetDescendants()) do
+	for _, desc in char:GetDescendants() do
 		if desc:IsA("BasePart") then
 			desc.Anchored = anchored
 		end
@@ -9,7 +9,7 @@ function KillEffectUtils.anchor(char: Instance, anchored: boolean)
 end
 
 function KillEffectUtils.destroyMotors(char: Instance)
-	for _, desc in ipairs(char:GetDescendants()) do
+	for _, desc in char:GetDescendants() do
 		if desc:IsA("Motor6D") then
 			desc:Destroy()
 		end

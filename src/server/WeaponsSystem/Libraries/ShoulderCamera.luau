@@ -17,6 +17,8 @@ end
 local Settings = UserSettings()
 local GameSettings = Settings.GameSettings
 
+local TRANSLATION_SCALE_ZOOMED = Vector3.new(0.25, 0.25, 0.25)
+local TRANSLATION_SCALE_DEFAULT = Vector3.new(0.5, 0.5, 0.5)
 local CAMERA_RENDERSTEP_NAME = "ShoulderCameraUpdate"
 local ZOOM_ACTION_NAME = "ShoulderCameraZoom"
 local SPRINT_ACTION_NAME = "ShoulderCameraSprint"
@@ -552,7 +554,7 @@ function ShoulderCamera:onRenderStep(dt)
 	local rayToFocus = Ray.new(rootPartPos, vecToFocus + (vecToFocus.Unit * collisionRadius))
 	local hitPart, hitPoint, hitNormal = self:penetrateCast(rayToFocus, self.raycastIgnoreList)
 	local currentTime = tick()
-	local sideCorrectionGoalVector = Vector3.new() -- if nothing is adjacent to player, goal vector is (0, 0, 0)
+	local sideCorrectionGoalVector = Vector3.zero
 	if hitPart then
 		hitPoint = hitPoint + (hitNormal * collisionRadius)
 		sideCorrectionGoalVector = hitPoint - cameraFocus.p
@@ -700,7 +702,7 @@ function ShoulderCamera:onRenderStep(dt)
 	if self:isHumanoidControllable() and self.rotateCharacterWithCamera then
 		self.currentHumanoid.AutoRotate = false
 		self.currentRootPart.CFrame = CFrame.Angles(0, self.yaw, 0) + self.currentRootPart.Position -- rotate character to be upright and facing the same direction as camera
-		self:applyRootJointFix()
+		self:applyRootJointFix(yawRotation)
 	else
 		self.currentHumanoid.AutoRotate = true
 	end
@@ -710,13 +712,13 @@ function ShoulderCamera:onRenderStep(dt)
 end
 
 -- This function keeps the held weapon from bouncing up and down too much when you move
-function ShoulderCamera:applyRootJointFix()
+function ShoulderCamera:applyRootJointFix(cachedYawRotation: CFrame?)
 	if self.rootJoint then
-		local translationScale = self.zoomState and Vector3.new(0.25, 0.25, 0.25) or Vector3.new(0.5, 0.5, 0.5)
+		local translationScale = self.zoomState and TRANSLATION_SCALE_ZOOMED or TRANSLATION_SCALE_DEFAULT
 		local rotationScale = self.zoomState and 0.15 or 0.2
 		local rootRotation = self.rootJoint.Part0.CFrame - self.rootJoint.Part0.CFrame.Position
 		local rotation = self.rootJoint.Transform - self.rootJoint.Transform.Position
-		local yawRotation = CFrame.Angles(0, self.yaw, 0)
+		local yawRotation = cachedYawRotation or CFrame.Angles(0, self.yaw, 0)
 		local leadRotation = rootRotation:toObjectSpace(yawRotation)
 		local rotationFix = self.rootRigAttach.CFrame
 		if self:isHumanoidControllable() then

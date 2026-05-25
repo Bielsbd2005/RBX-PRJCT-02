@@ -32,6 +32,34 @@ if IsServer then
 	WeaponSecurity = require(script.Parent:WaitForChild("Libraries"):WaitForChild("WeaponSecurity"))
 end
 
+-- Pooled elimination sound — avoids Clone + Debris per kill/assist.
+local _elimSoundPool: { Sound } = {}
+local _ELIM_POOL_SIZE = 3
+
+local function _playEliminationSound()
+	local audio = SoundService:FindFirstChild("Audio")
+	local gameplay = audio and audio:FindFirstChild("Gameplay")
+	local template = gameplay and gameplay:FindFirstChild("EliminatedPlayer")
+	if not template then
+		warn("WeaponsSystem: Could not find SoundService.Audio.Gameplay.EliminatedPlayer")
+		return
+	end
+
+	for _, s in _elimSoundPool do
+		if not s.IsPlaying then
+			s:Play()
+			return
+		end
+	end
+
+	if #_elimSoundPool < _ELIM_POOL_SIZE then
+		local s = template:Clone()
+		s.Parent = SoundService
+		table.insert(_elimSoundPool, s)
+		s:Play()
+	end
+end
+
 local NetworkingCallbacks = {}
 NetworkingCallbacks.WeaponsSystem = nil
 
@@ -151,18 +179,7 @@ function NetworkingCallbacks.PlayerEliminated(victimName, xpGained, wasHeadshot,
 
 	local WeaponsSystem = NetworkingCallbacks.WeaponsSystem
 
-	local audio = SoundService:FindFirstChild("Audio")
-	local gameplay = audio and audio:FindFirstChild("Gameplay")
-	local sound = gameplay and gameplay:FindFirstChild("EliminatedPlayer")
-
-	if sound then
-		local clone = sound:Clone()
-		clone.Parent = SoundService
-		clone:Play()
-		Debris:AddItem(clone, clone.TimeLength + 1)
-	else
-		warn("WeaponsSystem: Could not find SoundService.Audio.Gameplay.EliminatedPlayer")
-	end
+	_playEliminationSound()
 
 	local PersonalKillFeed = require(script.Parent:WaitForChild("Libraries"):WaitForChild("PersonalKillFeed"))
 	PersonalKillFeed.showKill(victimName or "Unknown", xpGained or 100, wasHeadshot or false)
@@ -207,16 +224,7 @@ function NetworkingCallbacks.PlayerAssist()
 
 	local WeaponsSystem = NetworkingCallbacks.WeaponsSystem
 
-	local audio = SoundService:FindFirstChild("Audio")
-	local gameplay = audio and audio:FindFirstChild("Gameplay")
-	local sound = gameplay and gameplay:FindFirstChild("EliminatedPlayer")
-
-	if sound then
-		local clone = sound:Clone()
-		clone.Parent = SoundService
-		clone:Play()
-		Debris:AddItem(clone, clone.TimeLength + 1)
-	end
+	_playEliminationSound()
 
 	local PersonalKillFeed = require(script.Parent:WaitForChild("Libraries"):WaitForChild("PersonalKillFeed"))
 	PersonalKillFeed.showAssist()

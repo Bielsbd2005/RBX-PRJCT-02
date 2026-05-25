@@ -84,6 +84,7 @@ local _roamGraph: RoamGraph.RoamGraph? = nil
 local _spawnPoints: { BasePart } = {}
 local _onBotDied: ((string, string, Humanoid, number) -> ())? = nil
 local _botsByName: { [string]: BotRecord } = {}
+local _activeBotCount = 0
 -- B6: index O(1) por FakeUserId para _findAttackerModel. Antes scan lineal
 -- sobre aliveTargets por cada damage event (peor caso 16 events/100ms × 16
 -- candidatos = 2560 comparaciones/seg).
@@ -268,17 +269,13 @@ local function _assignIdentity(): (BotIdentity, number)
 	return identity, fakeUserId
 end
 
-local function _clearTeamList(team: "A" | "B")
-	local list = _botNamesByTeam[team]
-	table.clear(list)
-	for name, bot in _botsByName do
-		if bot.team == team and bot.model.Parent ~= nil and bot.humanoid.Health > 0 then
-			table.insert(list, name)
-		end
-	end
-end
-
 local function _refreshAliveLists()
+	local listA = _botNamesByTeam.A
+	local listB = _botNamesByTeam.B
+	table.clear(listA)
+	table.clear(listB)
+
+	local count = 0
 	for name, bot in _botsByName do
 		if bot.model.Parent == nil or bot.humanoid.Health <= 0 then
 			if bot.deathConnection then
@@ -286,11 +283,16 @@ local function _refreshAliveLists()
 				bot.deathConnection = nil
 			end
 			_botsByName[name] = nil
+		else
+			count += 1
+			if bot.team == "A" then
+				table.insert(listA, name)
+			else
+				table.insert(listB, name)
+			end
 		end
 	end
-
-	_clearTeamList("A")
-	_clearTeamList("B")
+	_activeBotCount = count
 end
 
 local function _getRandomSpawnPoint(): BasePart?
@@ -471,11 +473,7 @@ do
 end
 
 local function _notifyActiveBotCount()
-	local count = 0
-	for _ in _botsByName do
-		count += 1
-	end
-	NavMetrics.SetActiveBotCount(count)
+	NavMetrics.SetActiveBotCount(_activeBotCount)
 end
 
 local function _removeBotByName(botName: string)
@@ -507,6 +505,7 @@ local function _removeBotByName(botName: string)
 	end
 
 	_botsByName[botName] = nil
+	_activeBotCount = math.max(0, _activeBotCount - 1)
 	_refreshAliveLists()
 	_notifyActiveBotCount()
 end
@@ -711,11 +710,7 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 			-- B6: clear el index — el nuevo bot se asignará en _spawnOneBot.
 			_botModelByFakeUserId[fakeUserId] = nil
 			_botsByName[botName] = nil
-			-- Limpiar dicts por nombre. _removeBotByName lo hace pero este path
-			-- (death) lo omitía → _botFakeUserIdByName[oldName] apuntaba a un
-			-- fakeUserId reciclado por otro bot. _identityByFakeUserId NO se
-			-- limpia: lo necesita el recycle pool y GetBotIdentity para kill
-			-- attribution post-respawn.
+			_activeBotCount = math.max(0, _activeBotCount - 1)
 			_botIdentityByName[botName] = nil
 			_botFakeUserIdByName[botName] = nil
 			_refreshAliveLists()
@@ -734,6 +729,7 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 	end)
 
 	_botsByName[botName] = record
+	_activeBotCount += 1
 	table.insert(_botNamesByTeam[team], botName)
 	_notifyActiveBotCount()
 	NavMetrics.RecordBotSpawned()

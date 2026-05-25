@@ -13,6 +13,7 @@
 
 local RunService = game:GetService("RunService")
 local CollectionService = game:GetService("CollectionService")
+local UserInputService = game:GetService("UserInputService")
 
 local WeaponWrapAnimator = {}
 
@@ -37,6 +38,9 @@ local _connection: RBXScriptConnection? = nil
 local _addedConn: RBXScriptConnection? = nil
 local _removedConn: RBXScriptConnection? = nil
 local _tracked: { [Texture]: TrackedTexture } = {}
+local _isMobile = UserInputService.TouchEnabled
+local _throttleAccum = 0
+local _THROTTLE_INTERVAL = if _isMobile then 1 / 30 else 0
 
 local function _resolveTile(value: number): number
 	local magnitude = math.abs(value)
@@ -119,13 +123,23 @@ function WeaponWrapAnimator.start()
 	_removedConn = CollectionService:GetInstanceRemovedSignal(ANIMATED_WRAP_TEXTURE_TAG):Connect(_untrack)
 
 	_connection = RunService.RenderStepped:Connect(function(dt)
+		if _THROTTLE_INTERVAL > 0 then
+			_throttleAccum += dt
+			if _throttleAccum < _THROTTLE_INTERVAL then
+				return
+			end
+			dt = _throttleAccum
+			_throttleAccum = 0
+		end
+
 		for texture, entry in _tracked do
 			if texture.Parent == nil then
 				_untrack(texture)
 				continue
 			end
-			-- tileU/V cacheados en entry, refrescados solo vía
-			-- GetPropertyChangedSignal cuando el wrap config cambia (raro).
+			if entry.speedU == 0 and entry.speedV == 0 then
+				continue
+			end
 			texture.OffsetStudsU = (texture.OffsetStudsU + entry.speedU * dt) % entry.tileU
 			texture.OffsetStudsV = (texture.OffsetStudsV + entry.speedV * dt) % entry.tileV
 		end

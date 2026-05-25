@@ -370,6 +370,7 @@ function Roblox.penetrateCast(ray, ignoreList)
 	end
 	params.FilterDescendantsInstances = ignoreList
 
+	local originalLen = #ignoreList
 	local tries = 0
 	local hitPart, hitPoint, hitNormal, hitMaterial =
 		nil, ray.Origin + ray.Direction, Vector3.new(0, 1, 0), Enum.Material.Air
@@ -389,12 +390,16 @@ function Roblox.penetrateCast(ray, ignoreList)
 			and hitPart.Parent:FindFirstChildOfClass("Humanoid") == nil
 		then
 			table.insert(ignoreList, hitPart)
-			-- Reasignar: mutar la lista subyacente no se propaga al RaycastParams.
 			params.FilterDescendantsInstances = ignoreList
 		else
 			break
 		end
 	end
+
+	for i = #ignoreList, originalLen + 1, -1 do
+		ignoreList[i] = nil
+	end
+
 	debug.profileend()
 	return hitPart, hitPoint, hitNormal, hitMaterial
 end
