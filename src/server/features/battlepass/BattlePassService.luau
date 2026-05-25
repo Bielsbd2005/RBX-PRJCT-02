@@ -438,6 +438,9 @@ end
 -- PREMIUM (Robux developer product)
 -- ────────────────────────────────────────────────────────────
 
+local _bpFunnelSessionByUserId: { [number]: string } = {}
+local _bpFunnelCounter = 0
+
 function BattlePassService:PromptPremium(player: Player): ()
 	local season = BattlePassConfig.GetActiveSeason()
 	if season.PremiumProductId == 0 then
@@ -456,11 +459,16 @@ function BattlePassService:PromptPremium(player: Player): ()
 		return
 	end
 
-	-- PromptProductPurchase abre el modal de Roblox; el grant ocurre en
-	-- ProcessReceipt cuando Roblox confirma la compra.
+	_bpFunnelCounter += 1
+	local sessionId = tostring(player.UserId) .. "_" .. tostring(_bpFunnelCounter)
+	_bpFunnelSessionByUserId[player.UserId] = sessionId
+	EconomyAnalytics.BPPremiumStep(player, 1, sessionId)
+
 	pcall(function()
 		MarketplaceService:PromptProductPurchase(player, season.PremiumProductId)
 	end)
+
+	EconomyAnalytics.BPPremiumStep(player, 2, sessionId)
 end
 
 -- ────────────────────────────────────────────────────────────
@@ -594,6 +602,10 @@ function BattlePassService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchas
 		if not ok then
 			return Enum.ProductPurchaseDecision.NotProcessedYet
 		end
+		local sessionId = _bpFunnelSessionByUserId[player.UserId]
+		EconomyAnalytics.BPPremiumStep(player, 3, sessionId)
+		_bpFunnelSessionByUserId[player.UserId] = nil
+
 		_respond(player, true, "PremiumGranted", 0, "Premium")
 		return Enum.ProductPurchaseDecision.PurchaseGranted
 	end
@@ -653,6 +665,7 @@ function BattlePassService:Start(dataService: DataService): ()
 	-- Cleanup de cooldowns.
 	Players.PlayerRemoving:Connect(function(player: Player)
 		_cooldowns[player.UserId] = nil
+		_bpFunnelSessionByUserId[player.UserId] = nil
 	end)
 
 	-- Listeners de red. Cada handler aplica:

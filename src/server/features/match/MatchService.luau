@@ -41,6 +41,12 @@ type MapDefinition = {
 local MatchService = {}
 MatchService.__index = MatchService
 
+-- Onboarding callbacks — set by ServerBootstrap, fire-and-forget.
+MatchService.OnPlayerJoinedMatch = nil :: ((Player) -> ())?
+MatchService.OnPlayerFirstKill = nil :: ((Player) -> ())?
+MatchService.OnPlayerMatchCompleted = nil :: ((Player) -> ())?
+MatchService.OnPlayerReturnedToLobby = nil :: ((Player) -> ())?
+
 local _started = false
 -- Rate limit por-userId para RemoteEvents de match (vote sync / return to menu).
 -- El `_joinDebounceByUserId` y `_respawnDebounceByUserId` ya tenían debounce de
@@ -514,8 +520,13 @@ local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?, a
 		return
 	end
 
-	_matchKillsByUserId[attackerUserId] = (_matchKillsByUserId[attackerUserId] or 0) + 1
-	-- RecordKill: ++streak, programa timeout de decay, devuelve newStreak.
+	local prevKills = _matchKillsByUserId[attackerUserId] or 0
+	_matchKillsByUserId[attackerUserId] = prevKills + 1
+
+	if prevKills == 0 and MatchService.OnPlayerFirstKill then
+		pcall(MatchService.OnPlayerFirstKill, attacker)
+	end
+
 	local newStreak = KillAttributionService:RecordKill(attackerUserId)
 	KillAttributionService:SendStreakBroadcast(attackerUserId)
 	_registerWeaponKillForAttacker(attackerUserId, attackerWeaponId)
@@ -1257,6 +1268,10 @@ function _finishRoundAndScheduleRestart(reason: string, winnerTeam: string)
 		_respawnDebounceByUserId[player.UserId] = nil
 		_pendingSpawnByUserId[player.UserId] = nil
 
+		if MatchService.OnPlayerMatchCompleted then
+			pcall(MatchService.OnPlayerMatchCompleted, player)
+		end
+
 		if lobbySpawn then
 			_teleportCharacterToSpawn(player, lobbySpawn)
 		else
@@ -1265,6 +1280,10 @@ function _finishRoundAndScheduleRestart(reason: string, winnerTeam: string)
 
 		if player.Parent == Players then
 			_sendMapLoadStateToPlayer(player)
+
+			if MatchService.OnPlayerReturnedToLobby then
+				pcall(MatchService.OnPlayerReturnedToLobby, player)
+			end
 		end
 	end
 
@@ -1571,6 +1590,10 @@ local function _onRequestJoinMatch(_: {}, player: Player)
 		if player.Parent == Players then
 			Network.Match.JoinMatchSpawned.SendTo({}, player)
 			_log(string.format("Player %s joined and spawned.", player.Name))
+
+			if MatchService.OnPlayerJoinedMatch then
+				pcall(MatchService.OnPlayerJoinedMatch, player)
+			end
 		end
 	end)
 end

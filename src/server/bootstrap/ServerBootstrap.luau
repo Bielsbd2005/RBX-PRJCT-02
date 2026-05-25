@@ -168,6 +168,50 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	MatchService:Start(DataService)
 	LockerService:Start(DataService)
 	ClearDataCommandService:Start(DataService)
+
+	-- ── Onboarding Funnel ──────────────────────────────────────
+	-- Track first-session players through: Joined → FirstMatch → FirstKill →
+	-- MatchCompleted → ReturnedToLobby. Only fires for JoinCount == 1.
+	local _onboardingPlayers: { [number]: true } = {}
+
+	DataService.ProfileLoaded:Connect(function(player: Player)
+		local profile = DataService:GetProfile(player)
+		if not profile or not profile.Data then return end
+		local joinCount = profile.Data.Metadata.JoinCount
+		if joinCount == 1 then
+			_onboardingPlayers[player.UserId] = true
+			EconomyAnalytics.OnboardingStep(player, 1)
+		end
+	end)
+
+	Players.PlayerRemoving:Connect(function(player: Player)
+		_onboardingPlayers[player.UserId] = nil
+	end)
+
+	MatchService.OnPlayerJoinedMatch = function(player: Player)
+		if _onboardingPlayers[player.UserId] then
+			EconomyAnalytics.OnboardingStep(player, 2)
+		end
+	end
+
+	MatchService.OnPlayerFirstKill = function(player: Player)
+		if _onboardingPlayers[player.UserId] then
+			EconomyAnalytics.OnboardingStep(player, 3)
+		end
+	end
+
+	MatchService.OnPlayerMatchCompleted = function(player: Player)
+		if _onboardingPlayers[player.UserId] then
+			EconomyAnalytics.OnboardingStep(player, 4)
+		end
+	end
+
+	MatchService.OnPlayerReturnedToLobby = function(player: Player)
+		if _onboardingPlayers[player.UserId] then
+			EconomyAnalytics.OnboardingStep(player, 5)
+			_onboardingPlayers[player.UserId] = nil
+		end
+	end
 end
 
 return ServerBootstrap
