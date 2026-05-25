@@ -29,6 +29,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ActionRewards = require(Shared:WaitForChild("constants"):WaitForChild("ActionRewards"))
+local EconomyAnalytics = require(script.Parent.EconomyAnalytics)
 
 local DataServiceMod = require(script.Parent.data.DataService)
 type DataService = DataServiceMod.DataServiceModule
@@ -110,6 +111,12 @@ function RewardService.Award(
 			warn(("[RewardService] AddXP falló para %s (action=%s): %s"):format(player.Name, actionKey, tostring(xpErr)))
 			ok = false
 		end
+	end
+
+	if ok and cashAmount > 0 then
+		local profile = _dataService:GetProfile(player)
+		local balance = if profile and profile.Data then profile.Data.Stats.Cash else 0
+		EconomyAnalytics.Source(player, cashAmount, balance, actionKey)
 	end
 
 	return ok, xpAmount, cashAmount

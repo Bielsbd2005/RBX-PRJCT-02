@@ -28,6 +28,7 @@ local Packages = ReplicatedStorage:WaitForChild("Packages")
 local Shared   = ReplicatedStorage:WaitForChild("Shared")
 
 local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
+local EconomyAnalytics = require(script.Parent.Parent.Parent.core.EconomyAnalytics)
 type DataService = DataServiceMod.DataServiceModule
 
 local Sift = require(Packages.sift) :: any
@@ -315,6 +316,11 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 
 	if success then
 		_markCooldown(player, "buy")
+
+		local profile = _dataService:GetProfile(player)
+		local balance = if profile and profile.Data then profile.Data.Stats.Cash else 0
+		EconomyAnalytics.Sink(player, price, balance, "ShopPurchase", data.category .. "::" .. data.itemId)
+
 		Network.Shop.Response.SendTo({
 			success = true,
 			message = if data.category == LockerCategory.WEAPON_WRAPS

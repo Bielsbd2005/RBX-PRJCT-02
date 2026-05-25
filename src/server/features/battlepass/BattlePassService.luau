@@ -34,6 +34,7 @@ local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
 
 local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
 type DataService = DataServiceMod.DataServiceModule
+local EconomyAnalytics = require(script.Parent.Parent.Parent.core.EconomyAnalytics)
 
 local M = NetGuards.MAX
 
@@ -419,6 +420,15 @@ function BattlePassService:ClaimTier(player: Player, tierLevel: number, track: s
 	if not ok then
 		_respond(player, false, "SaveFailed", tierLevel, track)
 		return
+	end
+
+	if reward.Kind == "Cash" then
+		local cashAmount = math.max(0, math.floor(reward.Amount or 0))
+		if cashAmount > 0 then
+			local profile = _dataService:GetProfile(player)
+			local balance = if profile and profile.Data then profile.Data.Stats.Cash else 0
+			EconomyAnalytics.Source(player, cashAmount, balance, "BattlePassClaim", "Tier" .. tostring(tierLevel) .. "_" .. track)
+		end
 	end
 
 	_respond(player, true, "OK", tierLevel, track)
