@@ -961,7 +961,7 @@ function WeaponsGui.new(weaponsSystem)
 
 	self.referenceViewportSize = Vector2.new(1000, 1000)
 	self.scaleWeight = 0.75
-	self.originalScaleAmounts = setmetatable({}, { __mode = "k" })
+	self.originalScaleAmounts = {}
 
 	self.crosshairDampingRatio = 0.9
 	self.crosshairFrequency = 3
