@@ -178,11 +178,14 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 		return
 	end
 
-	-- Validación 2.5: items exclusivos del Battle Pass no se venden.
-	-- Defense in depth: el Locker ya los oculta a quien no los posee, pero un
-	-- cliente malicioso podría reconstruir el packet con el itemId conocido.
-	-- BP-exclusive si lo flagea ItemsConfig manualmente O si aparece como
-	-- reward en cualquier season del BattlePass (single source of truth).
+	if itemConfig.CanPurchase ~= true then
+		Network.Shop.Response.SendTo({
+			success = false,
+			message = "Este ítem no está disponible para compra.",
+		}, player)
+		return
+	end
+
 	if itemConfig.isBPExclusive == true or BattlePassConfig.IsBPExclusive(data.category, data.itemId) then
 		Network.Shop.Response.SendTo({
 			success = false,
