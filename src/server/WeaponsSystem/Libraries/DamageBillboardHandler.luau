@@ -142,7 +142,8 @@ local TI_NUM_MOVE     = TweenInfo.new(1.40, Enum.EasingStyle.Quad, Enum.EasingDi
 -- Desktop-only profile (no mobile distinctions)
 local MAX_UI_DISTANCE     = 200
 local MAX_ACTIVE_LABELS   = 7         -- fixed desktop value
-local MERGE_WINDOW        = 0.14
+local MERGE_WINDOW        = 0.12
+local MERGE_MAX_HOLD      = 0.18
 local PARTICLES_PER_HEAD  = 25        -- fixed desktop value
 
 -- Rendering knobs (desktop)
@@ -537,16 +538,45 @@ function DamageBillboardHandler:ShowDamageBillboard(damageAmount: number, adorne
 	-- Billboard
 	local billboard = self:CreateBillboardForAdornee(adornee)
 
-	-- Merge window accumulation
+	-- Merge window accumulation with max hold time so SMGs produce a
+	-- steady stream of numbers instead of one big number when you stop firing.
 	local state = mergeState[billboard]
+	local now = time()
 	if not state then
-		state = { sum = 0, headshot = false, deadline = 0, scheduled = false, adornee = adornee }
+		state = { sum = 0, headshot = false, deadline = 0, scheduled = false, adornee = adornee, firstHitAt = 0 }
 		mergeState[billboard] = state
 	end
+
+	if state.sum == 0 then
+		state.firstHitAt = now
+	end
+
+	-- If we've been holding hits longer than MERGE_MAX_HOLD, flush now
+	-- and start a new accumulation window. This creates the rapid stream.
+	if state.sum > 0 and (now - state.firstHitAt) >= MERGE_MAX_HOLD then
+		local flushValue = state.sum
+		local flushHeadshot = state.headshot
+		local flushAdornee = state.adornee
+		if flushAdornee and flushAdornee.Parent then
+			if flushHeadshot then
+				local head = getHeadFromAdornee(flushAdornee)
+				if head then
+					emitHeadshotParticles(head)
+				end
+			end
+		end
+		if flushValue > 0 then
+			renderNumber(billboard, flushValue, flushHeadshot)
+		end
+		state.sum = 0
+		state.headshot = false
+		state.firstHitAt = now
+	end
+
 	state.sum += shownDamage
 	state.headshot = state.headshot or headshot
 	state.adornee = adornee
-	state.deadline = time() + MERGE_WINDOW
+	state.deadline = now + MERGE_WINDOW
 	scheduleFlush(billboard)
 end
 
