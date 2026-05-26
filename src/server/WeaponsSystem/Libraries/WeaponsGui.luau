@@ -1806,7 +1806,7 @@ function WeaponsGui:OnHitOtherPlayer(damage, humanoidHit, hitPart)
 	local initialSize = math.max(self.hitMarker.AbsoluteSize.X, minSize)
 	self.hitMarker.Size = UDim2.new(0, initialSize, 0, initialSize)
 	local hitTweenInfo = TweenInfo.new(0.12, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out)
-	local maxSize = math.max(self.hitMarker.AbsoluteSize.X * 2, minSize * 2)
+	local maxSize = math.max(self.hitMarker.AbsoluteSize.X * 3.5, minSize * 3.5)
 	local hitGoal = { Size = UDim2.new(0, maxSize, 0, maxSize), ImageColor3 = HIT_COLOR_PEAK, Rotation = math.random(-15, 15) }
 	self.currentHitTween = TweenService:Create(self.hitMarker, hitTweenInfo, hitGoal)
 	self.currentHitTween:Play()
