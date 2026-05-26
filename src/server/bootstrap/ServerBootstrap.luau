@@ -11,7 +11,7 @@ local StoreProducts = require(Shared:WaitForChild("constants"):WaitForChild("Sto
 
 local STORE_PRODUCTS_BY_ID = StoreProducts.ProductsByProductId :: { [number]: { CashAmount: number, ButtonName: string } }
 
-local EconomyAnalytics = require(script.Parent.core.EconomyAnalytics)
+local EconomyAnalytics = require(script.Parent.Parent.core.EconomyAnalytics)
 
 local ServerBootstrap = {}
 
