@@ -136,14 +136,14 @@ local COLOR_HEADSHOT_TEXT = Color3.fromRGB(235, 71, 62)    -- headshot text
 local COLOR_HEADSHOT_STROKE = Color3.fromRGB(118, 35, 32)  -- headshot stroke
 
 -- TweenInfos
-local TI_NUM_APPEAR   = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-local TI_NUM_MOVE     = TweenInfo.new(1.40, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local TI_NUM_APPEAR   = TweenInfo.new(0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local TI_NUM_MOVE     = TweenInfo.new(1.20, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
 -- Desktop-only profile (no mobile distinctions)
 local MAX_UI_DISTANCE     = 200
-local MAX_ACTIVE_LABELS   = 7         -- fixed desktop value
-local MERGE_WINDOW        = 0.12
-local MERGE_MAX_HOLD      = 0.18
+local MAX_ACTIVE_LABELS   = 10
+-- MERGE_WINDOW removed: each hit renders its own number immediately.
+-- MAX_ACTIVE_LABELS caps simultaneous labels per target to stay readable.
 local PARTICLES_PER_HEAD  = 25        -- fixed desktop value
 
 -- Rendering knobs (desktop)
@@ -375,10 +375,6 @@ local function createBillboard(adornee: Instance): BillboardGui
 	return billboard
 end
 
--- Merge buffer per billboard
--- mergeState[billboard] = { sum=0, headshot=false, deadline=0, scheduled=false, adornee=Instance }
-local mergeState = setmetatable({}, { __mode = "k" })
-
 local DamageBillboardHandler = {}
 
 function DamageBillboardHandler:CreateBillboardForAdornee(adornee: Instance): BillboardGui
@@ -398,7 +394,6 @@ function DamageBillboardHandler:CreateBillboardForAdornee(adornee: Instance): Bi
 				adorneeToBillboardGui[adornee] = nil
 				billboardLabelPool[bb] = nil
 				billboardActiveCount[bb] = nil
-				mergeState[bb] = nil
 				bb:Destroy()
 			end
 		end
@@ -466,58 +461,14 @@ local function renderNumber(billboard: BillboardGui, value: number, isHeadshot: 
 	moveTween:Play()
 end
 
--- Flush scheduler
-local scheduleFlush  -- forward declaration for recursion
-scheduleFlush = function(billboard: BillboardGui)
-	local state = mergeState[billboard]
-	if not state or state.scheduled then return end
-	state.scheduled = true
-
-	task.delay(MERGE_WINDOW, function()
-		local s = mergeState[billboard]
-		if not s then return end
-
-		s.scheduled = false
-
-		if time() >= s.deadline then
-			local value    = s.sum
-			local headshot = s.headshot
-			local adornee  = s.adornee
-
-			if adornee and adornee.Parent then
-				if headshot then
-					local head = getHeadFromAdornee(adornee)
-					if head then
-						emitHeadshotParticles(head)
-					end
-				end
-			end
-
-			if value > 0 then
-				renderNumber(billboard, value, headshot)
-			end
-
-			s.sum = 0
-			s.headshot = false
-		elseif s.sum > 0 then
-			-- Deadline was extended by a late hit; re-schedule to catch it
-			scheduleFlush(billboard)
-		end
-	end)
-end
-
 --// Public API
 function DamageBillboardHandler:ShowDamageBillboard(damageAmount: number, adornee: Instance, isHeadshot: boolean?)
 	if shouldSkipFriendlyTargetFx(adornee) then
 		return
 	end
 
-	-- Headshot flag llega como parámetro desde el caller (que sabe qué part
-	-- hiteó). Antes leíamos de un BoolValue global mutable que era racy entre
-	-- hits concurrentes; ahora es un valor inmutable por llamada.
 	local headshot = isHeadshot == true
 
-	-- Distance culling: keep audio (use cached camera)
 	local pos = getWorldPos(adornee)
 	if pos then
 		local cam = currentCamera
@@ -531,53 +482,19 @@ function DamageBillboardHandler:ShowDamageBillboard(damageAmount: number, adorne
 	local mult = (HeadshotMultiplier and HeadshotMultiplier.Value) or 1
 	local shownDamage = headshot and math.ceil(damageAmount * mult) or math.ceil(damageAmount)
 
-	-- Progressive audio
 	local progressivePitch = getCurrentPitch()
 	playUIAudio(headshot and "Headshot" or "HitSound", progressivePitch)
 
-	-- Billboard
 	local billboard = self:CreateBillboardForAdornee(adornee)
 
-	-- Merge window accumulation with max hold time so SMGs produce a
-	-- steady stream of numbers instead of one big number when you stop firing.
-	local state = mergeState[billboard]
-	local now = time()
-	if not state then
-		state = { sum = 0, headshot = false, deadline = 0, scheduled = false, adornee = adornee, firstHitAt = 0 }
-		mergeState[billboard] = state
-	end
-
-	if state.sum == 0 then
-		state.firstHitAt = now
-	end
-
-	-- If we've been holding hits longer than MERGE_MAX_HOLD, flush now
-	-- and start a new accumulation window. This creates the rapid stream.
-	if state.sum > 0 and (now - state.firstHitAt) >= MERGE_MAX_HOLD then
-		local flushValue = state.sum
-		local flushHeadshot = state.headshot
-		local flushAdornee = state.adornee
-		if flushAdornee and flushAdornee.Parent then
-			if flushHeadshot then
-				local head = getHeadFromAdornee(flushAdornee)
-				if head then
-					emitHeadshotParticles(head)
-				end
-			end
+	if headshot and adornee and adornee.Parent then
+		local head = getHeadFromAdornee(adornee)
+		if head then
+			emitHeadshotParticles(head)
 		end
-		if flushValue > 0 then
-			renderNumber(billboard, flushValue, flushHeadshot)
-		end
-		state.sum = 0
-		state.headshot = false
-		state.firstHitAt = now
 	end
 
-	state.sum += shownDamage
-	state.headshot = state.headshot or headshot
-	state.adornee = adornee
-	state.deadline = now + MERGE_WINDOW
-	scheduleFlush(billboard)
+	renderNumber(billboard, shownDamage, headshot)
 end
 
 return DamageBillboardHandler
