@@ -1030,7 +1030,7 @@ function WeaponsGui.new(weaponsSystem)
 	self.crosshairSpreadTarget = 0
 	self.crosshairSpreadBase = 30
 	self.crosshairSpreadAim = 20 --Tamaño de la mira cuando se enfoca
-	self.crosshairSpreadFireKick = 8
+	self.crosshairSpreadFireKick = 3
 
 	self.gui = WeaponsSystemGuiTemplate:Clone()
 	self.gui.Enabled = false
