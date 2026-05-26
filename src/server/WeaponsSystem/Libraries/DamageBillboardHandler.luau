@@ -136,13 +136,13 @@ local COLOR_HEADSHOT_TEXT = Color3.fromRGB(235, 71, 62)    -- headshot text
 local COLOR_HEADSHOT_STROKE = Color3.fromRGB(118, 35, 32)  -- headshot stroke
 
 -- TweenInfos
-local TI_NUM_APPEAR   = TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-local TI_NUM_MOVE     = TweenInfo.new(1.00, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local TI_NUM_APPEAR   = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local TI_NUM_MOVE     = TweenInfo.new(1.40, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
 -- Desktop-only profile (no mobile distinctions)
 local MAX_UI_DISTANCE     = 200
 local MAX_ACTIVE_LABELS   = 7         -- fixed desktop value
-local MERGE_WINDOW        = 0.075
+local MERGE_WINDOW        = 0.14
 local PARTICLES_PER_HEAD  = 25        -- fixed desktop value
 
 -- Rendering knobs (desktop)
