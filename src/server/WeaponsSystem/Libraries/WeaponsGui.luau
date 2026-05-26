@@ -1710,10 +1710,9 @@ end
 
 function WeaponsGui:_layoutShotgunCrosshairCorners()
 	if not (self.crosshairShotgunFrame and self._isShotgun) then return end
-	local s = self.crosshairSpread
-	local size = math.floor(self.crosshairNormalSize.Y * 0.45)
-	-- W7: AnchorPoint solo se asigna una vez por corner (no cambia entre frames).
-	-- Antes se reasignaba el mismo Vector2.new(0.5,0.5) cada frame.
+	local scale = self.crosshairScale * self.crosshairWeaponScale
+	local s = self.crosshairSpread * scale
+	local size = math.floor(self.crosshairNormalSize.Y * 0.45 * scale)
 	if not self._shotgunAnchorsSet then
 		self.crosshairShotgunTopLeft.AnchorPoint = CENTER_ANCHOR_V2
 		self.crosshairShotgunTopRight.AnchorPoint = CENTER_ANCHOR_V2
@@ -1849,8 +1848,10 @@ function WeaponsGui:onRenderStepped(dt)
 		end
 		if self.crosshairShotgunFrame and self.crosshairEnabled then
 			local s = self.crosshairSpread
-			if s ~= self._lastShotgunSpread then
+			local cs = self.crosshairScale
+			if s ~= self._lastShotgunSpread or cs ~= self._lastShotgunScale then
 				self._lastShotgunSpread = s
+				self._lastShotgunScale = cs
 				self:_layoutShotgunCrosshairCorners()
 			end
 		end
