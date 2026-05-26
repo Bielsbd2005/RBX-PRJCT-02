@@ -946,13 +946,6 @@ function BattlePassFeature.start(menuController: any): any
 	end
 
 	render = function()
-		if not _bpIsOpen then
-			_bpDirtyWhileClosed = true
-			return
-		end
-
-		clearRowConnections()
-
 		local state = Fusion.peek(DataController.BattlePass)
 		if type(state) ~= "table" then
 			return
@@ -1029,6 +1022,13 @@ function BattlePassFeature.start(menuController: any): any
 				bottomNotification.Visible = false
 			end
 		end
+
+		if not _bpIsOpen then
+			_bpDirtyWhileClosed = true
+			return
+		end
+
+		clearRowConnections()
 
 		-- Slots de la página actual
 		for i = 1, SLOTS_PER_PAGE do

@@ -2,6 +2,7 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local SoundService = game:GetService("SoundService")
 local TweenService = game:GetService("TweenService")
 
 local Client = script.Parent.Parent
@@ -28,7 +29,8 @@ local function setupSlider(
 	settingNode: Instance,
 	configKey: string,
 	currentConfig: { [string]: boolean | number },
-	janitor: any
+	janitor: any,
+	onChange: ((number) -> ())?
 ): (number) -> ()
 	local container = settingNode:WaitForChild("SliderContainer") :: Frame
 	local drag = container:WaitForChild("Drag") :: Frame
@@ -61,6 +63,10 @@ local function setupSlider(
 		local fillWidth = (currentX - minX) + (drag.AbsoluteSize.X / 2)
 		indicator.Size = UDim2.new(0, fillWidth, 1, 0)
 		valueLabel.Text = math.round(percentage * 100) .. "%"
+
+		if onChange then
+			onChange(percentage)
+		end
 	end), "Disconnect")
 
 	return function(percentage: number)
@@ -73,6 +79,10 @@ local function setupSlider(
 		drag.Position = UDim2.new(0, centerPos, 0.5, 0)
 		indicator.Size = UDim2.new(0, centerPos, 1, 0)
 		valueLabel.Text = math.round(clamped * 100) .. "%"
+
+		if onChange then
+			onChange(clamped)
+		end
 	end
 end
 
@@ -209,8 +219,26 @@ function SettingsFeature.start(menuController: any): any
 		end
 	end
 
-	local updateMusic = setupSlider(musicSetting, "MusicVolume", currentConfig, janitor)
-	local updateSens = setupSlider(sensSetting, "CameraSensitivity", currentConfig, janitor)
+	local lobbyMusic: Sound? = nil
+	do
+		local s = SoundService:FindFirstChild("LobbyMusic")
+		if s and s:IsA("Sound") then
+			lobbyMusic = s
+		end
+	end
+
+	local function applyMusicVolume(value: number)
+		if lobbyMusic then
+			(lobbyMusic :: Sound):SetAttribute("VolumeMultiplier", value)
+		end
+	end
+
+	local function applySensitivity(value: number)
+		player:SetAttribute("CameraSensitivity", value)
+	end
+
+	local updateMusic = setupSlider(musicSetting, "MusicVolume", currentConfig, janitor, applyMusicVolume)
+	local updateSens = setupSlider(sensSetting, "CameraSensitivity", currentConfig, janitor, applySensitivity)
 	local updateVib = setupToggle(vibSetting, "Vibration", currentConfig, janitor)
 	local updateAim = setupToggle(aimSetting, "AimAssist", currentConfig, janitor)
 
@@ -231,12 +259,14 @@ function SettingsFeature.start(menuController: any): any
 		local newState = not (currentConfig.Vibration :: boolean)
 		updateVib(newState)
 		markPending("Vibration")
+		player:SetAttribute("Vibration", newState)
 	end), "Disconnect")
 
 	janitor:Add(aimToggleBtn.MouseButton1Click:Connect(function()
 		local newState = not (currentConfig.AimAssist :: boolean)
 		updateAim(newState)
 		markPending("AimAssist")
+		player:SetAttribute("AimAssist", newState)
 	end), "Disconnect")
 
 	janitor:Add(resetBtn.MouseButton1Click:Connect(function()
@@ -249,6 +279,8 @@ function SettingsFeature.start(menuController: any): any
 		markPending("CameraSensitivity")
 		markPending("Vibration")
 		markPending("AimAssist")
+		player:SetAttribute("Vibration", true)
+		player:SetAttribute("AimAssist", true)
 	end), "Disconnect")
 
 	janitor:Add(closeBtn.MouseButton1Click:Connect(function()
@@ -272,6 +304,8 @@ function SettingsFeature.start(menuController: any): any
 		updateSens(savedSettings.CameraSensitivity or 0.5)
 		updateVib(if savedSettings.Vibration ~= nil then savedSettings.Vibration else true)
 		updateAim(if savedSettings.AimAssist ~= nil then savedSettings.AimAssist else true)
+		player:SetAttribute("Vibration", if savedSettings.Vibration ~= nil then savedSettings.Vibration else true)
+		player:SetAttribute("AimAssist", if savedSettings.AimAssist ~= nil then savedSettings.AimAssist else true)
 	end)
 
 	return janitor

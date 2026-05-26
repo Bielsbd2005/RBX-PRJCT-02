@@ -1168,11 +1168,20 @@ function ShoulderCamera:updateZoomState()
 	self.currentTouchSensitivity = isZoomed and self.zoomedTouchSensitivity or self.touchSensitivity
 
 	if self.weaponsSystem and self.weaponsSystem.gui then
-		self.weaponsSystem.gui:setCrosshairScaleTarget(self.zoomState and self.zoomedCrosshairScale or self.normalCrosshairScale)
-		self.weaponsSystem.gui:setCrosshairEnabled(not self.zoomState or not self.hasScope)
-		self.weaponsSystem.gui:setScopeEnabled(self.zoomState and self.hasScope)
+		local gui = self.weaponsSystem.gui
+		gui:setCrosshairScaleTarget(self.zoomState and self.zoomedCrosshairScale or self.normalCrosshairScale)
+		gui:setCrosshairEnabled(not self.zoomState or not self.hasScope)
+		gui:setScopeEnabled(self.zoomState and self.hasScope)
 		if self.currentTool then
 			self.currentTool.ManualActivationOnly = UserInputService.TouchEnabled
+		end
+
+		local hideHotbar = self.zoomState and self.hasScope
+		if gui.hotbarPC then
+			gui.hotbarPC.Visible = not hideHotbar and not UserInputService.TouchEnabled
+		end
+		if gui.hotbarTouchscreen then
+			gui.hotbarTouchscreen.Visible = not hideHotbar and UserInputService.TouchEnabled
 		end
 	end
 
@@ -1221,8 +1230,9 @@ end
 
 function ShoulderCamera:applyInput(yaw, pitch)
 	local yInvertValue = UserGameSettings:GetCameraYInvertValue()
-	self.yaw = self.yaw + yaw
-	self.pitch = math.clamp(self.pitch + pitch * yInvertValue, self.minPitch, self.maxPitch)
+	local sensMult = 0.5 + (LocalPlayer:GetAttribute("CameraSensitivity") or 0.5) * 1.5
+	self.yaw = self.yaw + yaw * sensMult
+	self.pitch = math.clamp(self.pitch + pitch * yInvertValue * sensMult, self.minPitch, self.maxPitch)
 end
 
 function ShoulderCamera:processGamepadInput(dt)

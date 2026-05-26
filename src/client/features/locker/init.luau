@@ -1311,7 +1311,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		selectItem(selectedKey)
 	end
 
-	local function updateStatsUiFromData()
+	local function updateStatsUi()
 		local stats = getCurrentStats()
 		if cashValueLabel then
 			cashValueLabel.Text = UIUtils.formatCashAmount(stats.Cash)
@@ -1320,7 +1320,10 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		if levelValueLabel then
 			levelValueLabel.Text = tostring(stats.Level)
 		end
+	end
 
+	local function updateStatsUiFromData()
+		updateStatsUi()
 		updateActionFrameForSelected()
 	end
 
@@ -1533,11 +1536,12 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 		local statsObserver = fusionScope:Observer(DataController.Stats)
 		janitor:Add(statsObserver:onBind(function()
+			updateStatsUi()
 			if not isOpen then
 				dirtyWhileClosed = true
 				return
 			end
-			updateStatsUiFromData()
+			updateActionFrameForSelected()
 		end), true)
 
 		local weaponKillsObserver = fusionScope:Observer(DataController.WeaponKills)

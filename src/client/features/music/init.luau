@@ -121,20 +121,32 @@ function LobbyMusicFeature.start(menuController: any): any
 		table.clear(activeTweens)
 	end, true)
 
+	local function getVolumeMultiplier(): number
+		return math.clamp(sound:GetAttribute("VolumeMultiplier") or 1, 0, 1)
+	end
+
 	local function applyState()
 		local hasPanel = menuController:hasOpenPanel()
 		local isHidden = menuController:isHidden()
+		local mult = getVolumeMultiplier()
 
 		if hasPanel then
-			tweenTo(MUFFLE_VOLUME, MUFFLE_HIGH_GAIN, MUFFLE_MID_GAIN, STATE_TWEEN_INFO)
+			tweenTo(MUFFLE_VOLUME * mult, MUFFLE_HIGH_GAIN, MUFFLE_MID_GAIN, STATE_TWEEN_INFO)
 		elseif isHidden then
 			tweenTo(0, 0, 0, FADE_TWEEN_INFO)
 		else
-			tweenTo(BASE_VOLUME, 0, 0, STATE_TWEEN_INFO)
+			tweenTo(BASE_VOLUME * mult, 0, 0, STATE_TWEEN_INFO)
 		end
 	end
 
 	janitor:Add(menuController:onStateChanged(applyState), true)
+	janitor:Add(sound:GetAttributeChangedSignal("VolumeMultiplier"):Connect(function()
+		local mult = getVolumeMultiplier()
+		local hasPanel = menuController:hasOpenPanel()
+		local isHidden = menuController:isHidden()
+		if isHidden and not hasPanel then return end
+		sound.Volume = (if hasPanel then MUFFLE_VOLUME else BASE_VOLUME) * mult
+	end), "Disconnect")
 	applyState()
 
 	return janitor

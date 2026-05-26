@@ -469,7 +469,7 @@ function WeaponsGui:_captureHotbarSlot(hotbarRoot, itemName)
 		imageNode = itemFrame:FindFirstChildWhichIsA("ImageButton") or itemFrame:FindFirstChildWhichIsA("ImageLabel")
 	end
 
-	local strokeNode = itemFrame:FindFirstChildWhichIsA("UIStroke", true)
+	local strokeNode = itemFrame:FindFirstChildWhichIsA("UIStroke")
 	local ammoRoot = itemFrame:FindFirstChild("Ammo")
 	local ammoValueNode = if ammoRoot then ammoRoot:FindFirstChild("Value") else nil
 	local ammoValueLabel = if ammoValueNode and (
@@ -479,14 +479,7 @@ function WeaponsGui:_captureHotbarSlot(hotbarRoot, itemName)
 	) then ammoValueNode else nil
 
 	if not ammoValueNode then
-		ammoValueLabel = itemFrame:FindFirstChild("Value", true)
-		if ammoValueLabel and (
-			ammoValueLabel:IsA("TextLabel")
-			or ammoValueLabel:IsA("TextButton")
-			or ammoValueLabel:IsA("TextBox")
-		) then
-			ammoValueNode = ammoValueLabel
-		end
+		ammoValueLabel = nil
 	end
 
 	return {
@@ -1064,13 +1057,13 @@ function WeaponsGui.new(weaponsSystem)
 		self.outOfRangeFrame = self.scalingElementsFolder:FindFirstChild("OutOfRange")
 		if self.outOfRangeFrame then
 			self.outOfRangeFrame.Visible = false
-			self.outOfRangeDistanceLabel = self.outOfRangeFrame:FindFirstChild("Distance", true)
+			self.outOfRangeDistanceLabel = self.outOfRangeFrame:FindFirstChild("Distance")
 		end
 
 		self.hitMarker = self.scalingElementsFolder:WaitForChild("HitMarker"):WaitForChild("HitMarkerImage")
-		self.vignette = self.gui:FindFirstChild("Vignette", true)
+		self.vignette = self.gui:FindFirstChild("Vignette")
 		if not self.vignette then
-			self.vignette = self.gui:FindFirstChild("KillContainer", true)
+			self.vignette = self.gui:FindFirstChild("KillContainer")
 		end
 		if self.vignette and self.vignette:IsA("GuiObject") then
 			self.vignette.Visible = false
@@ -1124,13 +1117,13 @@ function WeaponsGui.new(weaponsSystem)
 		self.scopeFrame = self.gui:WaitForChild("Scope")
 		local scopeImage = self.scopeFrame:WaitForChild("ScopeImage")
 
-		self.ammoDisplayNode = self.gui:FindFirstChild("Ammo", true)
+		self.ammoDisplayNode = self.gui:FindFirstChild("Ammo")
 		if self.ammoDisplayNode and not (
 			self.ammoDisplayNode:IsA("TextLabel")
 			or self.ammoDisplayNode:IsA("TextButton")
 			or self.ammoDisplayNode:IsA("TextBox")
 		) then
-			self.ammoDisplayLabel = self.ammoDisplayNode:FindFirstChildWhichIsA("TextLabel", true)
+			self.ammoDisplayLabel = self.ammoDisplayNode:FindFirstChildWhichIsA("TextLabel")
 		else
 			self.ammoDisplayLabel = self.ammoDisplayNode
 		end
@@ -1744,6 +1737,10 @@ end
 
 function WeaponsGui:_pulseMobileHaptics(isHeadshot)
 	if not isMobileTouchDevice() then
+		return
+	end
+
+	if LocalPlayer:GetAttribute("Vibration") == false then
 		return
 	end
 

@@ -683,6 +683,8 @@ function BaseWeapon:onStepped(dt)
 	-- target-finding por completo.
 	if not _isTouchPrimaryInput() then return end
 
+	if Players.LocalPlayer:GetAttribute("AimAssist") == false then return end
+
 	-- Rocket launcher: nunca autoshoot (riesgo de splash al teammate / al jugador).
 	if self:getConfigValue("ExplodeOnImpact", false) then return end
 
