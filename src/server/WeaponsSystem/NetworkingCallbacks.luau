@@ -79,11 +79,7 @@ function NetworkingCallbacks.WeaponFired(player, instance, fireInfo)
 					return
 				end
 				WeaponSecurity.registerShot(player, weapon, fireInfo)
-
-				local ds = WeaponsSystem._dataService
-				if ds then
-					pcall(ds.Increment, ds, player, { "Stats", "ShotsFired" }, 1)
-				end
+				WeaponsSystem.accumulateStat(player, "ShotsFired", 1)
 			end
 			weapon:onFired(player, fireInfo, true)
 		end
@@ -157,11 +153,7 @@ function NetworkingCallbacks.WeaponHit(player, instance, hitInfo)
 					return
 				end
 
-				local ds = WeaponsSystem._dataService
-				if ds then
-					pcall(ds.Increment, ds, player, { "Stats", "ShotsHit" }, 1)
-				end
-
+				WeaponsSystem.accumulateStat(player, "ShotsHit", 1)
 				weapon:onHit(hitInfo)
 			end
 		end

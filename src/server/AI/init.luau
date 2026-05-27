@@ -13,6 +13,7 @@ local BotNames = require(Shared.constants.BotNames)
 local BotConfig = require(Shared.constants.BotConfig)
 local ItemDefaults = require(Shared.constants.ItemDefaults)
 
+local LastAttackerStore = require(ReplicatedStorage:WaitForChild("WeaponsSystem"):WaitForChild("Libraries"):WaitForChild("LastAttackerStore"))
 local BotAI = require(script:WaitForChild("BotAI"))
 local BotAppearance = require(script:WaitForChild("BotAppearance"))
 local BotPersonality = require(script:WaitForChild("BotPersonality"))
@@ -48,13 +49,14 @@ type BotRecord = {
 local _dataServiceRef: any = nil
 
 local function _getKillEffectForBotAttacker(humanoid: Humanoid): string
-	local attackerUserIdAttr = humanoid:GetAttribute("LastAttackerUserId")
-	local attackerAtAttr = humanoid:GetAttribute("LastAttackerAt")
-	local attackerUserId = if type(attackerUserIdAttr) == "number" then attackerUserIdAttr else nil
-	local attackerAt = if type(attackerAtAttr) == "number" then attackerAtAttr else 0
-	if attackerAt > 0 and math.abs(time() - attackerAt) > GameConfig.KillAttributionWindow then
+	local lastAttacker = LastAttackerStore.get(humanoid)
+	if not lastAttacker then
 		return ItemDefaults.ITEM_ID
 	end
+	if lastAttacker.At > 0 and math.abs(time() - lastAttacker.At) > GameConfig.KillAttributionWindow then
+		return ItemDefaults.ITEM_ID
+	end
+	local attackerUserId = lastAttacker.UserId
 	if not attackerUserId then
 		return ItemDefaults.ITEM_ID
 	end

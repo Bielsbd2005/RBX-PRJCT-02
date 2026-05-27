@@ -322,7 +322,7 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 
 		local profile = _dataService:GetProfile(player)
 		local balance = if profile and profile.Data then profile.Data.Stats.Cash else 0
-		EconomyAnalytics.Sink(player, price, balance, "Shop::" .. data.category, data.itemId)
+		EconomyAnalytics.Sink(player, price, balance, "Shop::" .. data.category)
 		EconomyAnalytics.ItemSource(player, "ShopItem::" .. data.category, data.itemId)
 
 		Network.Shop.Response.SendTo({

@@ -134,6 +134,66 @@ local damageContributors: { [Humanoid]: { [Player]: number } } = setmetatable({}
 local assistDiedConnections: { [Humanoid]: RBXScriptConnection } = setmetatable({}, { __mode = "k" }) :: any
 local assistAncestryConnections: { [Humanoid]: RBXScriptConnection } = setmetatable({}, { __mode = "k" }) :: any
 
+local LastAttackerStore = require(Libraries:WaitForChild("LastAttackerStore"))
+
+type PendingStats = { ShotsFired: number, ShotsHit: number, DamageDealt: number }
+local _pendingStatsByPlayer: { [Player]: PendingStats } = {}
+local STATS_FLUSH_INTERVAL = 5
+
+local function _flushPendingStats()
+	if not DataService then return end
+	for player, stats in _pendingStatsByPlayer do
+		if player.Parent ~= Players then
+			_pendingStatsByPlayer[player] = nil
+			continue
+		end
+		local updates = {}
+		if stats.ShotsFired > 0 then
+			table.insert(updates, { path = { "Stats", "ShotsFired" }, delta = stats.ShotsFired })
+		end
+		if stats.ShotsHit > 0 then
+			table.insert(updates, { path = { "Stats", "ShotsHit" }, delta = stats.ShotsHit })
+		end
+		if stats.DamageDealt > 0 then
+			table.insert(updates, { path = { "Stats", "DamageDealt" }, delta = stats.DamageDealt })
+		end
+		if #updates > 0 then
+			pcall(DataService.BatchUpdate, DataService, player, updates)
+		end
+		_pendingStatsByPlayer[player] = nil
+	end
+end
+
+local function _accumulateStat(player: Player, key: string, delta: number)
+	local entry = _pendingStatsByPlayer[player]
+	if not entry then
+		entry = { ShotsFired = 0, ShotsHit = 0, DamageDealt = 0 }
+		_pendingStatsByPlayer[player] = entry
+	end
+	;(entry :: any)[key] = (entry :: any)[key] + delta
+end
+
+task.spawn(function()
+	while true do
+		task.wait(STATS_FLUSH_INTERVAL)
+		_flushPendingStats()
+	end
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+	local stats = _pendingStatsByPlayer[player]
+	if stats and DataService then
+		local updates = {}
+		if stats.ShotsFired > 0 then table.insert(updates, { path = { "Stats", "ShotsFired" }, delta = stats.ShotsFired }) end
+		if stats.ShotsHit > 0 then table.insert(updates, { path = { "Stats", "ShotsHit" }, delta = stats.ShotsHit }) end
+		if stats.DamageDealt > 0 then table.insert(updates, { path = { "Stats", "DamageDealt" }, delta = stats.DamageDealt }) end
+		if #updates > 0 then
+			pcall(DataService.BatchUpdate, DataService, player, updates)
+		end
+		_pendingStatsByPlayer[player] = nil
+	end
+end)
+
 local function _clearDamageContributors(target: Humanoid)
 	damageContributors[target] = nil
 	if assistDiedConnections[target] then
@@ -206,6 +266,18 @@ WeaponsSystem.CurrentWeaponChanged = Instance.new("BindableEvent")
 --   listeners para DailyTasks/BattlePass/etc. WeaponsSystem solo notifica.
 WeaponsSystem.Killed = Instance.new("BindableEvent")
 WeaponsSystem.killHook = (nil :: any) :: ((killer: Player, victimHum: Humanoid, weaponName: string, wasHeadshot: boolean) -> { coinAmount: number?, streakAfterKill: number?, xpGained: number? })?
+
+function WeaponsSystem.getLastAttacker(humanoid: Humanoid)
+	return LastAttackerStore.get(humanoid)
+end
+
+function WeaponsSystem.accumulateStat(player: Player, key: string, delta: number)
+	_accumulateStat(player, key, delta)
+end
+
+function WeaponsSystem.setLastAttacker(humanoid: Humanoid, userId: number, weaponId: string, headshot: boolean?)
+	LastAttackerStore.set(humanoid, userId, weaponId, headshot)
+end
 
 -- Inyección explícita de servicios. Llama a esto desde ServerBootstrap antes
 -- de WeaponsSystem.setup() para evitar el autoload por nombre y para tests.
@@ -883,10 +955,7 @@ local function _defaultDamageCallback(system, target, amount, damageType, dealer
 
 	if dealer and dealer.Character then
 		if dealerPlayer then
-			target:SetAttribute("LastAttackerUserId", dealerPlayer.UserId)
-			target:SetAttribute("LastAttackerAt", time())
-			target:SetAttribute("LastAttackerWeaponId", weaponName)
-			target:SetAttribute("LastAttackerHeadshot", wasHeadshot == true)
+			WeaponsSystem.setLastAttacker(target, dealerPlayer.UserId, weaponName, wasHeadshot)
 
 			-- Track damage contributor for assists
 			if not damageContributors[target] then
@@ -915,9 +984,7 @@ local function _defaultDamageCallback(system, target, amount, damageType, dealer
 			end
 			damageContributors[target][dealerPlayer] = (damageContributors[target][dealerPlayer] or 0) + finalDamage
 
-			if DataService then
-				pcall(DataService.Increment, DataService, dealerPlayer, { "Stats", "DamageDealt" }, finalDamage)
-			end
+			_accumulateStat(dealerPlayer, "DamageDealt", finalDamage)
 		end
 
 		target:TakeDamage(finalDamage)

@@ -16,6 +16,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local TeamUtils = require(Shared.utils.TeamUtils)
 local BotConfig = require(Shared.constants.BotConfig)
+local LastAttackerStore = require(ReplicatedStorage:WaitForChild("WeaponsSystem"):WaitForChild("Libraries"):WaitForChild("LastAttackerStore"))
 
 local Navigator = require(script.Parent:WaitForChild("nav"):WaitForChild("Navigator"))
 local StuckDetector = require(script.Parent:WaitForChild("nav"):WaitForChild("StuckDetector"))
@@ -824,7 +825,9 @@ function BotAI:Start(
 	table.insert(self._connections, connJump)
 
 	local connDamage = humanoid:GetAttributeChangedSignal("LastAttackerAt"):Connect(function()
-		local attackerUserId = humanoid:GetAttribute("LastAttackerUserId")
+		local lastAttacker = LastAttackerStore.get(humanoid)
+		if not lastAttacker then return end
+		local attackerUserId = lastAttacker.UserId
 		if type(attackerUserId) ~= "number" then return end
 		if attackerUserId == self._fakeUserId then return end -- self-damage
 		local attackerModel = _findAttackerModel(attackerUserId, self._aliveTargets, self._dummy, self._botModelByFakeUserId)
@@ -991,9 +994,7 @@ function BotAI:Start(
 						if targetHum and (targetHum :: Humanoid).Health > 0 then
 							local dmg = math.random(profile.DamageMin, profile.DamageMax)
 
-							;(targetHum :: Humanoid):SetAttribute("LastAttackerUserId", self._fakeUserId)
-							;(targetHum :: Humanoid):SetAttribute("LastAttackerAt", time())
-							;(targetHum :: Humanoid):SetAttribute("LastAttackerWeaponId", if weapon then weapon.Name else "NPC")
+							LastAttackerStore.set(targetHum :: Humanoid, self._fakeUserId, if weapon then weapon.Name else "NPC")
 
 							;(targetHum :: Humanoid):TakeDamage(dmg)
 

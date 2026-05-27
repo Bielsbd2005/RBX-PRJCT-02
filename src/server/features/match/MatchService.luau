@@ -30,6 +30,7 @@ local DailyTasksService = require(script.Parent.Parent.dailyTasks.DailyTasksServ
 local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
 local RewardService = require(script.Parent.Parent.Parent.core.RewardService)
 local EconomyAnalytics = require(script.Parent.Parent.Parent.core.EconomyAnalytics)
+local LastAttackerStore = require(ReplicatedStorage:WaitForChild("WeaponsSystem"):WaitForChild("Libraries"):WaitForChild("LastAttackerStore"))
 type DataService = DataServiceMod.DataServiceModule
 
 type MapDefinition = {
@@ -873,14 +874,11 @@ local function _registerDeathListener(player: Player, character: Model)
 				_recentDeathBySpawn[nearestSpawn] = time()
 			end
 		end
-		local attackerUserIdAttr = humanoid:GetAttribute("LastAttackerUserId")
-		local attackerAtAttr = humanoid:GetAttribute("LastAttackerAt")
-		local attackerWeaponIdAttr = humanoid:GetAttribute("LastAttackerWeaponId")
-		local attackerHeadshotAttr = humanoid:GetAttribute("LastAttackerHeadshot")
-		local attackerUserId = if type(attackerUserIdAttr) == "number" then attackerUserIdAttr else nil
-		local attackerAt = if type(attackerAtAttr) == "number" then attackerAtAttr else 0
-		local attackerWeaponId = if type(attackerWeaponIdAttr) == "string" then attackerWeaponIdAttr else ""
-		local attackerWasHeadshot = attackerHeadshotAttr == true
+		local lastAttacker = LastAttackerStore.get(humanoid)
+		local attackerUserId = if lastAttacker then lastAttacker.UserId else nil
+		local attackerAt = if lastAttacker then lastAttacker.At else 0
+		local attackerWeaponId = if lastAttacker then lastAttacker.WeaponId else ""
+		local attackerWasHeadshot = if lastAttacker then lastAttacker.Headshot else false
 		if attackerAt > 0 and time() - attackerAt > GameConfig.KillAttributionWindow then
 			attackerUserId = nil
 		end
@@ -1345,14 +1343,11 @@ local function _handleBotDied(botTeam: string, _botName: string, botHumanoid: Hu
 	end
 
 	-- Credit the kill to whoever killed this bot
-	local attackerUserIdAttr = botHumanoid:GetAttribute("LastAttackerUserId")
-	local attackerAtAttr = botHumanoid:GetAttribute("LastAttackerAt")
-	local attackerWeaponIdAttr = botHumanoid:GetAttribute("LastAttackerWeaponId")
-	local attackerHeadshotAttr = botHumanoid:GetAttribute("LastAttackerHeadshot")
-	local attackerUserId = if type(attackerUserIdAttr) == "number" then attackerUserIdAttr else nil
-	local attackerAt = if type(attackerAtAttr) == "number" then attackerAtAttr else 0
-	local attackerWeaponId = if type(attackerWeaponIdAttr) == "string" then attackerWeaponIdAttr else ""
-	local attackerWasHeadshot = attackerHeadshotAttr == true
+	local lastAttacker = LastAttackerStore.get(botHumanoid)
+	local attackerUserId = if lastAttacker then lastAttacker.UserId else nil
+	local attackerAt = if lastAttacker then lastAttacker.At else 0
+	local attackerWeaponId = if lastAttacker then lastAttacker.WeaponId else ""
+	local attackerWasHeadshot = if lastAttacker then lastAttacker.Headshot else false
 	if attackerAt > 0 and time() - attackerAt > GameConfig.KillAttributionWindow then
 		attackerUserId = nil
 	end
