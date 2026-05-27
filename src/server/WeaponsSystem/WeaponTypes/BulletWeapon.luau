@@ -143,6 +143,10 @@ local function _projectileLoopTick(dt: number)
 			i += 1
 		end
 	end
+	if #activeProjectiles == 0 and projectileLoopConn then
+		projectileLoopConn:Disconnect()
+		projectileLoopConn = nil
+	end
 end
 
 local function _ensureProjectileLoop()
@@ -218,7 +222,7 @@ function BulletWeapon.new(weaponsSystem, instance)
 			table.insert(self.chargingParticles, descendant)
 		end
 	end)
-	for _, v in pairs(self.instance:GetDescendants()) do
+	for _, v in self.instance:GetDescendants() do
 		if v.Name == "ChargingParticles" and v:IsA("ParticleEmitter") then
 			table.insert(self.chargingParticles, v)
 		end
@@ -382,7 +386,7 @@ function BulletWeapon:simulateFire(firingPlayer, fireInfo)
 			-- Add recoil to camera
 			local recoilMin, recoilMax = self:getConfigValue("RecoilMin", 0.05), self:getConfigValue("RecoilMax", 0.5)
 			local intensityToAdd = randomGenerator:NextNumber(recoilMin, recoilMax)
-			local xIntensity = math.sin(tick() * 2) * intensityToAdd * math.rad(0.05)
+			local xIntensity = math.sin(os.clock() * 2) * intensityToAdd * math.rad(0.05)
 			local yIntensity = intensityToAdd * 0.025
 			self.weaponsSystem.camera:addRecoil(Vector2.new(xIntensity, yIntensity))
 
@@ -400,7 +404,7 @@ function BulletWeapon:simulateFire(firingPlayer, fireInfo)
 end
 
 function BulletWeapon:getIgnoreList(includeLocalPlayer)
-	local now = tick()
+	local now = os.clock()
 	local ignoreList = self.ignoreList
 	if not ignoreList or now - self.ignoreListRefreshTime > IGNORE_LIST_LIFETIME then
 		ignoreList = {
@@ -580,7 +584,7 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 	local projectileEntry: ProjectileEntry = { active = true, callback = nil }
 	local stepConn = { Disconnect = function() projectileEntry.active = false end }
 	local pTravelDistance = 0 -- projected travel distance so far if projectile never stops
-	local startTime = tick()
+	local startTime = os.clock()
 	local didHit = false
 	local stoppedMotion = false
 	local stoppedMotionAt = 0
@@ -600,7 +604,7 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 	}
 
 	local steppedCallback = function(dt)
-		local now = tick()
+		local now = os.clock()
 		timeSinceStart = now - startTime
 
 		local travelDist = bulletSpeed * dt -- distance projectile has travelled since last frame
@@ -958,7 +962,7 @@ function BulletWeapon:onFired(firingPlayer, fireInfo, fromNetwork)
 		end
 	end
 
-	self.nextFireTime = tick() + cooldownTime
+	self.nextFireTime = os.clock() + cooldownTime
 
 	BaseWeapon.onFired(self, firingPlayer, fireInfo, fromNetwork)
 end
@@ -1009,7 +1013,7 @@ function BulletWeapon:onActivatedChanged()
 		end
 
 		-- Fire weapon
-		if self.activated and self.player == localPlayer and self:canFire() and tick() > self.nextFireTime then
+		if self.activated and self.player == localPlayer and self:canFire() and os.clock() > self.nextFireTime then
 			self:doLocalFire()
 		end
 
@@ -1109,7 +1113,7 @@ end
 function BulletWeapon:setChargingParticles(charge)
 	local ratePerCharge = self:getConfigValue("ChargingParticlesRatePerCharge", 20)
 	local rate = ratePerCharge * charge
-	for _, v in pairs(self.chargingParticles) do
+	for _, v in self.chargingParticles do
 		v.Rate = rate
 	end
 end
@@ -1120,7 +1124,7 @@ function BulletWeapon:onStepped(dt)
 
 	BaseWeapon.onStepped(self, dt)
 
-	local now = tick()
+	local now = os.clock()
 
 	local chargingSound = self:getSound("Charging")
 	local dischargingSound = self:getSound("Discharging")

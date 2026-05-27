@@ -17,7 +17,7 @@ local function initializeWeaponsSystemAssets()
 		local decalNonZeroTransparencyValues = { ["ScorchMark"] = 0.25 }
 		local particleEmittersToDisable = { ["Smoke"] = true }
 		local imageLabelNonZeroTransparencyValues = { ["Impact"] = 0.25 }
-		for _, descendant in pairs(effectsFolder:GetDescendants()) do
+		for _, descendant in effectsFolder:GetDescendants() do
 			if descendant:IsA("BasePart") then
 				if partNonZeroTransparencyValues[descendant.Name] ~= nil then
 					descendant.Transparency = partNonZeroTransparencyValues[descendant.Name]

@@ -124,6 +124,10 @@ function RagdollModule.apply(char: Model): boolean
 		end
 	end
 
+	-- Roblox forces CanCollide=false on dead humanoid parts every frame.
+	-- Re-enforce each Stepped so the ragdoll doesn't clip through the floor.
+	Utils.enforceCanCollide(allBaseParts, char)
+
 	local impulsePart = parts.LowerTorso or parts.Torso or parts.HumanoidRootPart
 	if impulsePart then
 		local vx = rng:NextInteger(-CONFIG.THROW_FORCE, CONFIG.THROW_FORCE)

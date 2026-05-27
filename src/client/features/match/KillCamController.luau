@@ -198,11 +198,12 @@ function KillCamController:start(data: StartData?)
 
 	local focusRoot, lastKnownPosition = _resolveKillerRoot(killerUserId, serverFallbackPos)
 
-	-- If no killer info at all, fall back to local player's death position
+	-- If no killer info at all, fall back to local player's death position.
+	-- Do NOT track the root as focusRoot — the ragdoll sets it to CanCollide=false
+	-- and it free-falls through the floor. We only capture the static position.
 	if not focusRoot and lastKnownPosition == Vector3.zero then
 		local localRoot = _resolveRootPartFromCharacter(self._player.Character)
 		if localRoot then
-			focusRoot = localRoot
 			lastKnownPosition = localRoot.Position
 		else
 			self._active = false

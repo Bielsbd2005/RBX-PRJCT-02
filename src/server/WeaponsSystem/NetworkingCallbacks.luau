@@ -60,6 +60,38 @@ local function _playEliminationSound()
 	end
 end
 
+-- Lazy-init caches for client libraries (avoid require/WaitForChild per kill)
+local _personalKillFeed = nil
+local _bonusEffect = nil
+local _pickupDropEffect = nil
+
+local function _getPersonalKillFeed()
+	if not _personalKillFeed then
+		local lib = script.Parent:FindFirstChild("Libraries")
+		local mod = lib and lib:FindFirstChild("PersonalKillFeed")
+		if mod then _personalKillFeed = require(mod) end
+	end
+	return _personalKillFeed
+end
+
+local function _getBonusEffect()
+	if not _bonusEffect then
+		local lib = script.Parent:FindFirstChild("Libraries")
+		local mod = lib and lib:FindFirstChild("BonusEffect")
+		if mod then _bonusEffect = require(mod) end
+	end
+	return _bonusEffect
+end
+
+local function _getPickupDropEffect()
+	if not _pickupDropEffect then
+		local lib = script.Parent:FindFirstChild("Libraries")
+		local mod = lib and lib:FindFirstChild("PickupDropEffect")
+		if mod then _pickupDropEffect = require(mod) end
+	end
+	return _pickupDropEffect
+end
+
 local NetworkingCallbacks = {}
 NetworkingCallbacks.WeaponsSystem = nil
 
@@ -78,7 +110,13 @@ function NetworkingCallbacks.WeaponFired(player, instance, fireInfo)
 				if not WeaponSecurity.ownsWeapon(player, instance) then
 					return
 				end
-				WeaponSecurity.registerShot(player, weapon, fireInfo)
+				local currentAmmo = instance:GetAttribute("CurrentAmmo")
+				if typeof(currentAmmo) == "number" and currentAmmo <= 0 then
+					return
+				end
+				if not WeaponSecurity.registerShot(player, weapon, fireInfo) then
+					return
+				end
 				WeaponsSystem.accumulateStat(player, "ShotsFired", 1)
 			end
 			weapon:onFired(player, fireInfo, true)
@@ -184,8 +222,10 @@ function NetworkingCallbacks.PlayerEliminated(victimName, xpGained, wasHeadshot,
 
 	_playEliminationSound()
 
-	local PersonalKillFeed = require(script.Parent:WaitForChild("Libraries"):WaitForChild("PersonalKillFeed"))
-	PersonalKillFeed.showKill(victimName or "Unknown", xpGained or 100, wasHeadshot or false)
+	local PersonalKillFeed = _getPersonalKillFeed()
+	if PersonalKillFeed then
+		PersonalKillFeed.showKill(victimName or "Unknown", xpGained or 100, wasHeadshot or false)
+	end
 
 	if WeaponsSystem then
 		if WeaponsSystem.camera then
@@ -200,24 +240,16 @@ function NetworkingCallbacks.PlayerEliminated(victimName, xpGained, wasHeadshot,
 		StreakController.onKill()
 	end
 
-	-- Mostrar BonusEffect basado en la racha
 	if victimPos then
-		coroutine.wrap(function()
-			local BonusEffect = script.Parent:WaitForChild("Libraries"):FindFirstChild("BonusEffect")
-			if BonusEffect then
-				require(BonusEffect).Play(victimPos, streak or 1)
-			end
-		end)()
-	end
+		local BonusEffect = _getBonusEffect()
+		if BonusEffect then
+			BonusEffect.Play(victimPos, streak or 1)
+		end
 
-	-- Spawnear pickup de Health en la posición de la víctima.
-	if victimPos then
-		coroutine.wrap(function()
-			local PickupDropEffect = script.Parent:WaitForChild("Libraries"):FindFirstChild("PickupDropEffect")
-			if PickupDropEffect then
-				require(PickupDropEffect).Play(victimPos)
-			end
-		end)()
+		local PickupDropEffect = _getPickupDropEffect()
+		if PickupDropEffect then
+			PickupDropEffect.Play(victimPos)
+		end
 	end
 end
 
@@ -229,8 +261,10 @@ function NetworkingCallbacks.PlayerAssist()
 
 	_playEliminationSound()
 
-	local PersonalKillFeed = require(script.Parent:WaitForChild("Libraries"):WaitForChild("PersonalKillFeed"))
-	PersonalKillFeed.showAssist()
+	local PersonalKillFeed = _getPersonalKillFeed()
+	if PersonalKillFeed then
+		PersonalKillFeed.showAssist()
+	end
 
 	-- Las assists no disparan FOV kick (reservado para kills propias).
 	if WeaponsSystem and WeaponsSystem.gui then
@@ -350,8 +384,5 @@ function NetworkingCallbacks.PlayExplosionVFX(position: Vector3)
 	-- el holder (al destruir el holder, las partículas vivas también desaparecen).
 	Debris:AddItem(holder, maxLifetime + 0.5)
 end
-
--- Exportar globalmente para que el cliente pueda acceder
-_G.WeaponsSystemNetworkingCallbacks = NetworkingCallbacks
 
 return NetworkingCallbacks

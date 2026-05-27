@@ -553,7 +553,7 @@ function ShoulderCamera:onRenderStep(dt)
 	local vecToFocus = cameraFocus.p - rootPartPos
 	local rayToFocus = Ray.new(rootPartPos, vecToFocus + (vecToFocus.Unit * collisionRadius))
 	local hitPart, hitPoint, hitNormal = self:penetrateCast(rayToFocus, self.raycastIgnoreList)
-	local currentTime = tick()
+	local currentTime = os.clock()
 	local sideCorrectionGoalVector = Vector3.zero
 	if hitPart then
 		hitPoint = hitPoint + (hitNormal * collisionRadius)
@@ -1045,7 +1045,7 @@ function ShoulderCamera:handlePartTransparencies()
 	local partsLookup = {}
 	local accoutrementsLookup = {}
 
-	for _, child in pairs(self.currentCharacter:GetChildren()) do
+	for _, child in self.currentCharacter:GetChildren() do
 		local hidden = false
 		if child:IsA("BasePart") then
 			hidden = partsLookup[child.Name] == true
@@ -1247,7 +1247,7 @@ function ShoulderCamera:processGamepadInput(dt)
 		end
 
 		local finalConstant = 0
-		local currentTime = tick()
+		local currentTime = os.clock()
 
 		if self.lastThumbstickTime then
 			local elapsed = (currentTime - self.lastThumbstickTime) * 10
@@ -1314,10 +1314,10 @@ function ShoulderCamera:onInputBegan(inputObj, wasProcessed)
 		local touchStartPos = Vector2.new(inputObj.Position.X, inputObj.Position.Y)
 		if not wasProcessed and self:isTouchPositionForCamera(touchStartPos) and not self.touchObj then
 			self.touchObj = inputObj
-			self.touchStartTime = tick()
+			self.touchStartTime = os.clock()
 			self.eventConnections.touchChanged = inputObj.Changed:Connect(function(prop)
 				if prop == "Position" then
-					local touchTime = tick() - self.touchStartTime
+					local touchTime = os.clock() - self.touchStartTime
 
 					local newTouchPos = Vector2.new(inputObj.Position.X, inputObj.Position.Y)
 					local delta = (newTouchPos - touchStartPos) * self.currentTouchSensitivity
@@ -1363,7 +1363,7 @@ function ShoulderCamera:onInputEnded(inputObj, wasProcessed)
 				self.eventConnections.touchChanged = nil
 			end
 
-			local touchTime = tick() - self.touchStartTime
+			local touchTime = os.clock() - self.touchStartTime
 			if self.currentTool and self.firingTool then
 				self.currentTool:Deactivate()
 			end
@@ -1371,7 +1371,7 @@ function ShoulderCamera:onInputEnded(inputObj, wasProcessed)
 
 			self.touchPanAccumulator = Vector2.new(0, 0)
 			if touchTime < self.touchDelayTime and not self.applyingTouchPan then
-				self.lastTapEndTime = tick()
+				self.lastTapEndTime = os.clock()
 			else
 				self.lastTapEndTime = nil
 			end

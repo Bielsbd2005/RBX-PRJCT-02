@@ -34,6 +34,7 @@ local DEFAULT_MAX_RANGE = 1500
 local RANGE_TOLERANCE = 50
 local MIN_DIR_DOT = 0.5
 local MIN_DIR_CHECK_DIST = 5
+local ROF_TOLERANCE = 0.8
 
 type ShotData = {
 	origin: Vector3,
@@ -47,6 +48,8 @@ type ShotData = {
 -- userId → sid → ShotData
 local pendingShots: { [number]: { [number]: ShotData } } = {}
 local pendingCounts: { [number]: number } = {}
+local lastShotTime: { [number]: number } = {}
+local lastShotCooldown: { [number]: number } = {}
 
 local function getOrCreateBucket(userId: number): { [number]: ShotData }
 	local bucket = pendingShots[userId]
@@ -99,16 +102,32 @@ function WeaponSecurity.ownsWeapon(player: Player, weaponInst: Instance): boolea
 end
 
 -- Registra un disparo válido. Llamar en WeaponFired tras validar propiedad.
-function WeaponSecurity.registerShot(player: Player, weapon: any, fireInfo: any)
-	if typeof(fireInfo) ~= "table" then return end
+-- Retorna false si el disparo es rechazado por ROF.
+function WeaponSecurity.registerShot(player: Player, weapon: any, fireInfo: any): boolean
+	if typeof(fireInfo) ~= "table" then return false end
 	local sid = fireInfo.id
-	if typeof(sid) ~= "number" then return end
-	if typeof(fireInfo.origin) ~= "Vector3" or typeof(fireInfo.dir) ~= "Vector3" then return end
-	if fireInfo.dir.Magnitude < 1e-4 then return end
+	if typeof(sid) ~= "number" then return false end
+	if typeof(fireInfo.origin) ~= "Vector3" or typeof(fireInfo.dir) ~= "Vector3" then return false end
+	if fireInfo.dir.Magnitude < 1e-4 then return false end
 
 	local userId = player.UserId
-	local bucket = getOrCreateBucket(userId)
 	local now = os.clock()
+
+	local cooldown = 0
+	if typeof(weapon) == "table" and typeof(weapon.getConfigValue) == "function" then
+		local cd = weapon:getConfigValue("ShotCooldown", 0.1)
+		if typeof(cd) == "number" and cd > 0 then
+			cooldown = cd
+		end
+	end
+	local prev = lastShotTime[userId]
+	if prev and cooldown > 0 and (now - prev) < cooldown * ROF_TOLERANCE then
+		return false
+	end
+	lastShotTime[userId] = now
+	lastShotCooldown[userId] = cooldown
+
+	local bucket = getOrCreateBucket(userId)
 
 	local count = getBucketCount(userId)
 	if count >= MAX_PENDING_PER_PLAYER then
@@ -146,6 +165,7 @@ function WeaponSecurity.registerShot(player: Player, weapon: any, fireInfo: any)
 		hitsRemaining = numProjectiles,
 		maxRange = maxRange,
 	}
+	return true
 end
 
 -- Valida un hit reportado por el cliente. Retorna (ok, reason).
@@ -202,8 +222,11 @@ end
 
 if RunService:IsServer() then
 	Players.PlayerRemoving:Connect(function(player)
-		pendingShots[player.UserId] = nil
-		pendingCounts[player.UserId] = nil
+		local uid = player.UserId
+		pendingShots[uid] = nil
+		pendingCounts[uid] = nil
+		lastShotTime[uid] = nil
+		lastShotCooldown[uid] = nil
 	end)
 end
 

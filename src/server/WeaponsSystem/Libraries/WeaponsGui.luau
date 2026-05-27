@@ -1299,7 +1299,7 @@ function WeaponsGui:onScreenSizeChanged()
 
 	self:_refreshHotbar()
 
-	for _, child in pairs(self.scalingElementsFolder:GetChildren()) do
+	for _, child in self.scalingElementsFolder:GetChildren() do
 		self:updateScale(child, viewportSize)
 	end
 

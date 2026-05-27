@@ -229,7 +229,7 @@ do
 			warn(debug.traceback())
 		end)
 	end
-	for _, child in pairs(WeaponTypes:GetChildren()) do
+	for _, child in WeaponTypes:GetChildren() do
 		onNewWeaponType(child)
 	end
 	WeaponTypes.ChildAdded:Connect(onNewWeaponType)
@@ -493,7 +493,7 @@ function WeaponsSystem.setup()
 		local networkFolder = Instance.new("Folder")
 		networkFolder.Name = "Network"
 
-		for _, remoteEventName in pairs(REMOTE_EVENT_NAMES) do
+		for _, remoteEventName in REMOTE_EVENT_NAMES do
 			local remoteEvent = Instance.new("RemoteEvent")
 			remoteEvent.Name = remoteEventName
 			remoteEvent.Parent = networkFolder
@@ -510,7 +510,7 @@ function WeaponsSystem.setup()
 			end)
 			WeaponsSystem.remoteEvents[remoteEventName] = remoteEvent
 		end
-		for _, remoteFuncName in pairs(REMOTE_FUNCTION_NAMES) do
+		for _, remoteFuncName in REMOTE_FUNCTION_NAMES do
 			local remoteFunc = Instance.new("RemoteEvent")
 			remoteFunc.Name = remoteFuncName
 			remoteFunc.Parent = networkFolder
@@ -547,7 +547,7 @@ function WeaponsSystem.setup()
 
 		local networkFolder = WeaponsSystemFolder:WaitForChild("Network", math.huge)
 
-		for _, remoteEventName in pairs(REMOTE_EVENT_NAMES) do
+		for _, remoteEventName in REMOTE_EVENT_NAMES do
 			coroutine.wrap(function()
 				local remoteEvent = networkFolder:WaitForChild(remoteEventName, math.huge)
 				local callback = NetworkingCallbacks[remoteEventName]
@@ -559,7 +559,7 @@ function WeaponsSystem.setup()
 				WeaponsSystem.remoteEvents[remoteEventName] = remoteEvent
 			end)()
 		end
-		for _, remoteFuncName in pairs(REMOTE_FUNCTION_NAMES) do
+		for _, remoteFuncName in REMOTE_FUNCTION_NAMES do
 			coroutine.wrap(function()
 				local remoteFunc = networkFolder:WaitForChild(remoteFuncName, math.huge)
 				local callback = NetworkingCallbacks[remoteFuncName]
@@ -585,7 +585,7 @@ function WeaponsSystem.setup()
 	WeaponsSystem.connections.weaponAdded = CollectionService:GetInstanceAddedSignal(WEAPON_TAG):Connect(WeaponsSystem.onWeaponAdded)
 	WeaponsSystem.connections.weaponRemoved = CollectionService:GetInstanceRemovedSignal(WEAPON_TAG):Connect(WeaponsSystem.onWeaponRemoved)
 
-	for _, instance in pairs(CollectionService:GetTagged(WEAPON_TAG)) do
+	for _, instance in CollectionService:GetTagged(WEAPON_TAG) do
 		WeaponsSystem.onWeaponAdded(instance)
 	end
 
@@ -1062,6 +1062,7 @@ local function _defaultGetTeamCallback(player)
 	if not player or not player.Team then
 		return 0
 	end
+	return player.Team
 end
 
 function WeaponsSystem.getTeam(player)

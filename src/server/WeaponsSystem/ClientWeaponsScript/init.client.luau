@@ -36,30 +36,22 @@ if script.Parent.Name ~= "PlayerScripts" then
 		playerChildAddedConnection = script.Parent.Parent.ChildAdded:Connect(onPlayerChildAdded)
 	end
 else
-	-- Initialize LevelUp Listener
 	task.spawn(function()
-		-- Wait for the module provided by user
 		local success, LevelUpFX = pcall(function()
 			return require(ReplicatedStorage:WaitForChild("LevelUpFX", 10))
 		end)
+		if not success or not LevelUpFX then return end
 
-		if success and LevelUpFX then
-			local MenuFolder = ReplicatedStorage:WaitForChild("MenuFolder", 10)
-			if MenuFolder then
-				local Remotes = MenuFolder:WaitForChild("Remotes", 10)
-				if Remotes then
-					local Currency = Remotes:WaitForChild("Currency", 10)
-					if Currency then
-						local LevelUp = Currency:WaitForChild("LevelUp", 10)
-						if LevelUp then
-							LevelUp.OnClientEvent:Connect(function(newLevel)
-								LevelUpFX.Show(newLevel)
-							end)
-						end
-					end
-				end
-			end
-		end
+		local LevelUp = ReplicatedStorage
+			:WaitForChild("MenuFolder", 10)
+		LevelUp = LevelUp and LevelUp:WaitForChild("Remotes", 10)
+		LevelUp = LevelUp and LevelUp:WaitForChild("Currency", 10)
+		LevelUp = LevelUp and LevelUp:WaitForChild("LevelUp", 10)
+		if not LevelUp then return end
+
+		LevelUp.OnClientEvent:Connect(function(newLevel)
+			LevelUpFX.Show(newLevel)
+		end)
 	end)
 
 	weaponsSystemFolder = ReplicatedStorage:FindFirstChild("WeaponsSystem")

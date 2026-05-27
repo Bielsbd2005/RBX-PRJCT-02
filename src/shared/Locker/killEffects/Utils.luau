@@ -1,6 +1,34 @@
 --!strict
 
+local RunService = game:GetService("RunService")
+
 local KillEffectUtils = {}
+
+-- Roblox's internal character controller forces CanCollide = false on dead
+-- humanoid parts every physics step. This helper re-enforces CanCollide = true
+-- each Stepped frame so the ragdoll doesn't clip through the floor.
+-- Auto-disconnects after `duration` seconds or when the character is destroyed.
+local ENFORCE_DURATION = 12
+
+function KillEffectUtils.enforceCanCollide(parts: { BasePart }, char: Model)
+	local conn: RBXScriptConnection? = nil
+	local startAt = time()
+
+	conn = RunService.Stepped:Connect(function()
+		if time() - startAt > ENFORCE_DURATION or not char.Parent then
+			if conn then
+				conn:Disconnect()
+				conn = nil
+			end
+			return
+		end
+		for _, part in parts do
+			if part.Parent and part.Name ~= "HumanoidRootPart" and not part.CanCollide then
+				part.CanCollide = true
+			end
+		end
+	end)
+end
 
 function KillEffectUtils.createBallJoint(att0: Attachment?, att1: Attachment?, limits: { UpperAngle: number }?)
 	if not att0 or not att1 then

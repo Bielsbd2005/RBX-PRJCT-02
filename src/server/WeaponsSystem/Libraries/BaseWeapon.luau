@@ -85,7 +85,7 @@ function BaseWeapon:doInitialSetup()
 	self.connections.childRemoved = self.instance.ChildRemoved:Connect(function(child)
 		self:onChildRemoved(child)
 	end)
-	for _, child in pairs(self.instance:GetChildren()) do
+	for _, child in self.instance:GetChildren() do
 		self:onChildAdded(child)
 	end
 
@@ -233,7 +233,7 @@ end
 
 function BaseWeapon:cleanupConnection(...)
 	local args = { ... }
-	for _, name in pairs(args) do
+	for _, name in args do
 		if typeof(name) == "string" and self.connections[name] then
 			self.connections[name]:Disconnect()
 			self.connections[name] = nil
@@ -305,7 +305,7 @@ function BaseWeapon:onEquippedChanged()
 	end
 
 	if self.instanceIsTool then
-		for _, part in pairs(self.instance:GetDescendants()) do
+		for _, part in self.instance:GetDescendants() do
 			if part:IsA("BasePart") then
 				part.CanCollide = part ~= self.handle and not self.equipped
 			end
@@ -336,10 +336,6 @@ function BaseWeapon:setActivated(activated, fromNetwork)
 	end
 
 	self.activated = activated
-	if IsServer and not fromNetwork then
-		WeaponsNetwork.broadcastWeaponActivated(self.player, self.instance, self.activated)
-	end
-
 	self:onActivatedChanged()
 end
 
@@ -375,7 +371,7 @@ function BaseWeapon:fire(origin, dir, charge)
 	-- (y BurstShotCooldown). Antes esto usaba FireRate, una clave que no existe
 	-- en las armas, por lo que el AutoShoot quedaba clavado al fallback de 0.15s
 	-- e ignoraba la cadencia configurada por arma.
-	if tick() < (self.nextFireTime or 0) then
+	if os.clock() < (self.nextFireTime or 0) then
 		return
 	end
 
@@ -390,7 +386,7 @@ function BaseWeapon:fire(origin, dir, charge)
 	fireInfo.charge = math.clamp(charge or 1, 0, 1)
 	fireInfo.id = self.nextShotId
 	self.nextShotId = self.nextShotId + 1
-	self.lastFireTime = tick()
+	self.lastFireTime = os.clock()
 
 	if not IsServer then
 		self:onFired(self.player, fireInfo, false)
@@ -576,15 +572,16 @@ end
 
 -- This function is used to set configuration values from outside configuration objects/folders
 function BaseWeapon:importConfiguration(config)
-	if not config or not config:IsA("Configuration") then
-		for _, child in pairs(config:GetChildren()) do
-			if child:IsA("ValueBase") then
-				local valueName = child.Name
-				local newValue = child.Value
-				local oldValue = self.configValues[valueName]
-				self.configValues[valueName] = newValue
-				self:onConfigValueChanged(valueName, newValue, oldValue)
-			end
+	if not config then
+		return
+	end
+	for _, child in config:GetChildren() do
+		if child:IsA("ValueBase") then
+			local valueName = child.Name
+			local newValue = child.Value
+			local oldValue = self.configValues[valueName]
+			self.configValues[valueName] = newValue
+			self:onConfigValueChanged(valueName, newValue, oldValue)
 		end
 	end
 end
@@ -595,7 +592,7 @@ function BaseWeapon:setConfiguration(config)
 		return
 	end
 
-	for _, child in pairs(config:GetChildren()) do
+	for _, child in config:GetChildren() do
 		if child:IsA("ValueBase") then
 			self:onConfigValueAdded(child)
 		end
@@ -643,7 +640,7 @@ function BaseWeapon:onRenderStepped(dt)
 	end
 
 	-- Check if we fired recently
-	local firedRecently = (tick() - self.lastFireTime) < 0.5
+	local firedRecently = (os.clock() - self.lastFireTime) < 0.5
 
 	-- Prioritize reload: Do not play run animation if reloading
 	if self.reloading then
@@ -799,7 +796,7 @@ function BaseWeapon:onStepped(dt)
 	-- Auto-fire respeta la cadencia real del arma. BulletWeapon.onFired actualiza
 	-- nextFireTime con ShotCooldown / BurstShotCooldown tras cada disparo, igual
 	-- que el flujo manual de fuego (ver BulletWeapon.onActivatedChanged).
-	if tick() < (self.nextFireTime or 0) then return end
+	if os.clock() < (self.nextFireTime or 0) then return end
 
 	-- Determine weapon muzzle origin matching BulletWeapon's self.tipAttach precisely.
 	-- El lookup se cachea: el subárbol del Tool no cambia en runtime, y los
@@ -982,7 +979,7 @@ function BaseWeapon:onReloaded(player, fromNetwork)
 	end
 
 	local reloadTime = self:getConfigValue("ReloadTime", 2)
-	local startTime = tick()
+	local startTime = os.clock()
 
 	-- GUI solo si esta weapon es la currentWeapon del LocalPlayer.
 	if not IsServer and self.weaponsSystem.gui

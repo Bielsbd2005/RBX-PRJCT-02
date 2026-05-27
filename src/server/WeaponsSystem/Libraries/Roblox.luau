@@ -78,7 +78,7 @@ end
 
 function Roblox.weldModel(model)
 	local rootPart = model.PrimaryPart
-	for _, part in pairs(model:GetDescendants()) do
+	for _, part in model:GetDescendants() do
 		if part:IsA("BasePart") and part ~= rootPart then
 			local weld = Instance.new("WeldConstraint")
 			weld.Part0 = rootPart
@@ -90,7 +90,7 @@ end
 
 function Roblox.setNetworkOwner(model, owner)
 	if not model then warn("Cannot setNetworkOwner on nil model") return end
-	for _, part in pairs(model:GetDescendants()) do
+	for _, part in model:GetDescendants() do
 		if part:IsA("BasePart") and not part.Anchored then
 			part:SetNetworkOwner(owner)
 		end
@@ -112,7 +112,7 @@ end
 function Roblox.getTotalMass(part)
 	local allConnected = part:GetConnectedParts(true)
 	local total = 0
-	for _, v in pairs(allConnected) do
+	for _, v in allConnected do
 		total = total + v:GetMass()
 	end
 	return total
@@ -145,7 +145,7 @@ function Roblox.fadeAway(gui, duration, level)
 		return
 	end
 
-	for _, v in pairs(gui:GetChildren()) do
+	for _, v in gui:GetChildren() do
 		Roblox.fadeAway(v, duration, level + 1)
 	end
 
@@ -161,7 +161,7 @@ function Roblox.fadeAway(gui, duration, level)
 end
 
 function Roblox.setModelAnchored(model, anchored)
-	for _, part in pairs(model:GetDescendants()) do
+	for _, part in model:GetDescendants() do
 		if part:IsA("BasePart") then
 			part.Anchored = anchored
 		end
@@ -169,7 +169,7 @@ function Roblox.setModelAnchored(model, anchored)
 end
 
 function Roblox.setModelLocalVisible(model, visible)
-	for _, part in pairs(model:GetDescendants()) do
+	for _, part in model:GetDescendants() do
 		if part:IsA("BasePart") then
 			part.LocalTransparencyModifier = visible and 0 or 1
 		elseif part:IsA("SurfaceGui") then
@@ -181,7 +181,7 @@ function Roblox.setModelLocalVisible(model, visible)
 end
 
 function Roblox.forAllTagged(tagName, enterFunc, exitFunc)
-	for _, obj in pairs(CollectionService:GetTagged(tagName)) do
+	for _, obj in CollectionService:GetTagged(tagName) do
 		if enterFunc then
 			enterFunc(obj, tagName)
 		end
@@ -374,7 +374,7 @@ function Roblox.penetrateCast(ray, ignoreList)
 	local tries = 0
 	local hitPart, hitPoint, hitNormal, hitMaterial =
 		nil, ray.Origin + ray.Direction, Vector3.new(0, 1, 0), Enum.Material.Air
-	while tries < 50 do
+	while tries < 10 do
 		tries = tries + 1
 		local result = workspace:Raycast(ray.Origin, ray.Direction, params)
 		if not result then
@@ -431,7 +431,7 @@ local DURATION_TOKENS = {
 function Roblox.parseDurationInSeconds(inputStr)
 	local tokensFound = {}
 	local totalDurationSeconds = 0
-	for _, tokenInfo in pairs(DURATION_TOKENS) do
+	for _, tokenInfo in DURATION_TOKENS do
 		local numFound = string.match(inputStr, "(%d+)" .. tokenInfo[2])
 		if numFound then
 			local num = tonumber(numFound) or 0
@@ -468,7 +468,7 @@ function Roblox.chooseWeighted(choiceTable)
 end
 
 function Roblox.hasMatchingTag(instance, tagPattern)
-	for _, tagName in pairs(CollectionService:GetTags(instance)) do
+	for _, tagName in CollectionService:GetTags(instance) do
 		if tagName:match(tagPattern) ~= nil then
 			return true
 		end

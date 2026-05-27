@@ -63,16 +63,44 @@ function WeaponsNetwork.broadcastWeaponFired(player: Player?, weaponInst: Instan
 	end
 end
 
-function WeaponsNetwork.broadcastWeaponActivated(player: Player?, weaponInst: Instance, activated: boolean)
-	getEvent("WeaponActivated"):FireAllClients(player, weaponInst, activated)
-end
-
 function WeaponsNetwork.broadcastReloaded(player: Player?, weaponInst: Instance)
-	getEvent("WeaponReloaded"):FireAllClients(player, weaponInst)
+	local origin = player and player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+	if not origin then
+		getEvent("WeaponReloaded"):FireAllClients(player, weaponInst)
+		return
+	end
+	local pos = (origin :: BasePart).Position
+	local event = getEvent("WeaponReloaded")
+	for _, p in Players:GetPlayers() do
+		if p == player then continue end
+		local char = p.Character
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		if root then
+			local delta = (root :: BasePart).Position - pos
+			if delta:Dot(delta) > SHOT_BROADCAST_RANGE_SQ then continue end
+		end
+		event:FireClient(p, player, weaponInst)
+	end
 end
 
 function WeaponsNetwork.broadcastReloadCanceled(player: Player?, weaponInst: Instance)
-	getEvent("WeaponReloadCanceled"):FireAllClients(player, weaponInst)
+	local origin = player and player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+	if not origin then
+		getEvent("WeaponReloadCanceled"):FireAllClients(player, weaponInst)
+		return
+	end
+	local pos = (origin :: BasePart).Position
+	local event = getEvent("WeaponReloadCanceled")
+	for _, p in Players:GetPlayers() do
+		if p == player then continue end
+		local char = p.Character
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		if root then
+			local delta = (root :: BasePart).Position - pos
+			if delta:Dot(delta) > SHOT_BROADCAST_RANGE_SQ then continue end
+		end
+		event:FireClient(p, player, weaponInst)
+	end
 end
 
 function WeaponsNetwork.broadcastExplosionVFX(position: Vector3)
