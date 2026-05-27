@@ -118,7 +118,7 @@ export type Settings = {
 	HUDScale: number,       -- 0..1 mapped a [0.75..1.5] en cliente
 	-- Toggles
 	Vibration: boolean,
-	AimAssist: boolean,
+	AutoShoot: boolean,
 	ShowDamageNumbers: boolean,
 	-- Choices (string enums whitelisted en SettingsService)
 	ColorblindMode: string, -- "None" | "Protanopia" | "Deuteranopia" | "Tritanopia"
@@ -331,7 +331,7 @@ local DEFAULT: PlayerProfile = {
 		FOV = 0.5,
 		HUDScale = 0.5,
 		Vibration = true,
-		AimAssist = true,
+		AutoShoot = true,
 		ShowDamageNumbers = true,
 		ColorblindMode = "None",
 		Language = "en",

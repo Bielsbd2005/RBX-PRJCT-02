@@ -179,7 +179,7 @@ function SettingsFeature.start(menuController: any): any
 	local musicSetting = settingsList:WaitForChild("Music")
 	local sensSetting = settingsList:WaitForChild("Sensitivity")
 	local vibSetting = settingsList:WaitForChild("Vibration")
-	local aimSetting = settingsList:WaitForChild("AimAssist")
+	local aimSetting = settingsList:WaitForChild("AutoShoot")
 
 	local fovEffect = CameraFovEffect.new()
 	janitor:Add(fovEffect, "Destroy")
@@ -200,7 +200,7 @@ function SettingsFeature.start(menuController: any): any
 		MusicVolume = 0.5,
 		CameraSensitivity = 0.5,
 		Vibration = true,
-		AimAssist = true,
+		AutoShoot = true,
 	}
 	local pendingChanges: PendingChanges = {}
 
@@ -240,7 +240,7 @@ function SettingsFeature.start(menuController: any): any
 	local updateMusic = setupSlider(musicSetting, "MusicVolume", currentConfig, janitor, applyMusicVolume)
 	local updateSens = setupSlider(sensSetting, "CameraSensitivity", currentConfig, janitor, applySensitivity)
 	local updateVib = setupToggle(vibSetting, "Vibration", currentConfig, janitor)
-	local updateAim = setupToggle(aimSetting, "AimAssist", currentConfig, janitor)
+	local updateAim = setupToggle(aimSetting, "AutoShoot", currentConfig, janitor)
 
 	local musicDragDetector = (musicSetting :: Instance):WaitForChild("SliderContainer"):WaitForChild("Drag"):WaitForChild("UIDragDetector") :: UIDragDetector
 	local sensDragDetector = (sensSetting :: Instance):WaitForChild("SliderContainer"):WaitForChild("Drag"):WaitForChild("UIDragDetector") :: UIDragDetector
@@ -263,10 +263,10 @@ function SettingsFeature.start(menuController: any): any
 	end), "Disconnect")
 
 	janitor:Add(aimToggleBtn.MouseButton1Click:Connect(function()
-		local newState = not (currentConfig.AimAssist :: boolean)
+		local newState = not (currentConfig.AutoShoot :: boolean)
 		updateAim(newState)
-		markPending("AimAssist")
-		player:SetAttribute("AimAssist", newState)
+		markPending("AutoShoot")
+		player:SetAttribute("AutoShoot", newState)
 	end), "Disconnect")
 
 	janitor:Add(resetBtn.MouseButton1Click:Connect(function()
@@ -278,9 +278,9 @@ function SettingsFeature.start(menuController: any): any
 		markPending("MusicVolume")
 		markPending("CameraSensitivity")
 		markPending("Vibration")
-		markPending("AimAssist")
+		markPending("AutoShoot")
 		player:SetAttribute("Vibration", true)
-		player:SetAttribute("AimAssist", true)
+		player:SetAttribute("AutoShoot", true)
 	end), "Disconnect")
 
 	janitor:Add(closeBtn.MouseButton1Click:Connect(function()
@@ -303,9 +303,9 @@ function SettingsFeature.start(menuController: any): any
 		updateMusic(savedSettings.MusicVolume or 0.5)
 		updateSens(savedSettings.CameraSensitivity or 0.5)
 		updateVib(if savedSettings.Vibration ~= nil then savedSettings.Vibration else true)
-		updateAim(if savedSettings.AimAssist ~= nil then savedSettings.AimAssist else true)
+		updateAim(if savedSettings.AutoShoot ~= nil then savedSettings.AutoShoot else true)
 		player:SetAttribute("Vibration", if savedSettings.Vibration ~= nil then savedSettings.Vibration else true)
-		player:SetAttribute("AimAssist", if savedSettings.AimAssist ~= nil then savedSettings.AimAssist else true)
+		player:SetAttribute("AutoShoot", if savedSettings.AutoShoot ~= nil then savedSettings.AutoShoot else true)
 	end)
 
 	return janitor

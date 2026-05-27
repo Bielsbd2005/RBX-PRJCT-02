@@ -54,7 +54,7 @@ local NUMERIC_SETTINGS = {
 
 local BOOLEAN_SETTINGS = {
 	Vibration = true,
-	AimAssist = true,
+	AutoShoot = true,
 	ShowDamageNumbers = true,
 }
 

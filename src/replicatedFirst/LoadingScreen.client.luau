@@ -4,12 +4,13 @@ local Players = game:GetService("Players")
 local ContentProvider = game:GetService("ContentProvider")
 local ReplicatedFirst = game:GetService("ReplicatedFirst")
 
-local SKIP_IN_STUDIO = true
+local SKIP_IN_STUDIO = false
 
 ReplicatedFirst:RemoveDefaultLoadingScreen()
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
+playerGui.ScreenOrientation = Enum.ScreenOrientation.LandscapeSensor
 
 if SKIP_IN_STUDIO and RunService:IsStudio() then
 	local loadingScreen = playerGui:FindFirstChild("LoadingScreen")
