@@ -538,11 +538,19 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 				t = hitT,
 			}
 			self:onHit(hitInfo)
-			table.clear(_hitInfoSendBuffer)
+
+			-- Diferir el envío del hit: BaseWeapon:fire() llama onFired (→ aquí)
+			-- ANTES de fireWeaponFired. Si enviamos el hit síncronamente, el
+			-- server lo recibe antes de que el shot esté registrado y validateHit
+			-- lo descarta con "unknown sid". task.defer encola tras fire().
+			local hitPayload = {}
 			for k, v in pairs(hitInfo) do
-				_hitInfoSendBuffer[k] = v
+				hitPayload[k] = v
 			end
-			WeaponsNetwork.fireWeaponHit(self.instance, _hitInfoSendBuffer)
+			local weaponInst = self.instance
+			task.defer(function()
+				WeaponsNetwork.fireWeaponHit(weaponInst, hitPayload)
+			end)
 
 			if hitSound then hitSound:Play() end
 			self:_spawnHitMark(hitPart, hitPoint, hitNormal, parabola)
