@@ -442,11 +442,6 @@ function BotAI:_canSeeTarget(target: Model, preResolvedRoot: BasePart?): boolean
 	end
 
 	local params = self._raycastParams
-	if not params then
-		params = RaycastParams.new()
-		params.FilterDescendantsInstances = { self._dummy }
-		params.FilterType = Enum.RaycastFilterType.Exclude
-	end
 
 	local result = workspace:Raycast(origin, direction, params)
 	local seesTarget = result ~= nil and result.Instance:IsDescendantOf(target)
@@ -767,7 +762,9 @@ function BotAI:Start(
 	self._navigator = Navigator.new(humanoid, rootPart, AGENT_PARAMS)
 
 	local _, connDetectViz = DetectRangeViz.attach(rootPart, BotConfig.Combat.DetectRange)
-	table.insert(self._connections, connDetectViz)
+	if connDetectViz then
+		table.insert(self._connections, connDetectViz)
+	end
 
 	self._stuckDetector = StuckDetector.new(
 		rootPart,

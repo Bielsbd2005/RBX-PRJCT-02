@@ -18,21 +18,27 @@
 	únicamente para clientes que tengan al bot visible. Despreciable.
 ]]
 
+local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 
 local DetectRangeViz = {}
 
 local ATTR = "DebugBotDetectRange"
+local _IS_STUDIO = RunService:IsStudio()
 
-local function _isEnabled(): boolean
-	return Workspace:GetAttribute(ATTR) == true
+function DetectRangeViz.isEnabled(): boolean
+	return _IS_STUDIO and Workspace:GetAttribute(ATTR) == true
 end
 
 -- Crea y attachea el adornment al rootPart. Devuelve (adornment, connection)
 -- para que el caller los limpie en Stop. El adornment se parentea al
 -- rootPart, así que si el char muere y se destruye, el adornment muere
 -- automáticamente — pero la connection necesita Disconnect explícito.
-function DetectRangeViz.attach(rootPart: BasePart, radius: number): (SphereHandleAdornment, RBXScriptConnection)
+function DetectRangeViz.attach(rootPart: BasePart, radius: number): (SphereHandleAdornment?, RBXScriptConnection?)
+	if not _IS_STUDIO then
+		return nil, nil
+	end
+
 	local adornment = Instance.new("SphereHandleAdornment")
 	adornment.Name = "BotDetectRangeDbg"
 	adornment.Adornee = rootPart
@@ -41,12 +47,12 @@ function DetectRangeViz.attach(rootPart: BasePart, radius: number): (SphereHandl
 	adornment.Transparency = 0.85                     -- apenas visible
 	adornment.AlwaysOnTop = false                     -- respeta oclusión
 	adornment.ZIndex = 1
-	adornment.Visible = _isEnabled()
+	adornment.Visible = DetectRangeViz.isEnabled()
 	adornment.Parent = rootPart
 
 	local conn = Workspace:GetAttributeChangedSignal(ATTR):Connect(function()
 		if adornment.Parent then
-			adornment.Visible = _isEnabled()
+			adornment.Visible = DetectRangeViz.isEnabled()
 		end
 	end)
 

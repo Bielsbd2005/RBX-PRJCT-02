@@ -33,6 +33,8 @@ export type GameConfigType = {
 	MaxRoundDuration: number,
 	WinScoreLimit: number,
 	KillAttributionWindow: number,
+	MatchCashCap: number,
+	MatchXPCap: number,
 	Teams: TeamsDefinition,
 	Maps: { MapDefinition },
 }
@@ -56,6 +58,8 @@ local GameConfig: GameConfigType = {
 	-- Más allá de este tiempo, el kill se considera "muerte natural" / no atribuible.
 	-- Consumida por MatchService (PvP) y AIService (bots) para mantener atribución uniforme.
 	KillAttributionWindow = 2,
+	MatchCashCap = 500,
+	MatchXPCap = 800,
 
 	Teams = {
 		A = {

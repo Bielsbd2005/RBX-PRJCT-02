@@ -78,6 +78,7 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 	local DailyTasksFeature = require(clientRoot.features.dailyTasks)
 	local BattlePassFeature = require(clientRoot.features.battlepass)
 	local LobbyFeature = require(clientRoot.features.lobby)
+	local ProfileBoardFeature = require(clientRoot.features.profileBoard)
 	local LobbyMusicFeature = require(clientRoot.features.music)
 	local MatchFeature = require(clientRoot.features.match)
 
@@ -130,6 +131,7 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 		{ label = "dailyTasks", start = DailyTasksFeature.start },
 		{ label = "battlepass", start = BattlePassFeature.start },
 		{ label = "lobby", start = LobbyFeature.start },
+		{ label = "profileBoard", start = ProfileBoardFeature.start },
 		{ label = "music", start = LobbyMusicFeature.start },
 		{ label = "match", start = MatchFeature.start },
 	} :: { DeferredFeatureEntry }

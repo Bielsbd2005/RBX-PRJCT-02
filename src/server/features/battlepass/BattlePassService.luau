@@ -617,10 +617,6 @@ function BattlePassService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchas
 		EconomyAnalytics.BPPremiumStep(player, 3, sessionId)
 		_bpFunnelSessionByUserId[player.UserId] = nil
 
-		if season.PremiumRobuxPrice and season.PremiumRobuxPrice > 0 then
-			EconomyAnalytics.RobuxSink(player, season.PremiumRobuxPrice, "BPPremium", season.Id)
-		end
-
 		_respond(player, true, "PremiumGranted", 0, "Premium")
 		return Enum.ProductPurchaseDecision.PurchaseGranted
 	end
@@ -638,7 +634,6 @@ function BattlePassService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchas
 	end
 
 	if season.SkipRobuxPrice and season.SkipRobuxPrice > 0 then
-		EconomyAnalytics.RobuxSink(player, season.SkipRobuxPrice, "BPSkip", season.Id)
 		pcall(_dataService.Increment, _dataService, player, { "Stats", "TotalRobuxSpent" }, season.SkipRobuxPrice)
 	end
 

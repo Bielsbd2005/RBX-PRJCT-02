@@ -11,6 +11,7 @@ local HttpService = game:GetService("HttpService")
 local ServerScriptService = game:GetService("ServerScriptService")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 
+local ActionRewards = require(Shared:WaitForChild("constants"):WaitForChild("ActionRewards"))
 local GameConfig = require(Shared:WaitForChild("GameConfig"))
 local Network = require(Shared.networking.Network)
 local NetGuards = require(Shared.networking.NetGuards)
@@ -94,6 +95,8 @@ local _matchKillsByUserId: { [number]: number } = {}
 -- viven en KillAttributionService. Acá quedan kills/deaths que son
 -- accesados ampliamente (HUD broadcast, score updates).
 local _matchDeathsByUserId: { [number]: number } = {}
+local _matchCashEarnedByUserId: { [number]: number } = {}
+local _matchXPEarnedByUserId: { [number]: number } = {}
 local _recentKillTimestamps: { [number]: { number } } = {}
 local MULTIKILL_WINDOW = 4
 local _lastMapLoadStateBroadcastKey: string? = nil
@@ -265,6 +268,8 @@ local function _resetMatchScopedState()
 	-- Kill/death tracking
 	table.clear(_matchKillsByUserId)
 	table.clear(_matchDeathsByUserId)
+	table.clear(_matchCashEarnedByUserId)
+	table.clear(_matchXPEarnedByUserId)
 	table.clear(_recentKillTimestamps)
 	-- Streak state (counts + timeouts + broadcast keys) vive en KillAttributionService.
 	KillAttributionService:Clear()
@@ -337,12 +342,20 @@ end
 -- kill chain (línea ~519+) ya tenía `attacker` resuelto y la función hacía
 -- GetPlayerByUserId redundante por cada call (4 calls por kill: Kill +
 -- Headshot? + Streak3? + Streak5?). Ahora 1 lookup en el caller, 4 reuses.
+local function _isMatchCapReached(userId: number): boolean
+	return (_matchCashEarnedByUserId[userId] or 0) >= GameConfig.MatchCashCap
+		and (_matchXPEarnedByUserId[userId] or 0) >= GameConfig.MatchXPCap
+end
+
 local function _grantActionRewardsToAttacker(attacker: Player?, action: string, weaponId: string?)
 	if not _dataService or not attacker then
 		return
 	end
 
-	-- C2: si el profile aún no cargó, encolar y reintentar tras ProfileLoaded.
+	if _isMatchCapReached(attacker.UserId) then
+		return
+	end
+
 	if not _hasProfile(attacker) then
 		_deferUntilProfile(attacker, function()
 			_grantActionRewardsToAttacker(attacker, action, weaponId)
@@ -350,7 +363,11 @@ local function _grantActionRewardsToAttacker(attacker: Player?, action: string, 
 		return
 	end
 
-	RewardService.Award(attacker, action, nil, weaponId)
+	local ok, xpGranted, cashGranted = RewardService.Award(attacker, action, nil, weaponId)
+	if ok then
+		_matchCashEarnedByUserId[attacker.UserId] = (_matchCashEarnedByUserId[attacker.UserId] or 0) + cashGranted
+		_matchXPEarnedByUserId[attacker.UserId] = (_matchXPEarnedByUserId[attacker.UserId] or 0) + xpGranted
+	end
 end
 
 local function _grantMasteryWrapsIfEligible(player: Player, weaponCategory: string, weaponId: string, newKillCount: number)
@@ -1690,6 +1707,19 @@ local function _onRequestReturnToMenu(_: {}, player: Player)
 		_sendMapLoadStateToPlayer(player)
 		_sendRoundStateToPlayer(player)
 	end
+end
+
+function MatchService:GrantCombatReward(player: Player, actionKey: string, extraUpdates: any?, itemSku: string?)
+	if _isMatchCapReached(player.UserId) then
+		return false, 0, 0
+	end
+
+	local ok, xpGranted, cashGranted = RewardService.Award(player, actionKey, extraUpdates, itemSku)
+	if ok then
+		_matchCashEarnedByUserId[player.UserId] = (_matchCashEarnedByUserId[player.UserId] or 0) + cashGranted
+		_matchXPEarnedByUserId[player.UserId] = (_matchXPEarnedByUserId[player.UserId] or 0) + xpGranted
+	end
+	return ok, xpGranted, cashGranted
 end
 
 function MatchService:GetPlayerKillStreak(playerOrUserId: Player | number): number

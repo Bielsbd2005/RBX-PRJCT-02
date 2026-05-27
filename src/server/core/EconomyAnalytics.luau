@@ -58,32 +58,6 @@ function EconomyAnalytics.Sink(
 	_logEconomy(player, Enum.AnalyticsEconomyFlowType.Sink, amount, endingBalance, transactionType, itemSku)
 end
 
--- ── Robux (premium currency) ──────────────────────────────────
--- Registra gasto de Robux como sink de "Robux" (moneda separada de Cash).
--- Creator Hub → Economy muestra ambas monedas; esto permite correlacionar
--- ingresos reales con flujo de Cash en el mismo dashboard.
-
-function EconomyAnalytics.RobuxSink(
-	player: Player,
-	robuxAmount: number,
-	transactionType: string,
-	itemSku: string?
-)
-	if robuxAmount <= 0 then return end
-
-	pcall(function()
-		AnalyticsService:LogEconomyEvent(
-			player,
-			Enum.AnalyticsEconomyFlowType.Sink,
-			"Robux",
-			robuxAmount,
-			0,
-			transactionType,
-			itemSku
-		)
-	end)
-end
-
 -- ── Items (virtual goods, no currency amount) ─────────────────
 -- Registra la adquisición de un item como source de "Items" (amount=1).
 -- Permite rastrear en qué proporción los items entran al juego vía

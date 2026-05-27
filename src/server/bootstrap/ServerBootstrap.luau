@@ -80,7 +80,6 @@ function ServerBootstrap.start(serverRoot: Script): ()
 				local profile = DataService:GetProfile(buyer)
 				local balance = if profile and profile.Data then profile.Data.Stats.Cash else 0
 				EconomyAnalytics.Source(buyer, storeProduct.CashAmount, balance, "RobuxPurchase", storeProduct.ButtonName)
-				EconomyAnalytics.RobuxSink(buyer, storeProduct.RobuxPrice, "CashStorePurchase", storeProduct.ButtonName)
 				return Enum.ProductPurchaseDecision.PurchaseGranted
 			end
 			return Enum.ProductPurchaseDecision.NotProcessedYet

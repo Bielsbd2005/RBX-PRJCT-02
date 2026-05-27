@@ -587,10 +587,7 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 	botModel:SetAttribute("FakeUserId", fakeUserId)
 	botModel:SetAttribute("ProfileImage", identity.image)
 	_botModelByFakeUserId[fakeUserId] = botModel
-	local hum = botModel:FindFirstChildOfClass("Humanoid")
-	if hum then
-		hum.DisplayName = identity.name
-	end
+	humanoid.DisplayName = identity.name
 
 	-- Apariencia (hat + face). El wrap se aplica dentro de BotAI:_setupTool
 	-- tras clonar el tool, vía el wrapId que pasamos al constructor.

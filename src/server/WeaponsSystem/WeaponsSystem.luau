@@ -309,11 +309,8 @@ flushAssists = function(target: Humanoid, killerPlayer: Player?)
 				if assistEvent then
 					assistEvent:FireClient(contributor)
 				end
-				if RewardService then
-					-- Stats.Assists+1 va atómico con el Cash dentro del mismo
-					-- BatchUpdate. XP se aplica internamente vía AddXP (cascada
-					-- de level-up).
-					(RewardService :: any).Award(contributor, "Assist", {
+				if MatchService and MatchService.GrantCombatReward then
+					(MatchService :: any):GrantCombatReward(contributor, "Assist", {
 						{ path = { "Stats", "Assists" }, delta = 1 },
 					})
 				end

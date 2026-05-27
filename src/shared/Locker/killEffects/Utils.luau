@@ -1,20 +1,6 @@
+--!strict
+
 local KillEffectUtils = {}
-
-function KillEffectUtils.anchor(char: Instance, anchored: boolean)
-	for _, desc in char:GetDescendants() do
-		if desc:IsA("BasePart") then
-			desc.Anchored = anchored
-		end
-	end
-end
-
-function KillEffectUtils.destroyMotors(char: Instance)
-	for _, desc in char:GetDescendants() do
-		if desc:IsA("Motor6D") then
-			desc:Destroy()
-		end
-	end
-end
 
 function KillEffectUtils.createBallJoint(att0: Attachment?, att1: Attachment?, limits: { UpperAngle: number }?)
 	if not att0 or not att1 then

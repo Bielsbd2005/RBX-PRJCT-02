@@ -95,7 +95,7 @@ while loadedAssets < totalAssets or (os.clock() - startTime) < MIN_LOAD_TIME do
 	local elapsed = os.clock() - startTime
 	local realProgress = loadedAssets / totalAssets
 	local timeProgress = math.min(elapsed / MIN_LOAD_TIME, 1)
-	local progress = math.max(realProgress, timeProgress)
+	local progress = math.min(realProgress, timeProgress)
 
 	if progress - lastTweenedProgress >= PROGRESS_TWEEN_THRESHOLD then
 		lastTweenedProgress = progress
