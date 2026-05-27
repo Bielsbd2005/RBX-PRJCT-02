@@ -58,7 +58,8 @@ end
 function RewardService.Award(
 	player: Player,
 	actionKey: string,
-	extraUpdates: { BatchUpdateEntry }?
+	extraUpdates: { BatchUpdateEntry }?,
+	itemSku: string?
 ): (boolean, number, number)
 	if not _dataService or not player then
 		return false, 0, 0
@@ -116,7 +117,7 @@ function RewardService.Award(
 	if ok and cashAmount > 0 then
 		local profile = _dataService:GetProfile(player)
 		local balance = if profile and profile.Data then profile.Data.Stats.Cash else 0
-		EconomyAnalytics.Source(player, cashAmount, balance, actionKey)
+		EconomyAnalytics.Source(player, cashAmount, balance, actionKey, itemSku)
 	end
 
 	return ok, xpAmount, cashAmount

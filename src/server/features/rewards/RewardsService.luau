@@ -130,7 +130,7 @@ local function _onClaimLikeJoin(_: {}, player: Player): ()
 
 	local ok, _xp, rewardCash = RewardService.Award(player, "ClaimLikeJoin", {
 		{ path = { "Rewards", "GroupClaimed" }, value = true },
-	})
+	}, "LikeJoin")
 
 	if ok then
 		_send(player, true, "Like&Join reclamado. +" .. tostring(rewardCash) .. " Cash.", "LikeJoin", rewardCash)
@@ -158,7 +158,7 @@ local function _onClaimNotifications(_: {}, player: Player): ()
 
 	local ok, _xp, rewardCash = RewardService.Award(player, "ClaimNotifications", {
 		{ path = { "Rewards", "NotificationsClaimed" }, value = true },
-	})
+	}, "Notifications")
 
 	if ok then
 		_send(player, true, "Notificaciones reclamadas. +" .. tostring(rewardCash) .. " Cash.", "Notifications", rewardCash)
@@ -214,7 +214,7 @@ local function _onRedeemCode(data: { code: string }, player: Player): ()
 
 	local ok, _xp, rewardCash = RewardService.Award(player, actionKey, {
 		{ path = { "Rewards", "ClaimedCodes", normalizedCode }, value = true },
-	})
+	}, normalizedCode)
 
 	if ok then
 		_send(player, true, "Codigo reclamado. +" .. tostring(rewardCash) .. " Cash.", "Code", rewardCash)

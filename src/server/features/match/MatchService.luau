@@ -29,6 +29,7 @@ local DailyTasksService = require(script.Parent.Parent.dailyTasks.DailyTasksServ
 
 local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
 local RewardService = require(script.Parent.Parent.Parent.core.RewardService)
+local EconomyAnalytics = require(script.Parent.Parent.Parent.core.EconomyAnalytics)
 type DataService = DataServiceMod.DataServiceModule
 
 type MapDefinition = {
@@ -332,7 +333,7 @@ end
 -- kill chain (línea ~519+) ya tenía `attacker` resuelto y la función hacía
 -- GetPlayerByUserId redundante por cada call (4 calls por kill: Kill +
 -- Headshot? + Streak3? + Streak5?). Ahora 1 lookup en el caller, 4 reuses.
-local function _grantActionRewardsToAttacker(attacker: Player?, action: string)
+local function _grantActionRewardsToAttacker(attacker: Player?, action: string, weaponId: string?)
 	if not _dataService or not attacker then
 		return
 	end
@@ -340,12 +341,12 @@ local function _grantActionRewardsToAttacker(attacker: Player?, action: string)
 	-- C2: si el profile aún no cargó, encolar y reintentar tras ProfileLoaded.
 	if not _hasProfile(attacker) then
 		_deferUntilProfile(attacker, function()
-			_grantActionRewardsToAttacker(attacker, action)
+			_grantActionRewardsToAttacker(attacker, action, weaponId)
 		end)
 		return
 	end
 
-	RewardService.Award(attacker, action)
+	RewardService.Award(attacker, action, nil, weaponId)
 end
 
 local function _grantMasteryWrapsIfEligible(player: Player, weaponCategory: string, weaponId: string, newKillCount: number)
@@ -399,6 +400,14 @@ local function _grantMasteryWrapsIfEligible(player: Player, weaponCategory: stri
 	end)
 	if not ok then
 		warn("[MatchService] Mastery wraps BatchUpdate error: " .. tostring(err))
+		return
+	end
+
+	for _, update in updates do
+		local wrapKey = update.path[5]
+		if type(wrapKey) == "string" then
+			EconomyAnalytics.ItemSource(player, "MasteryWrap", weaponCategory .. "::" .. weaponId .. "::" .. wrapKey)
+		end
 	end
 end
 
@@ -530,14 +539,14 @@ local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?, a
 	local newStreak = KillAttributionService:RecordKill(attackerUserId)
 	KillAttributionService:SendStreakBroadcast(attackerUserId)
 	_registerWeaponKillForAttacker(attackerUserId, attackerWeaponId)
-	_grantActionRewardsToAttacker(attacker, "Kill")
+	_grantActionRewardsToAttacker(attacker, "Kill", attackerWeaponId)
 	if attackerWasHeadshot then
-		_grantActionRewardsToAttacker(attacker, "Headshot")
+		_grantActionRewardsToAttacker(attacker, "Headshot", attackerWeaponId)
 	end
 	if newStreak == 3 then
-		_grantActionRewardsToAttacker(attacker, "Streak3")
+		_grantActionRewardsToAttacker(attacker, "Streak3", attackerWeaponId)
 	elseif newStreak == 5 then
-		_grantActionRewardsToAttacker(attacker, "Streak5")
+		_grantActionRewardsToAttacker(attacker, "Streak5", attackerWeaponId)
 	end
 
 	_persistAttackerKillStats(attacker, attackerWasHeadshot == true, newStreak)
@@ -1338,14 +1347,14 @@ local function _handleBotDied(botTeam: string, _botName: string, botHumanoid: Hu
 			if attackerPlayer then
 				local newStreak = KillAttributionService:RecordKill(attackerUserId)
 				_registerWeaponKillForAttacker(attackerUserId, attackerWeaponId)
-				_grantActionRewardsToAttacker(attackerPlayer, "Kill")
+				_grantActionRewardsToAttacker(attackerPlayer, "Kill", attackerWeaponId)
 				if attackerWasHeadshot then
-					_grantActionRewardsToAttacker(attackerPlayer, "Headshot")
+					_grantActionRewardsToAttacker(attackerPlayer, "Headshot", attackerWeaponId)
 				end
 				if newStreak == 3 then
-					_grantActionRewardsToAttacker(attackerPlayer, "Streak3")
+					_grantActionRewardsToAttacker(attackerPlayer, "Streak3", attackerWeaponId)
 				elseif newStreak == 5 then
-					_grantActionRewardsToAttacker(attackerPlayer, "Streak5")
+					_grantActionRewardsToAttacker(attackerPlayer, "Streak5", attackerWeaponId)
 				end
 				-- C1 fix: persistir Stats.Kills/Headshots/KillStreakBest lifetime
 				-- también para kills vs bots. Antes el path PvE solo

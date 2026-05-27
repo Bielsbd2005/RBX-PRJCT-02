@@ -422,13 +422,16 @@ function BattlePassService:ClaimTier(player: Player, tierLevel: number, track: s
 		return
 	end
 
+	local tierSku = "Tier" .. tostring(tierLevel) .. "_" .. track
 	if reward.Kind == "Cash" then
 		local cashAmount = math.max(0, math.floor(reward.Amount or 0))
 		if cashAmount > 0 then
 			local profile = _dataService:GetProfile(player)
 			local balance = if profile and profile.Data then profile.Data.Stats.Cash else 0
-			EconomyAnalytics.Source(player, cashAmount, balance, "BattlePassClaim", "Tier" .. tostring(tierLevel) .. "_" .. track)
+			EconomyAnalytics.Source(player, cashAmount, balance, "BattlePassClaim", tierSku)
 		end
+	elseif reward.Kind == "Item" and reward.Category and reward.ItemId then
+		EconomyAnalytics.ItemSource(player, "BattlePassItem", reward.Category .. "::" .. reward.ItemId .. "::" .. tierSku)
 	end
 
 	_respond(player, true, "OK", tierLevel, track)
@@ -606,6 +609,10 @@ function BattlePassService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchas
 		EconomyAnalytics.BPPremiumStep(player, 3, sessionId)
 		_bpFunnelSessionByUserId[player.UserId] = nil
 
+		if season.PremiumRobuxPrice and season.PremiumRobuxPrice > 0 then
+			EconomyAnalytics.RobuxSink(player, season.PremiumRobuxPrice, "BPPremium", season.Id)
+		end
+
 		_respond(player, true, "PremiumGranted", 0, "Premium")
 		return Enum.ProductPurchaseDecision.PurchaseGranted
 	end
@@ -620,6 +627,10 @@ function BattlePassService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchas
 	end
 	if not _dataService:MarkReceiptProcessed(player, purchaseId) then
 		return Enum.ProductPurchaseDecision.NotProcessedYet
+	end
+
+	if season.SkipRobuxPrice and season.SkipRobuxPrice > 0 then
+		EconomyAnalytics.RobuxSink(player, season.SkipRobuxPrice, "BPSkip", season.Id)
 	end
 
 	-- tier en la respuesta = nuevo CurrentTier (post-skip), para que el cliente

@@ -4,6 +4,7 @@ export type StoreProductDefinition = {
 	ButtonName: string,
 	ProductId: number,
 	PriceText: string,
+	RobuxPrice: number,
 	CashAmount: number,
 }
 
@@ -11,30 +12,35 @@ local PRODUCTS_IN_ORDER = {
 	{
 		ButtonName = "Cash1",
 		ProductId = 3567132597,
+		RobuxPrice = 49,
 		PriceText = " 49",
 		CashAmount = 500,
 	},
 	{
 		ButtonName = "Cash2",
 		ProductId = 3567132599,
+		RobuxPrice = 99,
 		PriceText = " 99",
 		CashAmount = 1250,
 	},
 	{
 		ButtonName = "Cash3",
 		ProductId = 3567132598,
+		RobuxPrice = 199,
 		PriceText = " 199",
 		CashAmount = 3000,
 	},
 	{
 		ButtonName = "Cash4",
 		ProductId = 3567132596,
+		RobuxPrice = 399,
 		PriceText = " 399",
 		CashAmount = 7000,
 	},
 	{
 		ButtonName = "Cash5",
 		ProductId = 3567132595,
+		RobuxPrice = 799,
 		PriceText = " 799",
 		CashAmount = 15000,
 	},

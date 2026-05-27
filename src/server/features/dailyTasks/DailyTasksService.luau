@@ -114,7 +114,7 @@ function DailyTasksService:IncrementProgress(player: Player, kind: string, amoun
 		RewardService.Award(player, "Daily" .. taskDef.Id, {
 			progressUpdate,
 			{ path = { "DailyTasks", "Claimed", taskDef.Id }, value = true },
-		})
+		}, taskDef.Kind)
 	else
 		_dataService:BatchUpdate(player, { progressUpdate })
 	end

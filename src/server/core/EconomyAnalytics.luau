@@ -58,33 +58,91 @@ function EconomyAnalytics.Sink(
 	_logEconomy(player, Enum.AnalyticsEconomyFlowType.Sink, amount, endingBalance, transactionType, itemSku)
 end
 
--- ── Onboarding Funnel ──────────────────────────────────────────
--- Steps:
---   1 = Joined (player entered game)
---   2 = FirstMatchStarted (pressed Play for the first time ever)
---   3 = FirstKill (got first kill ever)
---   4 = FirstMatchCompleted (finished first round)
---   5 = ReturnedToLobby (back in menu after first round)
+-- ── Robux (premium currency) ──────────────────────────────────
+-- Registra gasto de Robux como sink de "Robux" (moneda separada de Cash).
+-- Creator Hub → Economy muestra ambas monedas; esto permite correlacionar
+-- ingresos reales con flujo de Cash en el mismo dashboard.
 
-local ONBOARDING_FUNNEL = "PlayerOnboarding"
+function EconomyAnalytics.RobuxSink(
+	player: Player,
+	robuxAmount: number,
+	transactionType: string,
+	itemSku: string?
+)
+	if robuxAmount <= 0 then return end
+
+	pcall(function()
+		AnalyticsService:LogEconomyEvent(
+			player,
+			Enum.AnalyticsEconomyFlowType.Sink,
+			"Robux",
+			robuxAmount,
+			0,
+			transactionType,
+			itemSku
+		)
+	end)
+end
+
+-- ── Items (virtual goods, no currency amount) ─────────────────
+-- Registra la adquisición de un item como source de "Items" (amount=1).
+-- Permite rastrear en qué proporción los items entran al juego vía
+-- BattlePass, mastery, shop, etc.
+
+function EconomyAnalytics.ItemSource(
+	player: Player,
+	transactionType: string,
+	itemSku: string
+)
+	pcall(function()
+		AnalyticsService:LogEconomyEvent(
+			player,
+			Enum.AnalyticsEconomyFlowType.Source,
+			"Items",
+			1,
+			0,
+			transactionType,
+			itemSku
+		)
+	end)
+end
+
+-- ── Onboarding Funnel ──────────────────────────────────────────
+-- LogOnboardingFunnelStepEvent(player, step, stepName, customData?)
+-- Roblox tiene un único funnel de onboarding por experiencia; el tercer
+-- argumento es el NOMBRE del paso (label visible en Creator Hub), no un
+-- nombre de funnel.
+
+local ONBOARDING_STEP_NAMES = {
+	[1] = "Joined",
+	[2] = "FirstMatchStarted",
+	[3] = "FirstKill",
+	[4] = "FirstMatchCompleted",
+	[5] = "ReturnedToLobby",
+}
 
 function EconomyAnalytics.OnboardingStep(player: Player, step: number)
+	local stepName = ONBOARDING_STEP_NAMES[step] or ("Step" .. tostring(step))
 	pcall(function()
-		AnalyticsService:LogOnboardingFunnelStepEvent(player, step, ONBOARDING_FUNNEL)
+		AnalyticsService:LogOnboardingFunnelStepEvent(player, step, stepName)
 	end)
 end
 
 -- ── Custom Funnels ─────────────────────────────────────────────
+-- LogFunnelStepEvent(player, funnelName, funnelSessionId, step, stepName?)
 -- BattlePass Premium conversion:
---   1 = ClickedBuyPremium (client requested purchase)
---   2 = PromptShown (Roblox purchase modal shown)
---   3 = Purchased (receipt processed, premium granted)
 
 local BP_PREMIUM_FUNNEL = "BattlePassPremium"
+local BP_PREMIUM_STEP_NAMES = {
+	[1] = "ClickedBuyPremium",
+	[2] = "PromptShown",
+	[3] = "Purchased",
+}
 
 function EconomyAnalytics.BPPremiumStep(player: Player, step: number, sessionId: string?)
+	local stepName = BP_PREMIUM_STEP_NAMES[step]
 	pcall(function()
-		AnalyticsService:LogFunnelStepEvent(player, BP_PREMIUM_FUNNEL, sessionId, step)
+		AnalyticsService:LogFunnelStepEvent(player, BP_PREMIUM_FUNNEL, sessionId, step, stepName)
 	end)
 end
 

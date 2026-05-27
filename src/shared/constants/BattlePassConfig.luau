@@ -55,7 +55,9 @@ export type Season = {
 	StartsAt: number,           -- os.time() informativo (v2: selección por fechas)
 	EndsAt: number,
 	PremiumProductId: number,   -- Roblox developer product. 0 = sin configurar.
+	PremiumRobuxPrice: number,  -- Precio en Robux del premium (para analytics).
 	SkipProductId: number,      -- Roblox developer product (skip 1 tier). 0 = sin configurar.
+	SkipRobuxPrice: number,     -- Precio en Robux del skip (para analytics).
 	Tiers: { Tier },            -- contiguos, Level == índice
 }
 
@@ -134,7 +136,9 @@ BattlePassConfig.Seasons = {
 		-- 2 days" desde 2026-04-30 (formato exacto del ejemplo de diseño).
 		EndsAt = os.time({ year = 2026, month = 6, day = 13, hour = 0, min = 0, sec = 0 }),
 		PremiumProductId = 3583494613, -- TODO: pegar el productId real de Roblox.
+		PremiumRobuxPrice = 399,
 		SkipProductId = 3583700824,             -- TODO: pegar el productId real del "Skip Tier".
+		SkipRobuxPrice = 75,
 		Tiers = {
 			tier(1,  weaponWrap("Wrap_RPG_Blue", "Special", "RPG"),  cash(250)),
 			tier(2,  cash(100),  cash(300)),

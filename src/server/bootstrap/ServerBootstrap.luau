@@ -9,7 +9,7 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ActionRewards = require(Shared:WaitForChild("constants"):WaitForChild("ActionRewards"))
 local StoreProducts = require(Shared:WaitForChild("constants"):WaitForChild("StoreProducts"))
 
-local STORE_PRODUCTS_BY_ID = StoreProducts.ProductsByProductId :: { [number]: { CashAmount: number, ButtonName: string } }
+local STORE_PRODUCTS_BY_ID = StoreProducts.ProductsByProductId :: { [number]: { CashAmount: number, ButtonName: string, RobuxPrice: number } }
 
 local EconomyAnalytics = require(script.Parent.Parent.core.EconomyAnalytics)
 
@@ -78,6 +78,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 				local profile = DataService:GetProfile(buyer)
 				local balance = if profile and profile.Data then profile.Data.Stats.Cash else 0
 				EconomyAnalytics.Source(buyer, storeProduct.CashAmount, balance, "RobuxPurchase", storeProduct.ButtonName)
+				EconomyAnalytics.RobuxSink(buyer, storeProduct.RobuxPrice, "CashStorePurchase", storeProduct.ButtonName)
 				return Enum.ProductPurchaseDecision.PurchaseGranted
 			end
 			return Enum.ProductPurchaseDecision.NotProcessedYet
