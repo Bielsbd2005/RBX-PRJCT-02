@@ -93,6 +93,8 @@ local _matchKillsByUserId: { [number]: number } = {}
 -- viven en KillAttributionService. Acá quedan kills/deaths que son
 -- accesados ampliamente (HUD broadcast, score updates).
 local _matchDeathsByUserId: { [number]: number } = {}
+local _recentKillTimestamps: { [number]: { number } } = {}
+local MULTIKILL_WINDOW = 4
 local _lastMapLoadStateBroadcastKey: string? = nil
 local _lastRoundStateBroadcastKey: string? = nil
 local _lastBotRosterJsonBroadcast: string? = nil
@@ -262,6 +264,7 @@ local function _resetMatchScopedState()
 	-- Kill/death tracking
 	table.clear(_matchKillsByUserId)
 	table.clear(_matchDeathsByUserId)
+	table.clear(_recentKillTimestamps)
 	-- Streak state (counts + timeouts + broadcast keys) vive en KillAttributionService.
 	KillAttributionService:Clear()
 	-- Recent deaths por spawn point (audit fix: antes solo se limpiaba en
@@ -550,6 +553,25 @@ local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?, a
 	end
 
 	_persistAttackerKillStats(attacker, attackerWasHeadshot == true, newStreak)
+
+	local now = time()
+	local timestamps = _recentKillTimestamps[attackerUserId]
+	if not timestamps then
+		timestamps = {}
+		_recentKillTimestamps[attackerUserId] = timestamps
+	end
+	table.insert(timestamps, now)
+	while #timestamps > 0 and (now - timestamps[1]) > MULTIKILL_WINDOW do
+		table.remove(timestamps, 1)
+	end
+	if _dataService and _hasProfile(attacker) then
+		local killsInWindow = #timestamps
+		if killsInWindow == 2 then
+			pcall(_dataService.Increment, _dataService, attacker, { "Stats", "DoubleKills" }, 1)
+		elseif killsInWindow == 3 then
+			pcall(_dataService.Increment, _dataService, attacker, { "Stats", "TripleKills" }, 1)
+		end
+	end
 end
 
 local function _ensureTeams()
@@ -1471,6 +1493,7 @@ local function _onRequestVoteSync(_: {}, player: Player)
 	_voteSyncCooldownByUserId[player.UserId] = now
 
 	_log(string.format("Received RequestVoteSync from %s.", player.Name))
+	_startVoteIfPossible()
 	VotingService:SendSnapshotTo(player)
 	_sendMapLoadStateToPlayer(player)
 	_sendRoundStateToPlayer(player)
@@ -1755,16 +1778,6 @@ function MatchService:Start(dataService: DataService): ()
 		KillAttributionService:InitStreak(player.UserId)
 		KillAttributionService:SendStreakBroadcast(player.UserId)
 		_bindCharacterTracking(player)
-		_startVoteIfPossible()
-
-		task.delay(0.75, function()
-			if player.Parent == Players then
-				VotingService:SendSnapshotTo(player)
-				_sendMapLoadStateToPlayer(player)
-				_sendRoundStateToPlayer(player)
-				_sendAllPlayerStreaksToPlayer(player)
-			end
-		end)
 	end)
 
 	Players.PlayerRemoving:Connect(function(player)
@@ -1778,6 +1791,7 @@ function MatchService:Start(dataService: DataService): ()
 		_respawnDebounceByUserId[player.UserId] = nil
 		_matchKillsByUserId[player.UserId] = nil
 		_matchDeathsByUserId[player.UserId] = nil
+		_recentKillTimestamps[player.UserId] = nil
 		KillAttributionService:OnPlayerRemoving(player.UserId)
 		_pendingProfileActionsByUserId[player.UserId] = nil
 		_roundEndEligibleByUserId[player.UserId] = nil

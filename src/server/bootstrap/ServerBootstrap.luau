@@ -72,6 +72,8 @@ function ServerBootstrap.start(serverRoot: Script): ()
 			-- Atómico: grant Cash + mark receipt en el mismo BatchUpdate.
 			local ok = DataService:BatchUpdate(buyer, {
 				{ path = { "Stats", "Cash" }, delta = storeProduct.CashAmount },
+				{ path = { "Stats", "TotalCashEarned" }, delta = storeProduct.CashAmount },
+				{ path = { "Stats", "TotalRobuxSpent" }, delta = storeProduct.RobuxPrice },
 				{ path = { "ProcessedReceipts", purchaseId }, value = os.time() },
 			})
 			if ok then

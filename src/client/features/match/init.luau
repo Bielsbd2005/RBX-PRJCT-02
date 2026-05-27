@@ -34,7 +34,7 @@ local LightingPresetController = require(Client.core.lighting.LightingPresetCont
 
 local MatchFeature = {}
 
-local LOCAL_VOTE_COOLDOWN = 0.12
+local LOCAL_VOTE_COOLDOWN = 0.3
 local JOIN_CONFIRM_TIMEOUT = 8
 local RESPAWN_REQUEST_TIMEOUT = 5
 local RETURN_TO_MENU_TIMEOUT = 8
@@ -688,11 +688,11 @@ function MatchFeature.start(menuController: any): any
 	-- ── Network: VoteState ───────────────────────────────────
 	janitor:Add(Network.Match.VoteState.Listen(function(data: {
 		optionAName: string,
-		optionAVotes: number,
+		optionAVoterIds: string,
 		optionBName: string,
-		optionBVotes: number,
+		optionBVoterIds: string,
 		optionCName: string,
-		optionCVotes: number,
+		optionCVoterIds: string,
 		timeLeft: number,
 	})
 		if not isVoting then
@@ -700,9 +700,9 @@ function MatchFeature.start(menuController: any): any
 		end
 		view:updateTimer(data.timeLeft)
 		view:updateVotes({
-			[data.optionAName] = data.optionAVotes,
-			[data.optionBName] = data.optionBVotes,
-			[data.optionCName] = data.optionCVotes,
+			[data.optionAName] = data.optionAVoterIds,
+			[data.optionBName] = data.optionBVoterIds,
+			[data.optionCName] = data.optionCVoterIds,
 		})
 		if selectedMapName ~= "" then
 			view:setSelectedMap(selectedMapName)
@@ -710,12 +710,14 @@ function MatchFeature.start(menuController: any): any
 	end), true)
 
 	-- ── Network: EndVote ─────────────────────────────────────
-	janitor:Add(Network.Match.EndVote.Listen(function(_: { winnerMapName: string })
+	janitor:Add(Network.Match.EndVote.Listen(function(data: { winnerMapName: string })
 		isVoting = false
-		matchMenu:setPhaseLabel("DEPLOY")
 		selectedMapName = ""
-		view:hide()
-		menuController:setMapVoteVisible(false)
+		view:showWinner(data.winnerMapName, function()
+			matchMenu:setPhaseLabel("DEPLOY")
+			view:hide()
+			menuController:setMapVoteVisible(false)
+		end)
 	end), true)
 
 	-- ── DataController observers ─────────────────────────────

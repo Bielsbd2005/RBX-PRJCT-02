@@ -83,6 +83,7 @@ function RewardService.Award(
 	local updates: { BatchUpdateEntry } = {}
 	if cashAmount > 0 then
 		table.insert(updates, { path = { "Stats", "Cash" }, delta = cashAmount })
+		table.insert(updates, { path = { "Stats", "TotalCashEarned" }, delta = cashAmount })
 	end
 	if extraUpdates then
 		for _, entry in extraUpdates do

@@ -217,7 +217,7 @@ function WeaponsSystem.injectServices(services: {
 	BattlePassService: any?,
 	RewardService: any?,
 })
-	if services.DataService ~= nil then DataService = services.DataService end
+	if services.DataService ~= nil then DataService = services.DataService; WeaponsSystem._dataService = DataService end
 	if services.MatchService ~= nil then MatchService = services.MatchService end
 	if services.DailyTasksService ~= nil then DailyTasksService = services.DailyTasksService end
 	if services.BattlePassService ~= nil then BattlePassService = services.BattlePassService end
@@ -914,6 +914,10 @@ local function _defaultDamageCallback(system, target, amount, damageType, dealer
 				end
 			end
 			damageContributors[target][dealerPlayer] = (damageContributors[target][dealerPlayer] or 0) + finalDamage
+
+			if DataService then
+				pcall(DataService.Increment, DataService, dealerPlayer, { "Stats", "DamageDealt" }, finalDamage)
+			end
 		end
 
 		target:TakeDamage(finalDamage)

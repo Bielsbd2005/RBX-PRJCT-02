@@ -18,6 +18,7 @@
 	para la parte de votación.
 ]]
 
+local AnalyticsService = game:GetService("AnalyticsService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
@@ -56,7 +57,7 @@ VotingService.__index = VotingService
 
 -- Cooldown entre cambios de voto del mismo jugador. 0.5s permite ~2 cambios/seg
 -- — suficiente para UX responsive sin permitir spam que sature broadcasts.
-local VOTE_CHANGE_COOLDOWN = 0.5
+local VOTE_CHANGE_COOLDOWN = 0.3
 local DEFAULT_PLACEHOLDER_IMAGE = "rbxasset://textures/ui/GuiImagePlaceholder.png"
 
 -- ── Estado ───────────────────────────────────────────────────
@@ -104,14 +105,24 @@ local function _pickRandomMapOptions(pool: { MapDefinition }, count: number): { 
 	return picked
 end
 
+local function _collectVoterIds(vote: ActiveVoteState, mapName: string): string
+	local ids = {}
+	for userId, votedMap in vote.votesByUserId do
+		if votedMap == mapName then
+			table.insert(ids, tostring(userId))
+		end
+	end
+	return table.concat(ids, ",")
+end
+
 local function _buildVoteStatePacket(vote: ActiveVoteState, timeLeft: number)
 	return {
 		optionAName = vote.optionNames[1],
-		optionAVotes = vote.voteCounts[vote.optionNames[1]] or 0,
+		optionAVoterIds = _collectVoterIds(vote, vote.optionNames[1]),
 		optionBName = vote.optionNames[2],
-		optionBVotes = vote.voteCounts[vote.optionNames[2]] or 0,
+		optionBVoterIds = _collectVoterIds(vote, vote.optionNames[2]),
 		optionCName = vote.optionNames[3],
-		optionCVotes = vote.voteCounts[vote.optionNames[3]] or 0,
+		optionCVoterIds = _collectVoterIds(vote, vote.optionNames[3]),
 		timeLeft = math.max(0, timeLeft),
 	}
 end
@@ -119,12 +130,11 @@ end
 local function _broadcastVoteState(vote: ActiveVoteState)
 	local timeLeft = math.ceil(math.max(0, vote.endAt - time()))
 	local packet = _buildVoteStatePacket(vote, timeLeft)
-	-- Dedupe: solo enviamos si cambió algún count o el segundo de timeLeft.
 	local key = string.format(
-		"%s|%d|%s|%d|%s|%d|%d",
-		tostring(packet.optionAName), packet.optionAVotes,
-		tostring(packet.optionBName), packet.optionBVotes,
-		tostring(packet.optionCName), packet.optionCVotes,
+		"%s|%s|%s|%s|%s|%s|%d",
+		tostring(packet.optionAName), packet.optionAVoterIds,
+		tostring(packet.optionBName), packet.optionBVoterIds,
+		tostring(packet.optionCName), packet.optionCVoterIds,
 		packet.timeLeft
 	)
 	if key == _lastVoteBroadcastKey then
@@ -227,8 +237,6 @@ local function _onCastVote(data: { mapName: string }, player: Player)
 	vote.votesByUserId[player.UserId] = mapName
 	vote.voteCounts[mapName] = (vote.voteCounts[mapName] or 0) + 1
 	_deps.log(string.format("Vote updated: %s -> '%s' (previous: %s)", player.Name, mapName, previous or "none"))
-
-	_broadcastVoteState(vote)
 end
 
 local function _runVoteTimer(vote: ActiveVoteState)
@@ -254,6 +262,22 @@ local function _runVoteTimer(vote: ActiveVoteState)
 	local winner = _resolveWinner(vote)
 	_deps.setPhase("VoteEnded", "winner=" .. winner)
 	_deps.log(string.format("Vote finished. Winner map: '%s'.", winner))
+
+	local totalVoters = 0
+	for _ in vote.votesByUserId do
+		totalVoters += 1
+	end
+	local anyPlayer = Players:GetPlayers()[1]
+	if anyPlayer then
+		pcall(function()
+			AnalyticsService:LogCustomEvent(anyPlayer, "MapVoteWinner", 1, {
+				map = winner,
+				voters = tostring(totalVoters),
+				playerCount = tostring(#Players:GetPlayers()),
+			})
+		end)
+	end
+
 	Network.Match.EndVote.SendToAll({ winnerMapName = winner })
 
 	_activeVote = nil

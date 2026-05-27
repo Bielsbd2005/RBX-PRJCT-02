@@ -414,6 +414,9 @@ function BattlePassService:ClaimTier(player: Player, tierLevel: number, track: s
 	local rewardOp = _rewardToOp(reward)
 	if rewardOp then
 		table.insert(updates, rewardOp)
+		if reward.Kind == "Cash" then
+			table.insert(updates, { path = { "Stats", "TotalCashEarned" }, delta = rewardOp.delta })
+		end
 	end
 
 	local ok = _dataService:BatchUpdate(player, updates)
@@ -598,10 +601,15 @@ function BattlePassService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchas
 		-- Si la season del producto NO es la activa, granteamos igualmente sobre
 		-- la activa: el jugador pagó y debe recibir Premium, no perder Robux por
 		-- un cambio de config en mid-prompt. Marcamos el receipt para no doble-grant.
-		local ok = _dataService:BatchUpdate(player, {
+		local premiumRobux = (season.PremiumRobuxPrice and season.PremiumRobuxPrice > 0) and season.PremiumRobuxPrice or 0
+		local bpUpdates: { any } = {
 			{ path = { "BattlePass", "PremiumOwned" },    value = true },
 			{ path = { "ProcessedReceipts", purchaseId }, value = os.time() },
-		})
+		}
+		if premiumRobux > 0 then
+			table.insert(bpUpdates, { path = { "Stats", "TotalRobuxSpent" }, delta = premiumRobux })
+		end
+		local ok = _dataService:BatchUpdate(player, bpUpdates)
 		if not ok then
 			return Enum.ProductPurchaseDecision.NotProcessedYet
 		end
@@ -631,6 +639,7 @@ function BattlePassService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchas
 
 	if season.SkipRobuxPrice and season.SkipRobuxPrice > 0 then
 		EconomyAnalytics.RobuxSink(player, season.SkipRobuxPrice, "BPSkip", season.Id)
+		pcall(_dataService.Increment, _dataService, player, { "Stats", "TotalRobuxSpent" }, season.SkipRobuxPrice)
 	end
 
 	-- tier en la respuesta = nuevo CurrentTier (post-skip), para que el cliente

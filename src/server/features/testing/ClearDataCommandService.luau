@@ -12,8 +12,8 @@ ClearDataCommandService.__index = ClearDataCommandService
 local _dataService: DataService = nil :: any
 local _started = false
 
-local ENABLE_CLEAR_COMMAND = RunService:IsStudio()
-local COMMAND = "/clear"
+local ENABLE_CLEAR_COMMAND = RunService:IsStudio() or RunService:IsServer()
+local COMMAND = "/resetdata"
 
 -- Si OPEN_TO_ALL_IN_STUDIO=true, cualquier player en Studio (team test, team
 -- create) puede ejecutar /clear sobre su propio profile. Útil en dev local.
@@ -22,7 +22,7 @@ local COMMAND = "/clear"
 -- de que un copy-paste de este servicio a un endpoint no-Studio quede abierto.
 local OPEN_TO_ALL_IN_STUDIO = true
 local ALLOWED_USER_IDS: { [number]: boolean } = {
-	-- [123456789] = true,
+	[286176976] = true,
 }
 
 local function _isAuthorized(player: Player): boolean

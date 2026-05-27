@@ -307,11 +307,11 @@ local MatchNamespace = ByteNet.DefineNamespace("Match", function()
 		VoteState = ByteNet.DefinePacket({
 			Value = ByteNet.Struct({
 				optionAName = ByteNet.String,
-				optionAVotes = ByteNet.Int32,
+				optionAVoterIds = ByteNet.String,
 				optionBName = ByteNet.String,
-				optionBVotes = ByteNet.Int32,
+				optionBVoterIds = ByteNet.String,
 				optionCName = ByteNet.String,
-				optionCVotes = ByteNet.Int32,
+				optionCVoterIds = ByteNet.String,
 				timeLeft = ByteNet.Int32,
 			}),
 			ReliabilityType = "Reliable",
