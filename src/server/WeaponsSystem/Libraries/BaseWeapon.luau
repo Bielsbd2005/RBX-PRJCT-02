@@ -841,7 +841,13 @@ function BaseWeapon:onStepped(dt)
 	local resultPos = self._autoAimResultPos or targetPos
 	local direction = (resultPos - weaponOrigin).Unit
 	local charge = self.charge or 0
+
+	-- Hitscan: marcar para que simulateProjectile resuelva el impacto
+	-- instantáneamente en vez de simular un proyectil con viaje. Así el
+	-- auto-fire no falla contra enemigos en movimiento.
+	self._hitscanMode = true
 	self:fire(weaponOrigin, direction, charge)
+	self._hitscanMode = nil
 end
 
 function BaseWeapon:getAnimationController()

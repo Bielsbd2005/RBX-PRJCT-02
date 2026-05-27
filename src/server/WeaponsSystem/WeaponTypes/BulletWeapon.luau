@@ -513,6 +513,57 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 		parabola:setNumSamples(PARABOLA_SAMPLES_LOW)
 	end
 
+	-- ── Hitscan: resolución instantánea del impacto ──────────────
+	-- En auto-fire móvil, el proyectil viaja tan rápido como un raycast:
+	-- resolvemos el hit en el mismo frame en vez de simular viaje por tiempo.
+	-- El tracer visual se muestra igualmente y se desvanece con tracerFadeTime.
+	if self._hitscanMode and localPlayerInitiatedShot then
+		parabola:setDomain(0, maxDistance)
+		local hitPart, hitPoint, hitNormal, hitMaterial, hitT = parabola:findPart(self:getIgnoreList(true))
+
+		local projEnd = if hitPart then hitT * maxDistance else maxDistance
+		parabola:setDomain(0, projEnd)
+
+		if hitPart then
+			local hitDist = (hitPoint - origin).Magnitude
+			local hitInfo = {
+				sid = fireInfo.id,
+				pid = projectileIdx,
+				maxDist = projEnd,
+				part = hitPart,
+				p = hitPoint,
+				n = hitNormal,
+				m = hitMaterial,
+				d = hitDist,
+				t = hitT,
+			}
+			self:onHit(hitInfo)
+			table.clear(_hitInfoSendBuffer)
+			for k, v in pairs(hitInfo) do
+				_hitInfoSendBuffer[k] = v
+			end
+			WeaponsNetwork.fireWeaponHit(self.instance, _hitInfoSendBuffer)
+
+			if hitSound then hitSound:Play() end
+			self:_spawnHitMark(hitPart, hitPoint, hitNormal, parabola)
+		end
+
+		-- Tracer: renderizar beam desde origin hasta el final, luego fade-out.
+		if beam0 then parabola:renderToBeam(beam0) end
+		if beam1 then parabola:renderToBeam(beam1) end
+
+		task.delay(tracerFadeTime, function()
+			if bulletEffect then
+				_releaseBulletEffect(bulletEffectTemplate, bulletEffect)
+			end
+		end)
+
+		if not IsServer and self.usesCharging then
+			self.charge = math.clamp(self.charge - self:getConfigValue("FireDischarge", 1), 0, 1)
+		end
+		return
+	end
+
 	-- Set up/initialize variables used in steppedCallback
 	-- W2: stepConn ahora es un stub. Su `:Disconnect()` marca la entry como
 	-- inactive — el bucle global la elimina via swap-remove en la próxima
