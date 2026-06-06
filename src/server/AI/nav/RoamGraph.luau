@@ -30,6 +30,9 @@
 	    cuando mapRoot.Parent == nil.
 ]]
 
+local RunService = game:GetService("RunService")
+local IS_STUDIO = RunService:IsStudio()
+
 local RoamGraph = {}
 RoamGraph.__index = RoamGraph
 
@@ -80,13 +83,24 @@ end
 
 local function _wireListeners(self: RoamGraph)
 	local folder = _findAINavFolder(self._mapRoot)
-	if folder then
-		-- Authoring iterable: cualquier add/remove en runtime fuerza rebuild.
+	-- Los listeners de authoring solo son útiles en Studio (iterar puntos
+	-- sin restartar ronda). En producción la geometría es estática tras
+	-- la compilación — no se necesitan rebuilds dinámicos.
+	if folder and IS_STUDIO then
+		local rebuildScheduled = false
+		local function scheduleRebuild()
+			if rebuildScheduled then return end
+			rebuildScheduled = true
+			task.defer(function()
+				rebuildScheduled = false
+				_rebuild(self)
+			end)
+		end
 		table.insert(self._conns, folder.DescendantAdded:Connect(function()
-			_rebuild(self)
+			scheduleRebuild()
 		end))
 		table.insert(self._conns, folder.DescendantRemoving:Connect(function()
-			_rebuild(self)
+			scheduleRebuild()
 		end))
 	end
 	-- mapRoot destruido → limpiar caché y desuscribir.

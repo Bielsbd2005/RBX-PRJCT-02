@@ -174,29 +174,33 @@ end)
 
 local MatchNamespace = ByteNet.DefineNamespace("Match", function()
 	return {
-		-- S → C: Inicio de votacion con 3 opciones fijas.
+		-- S → C: Inicio de votacion con 3 opciones de mapa fijas (Option1/2/3). La
+		-- opción "Random" siempre está presente en la UI y no necesita datos de mapa.
 		StartVote = ByteNet.DefinePacket({
 			Value = ByteNet.Struct({
-				optionAName = ByteNet.String,
-				optionAImage = ByteNet.String,
-				optionBName = ByteNet.String,
-				optionBImage = ByteNet.String,
-				optionCName = ByteNet.String,
-				optionCImage = ByteNet.String,
-				optionAMode = ByteNet.String,
-				optionBMode = ByteNet.String,
-				optionCMode = ByteNet.String,
+				option1Name = ByteNet.String,
+				option1Image = ByteNet.String,
+				option2Name = ByteNet.String,
+				option2Image = ByteNet.String,
+				option3Name = ByteNet.String,
+				option3Image = ByteNet.String,
+				option1Mode = ByteNet.String,
+				option2Mode = ByteNet.String,
+				option3Mode = ByteNet.String,
 				duration = ByteNet.Int32,
 			}),
 			ReliabilityType = "Reliable",
 		}),
 
-		-- S → C: Estado de carga de mapa y disponibilidad de Play.
+		-- S → C: Estado de carga de mapa y disponibilidad de Play. isVoting permite
+		-- al cliente saber que el Play deshabilitado es por votación aunque se haya
+		-- perdido el StartVote (carrera al unirse / arrancar el servidor).
 		MapLoadState = ByteNet.DefinePacket({
 			Value = ByteNet.Struct({
 				isLoading = ByteNet.Bool,
 				playEnabled = ByteNet.Bool,
 				mapName = ByteNet.String,
+				isVoting = ByteNet.Bool,
 			}),
 			ReliabilityType = "Reliable",
 		}),
@@ -303,15 +307,17 @@ local MatchNamespace = ByteNet.DefineNamespace("Match", function()
 			ReliabilityType = "Reliable",
 		}),
 
-		-- S → C: Snapshot de votos y tiempo restante.
+		-- S → C: Snapshot de votos y tiempo restante. randomVoterIds = quienes
+		-- votaron la opción "Random" (sin mapa concreto).
 		VoteState = ByteNet.DefinePacket({
 			Value = ByteNet.Struct({
-				optionAName = ByteNet.String,
-				optionAVoterIds = ByteNet.String,
-				optionBName = ByteNet.String,
-				optionBVoterIds = ByteNet.String,
-				optionCName = ByteNet.String,
-				optionCVoterIds = ByteNet.String,
+				option1Name = ByteNet.String,
+				option1VoterIds = ByteNet.String,
+				option2Name = ByteNet.String,
+				option2VoterIds = ByteNet.String,
+				option3Name = ByteNet.String,
+				option3VoterIds = ByteNet.String,
+				randomVoterIds = ByteNet.String,
 				timeLeft = ByteNet.Int32,
 			}),
 			ReliabilityType = "Reliable",
@@ -361,13 +367,12 @@ end)
 
 local BattlePassNamespace = ByteNet.DefineNamespace("BattlePass", function()
 	return {
-		-- C → S: Reclamar la recompensa de un tier en una pista (Free/Premium).
-		-- El servidor valida tier completado, ownership Premium y no-doble-claim.
-		-- Int32 (no UInt16) para mantener consistencia con el resto del codebase.
+		-- C → S: Reclamar la recompensa de un tier. Cada nivel tiene una sola
+		-- recompensa (free o pass); el servidor deduce el tipo del config y valida
+		-- tier completado, ownership Premium (si es pass) y no-doble-claim.
 		ClaimTier = ByteNet.DefinePacket({
 			Value = ByteNet.Struct({
-				tier  = ByteNet.Int32,
-				track = ByteNet.String, -- "Free" | "Premium"
+				tier = ByteNet.Int32,
 			}),
 			ReliabilityType = "Reliable",
 		}),
@@ -379,8 +384,7 @@ local BattlePassNamespace = ByteNet.DefineNamespace("BattlePass", function()
 			ReliabilityType = "Reliable",
 		}),
 
-		-- C → S: Iniciar compra del developer product "Skip Tier". El servidor
-		-- promptea Robux; al confirmar el receipt, avanza CurrentTier en 1.
+		-- C → S: Iniciar compra del developer product "Skip Tier" (+1 nivel).
 		BuySkip = ByteNet.DefinePacket({
 			Value = ByteNet.Struct({}),
 			ReliabilityType = "Reliable",
@@ -392,7 +396,38 @@ local BattlePassNamespace = ByteNet.DefineNamespace("BattlePass", function()
 				success = ByteNet.Bool,
 				message = ByteNet.String,
 				tier    = ByteNet.Int32,
-				track   = ByteNet.String,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+	}
+end)
+
+-- ────────────────────────────────────────────────────────────
+-- NAMESPACE: Gifting
+-- Selección del destinatario de un regalo: el cliente manda un nombre de
+-- usuario, el servidor lo resuelve (GetUserIdFromNameAsync) + filtra el texto
+-- (TextService) y responde con el userId/nombre canónico o un error.
+-- ────────────────────────────────────────────────────────────
+
+local GiftingNamespace = ByteNet.DefineNamespace("Gifting", function()
+	return {
+		-- C → S: Validar un nombre de usuario como posible destinatario.
+		ValidateUser = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				username = ByteNet.String,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- S → C: Resultado de la validación. success=false ⇒ message contiene el
+		-- motivo (usuario inexistente, no se puede uno mismo, etc.). En éxito,
+		-- userId es el UserId numérico como string y username el nombre filtrado.
+		Response = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				success  = ByteNet.Bool,
+				message  = ByteNet.String,
+				userId   = ByteNet.String,
+				username = ByteNet.String,
 			}),
 			ReliabilityType = "Reliable",
 		}),
@@ -417,4 +452,5 @@ return {
 	Locker     = LockerNamespace,
 	Match      = MatchNamespace,
 	BattlePass = BattlePassNamespace,
+	Gifting    = GiftingNamespace,
 }

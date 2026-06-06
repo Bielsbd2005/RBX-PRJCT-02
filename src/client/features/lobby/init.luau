@@ -30,9 +30,14 @@ local HatApplier = require(Client.features.locker.Appliers.HatApplier)
 local DataController = require(Client.core.data.DataController)
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
 
-local IDLE_ANIMATION_ID = "rbxassetid://115197033304718"
+local IDLE_ANIMATION_ID = "rbxassetid://109968216239895"
 
 local function _placeCharacter(model: Model, target: Instance)
+	local humanoid = model:FindFirstChildWhichIsA("Humanoid", true)
+	if humanoid then
+		humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+	end
+
 	if target:IsA("BasePart") then
 		local rootPart = model:FindFirstChild("HumanoidRootPart", true)
 		if rootPart and rootPart:IsA("BasePart") then
@@ -92,17 +97,17 @@ local LobbyFeature = {}
 function LobbyFeature.start(_menuController: any): any
 	local janitor = Janitor.new()
 
-	local lobby = Workspace:FindFirstChild("Lobby")
-	local spawners = lobby and lobby:FindFirstChild("Spawners")
-	local p1 = spawners and spawners:FindFirstChild("P1")
+	local lobby = Workspace:WaitForChild("Lobby", 30)
+	local spawners = lobby and lobby:WaitForChild("Spawners", 30)
+	local p1 = spawners and spawners:WaitForChild("P1", 30)
 	if not p1 then
-		warn("[LobbyFeature] Workspace.Lobby.Spawners.P1 no encontrado")
+		warn("[LobbyFeature] Workspace.Lobby.Spawners.P1 no encontrado (timeout de 30s)")
 		return janitor
 	end
 
-	local lockerBodiesFolder = Shared:FindFirstChild("LockerBodies")
+	local lockerBodiesFolder = Shared:WaitForChild("LockerBodies", 30)
 	if not lockerBodiesFolder then
-		warn("[LobbyFeature] Shared.LockerBodies no encontrado")
+		warn("[LobbyFeature] Shared.LockerBodies no encontrado (timeout de 30s)")
 		return janitor
 	end
 

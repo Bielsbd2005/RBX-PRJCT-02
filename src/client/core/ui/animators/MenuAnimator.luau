@@ -27,6 +27,7 @@ MenuAnimator.__index = MenuAnimator
 
 function MenuAnimator.new(menuGui: ScreenGui)
 	local self = setmetatable({}, MenuAnimator)
+	self._gui = menuGui
 	self._containers = {} :: { ContainerData }
 	self._scheduledThreads = {} :: { thread }
 	self._generation = 0
@@ -87,6 +88,12 @@ end
 function MenuAnimator:hide(): ()
 	self:_cancelPending()
 
+	-- Menú plano (sin Top/Bottom para deslizar): ocultarlo entero.
+	if #self._containers == 0 then
+		self._gui.Enabled = false
+		return
+	end
+
 	local generation = self._generation
 
 	for i, data in ipairs(self._containers) do
@@ -96,6 +103,11 @@ end
 
 function MenuAnimator:show(): ()
 	self:_cancelPending()
+
+	if #self._containers == 0 then
+		self._gui.Enabled = true
+		return
+	end
 
 	local generation = self._generation
 

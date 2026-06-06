@@ -60,6 +60,10 @@ VotingService.__index = VotingService
 local VOTE_CHANGE_COOLDOWN = 0.3
 local DEFAULT_PLACEHOLDER_IMAGE = "rbxasset://textures/ui/GuiImagePlaceholder.png"
 
+-- Opción "Random": cuarto candidato siempre presente, sin mapa concreto. Si gana
+-- (o gana el desempate), se resuelve a un mapa aleatorio entre las 3 opciones.
+local RANDOM_KEY = GameConfig.RandomVoteKey
+
 -- ── Estado ───────────────────────────────────────────────────
 
 local _deps: Deps = nil :: any
@@ -117,12 +121,13 @@ end
 
 local function _buildVoteStatePacket(vote: ActiveVoteState, timeLeft: number)
 	return {
-		optionAName = vote.optionNames[1],
-		optionAVoterIds = _collectVoterIds(vote, vote.optionNames[1]),
-		optionBName = vote.optionNames[2],
-		optionBVoterIds = _collectVoterIds(vote, vote.optionNames[2]),
-		optionCName = vote.optionNames[3],
-		optionCVoterIds = _collectVoterIds(vote, vote.optionNames[3]),
+		option1Name = vote.optionNames[1],
+		option1VoterIds = _collectVoterIds(vote, vote.optionNames[1]),
+		option2Name = vote.optionNames[2],
+		option2VoterIds = _collectVoterIds(vote, vote.optionNames[2]),
+		option3Name = vote.optionNames[3],
+		option3VoterIds = _collectVoterIds(vote, vote.optionNames[3]),
+		randomVoterIds = _collectVoterIds(vote, RANDOM_KEY),
 		timeLeft = math.max(0, timeLeft),
 	}
 end
@@ -131,10 +136,11 @@ local function _broadcastVoteState(vote: ActiveVoteState)
 	local timeLeft = math.ceil(math.max(0, vote.endAt - time()))
 	local packet = _buildVoteStatePacket(vote, timeLeft)
 	local key = string.format(
-		"%s|%s|%s|%s|%s|%s|%d",
-		tostring(packet.optionAName), packet.optionAVoterIds,
-		tostring(packet.optionBName), packet.optionBVoterIds,
-		tostring(packet.optionCName), packet.optionCVoterIds,
+		"%s|%s|%s|%s|%s|%s|%s|%d",
+		tostring(packet.option1Name), packet.option1VoterIds,
+		tostring(packet.option2Name), packet.option2VoterIds,
+		tostring(packet.option3Name), packet.option3VoterIds,
+		packet.randomVoterIds,
 		packet.timeLeft
 	)
 	if key == _lastVoteBroadcastKey then
@@ -154,7 +160,11 @@ local function _isVoteChangeAllowed(player: Player): boolean
 	return true
 end
 
+-- La opción Random es válida además de los 3 mapas concretos.
 local function _isValidOption(vote: ActiveVoteState, mapName: string): boolean
+	if mapName == RANDOM_KEY then
+		return true
+	end
 	for _, optionName in vote.optionNames do
 		if optionName == mapName then
 			return true
@@ -163,15 +173,20 @@ local function _isValidOption(vote: ActiveVoteState, mapName: string): boolean
 	return false
 end
 
+-- Devuelve siempre un mapa concreto. Candidatos = 3 mapas + Random; si gana
+-- Random (o el desempate lo elige), se resuelve a un mapa aleatorio entre los 3.
 local function _resolveWinner(vote: ActiveVoteState): string
 	local connectedByUserId = {} :: { [number]: true }
 	for _, player in Players:GetPlayers() do
 		connectedByUserId[player.UserId] = true
 	end
 
+	local candidates = table.clone(vote.optionNames)
+	table.insert(candidates, RANDOM_KEY)
+
 	local validCounts = {} :: { [string]: number }
-	for _, optionName in vote.optionNames do
-		validCounts[optionName] = 0
+	for _, optionKey in candidates do
+		validCounts[optionKey] = 0
 	end
 
 	for userId, mapName in vote.votesByUserId do
@@ -182,21 +197,25 @@ local function _resolveWinner(vote: ActiveVoteState): string
 
 	local maxVotes = -1
 	local tied = {} :: { string }
-	for _, optionName in vote.optionNames do
-		local count = validCounts[optionName] or 0
+	for _, optionKey in candidates do
+		local count = validCounts[optionKey] or 0
 		if count > maxVotes then
 			maxVotes = count
 			table.clear(tied)
-			table.insert(tied, optionName)
+			table.insert(tied, optionKey)
 		elseif count == maxVotes then
-			table.insert(tied, optionName)
+			table.insert(tied, optionKey)
 		end
 	end
 
-	if #tied == 0 then
-		return vote.optionNames[math.random(1, #vote.optionNames)]
+	local winner = if #tied == 0
+		then candidates[math.random(1, #candidates)]
+		else tied[math.random(1, #tied)]
+
+	if winner == RANDOM_KEY then
+		winner = vote.optionNames[math.random(1, #vote.optionNames)]
 	end
-	return tied[math.random(1, #tied)]
+	return winner
 end
 
 local function _onCastVote(data: { mapName: string }, player: Player)
@@ -237,6 +256,10 @@ local function _onCastVote(data: { mapName: string }, player: Player)
 	vote.votesByUserId[player.UserId] = mapName
 	vote.voteCounts[mapName] = (vote.voteCounts[mapName] or 0) + 1
 	_deps.log(string.format("Vote updated: %s -> '%s' (previous: %s)", player.Name, mapName, previous or "none"))
+
+	-- Broadcast inmediato: sin esto el cambio solo se vería en el siguiente tick
+	-- del timer (hasta ~1s de latencia). El dedupe-key evita reenvíos redundantes.
+	_broadcastVoteState(vote)
 end
 
 local function _runVoteTimer(vote: ActiveVoteState)
@@ -321,25 +344,25 @@ function VotingService:SendSnapshotTo(player: Player)
 		return
 	end
 
-	local optionAName = vote.optionNames[1]
-	local optionBName = vote.optionNames[2]
-	local optionCName = vote.optionNames[3]
-	if not optionAName or not optionBName or not optionCName then
+	local option1Name = vote.optionNames[1]
+	local option2Name = vote.optionNames[2]
+	local option3Name = vote.optionNames[3]
+	if not option1Name or not option2Name or not option3Name then
 		_deps.log("Skipped active vote snapshot: incomplete option names.")
 		return
 	end
 
 	local okStart, errStart = pcall(function()
 		Network.Match.StartVote.SendTo({
-			optionAName = optionAName,
-			optionAImage = vote.optionImages[optionAName] or DEFAULT_PLACEHOLDER_IMAGE,
-			optionAMode = vote.optionModes[optionAName] or "TeamDeathmatch",
-			optionBName = optionBName,
-			optionBImage = vote.optionImages[optionBName] or DEFAULT_PLACEHOLDER_IMAGE,
-			optionBMode = vote.optionModes[optionBName] or "TeamDeathmatch",
-			optionCName = optionCName,
-			optionCImage = vote.optionImages[optionCName] or DEFAULT_PLACEHOLDER_IMAGE,
-			optionCMode = vote.optionModes[optionCName] or "TeamDeathmatch",
+			option1Name = option1Name,
+			option1Image = vote.optionImages[option1Name] or DEFAULT_PLACEHOLDER_IMAGE,
+			option1Mode = vote.optionModes[option1Name] or "TeamDeathmatch",
+			option2Name = option2Name,
+			option2Image = vote.optionImages[option2Name] or DEFAULT_PLACEHOLDER_IMAGE,
+			option2Mode = vote.optionModes[option2Name] or "TeamDeathmatch",
+			option3Name = option3Name,
+			option3Image = vote.optionImages[option3Name] or DEFAULT_PLACEHOLDER_IMAGE,
+			option3Mode = vote.optionModes[option3Name] or "TeamDeathmatch",
 			duration = vote.duration,
 		}, player)
 	end)
@@ -421,6 +444,7 @@ function VotingService:StartVoteIfPossible(): boolean
 		[optionNames[1]] = 0,
 		[optionNames[2]] = 0,
 		[optionNames[3]] = 0,
+		[RANDOM_KEY] = 0,
 	}
 	local optionImages = {
 		[optionNames[1]] = options[1].PlaceholderImage ~= "" and options[1].PlaceholderImage or DEFAULT_PLACEHOLDER_IMAGE,
@@ -454,15 +478,15 @@ function VotingService:StartVoteIfPossible(): boolean
 	_deps.log(string.format("Vote started with maps: '%s', '%s', '%s'.", optionNames[1], optionNames[2], optionNames[3]))
 
 	Network.Match.StartVote.SendToAll({
-		optionAName = optionNames[1],
-		optionAImage = optionImages[optionNames[1]],
-		optionAMode = optionModes[optionNames[1]],
-		optionBName = optionNames[2],
-		optionBImage = optionImages[optionNames[2]],
-		optionBMode = optionModes[optionNames[2]],
-		optionCName = optionNames[3],
-		optionCImage = optionImages[optionNames[3]],
-		optionCMode = optionModes[optionNames[3]],
+		option1Name = optionNames[1],
+		option1Image = optionImages[optionNames[1]],
+		option1Mode = optionModes[optionNames[1]],
+		option2Name = optionNames[2],
+		option2Image = optionImages[optionNames[2]],
+		option2Mode = optionModes[optionNames[2]],
+		option3Name = optionNames[3],
+		option3Image = optionImages[optionNames[3]],
+		option3Mode = optionModes[optionNames[3]],
 		duration = GameConfig.VoteDuration,
 	})
 

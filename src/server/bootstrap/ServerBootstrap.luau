@@ -33,6 +33,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	local MatchService = require(serverRoot.features.match.MatchService)
 	local DailyTasksService = require(serverRoot.features.dailyTasks.DailyTasksService)
 	local BattlePassService = require(serverRoot.features.battlepass.BattlePassService)
+	local GiftingService = require(serverRoot.features.gifting.GiftingService)
 	local LockerService = require(serverRoot.features.locker.LockerService)
 	local ClearDataCommandService = require(serverRoot.features.testing.ClearDataCommandService)
 
@@ -45,6 +46,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	SettingsService:Start(DataService)
 	RewardsService:Start(DataService)
 	BattlePassService:Start(DataService)
+	GiftingService:Start(DataService)
 	DailyTasksService:Start(DataService)
 
 	-- ProcessReceipt dispatcher central: delega BattlePass primero, luego Cash

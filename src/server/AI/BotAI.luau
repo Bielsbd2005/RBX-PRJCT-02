@@ -219,6 +219,7 @@ export type BotAIInstance = typeof(setmetatable({} :: {
 	_raycastParams: RaycastParams?,
 	_currentTarget: Model?,
 	_currentTargetRoot: BasePart?,
+	_currentTargetHum: Humanoid?,
 	_currentTargetPos: Vector3,
 	_currentTargetPlayer: Player?,
 	_isCurrentTargetVisible: boolean,
@@ -268,6 +269,7 @@ function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?, wrapId
 		_currentTarget = nil,
 		_currentTargetPlayer = nil,
 		_currentTargetRoot = nil,
+		_currentTargetHum = nil,
 		_currentTargetPos = Vector3.zero,
 		_isCurrentTargetVisible = false,
 		_targetGraceUntil = 0,
@@ -471,14 +473,14 @@ end
 @return Model? Target elegido o nil si no hay candidato válido.
 @return boolean true si el target elegido tiene LoS en esta evaluación.
 ]]
-function BotAI:_getBestTarget(): (Model?, boolean)
+function BotAI:_getBestTarget(): (Model?, boolean, BasePart?)
 	local rootPos = self._rootPart.Position
 	local myTeam = TeamUtils.normalize(self._team)
 	local facing = self._rootPart.CFrame.LookVector
 	local now = time()
 
 	local candidates = self._targetCandidates
-	table.clear(candidates)
+	local candidateCount = 0
 
 	for _, entry in self._aliveTargets do
 		local char = entry.model
@@ -511,24 +513,37 @@ function BotAI:_getBestTarget(): (Model?, boolean)
 
 		if d > 0.001 and facing:Dot(delta) / d < FOV_COS then continue end
 
-		table.insert(candidates, { char = char, d = d, root = root :: BasePart })
+		candidateCount += 1
+		local c = candidates[candidateCount]
+		if c then
+			c.char = char
+			c.d = d
+			c.root = root :: BasePart
+		else
+			candidates[candidateCount] = { char = char, d = d, root = root :: BasePart }
+		end
 	end
 
-	if #candidates == 0 then
-		return nil, false
+	-- Truncar entradas sobrantes del tick anterior
+	for i = candidateCount + 1, #candidates do
+		candidates[i] = nil
+	end
+
+	if candidateCount == 0 then
+		return nil, false, nil
 	end
 
 	table.sort(candidates, function(a, b) return a.d < b.d end)
 
-	local maxChecks = math.min(#candidates, BotConfig.Combat.MaxLosChecksPerEval)
+	local maxChecks = math.min(candidateCount, BotConfig.Combat.MaxLosChecksPerEval)
 	for i = 1, maxChecks do
 		local c = candidates[i]
 		if self:_canSeeTarget(c.char, c.root) then
-			return c.char, true
+			return c.char, true, c.root
 		end
 	end
 
-	return nil, false
+	return nil, false, nil
 end
 
 --[[
@@ -619,6 +634,8 @@ function BotAI:_evaluateTarget(now: number)
 	end
 	local potentialTarget: Model?
 	local isVisible: boolean
+	local resolvedRoot: BasePart? = nil
+	local resolvedHum: Humanoid? = nil
 	local forced = self:_getForcedTarget()
 	if forced then
 		potentialTarget = forced
@@ -627,9 +644,11 @@ function BotAI:_evaluateTarget(now: number)
 		local current = self._currentTarget
 		local fastPath = false
 		if current and current.Parent then
-			local hum = current:FindFirstChildOfClass("Humanoid")
-			local root = current:FindFirstChild("HumanoidRootPart")
-			if hum and (hum :: Humanoid).Health > 0 and root then
+			-- Perf: reusar refs cacheadas del tick anterior en lugar de
+			-- FindFirstChildOfClass/FindFirstChild por cada evaluación.
+			local hum = self._currentTargetHum
+			local root = self._currentTargetRoot
+			if hum and hum.Parent and (hum :: Humanoid).Health > 0 and root and root.Parent then
 				local toRoot = (root :: BasePart).Position - self._rootPart.Position
 				local d2 = toRoot:Dot(toRoot)
 				local detectRange = BotConfig.Combat.DetectRange
@@ -641,13 +660,15 @@ function BotAI:_evaluateTarget(now: number)
 							potentialTarget = current
 							isVisible = true
 							fastPath = true
+							resolvedRoot = root
+							resolvedHum = hum
 						end
 					end
 				end
 			end
 		end
 		if not fastPath then
-			potentialTarget, isVisible = self:_getBestTarget()
+			potentialTarget, isVisible, resolvedRoot = self:_getBestTarget()
 		end
 	end
 
@@ -655,8 +676,15 @@ function BotAI:_evaluateTarget(now: number)
 		self._targetGraceUntil = now + 3
 	elseif not potentialTarget and self._currentTarget and now < self._targetGraceUntil then
 		local prev = self._currentTarget
-		local prevHum = prev:FindFirstChildOfClass("Humanoid")
-		local prevRoot = prev:FindFirstChild("HumanoidRootPart")
+		-- Perf: reusar cache; si expiró, fallback a lookup directo
+		local prevHum = self._currentTargetHum
+		if not prevHum or not prevHum.Parent then
+			prevHum = prev:FindFirstChildOfClass("Humanoid")
+		end
+		local prevRoot = self._currentTargetRoot
+		if not prevRoot or not prevRoot.Parent then
+			prevRoot = prev:FindFirstChild("HumanoidRootPart") :: BasePart?
+		end
 		if prev.Parent
 			and prevHum and (prevHum :: Humanoid).Health > 0
 			and prevRoot then
@@ -665,6 +693,8 @@ function BotAI:_evaluateTarget(now: number)
 			if gd:Dot(gd) <= graceRange * graceRange then
 				potentialTarget = prev
 				isVisible = false
+				resolvedRoot = prevRoot
+				resolvedHum = prevHum
 			end
 		end
 	end
@@ -679,13 +709,23 @@ function BotAI:_evaluateTarget(now: number)
 	self._currentTarget = potentialTarget
 	self._isCurrentTargetVisible = isVisible
 	if potentialTarget then
-		local targetRoot = potentialTarget:FindFirstChild("HumanoidRootPart")
-		if targetRoot and targetRoot:IsA("BasePart") then
+		-- Perf: usar root/hum ya resueltos para evitar FindFirstChild redundante
+		local targetRoot: BasePart? = resolvedRoot
+		if not targetRoot or not targetRoot.Parent then
+			local r = potentialTarget:FindFirstChild("HumanoidRootPart")
+			targetRoot = if r and r:IsA("BasePart") then r :: BasePart else nil
+		end
+		if targetRoot then
 			self._currentTargetRoot = targetRoot
-			self._currentTargetPos = (targetRoot :: BasePart).Position
+			self._currentTargetPos = targetRoot.Position
 		else
 			self._currentTargetRoot = nil
 		end
+		local targetHum: Humanoid? = resolvedHum
+		if not targetHum or not targetHum.Parent then
+			targetHum = potentialTarget:FindFirstChildOfClass("Humanoid")
+		end
+		self._currentTargetHum = targetHum
 		if potentialTarget:GetAttribute("FakeUserId") == nil then
 			self._currentTargetPlayer = Players:GetPlayerFromCharacter(potentialTarget)
 		else
@@ -693,6 +733,7 @@ function BotAI:_evaluateTarget(now: number)
 		end
 	else
 		self._currentTargetRoot = nil
+		self._currentTargetHum = nil
 		self._currentTargetPlayer = nil
 	end
 end
@@ -1061,7 +1102,9 @@ function BotAI:Start(
 
 				dest = (dest :: Vector3) + Vector3.new(math.random(-4, 4), 0, math.random(-4, 4))
 
-				NavMetrics.record("roam_pick_count", { bot = self._dummy.Name })
+				if NavMetrics.ENABLED then
+					NavMetrics.record("roam_pick_count", { bot = self._dummy.Name })
+				end
 
 				self:_moveToLocation(dest :: Vector3, function()
 					return self._currentTarget ~= nil or not self._isAlive
@@ -1099,6 +1142,7 @@ function BotAI:Stop()
 
 	self._currentTarget = nil
 	self._currentTargetRoot = nil
+	self._currentTargetHum = nil
 	self._currentTargetPlayer = nil
 	self._forcedTarget = nil
 	table.clear(self._targetCandidates)

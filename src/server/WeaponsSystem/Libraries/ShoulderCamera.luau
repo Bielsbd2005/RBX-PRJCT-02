@@ -328,7 +328,10 @@ function ShoulderCamera:setEnabled(enabled)
 
 		self:setZoomFactor(self.currentZoomFactor) -- this ensures that zoomedFOV reflecs currentZoomFactor
 
-		workspace.CurrentCamera.CameraSubject = self.currentRootPart
+		local camera = workspace.CurrentCamera
+		if camera then
+			camera.CameraSubject = self.currentRootPart
+		end
 
 		self.occlusionTweenObject = Instance.new("NumberValue")
 		self.occlusionTweenObject.Name = "OcclusionTweenObject"

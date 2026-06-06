@@ -3,20 +3,21 @@
 	BattlePassConfig.luau
 	Fuente única de verdad para temporadas, tiers y recompensas del Battle Pass.
 
+	Modelo (v2): cada nivel tiene UNA sola recompensa y es de tipo FREE o PASS.
+	  • FREE  → cualquiera puede reclamarla.
+	  • PASS  → requiere PremiumOwned (compra del pase Premium con Robux).
+
 	Diseño escalable:
 	  • Añadir una nueva season = append a `Seasons`. Los perfiles existentes
 	    se resetean automáticamente cuando `GetActiveSeason().Id` ya no coincide
 	    con el `SeasonId` almacenado.
 	  • Las recompensas se leen LIVE del config en cada claim (no se snapshotean
-	    en el perfil). Editar rewards mid-season afecta a claims futuros, no a
-	    los ya hechos. Deferred a v2 si la balanceabilidad lo requiere.
-	  • Los tiers son contiguos (Level == índice), validar al añadir entradas.
-	  • XP rates se centralizan en `XPRates` para soportar boosters en v2.
+	    en el perfil).
+	  • Los tiers son contiguos (Level == índice).
 
 	Convenciones:
 	  • Reward.Kind = "Cash" → usar Amount (number).
 	  • Reward.Kind = "Item" → usar Category + ItemId (deben existir en ItemsConfig).
-	  • Icon/Label opcionales; el cliente fallback-ea a ItemsConfig[...].Image/Name.
 	  • PremiumProductId = 0 indica "no configurado" (UI desactiva el botón).
 ]]
 
@@ -32,11 +33,10 @@ export type Reward = {
 	Category: string?,  -- Item: "Hats" | "Faces" | "KillEffects" | "Outfits" | "Main" | "Special" | "WeaponWraps"
 	ItemId: string?,    -- Item: id en ItemsConfig
 	Icon: string?,      -- Override de UI (rbxassetid://...). Si nil, fallback a ItemsConfig.
-	Label: string?,     -- Override del texto del Value. Si nil, fallback a "+Amount" o ItemsConfig.Name.
+	Label: string?,     -- Override del texto. Si nil, fallback a "+Amount" o ItemsConfig.Name.
 	-- WeaponWraps — modos mutuamente excluyentes:
 	--   Global = true                       → grant a TODAS las armas (Main+Special).
 	--   WeaponCategory + WeaponId definidos → grant SÓLO al arma indicada.
-	-- Ambos ignorados si Kind != "Item" o Category != "WeaponWraps".
 	Global: boolean?,
 	WeaponCategory: string?, -- "Main" | "Special" (per-weapon wraps)
 	WeaponId: string?,       -- itemId en ItemsConfig[WeaponCategory] (per-weapon wraps)
@@ -45,18 +45,17 @@ export type Reward = {
 export type Tier = {
 	Level: number,      -- 1..N (debe coincidir con índice del array)
 	XPRequired: number, -- XP para completar este tier
-	Free: Reward,
-	Premium: Reward,
+	Reward: Reward,     -- recompensa única del nivel
+	Premium: boolean,   -- true = PASS (requiere PremiumOwned); false = FREE
 }
 
 export type Season = {
 	Id: string,
 	Name: string,
-	StartsAt: number,           -- os.time() informativo (v2: selección por fechas)
-	EndsAt: number,
+	EndsAt: number,             -- os.time() deadline (fuente del timer)
 	PremiumProductId: number,   -- Roblox developer product. 0 = sin configurar.
 	PremiumRobuxPrice: number,  -- Precio en Robux del premium (para analytics).
-	SkipProductId: number,      -- Roblox developer product (skip 1 tier). 0 = sin configurar.
+	SkipProductId: number,      -- Developer product "Skip Tier" (+1 nivel). 0 = sin configurar.
 	SkipRobuxPrice: number,     -- Precio en Robux del skip (para analytics).
 	Tiers: { Tier },            -- contiguos, Level == índice
 }
@@ -70,38 +69,20 @@ local ActionRewards = require(script.Parent:WaitForChild("ActionRewards"))
 local BattlePassConfig = {}
 
 -- XP rates por evento. v1: solo kills.
--- PerKill reusa ActionRewards.GetXP("Kill") para mantener una única fuente de
--- verdad: si el balance cambia en ActionRewards, el BP lo hereda sin drift.
 BattlePassConfig.XPRates = {
 	PerKill = ActionRewards.GetXP("Kill"),
 }
 
--- Icono por defecto para rewards Cash cuando un Reward no define Icon
--- explícito. Si queda como string vacío, el ImageLabel del slot se renderiza
--- sin textura.
+-- Icono por defecto para rewards Cash cuando un Reward no define Icon explícito.
 BattlePassConfig.RewardIcons = {
 	Cash = "rbxassetid://113694528712529",
 }
 
--- Curva de XP por tier. Base 100 + 5 XP por nivel completado. Da una rampa
--- suave (level 1 = 100 XP ≈ 4 kills, level 30 = 245 XP ≈ 10 kills) sin
--- explotar el grind: total S1 ≈ 5175 XP vs 3000 con curva plana anterior.
--- Tunear `XP_BASE` y `XP_STEP` aquí mueve la curva entera.
+-- Curva de XP por tier. Tunear XP_BASE / XP_STEP mueve la curva entera.
 local XP_BASE = 100
 local XP_STEP = 5
 local function xpForLevel(level: number): number
 	return XP_BASE + (level - 1) * XP_STEP
-end
-
--- Helper local para reducir el ruido de declaración de tiers.
--- Acepta override opcional de XPRequired para casos puntuales (boss tier, etc.).
-local function tier(level: number, free: Reward, premium: Reward, xpRequired: number?): Tier
-	return {
-		Level = level,
-		XPRequired = xpRequired or xpForLevel(level),
-		Free = free,
-		Premium = premium,
-	}
 end
 
 local function cash(amount: number): Reward
@@ -126,59 +107,64 @@ local function weaponWrap(itemId: string, weaponCategory: string, weaponId: stri
 	}
 end
 
+-- 64 niveles → 8 páginas de 8 slots. Editable: ajusta TIER_COUNT, los overrides
+-- de recompensa y la regla de qué niveles son PASS.
+local TIER_COUNT = 64
+
+-- Recompensa por nivel: por defecto Cash escalado; overrides puntuales para items/wraps.
+local REWARD_OVERRIDES: { [number]: Reward } = {
+	[1]  = weaponWrap("Wrap_RPG_Blue", "Special", "RPG"),
+	[3]  = globalWrap("Wrap_Pink"),
+	[5]  = item("Faces", "Face2"),
+	[10] = item("KillEffects", "Gravity"),
+	[15] = item("Faces", "Face5"),
+	[20] = item("Hats", "Hat2"),
+	[25] = item("Faces", "Face9"),
+	[30] = item("Hats", "Hat3"),
+}
+
+-- Niveles PASS (requieren Premium). Regla por defecto: los pares son PASS, los
+-- impares FREE. Editar a gusto del diseño.
+local function isPremiumLevel(level: number): boolean
+	return level % 2 == 0
+end
+
+local function defaultCashFor(level: number): number
+	return 100 + (level - 1) * 25
+end
+
+local function buildTiers(): { Tier }
+	local tiers: { Tier } = {}
+	for level = 1, TIER_COUNT do
+		tiers[level] = {
+			Level = level,
+			XPRequired = xpForLevel(level),
+			Reward = REWARD_OVERRIDES[level] or cash(defaultCashFor(level)),
+			Premium = isPremiumLevel(level),
+		}
+	end
+	return tiers
+end
+
 BattlePassConfig.Seasons = {
 	{
 		Id = "S1",
 		Name = "Season 1",
-		StartsAt = 0,
-		-- Fecha ficticia para testing visual del label TimeLeft. Reemplazar
-		-- por la fecha real antes de release. 2026-06-13 00:00 UTC ≈ "6 weeks,
-		-- 2 days" desde 2026-04-30 (formato exacto del ejemplo de diseño).
+		-- Fecha ficticia para testing del timer. Reemplazar por la real.
 		EndsAt = os.time({ year = 2026, month = 6, day = 13, hour = 0, min = 0, sec = 0 }),
 		PremiumProductId = 3583494613, -- TODO: pegar el productId real de Roblox.
 		PremiumRobuxPrice = 399,
-		SkipProductId = 3583700824,             -- TODO: pegar el productId real del "Skip Tier".
+		SkipProductId = 3583700824,    -- TODO: pegar el productId real del "Skip Tier".
 		SkipRobuxPrice = 75,
-		Tiers = {
-			tier(1,  weaponWrap("Wrap_RPG_Blue", "Special", "RPG"),  cash(250)),
-			tier(2,  cash(100),  cash(300)),
-			tier(3,  cash(150),  globalWrap("Wrap_Pink")),
-			tier(4,  cash(150),  cash(400)),
-			tier(5,  cash(200),  item("Faces", "Face2")),
-			tier(6,  cash(200),  cash(500)),
-			tier(7,  cash(250),  cash(550)),
-			tier(8,  cash(250),  cash(600)),
-			tier(9,  cash(300),  cash(650)),
-			tier(10, cash(300),  item("KillEffects", "Gravity")),
-			tier(11, cash(350),  cash(750)),
-			tier(12, cash(350),  cash(800)),
-			tier(13, cash(400),  cash(850)),
-			tier(14, cash(400),  cash(900)),
-			tier(15, cash(450),  item("Faces", "Face5")),
-			tier(16, cash(450),  cash(1000)),
-			tier(17, cash(500),  cash(1100)),
-			tier(18, cash(500),  cash(1200)),
-			tier(19, cash(550),  cash(1300)),
-			tier(20, cash(550),  item("Hats", "Hat2")),
-			tier(21, cash(600),  cash(1500)),
-			tier(22, cash(600),  cash(1600)),
-			tier(23, cash(650),  cash(1700)),
-			tier(24, cash(650),  cash(1800)),
-			tier(25, cash(700),  item("Faces", "Face9")),
-			tier(26, cash(700),  cash(2000)),
-			tier(27, cash(750),  cash(2200)),
-			tier(28, cash(750),  cash(2400)),
-			tier(29, cash(800),  cash(2600)),
-			tier(30, cash(1000), item("Hats", "Hat3")),
-		},
+		Tiers = buildTiers(),
 	},
-}
+} :: { Season }
 
 -- ────────────────────────────────────────────────────────────
 -- API PÚBLICA
 -- ────────────────────────────────────────────────────────────
 
--- v1: la season activa es siempre la primera. v2: seleccionar por os.time().
+-- v1: la season activa es siempre la primera.
 function BattlePassConfig.GetActiveSeason(): Season
 	return BattlePassConfig.Seasons[1]
 end
@@ -194,26 +180,21 @@ function BattlePassConfig.GetMaxTier(season: Season): number
 	return #season.Tiers
 end
 
--- Set de ítems que aparecen como reward en CUALQUIER season/tier/track del BP.
--- Construido lazy y cacheado: la primera llamada a IsBPExclusive recorre todas
--- las seasons, las siguientes son lookups O(1). Single source of truth: editar
--- los rewards en `Seasons` automáticamente actualiza el set; no hace falta
--- también flag-ear `isBPExclusive = true` en ItemsConfig (aunque ese flag sigue
--- funcionando como override manual en LockerCatalog/ShopService).
+-- Set de ítems que aparecen como reward en CUALQUIER season/tier del BP.
+-- Construido lazy y cacheado.
 local _bpExclusiveCache: { [string]: { [string]: boolean } }? = nil
 local function _buildBPExclusiveCache(): { [string]: { [string]: boolean } }
 	local set: { [string]: { [string]: boolean } } = {}
 	for _, season in BattlePassConfig.Seasons do
 		for _, t in season.Tiers do
-			for _, reward in { t.Free, t.Premium } do
-				if reward.Kind == "Item" and reward.Category and reward.ItemId then
-					local cat = set[reward.Category]
-					if not cat then
-						cat = {}
-						set[reward.Category] = cat
-					end
-					cat[reward.ItemId] = true
+			local reward = t.Reward
+			if reward.Kind == "Item" and reward.Category and reward.ItemId then
+				local cat = set[reward.Category]
+				if not cat then
+					cat = {}
+					set[reward.Category] = cat
 				end
+				cat[reward.ItemId] = true
 			end
 		end
 	end
@@ -230,8 +211,6 @@ end
 
 -- Resuelve un productId a su (Season, kind). kind ∈ "Premium" | "Skip".
 -- Devuelve (nil, nil) si el producto no pertenece a ningún BattlePass.
--- Permite que ProcessReceipt despache un único receipt entre los dos tipos
--- de compra del BP sin necesitar un mapa global externo.
 export type ReceiptKind = "Premium" | "Skip"
 function BattlePassConfig.ResolveReceipt(productId: number): (Season?, ReceiptKind?)
 	if productId == 0 then

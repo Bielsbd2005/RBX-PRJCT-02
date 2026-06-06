@@ -70,7 +70,7 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 	local DataController = require(clientRoot.core.data.DataController)
 	local MenuController = require(clientRoot.core.ui.MenuController)
 	local UISoundsController = require(clientRoot.core.ui.UISoundsController)
-	local PulseAlert = require(clientRoot.core.ui.animators.PulseAlert)
+	local ShadeController = require(clientRoot.core.ui.ShadeController)
 	local WeaponWrapAnimator = require(clientRoot.core.visuals.WeaponWrapAnimator)
 	local StoreFeature = require(clientRoot.features.store)
 	local SettingsFeature = require(clientRoot.features.settings)
@@ -78,7 +78,6 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 	local DailyTasksFeature = require(clientRoot.features.dailyTasks)
 	local BattlePassFeature = require(clientRoot.features.battlepass)
 	local LobbyFeature = require(clientRoot.features.lobby)
-	local ProfileBoardFeature = require(clientRoot.features.profileBoard)
 	local LobbyMusicFeature = require(clientRoot.features.music)
 	local MatchFeature = require(clientRoot.features.match)
 
@@ -109,29 +108,15 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 
 	_janitor:Add(UISoundsController.start(), "Destroy")
 
-	-- Pulso de alerta en Menu.Bottom.Indicator: crece 15% mientras se desvanece,
-	-- al hacerse transparente reinicia el ciclo. Si el nodo no existe, no pasa
-	-- nada (el feature/menu puede no tenerlo en algunas builds).
-	do
-		local menuGui = menuController:getGui()
-		local bottom = menuGui:FindFirstChild("Bottom")
-		local indicatorNode = if bottom then bottom:FindFirstChild("Indicator") else nil
-		if indicatorNode and indicatorNode:IsA("GuiObject") then
-			local handle = PulseAlert.bind(indicatorNode)
-			_janitor:Add(function()
-				handle:Destroy()
-			end, true)
-		end
-	end
 
 	local deferredFeatures = {
+		{ label = "shade", start = ShadeController.start },
 		{ label = "store", start = StoreFeature.start },
 		{ label = "settings", start = SettingsFeature.start },
 		{ label = "rewards", start = RewardsFeature.start },
 		{ label = "dailyTasks", start = DailyTasksFeature.start },
 		{ label = "battlepass", start = BattlePassFeature.start },
 		{ label = "lobby", start = LobbyFeature.start },
-		{ label = "profileBoard", start = ProfileBoardFeature.start },
 		{ label = "music", start = LobbyMusicFeature.start },
 		{ label = "match", start = MatchFeature.start },
 	} :: { DeferredFeatureEntry }

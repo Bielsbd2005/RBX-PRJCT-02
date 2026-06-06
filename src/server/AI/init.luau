@@ -21,6 +21,9 @@ local NavMetrics = require(script:WaitForChild("telemetry"):WaitForChild("NavMet
 local RoamGraph = require(script:WaitForChild("nav"):WaitForChild("RoamGraph"))
 local PathfindingQueue = require(script:WaitForChild("nav"):WaitForChild("PathfindingQueue"))
 
+local DataServiceMod = require(script.Parent.core.data.DataService)
+type DataService = DataServiceMod.DataServiceModule
+
 type BotIdentity = {
 	name: string,
 	image: string,
@@ -46,7 +49,7 @@ type BotRecord = {
 	descendantConn: RBXScriptConnection?,
 }
 
-local _dataServiceRef: any = nil
+local _dataServiceRef: DataService? = nil
 
 local function _getKillEffectForBotAttacker(humanoid: Humanoid): string
 	local lastAttacker = LastAttackerStore.get(humanoid)
@@ -478,7 +481,7 @@ local function _notifyActiveBotCount()
 	NavMetrics.SetActiveBotCount(_activeBotCount)
 end
 
-local function _removeBotByName(botName: string)
+local function _removeBotByName(botName: string, skipRefresh: boolean?)
 	local bot = _botsByName[botName]
 	if not bot then
 		return
@@ -508,8 +511,10 @@ local function _removeBotByName(botName: string)
 
 	_botsByName[botName] = nil
 	_activeBotCount = math.max(0, _activeBotCount - 1)
-	_refreshAliveLists()
-	_notifyActiveBotCount()
+	if not skipRefresh then
+		_refreshAliveLists()
+		_notifyActiveBotCount()
+	end
 end
 
 local function _markBotTeam(model: Model, team: "A" | "B")
@@ -770,7 +775,7 @@ local function _setTargetForTeam(team: "A" | "B", targetCount: number)
 	end
 end
 
-function AIService:SetDataService(dataService: any)
+function AIService:SetDataService(dataService: DataService)
 	_dataServiceRef = dataService
 end
 
@@ -819,7 +824,7 @@ function AIService:OnRoundEnd()
 	end
 
 	for _, botName in namesToRemove do
-		_removeBotByName(botName)
+		_removeBotByName(botName, true)
 	end
 
 	table.clear(_botsByName)

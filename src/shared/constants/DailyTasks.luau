@@ -6,7 +6,6 @@
 
 	Mapea 1:1 con los slots de UI:
 	  MatchHud.LeftContainer.TaskFrame.Task1/Task2/Task3
-	  Workspace.Lobby.Daily.Board.SurfaceGui.Container.TaskFrame.Task1/Task2/Task3
 	Cada slot consume:
 		.Title         — TextLabel
 		.Value         — TextLabel "<progress>/<objective>"

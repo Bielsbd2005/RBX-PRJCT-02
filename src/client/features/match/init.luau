@@ -29,6 +29,8 @@ local KillCamController = require(script.KillCamController)
 local CharacterHighlightController = require(script.CharacterHighlightController)
 local HealthBillboardController = require(script.HealthBillboardController)
 local MapVoteView = require(script.MapVoteView)
+local PanelController = require(Client.core.ui.PanelController)
+local BlurController = require(Client.core.ui.BlurController)
 local LightingPresetController = require(Client.core.lighting.LightingPresetController)
 
 
@@ -57,16 +59,24 @@ local function _resolveEndResultsGui(playerGui: PlayerGui): ScreenGui?
 	return nil
 end
 
-local function _resolveMapVote(menuGui: ScreenGui): (GuiObject?, GuiObject?)
-	local mapVote = menuGui:FindFirstChild("MapVote")
-	if not mapVote or not mapVote:IsA("GuiObject") then
+-- Pantalla de votación independiente: PlayerGui.UserInterface.Voting (ya no vive
+-- dentro del Menu). El CloseBtn es opcional (raíz o Header).
+local function _resolveVotingFrame(playerGui: PlayerGui): (GuiObject?, GuiButton?)
+	local ui = playerGui:FindFirstChild("UserInterface")
+	if not ui then
 		return nil, nil
 	end
-	local options = mapVote:FindFirstChild("Options")
-	if not options or not options:IsA("GuiObject") then
-		return mapVote, nil
+	local voting = ui:FindFirstChild("Voting")
+	if not voting or not voting:IsA("GuiObject") then
+		return nil, nil
 	end
-	return mapVote, options
+	local closeNode = voting:FindFirstChild("CloseBtn")
+	if not closeNode then
+		local header = voting:FindFirstChild("Header")
+		closeNode = if header then header:FindFirstChild("CloseBtn") else nil
+	end
+	local closeBtn = if closeNode and closeNode:IsA("GuiButton") then closeNode else nil
+	return voting, closeBtn
 end
 
 -- Resolver el Model del jugador/bot que mató al local. Para humanos vamos por
@@ -106,18 +116,15 @@ function MatchFeature.start(menuController: any): any
 
 	local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui") :: PlayerGui
 	local menuGui = menuController:getGui()
-	local mapVoteNode, optionsNode = _resolveMapVote(menuGui)
+	local votingFrame, votingCloseBtn = _resolveVotingFrame(playerGui)
 	local deathScreenGui = playerGui:FindFirstChild("DeathScreen")
 	local endResultsGui = _resolveEndResultsGui(playerGui)
 	local iris = IrisTransition.new(playerGui)
 
-	if not mapVoteNode then
-		warn("[MatchFeature] No se encontro Menu.MapVote")
-		return janitor
-	end
-	if not optionsNode then
-		warn("[MatchFeature] No se encontro Menu.MapVote.Options")
-		return janitor
+	-- Voting opcional: si la GUI aún no tiene UserInterface.Voting (migración), se
+	-- deshabilita la votación pero el resto del feature (Play, HUD, fases) sigue.
+	if not votingFrame then
+		warn("[MatchFeature] UserInterface.Voting no encontrado — votación de mapa deshabilitada.")
 	end
 
 	-- D4: flag de vida del feature. Cualquier task.delay scheduled en
@@ -156,7 +163,7 @@ function MatchFeature.start(menuController: any): any
 
 	local playButton = matchMenu:getPlayButton()
 	if not playButton then
-		warn("[MatchFeature] No se encontro Menu.Bottom.Play")
+		warn("[MatchFeature] No se encontro Menu.PlayBtn")
 		return janitor
 	end
 
@@ -168,8 +175,29 @@ function MatchFeature.start(menuController: any): any
 	-- ── Vistas ───────────────────────────────────────────────
 	matchMenu:setPhaseLabel("DEPLOY")
 
-	local view = MapVoteView.new(mapVoteNode, optionsNode)
+	local view = MapVoteView.new(votingFrame)
 	janitor:Add(view, "Destroy")
+
+	-- Panel de la pantalla de votación (independiente del Menu). Sin botón de
+	-- apertura: se abre programáticamente desde Play mientras hay votación activa.
+	-- El CloseBtn (si existe) la cierra y devuelve al menú sin afectar la votación.
+	local votingPanelOpen = false
+	local votingPanel: any = nil
+	if votingFrame then
+		votingFrame.Visible = false
+		votingPanel = PanelController.new(menuController, votingFrame, nil, votingCloseBtn, {
+			animationMode = "none",
+			onOpen = function()
+				votingPanelOpen = true
+				BlurController.acquire("Voting")
+			end,
+			onClose = function()
+				votingPanelOpen = false
+				BlurController.release("Voting")
+			end,
+		})
+		janitor:Add(votingPanel, "Destroy")
+	end
 
 	local deathView = if deathScreenGui and deathScreenGui:IsA("ScreenGui")
 		then DeathScreenView.new(deathScreenGui)
@@ -223,17 +251,48 @@ function MatchFeature.start(menuController: any): any
 
 	-- ── Estado local (ortogonal a MatchState) ────────────────
 	local isVoting = false
-	local selectedMapName = ""
+	local selectedVoteKey = ""
 	local lastLocalVoteAt = 0
 	local playEnabled = false
 	local respawnRequestSent = false
 
-	playButton.Active = false
-
+	-- Estructura nueva: PlayBtn.Indicator { Enabled, Disabled (UIGradient), Status }.
+	-- Se muestra/oculta el gradiente según el estado.
 	local function setPlayEnabled(enabled: boolean)
 		playEnabled = enabled
-		playButton.Active = enabled
+
+		local currentPlayButton = matchMenu:getPlayButton() or playButton
+		if not currentPlayButton then
+			return
+		end
+
+		-- Clickeable también durante la votación: ahí Play abre la pantalla de
+		-- votación en vez de unirse a la partida.
+		currentPlayButton.Active = enabled or isVoting
+
+		local indicator = currentPlayButton:FindFirstChild("Indicator")
+		if not indicator then
+			return
+		end
+
+		local enabledGradient = indicator:FindFirstChild("Enabled")
+		local disabledGradient = indicator:FindFirstChild("Disabled")
+		local statusLabel = indicator:FindFirstChild("Status")
+
+		if enabledGradient and enabledGradient:IsA("UIGradient") then
+			enabledGradient.Enabled = enabled
+		end
+		if disabledGradient and disabledGradient:IsA("UIGradient") then
+			disabledGradient.Enabled = not enabled
+		end
+		if statusLabel and statusLabel:IsA("TextLabel") then
+			statusLabel.TextColor3 = if enabled
+				then Color3.fromRGB(160, 128, 6)
+				else Color3.fromRGB(255, 255, 255)
+		end
 	end
+
+	setPlayEnabled(false)
 
 	local function tryJoinMatchFromLobby()
 		if not playEnabled or MatchState.getPhase() ~= "Lobby" then
@@ -300,8 +359,9 @@ function MatchFeature.start(menuController: any): any
 		end)
 	end
 
-	-- ── Bind de MapVote ──────────────────────────────────────
-	view:bindVoteHandler(function(mapName: string)
+	-- ── Bind de votación ─────────────────────────────────────
+	-- voteKey = nombre del mapa (Option1/2/3) o GameConfig.RandomVoteKey (Random).
+	view:bindVoteHandler(function(voteKey: string)
 		if not isVoting then
 			return
 		end
@@ -310,9 +370,9 @@ function MatchFeature.start(menuController: any): any
 			return
 		end
 		lastLocalVoteAt = now
-		selectedMapName = mapName
-		view:setSelectedMap(mapName)
-		Network.Match.CastVote.Send({ mapName = mapName })
+		selectedVoteKey = voteKey
+		view:setSelectedMap(voteKey)
+		Network.Match.CastVote.Send({ mapName = voteKey })
 	end)
 
 	-- ── Conexiones de Players ────────────────────────────────
@@ -324,9 +384,23 @@ function MatchFeature.start(menuController: any): any
 		hud:onPlayerRemoved(player.UserId)
 	end), "Disconnect")
 
+	-- Play tiene doble función: durante la votación abre la pantalla de votación;
+	-- en lobby normal intenta unirse a la partida.
+	local function onPlayPressed()
+		if isVoting then
+			if votingPanel then
+				-- Refresca opciones/votos por si se perdió algún StartVote/VoteState.
+				Network.Match.RequestVoteSync.Send({})
+				votingPanel:open()
+			end
+			return
+		end
+		tryJoinMatchFromLobby()
+	end
+
 	-- ── Play button ──────────────────────────────────────────
 	janitor:Add(playButton.MouseButton1Click:Connect(function()
-		tryJoinMatchFromLobby()
+		onPlayPressed()
 	end), "Disconnect")
 
 	janitor:Add(UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessedEvent: boolean)
@@ -339,7 +413,7 @@ function MatchFeature.start(menuController: any): any
 		if UserInputService:GetFocusedTextBox() ~= nil then
 			return
 		end
-		tryJoinMatchFromLobby()
+		onPlayPressed()
 	end), "Disconnect")
 
 	-- ── Network: MapLoadState ────────────────────────────────
@@ -347,15 +421,29 @@ function MatchFeature.start(menuController: any): any
 		isLoading: boolean,
 		playEnabled: boolean,
 		mapName: string,
+		isVoting: boolean,
 	})
 		-- Capturado para que el handler de fase pueda elegir el preset de
 		-- iluminación específico del mapa (ver MAP_TO_LIGHTING_PRESET arriba).
 		activeMapName = data.mapName
-		if isVoting then
-			matchMenu:setPhaseLabel("VOTING")
-		else
-			matchMenu:setPhaseLabel("DEPLOY")
+
+		-- MapLoadState es la fuente de verdad del estado de votación: si perdimos el
+		-- StartVote (carrera al unirse / arrancar el servidor), aquí lo recuperamos.
+		if data.isVoting and not isVoting then
+			isVoting = true
+			-- No tenemos las opciones (perdimos StartVote): pídelas para poblar la vista.
+			Network.Match.RequestVoteSync.Send({})
+		elseif not data.isVoting and isVoting then
+			-- La votación acabó sin que recibiéramos EndVote: limpieza de seguridad.
+			isVoting = false
+			selectedVoteKey = ""
+			view:hide()
+			if votingPanel then
+				votingPanel:close()
+			end
 		end
+
+		matchMenu:setPhaseLabel(if isVoting then "VOTING" else "DEPLOY")
 		setPlayEnabled(data.playEnabled and not data.isLoading)
 		matchMenu:enforceHidden()
 	end), true)
@@ -538,6 +626,11 @@ function MatchFeature.start(menuController: any): any
 		respawnRequestSent = false
 		hud:setEnabled(false)
 
+		local guard = function()
+			return MatchState.getPhase() == "Dying"
+		end
+		MatchWeapons.cleanAllWithRetries(playerGui, guard)
+
 		killCam:start({
 			killerUserId = data.killerUserId,
 			killerName = data.killerName,
@@ -661,38 +754,41 @@ function MatchFeature.start(menuController: any): any
 	end), true)
 
 	-- ── Network: StartVote ───────────────────────────────────
+	-- No abre la pantalla automáticamente: el jugador entra con Play (label
+	-- "VOTING"). Solo prepara el estado y puebla la vista para cuando la abra.
 	janitor:Add(Network.Match.StartVote.Listen(function(data: {
-		optionAName: string,
-		optionAImage: string,
-		optionAMode: string,
-		optionBName: string,
-		optionBImage: string,
-		optionBMode: string,
-		optionCName: string,
-		optionCImage: string,
-		optionCMode: string,
+		option1Name: string,
+		option1Image: string,
+		option1Mode: string,
+		option2Name: string,
+		option2Image: string,
+		option2Mode: string,
+		option3Name: string,
+		option3Image: string,
+		option3Mode: string,
 		duration: number,
 	})
 		isVoting = true
 		matchMenu:setPhaseLabel("VOTING")
-		selectedMapName = ""
-		menuController:setMapVoteVisible(true)
+		selectedVoteKey = ""
+		setPlayEnabled(playEnabled) -- recalcula Active (clickeable durante votación)
 		view:show({
-			optionA = { mapName = data.optionAName, mapImage = data.optionAImage, mapMode = data.optionAMode },
-			optionB = { mapName = data.optionBName, mapImage = data.optionBImage, mapMode = data.optionBMode },
-			optionC = { mapName = data.optionCName, mapImage = data.optionCImage, mapMode = data.optionCMode },
+			option1 = { mapName = data.option1Name, mapImage = data.option1Image, mapMode = data.option1Mode },
+			option2 = { mapName = data.option2Name, mapImage = data.option2Image, mapMode = data.option2Mode },
+			option3 = { mapName = data.option3Name, mapImage = data.option3Image, mapMode = data.option3Mode },
 		}, data.duration)
 		view:setSelectedMap("")
 	end), true)
 
 	-- ── Network: VoteState ───────────────────────────────────
 	janitor:Add(Network.Match.VoteState.Listen(function(data: {
-		optionAName: string,
-		optionAVoterIds: string,
-		optionBName: string,
-		optionBVoterIds: string,
-		optionCName: string,
-		optionCVoterIds: string,
+		option1Name: string,
+		option1VoterIds: string,
+		option2Name: string,
+		option2VoterIds: string,
+		option3Name: string,
+		option3VoterIds: string,
+		randomVoterIds: string,
 		timeLeft: number,
 	})
 		if not isVoting then
@@ -700,24 +796,37 @@ function MatchFeature.start(menuController: any): any
 		end
 		view:updateTimer(data.timeLeft)
 		view:updateVotes({
-			[data.optionAName] = data.optionAVoterIds,
-			[data.optionBName] = data.optionBVoterIds,
-			[data.optionCName] = data.optionCVoterIds,
+			random = data.randomVoterIds,
+			option1 = data.option1VoterIds,
+			option2 = data.option2VoterIds,
+			option3 = data.option3VoterIds,
 		})
-		if selectedMapName ~= "" then
-			view:setSelectedMap(selectedMapName)
+		if selectedVoteKey ~= "" then
+			view:setSelectedMap(selectedVoteKey)
 		end
 	end), true)
 
 	-- ── Network: EndVote ─────────────────────────────────────
 	janitor:Add(Network.Match.EndVote.Listen(function(data: { winnerMapName: string })
 		isVoting = false
-		selectedMapName = ""
-		view:showWinner(data.winnerMapName, function()
+		selectedVoteKey = ""
+		setPlayEnabled(playEnabled) -- ya no es clickeable por votación
+
+		local function finishVote()
 			matchMenu:setPhaseLabel("DEPLOY")
 			view:hide()
-			menuController:setMapVoteVisible(false)
-		end)
+			if votingPanel then
+				votingPanel:close()
+			end
+		end
+
+		-- Solo animamos el ganador si el jugador está viendo la pantalla; si no,
+		-- reseteamos en silencio (sigue en el menú).
+		if votingPanelOpen then
+			view:showWinner(data.winnerMapName, finishVote)
+		else
+			finishVote()
+		end
 	end), true)
 
 	-- ── DataController observers ─────────────────────────────
@@ -735,7 +844,7 @@ function MatchFeature.start(menuController: any): any
 	janitor:Add(function()
 		MatchState.reset()
 		isVoting = false
-		selectedMapName = ""
+		selectedVoteKey = ""
 		setPlayEnabled(false)
 		hud:setScores(0, 0, GameConfig.MaxRoundDuration)
 		view:hide()
@@ -743,7 +852,6 @@ function MatchFeature.start(menuController: any): any
 			deathView:hide()
 		end
 		killCam:stop()
-		menuController:setMapVoteVisible(false)
 		hud:setEnabled(false)
 		if endResultsGui then
 			endResultsGui.Enabled = false

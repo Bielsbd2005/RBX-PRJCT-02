@@ -503,7 +503,7 @@ function WeaponsSystem.setup()
 				--Connect a no-op function to ensure the queue doesn't pile up.
 				warn("There is no server callback implemented for the WeaponsSystem RemoteEvent \"%s\"!")
 				warn("A default no-op function will be implemented so that the queue cannot be abused.")
-				callback = function() end
+				callback = function(...) end
 			end
 			WeaponsSystem.connections[remoteEventName .. "Remote"] = remoteEvent.OnServerEvent:Connect(function(...)
 				callback(...)
@@ -520,7 +520,7 @@ function WeaponsSystem.setup()
 				--Connect a no-op function to ensure the queue doesn't pile up.
 				warn("There is no server callback implemented for the WeaponsSystem RemoteFunction \"%s\"!")
 				warn("A default no-op function will be implemented so that the queue cannot be abused.")
-				callback = function() end
+				callback = function(...) end
 			end
 			remoteFunc.OnServerInvoke = function(...)
 				return callback(...)

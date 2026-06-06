@@ -9,7 +9,6 @@ export type GuiAnimatorOptions = {
 }
 
 local SCALE_OPEN_INFO = TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
-local SCALE_CLOSE_INFO = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 local FADE_OPEN_INFO = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
 local GuiAnimator = {}
@@ -111,32 +110,18 @@ function GuiAnimator:open(): ()
 	self._currentTween:Play()
 end
 
-function GuiAnimator:close(): ()
+-- Cierre instantáneo (sin tween) en todos los modos. `onComplete` se invoca al
+-- ocultar, para que el caller encadene trabajo (p. ej. reaparecer el menú).
+function GuiAnimator:close(onComplete: (() -> ())?): ()
 	self:_clearTween()
 
-	if self._mode == "fade" or self._mode == "none" then
-		-- Snap instantáneo: ocultamos el contenedor sin tween. Las
-		-- transparencias intermedias (si interrumpimos un open mid-tween de
-		-- fade) se resetean en el siguiente open.
-		self:_setVisible(false)
-		return
+	-- En modo scale dejamos el UIScale listo para el próximo open (que lo pone
+	-- a 0 igualmente); no animamos la salida.
+	self:_setVisible(false)
+
+	if onComplete then
+		onComplete()
 	end
-
-	local tween = TweenService:Create(self._uiScale, SCALE_CLOSE_INFO, { Scale = 0 })
-	self._currentTween = tween
-	self._completionConnection = tween.Completed:Connect(function(playbackState)
-		if self._currentTween ~= tween then
-			return
-		end
-
-		if playbackState == Enum.PlaybackState.Completed then
-			self:_setVisible(false)
-		end
-
-		self:_clearTween()
-	end)
-
-	tween:Play()
 end
 
 function GuiAnimator:Destroy(): ()

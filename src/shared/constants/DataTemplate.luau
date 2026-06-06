@@ -215,7 +215,7 @@ export type DailyTasksState = {
 	    hacia el N". Cuando se supera el último tier, CurrentTier = MaxTier+1
 	    (sentinel "completado") y XP queda en 0.
 	  • XP es el progreso DENTRO del tier actual. No se acumula entre tiers
-	    (la cascada en _applyXP descuenta XPRequired y sube CurrentTier).
+	    (la cascada en BattlePassService:AddXP descuenta XPRequired y sube CurrentTier).
 	  • TotalXPEarned es el contador acumulativo de XP ganada en la season
 	    (nunca se decrementa al subir de tier). Sirve como fuente de verdad
 	    independiente para validar CurrentTier en cada claim: si CurrentTier
@@ -223,13 +223,9 @@ export type DailyTasksState = {
 	    se rechaza (defense-in-depth).
 	  • PremiumOwned se setea al procesar el receipt de Robux. Se RESETEA al
 	    cambiar de season (cada season requiere su propia compra).
-	  • ClaimedFree/ClaimedPremium usan `tostring(level)` como key porque
-	    ProfileStore prohíbe tablas numéricas con huecos.
-	  • GrantedSkips[PurchaseId] = true marca cada compra de "Skip Tier"
-	    aplicada. Permite idempotencia per-receipt: si BatchUpdate de la
-	    sección BattlePass tiene éxito pero ProcessedReceipts falla, el
-	    retry de Roblox no re-aplica el skip (a diferencia de Premium que
-	    es idempotente naturalmente con value=true).
+	  • Claimed usa `tostring(level)` como key porque ProfileStore prohíbe
+	    tablas numéricas con huecos. Cada nivel tiene una sola recompensa
+	    (FREE o PASS); reclamar un nivel PASS requiere PremiumOwned.
 	  • SeasonId se compara contra BattlePassConfig.GetActiveSeason().Id en
 	    el load del perfil; mismatch dispara reset.
 ]]
@@ -239,9 +235,9 @@ export type BattlePassState = {
 	XP: number,
 	TotalXPEarned: number,
 	PremiumOwned: boolean,
-	ClaimedFree: { [string]: boolean },
-	ClaimedPremium: { [string]: boolean },
-	GrantedSkips: { [string]: boolean },
+	-- Cada nivel tiene UNA sola recompensa (free o pass). Claimed[tostring(level)] = true.
+	Claimed: { [string]: boolean },
+	GrantedSkips: { [string]: boolean }, -- PurchaseId → true (idempotencia del Skip)
 }
 
 export type PlayerProfile = {
@@ -391,8 +387,7 @@ local DEFAULT: PlayerProfile = {
 		XP = 0,
 		TotalXPEarned = 0,
 		PremiumOwned = false,
-		ClaimedFree = {},
-		ClaimedPremium = {},
+		Claimed = {},
 		GrantedSkips = {},
 	},
 

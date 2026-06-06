@@ -29,22 +29,18 @@ export type MatchMenu = {
 -- ── Helpers de resolución ──────────────────────────────────────
 
 local function _findPlayButton(menuGui: ScreenGui): GuiButton?
-	local bottom = menuGui:FindFirstChild("Bottom")
-	if not bottom then return nil end
-
-	local playNode = bottom:FindFirstChild("Play")
+	local playNode = menuGui:FindFirstChild("PlayBtn")
 	if playNode and playNode:IsA("GuiButton") then
 		return playNode
 	end
-
 	return nil
 end
 
 local function _findPlayStatusLabel(playButton: GuiButton): TextLabel?
-	local contentNode = playButton:FindFirstChild("Content")
-	if not contentNode then return nil end
+	local indicator = playButton:FindFirstChild("Indicator")
+	if not indicator then return nil end
 
-	local statusNode = contentNode:FindFirstChild("Status")
+	local statusNode = indicator:FindFirstChild("Status")
 	if statusNode and statusNode:IsA("TextLabel") then
 		return statusNode
 	end
@@ -52,10 +48,10 @@ local function _findPlayStatusLabel(playButton: GuiButton): TextLabel?
 end
 
 local function _findPlayPcNode(playButton: GuiButton): GuiObject?
-	local contentNode = playButton:FindFirstChild("Content")
-	if not contentNode then return nil end
+	local indicator = playButton:FindFirstChild("Indicator")
+	if not indicator then return nil end
 
-	local pcNode = contentNode:FindFirstChild("PC")
+	local pcNode = indicator:FindFirstChild("PC")
 	if pcNode and pcNode:IsA("GuiObject") then
 		return pcNode
 	end

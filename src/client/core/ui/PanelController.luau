@@ -35,11 +35,15 @@ export type PanelController = {
 local PanelController = {}
 PanelController.__index = PanelController
 
+-- `menuBtn` y `closeBtn` son opcionales: durante la migración de la GUI el Menu
+-- puede estar vacío y un panel puede aún no tener su botón de cerrar. En ambos
+-- casos el panel se configura igual —carga datos, anima— y solo se omite el
+-- binding ausente.
 function PanelController.new(
 	menuController: any,
 	container: GuiObject,
-	menuBtn:   GuiButton,
-	closeBtn:  GuiButton,
+	menuBtn:   GuiButton?,
+	closeBtn:  GuiButton?,
 	options:   PanelControllerOptions?
 ): PanelController
 	local self = setmetatable({}, PanelController) :: any
@@ -61,16 +65,19 @@ function PanelController.new(
 
 	self._janitor:Add(self._animator, "Destroy")
 
-	local resetClose = MenuHover.bindButton(closeBtn, self._janitor)
+	if menuBtn then
+		self._janitor:Add(menuBtn.MouseButton1Click:Connect(function()
+			self:open()
+		end), "Disconnect")
+	end
 
-	self._janitor:Add(menuBtn.MouseButton1Click:Connect(function()
-		self:open()
-	end), "Disconnect")
-
-	self._janitor:Add(closeBtn.MouseButton1Click:Connect(function()
-		resetClose()
-		self:close()
-	end), "Disconnect")
+	if closeBtn then
+		local resetClose = MenuHover.bindButton(closeBtn, self._janitor)
+		self._janitor:Add(closeBtn.MouseButton1Click:Connect(function()
+			resetClose()
+			self:close()
+		end), "Disconnect")
+	end
 
 	return self
 end
@@ -95,8 +102,15 @@ function PanelController:close()
 	end
 
 	self._isOpen = false
-	self._animator:close()
-	self._menuController:show()
+
+	-- El menú reaparece al terminar la animación de cierre (no de golpe, que
+	-- taparía el tween). Y solo si no se abrió otro panel en medio — así el salto
+	-- de un panel a otro (Settings → Credits) no hace parpadear el menú.
+	self._animator:close(function()
+		if not self._menuController:hasOpenPanel() then
+			self._menuController:show()
+		end
+	end)
 
 	if self._onClose then
 		self._onClose()

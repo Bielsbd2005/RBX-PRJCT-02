@@ -16,6 +16,7 @@ local TeamUtils = require(Shared.utils.TeamUtils)
 local UIUtils = require(script.Parent.Parent.Parent.core.ui.UIUtils)
 local Janitor = require(ReplicatedStorage:WaitForChild("Packages").janitor) :: any
 local MatchNotificationsQueue = require(script.Parent.MatchNotificationsQueue)
+local GlobalKillFeed = require(script.Parent.GlobalKillFeed)
 
 -- ── Colores ──────────────────────────────────────────────────
 local TEAM_A_HUD_COLOR = Color3.fromRGB(0, 161, 251)
@@ -327,6 +328,11 @@ function MatchHud.new(matchHudGui: ScreenGui?): any
 	-- Extraído a su propio módulo para que MatchHud no orqueste tweens y
 	-- confetti; los callers siguen usando `hud:playXxxAnimation(...)`.
 	self._notificationsQueue = MatchNotificationsQueue.new(matchHudGui)
+
+	if matchHudGui then
+		self._globalKillFeed = GlobalKillFeed.new(matchHudGui, self)
+		self._janitor:Add(self._globalKillFeed, "Destroy")
+	end
 
 	-- Stats overlay: "vX | Yms[ | Zfps]" en Container.Version cada 1s.
 	-- En producción NO conectamos RenderStepped (cada conexión tiene overhead

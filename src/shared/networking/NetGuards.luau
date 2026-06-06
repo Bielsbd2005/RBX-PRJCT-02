@@ -36,12 +36,12 @@ NetGuards.MAX = table.freeze({
 	SettingChoice = 32,   -- valores enum de Settings (whitelisted)
 	Code          = 24,   -- códigos canjeables (típicamente <12 chars)
 	ClaimType     = 16,   -- "LikeJoin" | "Notifications" | "Code"
-	Track         = 16,   -- "Free" | "Premium"
 	MapName       = 32,
 	Mode          = 24,   -- "TeamDeathmatch", etc.
 	Kind          = 16,   -- "Bullet" | "Health"
 	UserIdString  = 16,   -- numeric UserId codificado como string
 	AssetUri      = 96,   -- "rbxassetid://<digits>"
+	Username      = 32,   -- nombre de usuario Roblox (≤20 chars; margen para espacios/typos)
 })
 
 --[[

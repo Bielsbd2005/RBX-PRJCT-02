@@ -21,6 +21,10 @@ export type MapDefinition = {
 
 export type GameConfigType = {
 	VoteDuration: number,
+	-- Clave centinela para la opción "Random" en la votación (no es un mapa real).
+	-- El cliente la envía como mapName al votar Random; el servidor la resuelve a
+	-- un mapa concreto aleatorio entre las opciones al cerrar la votación.
+	RandomVoteKey: string,
 	MapLoadTimeout: number,
 	PregameCountdown: number,
 	EndResultsDuration: number,
@@ -41,6 +45,7 @@ export type GameConfigType = {
 
 local GameConfig: GameConfigType = {
 	VoteDuration = 4,
+	RandomVoteKey = "__RANDOM__",
 	MapLoadTimeout = 12,
 	PregameCountdown = 5,
 	EndResultsDuration = 10,

@@ -38,16 +38,31 @@ local textFilled = maskFrame:WaitForChild("TextFilled")
 local filledStroke = textFilled:WaitForChild("UIStroke")
 local subtitle = background:WaitForChild("Subtitle")
 
-RunService.Heartbeat:Wait()
+-- Conexión en RenderStepped para forzar que textFilled tenga siempre la posición (0,0) y el ancho absoluto exacto de titleContainer
+local sizeConnection
+sizeConnection = RunService.RenderStepped:Connect(function()
+	if not titleContainer:IsDescendantOf(game) or not textFilled:IsDescendantOf(game) then
+		if sizeConnection then
+			sizeConnection:Disconnect()
+		end
+		return
+	end
+	textFilled.Position = UDim2.new(0, 0, 0, 0)
+	textFilled.Size = UDim2.new(0, titleContainer.AbsoluteSize.X, 1, 0)
+end)
+
+-- Esperar a que el motor de Roblox calcule el tamaño absoluto real en la pantalla
+while titleContainer.AbsoluteSize.X == 0 do
+	RunService.Heartbeat:Wait()
+end
 
 local TITLE_WIDTH = titleContainer.AbsoluteSize.X
 
-if TITLE_WIDTH == 0 then
-	warn("[LoadingScreen] TITLE_WIDTH is 0 after layout frame — title may use Scale sizing")
-	TITLE_WIDTH = titleContainer.Size.X.Offset
-end
+local maskYScale = maskFrame.Size.Y.Scale
+local maskYOffset = maskFrame.Size.Y.Offset
 
-maskFrame.Size = UDim2.new(0, 0, 4, 0)
+maskFrame.Position = UDim2.new(0, 0, 0, 0)
+maskFrame.Size = UDim2.new(0, 0, maskYScale, maskYOffset)
 subtitle.Text = "."
 
 local startTime = os.clock()
@@ -103,7 +118,7 @@ while loadedAssets < totalAssets or (os.clock() - startTime) < MIN_LOAD_TIME do
 			maskFrame,
 			progressTweenInfo,
 			{
-				Size = UDim2.new(0, TITLE_WIDTH * progress, 4, 0)
+				Size = UDim2.new(0, TITLE_WIDTH * progress, maskYScale, maskYOffset)
 			}
 		):Play()
 	end
@@ -118,7 +133,7 @@ TweenService:Create(
 	maskFrame,
 	TweenInfo.new(0.3, Enum.EasingStyle.Quad),
 	{
-		Size = UDim2.new(0, TITLE_WIDTH, 4, 0)
+		Size = UDim2.new(0, TITLE_WIDTH, maskYScale, maskYOffset)
 	}
 ):Play()
 
@@ -152,4 +167,7 @@ local tween = TweenService:Create(circle, IRIS_INFO, { Size = SIZE_SMALL })
 tween:Play()
 tween.Completed:Wait()
 
+if sizeConnection then
+	sizeConnection:Disconnect()
+end
 loadingScreen:Destroy()

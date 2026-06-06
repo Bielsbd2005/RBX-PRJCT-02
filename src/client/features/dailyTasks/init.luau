@@ -1,12 +1,8 @@
 --!strict
 --[[
 	DailyTasksFeature  (Client)
-	Pinta los slots Task1/Task2/Task3 en dos sitios:
-	  MatchHud.LeftContainer.TaskFrame.Task<N>             (HUD de partida)
-	  Workspace.Lobby.Daily.Board.SurfaceGui.Container.Task<N>  (board del lobby)
-	El SurfaceGui está en Workspace, pero los cambios desde un LocalScript no
-	replican: cada cliente pinta el board con sus propias tasks, así cada
-	jugador ve su progreso local.
+	Pinta los slots Task1/Task2/Task3 en el HUD de partida:
+	  MatchHud.LeftContainer.TaskFrame.Task<N>
 	Reactivo a cambios en DataController.DailyTasks (replicado desde server).
 
 	Per-slot UI esperada:
@@ -19,7 +15,6 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Workspace = game:GetService("Workspace")
 
 local Client = script.Parent.Parent
 local Shared = ReplicatedStorage:WaitForChild("Shared")
@@ -139,22 +134,10 @@ end
 
 local function _resolveMatchHudTaskFrame(): Instance?
 	local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui")
-	local matchHudGui = playerGui:FindFirstChild("MatchHud")
+	local matchHudGui = playerGui:WaitForChild("MatchHud", 30)
 	if not matchHudGui then return nil end
-	local leftContainer = matchHudGui:FindFirstChild("LeftContainer")
-	return leftContainer and leftContainer:FindFirstChild("TaskFrame")
-end
-
--- Workspace.Lobby.Daily.Board.SurfaceGui.Container.TaskFrame — board físico del lobby.
--- Las mutaciones desde el cliente no replican, así cada jugador pinta sus
--- propios datos sobre el mismo SurfaceGui sin afectar al resto.
-local function _resolveLobbyBoardTaskFrame(): Instance?
-	local lobby = Workspace:FindFirstChild("Lobby")
-	local daily = lobby and lobby:FindFirstChild("Daily")
-	local board = daily and daily:FindFirstChild("Board")
-	local surfaceGui = board and board:FindFirstChild("SurfaceGui")
-	local container = surfaceGui and surfaceGui:FindFirstChild("Container")
-	return container and container:FindFirstChild("TaskFrame")
+	local leftContainer = matchHudGui:WaitForChild("LeftContainer", 30)
+	return leftContainer and leftContainer:WaitForChild("TaskFrame", 30)
 end
 
 local DailyTasksFeature = {}
@@ -162,39 +145,34 @@ local DailyTasksFeature = {}
 function DailyTasksFeature.start(_menuController: any): any
 	local janitor = Janitor.new()
 
-	local hudSlots = _resolveSlotsFromTaskFrame(
-		_resolveMatchHudTaskFrame(),
-		"MatchHud.LeftContainer.TaskFrame"
-	)
-	local lobbySlots = _resolveSlotsFromTaskFrame(
-		_resolveLobbyBoardTaskFrame(),
-		"Workspace.Lobby.Daily.Board.SurfaceGui.Container.TaskFrame"
-	)
+	DataController:WhenReady():andThen(function()
+		local hudSlots = _resolveSlotsFromTaskFrame(
+			_resolveMatchHudTaskFrame(),
+			"MatchHud.LeftContainer.TaskFrame"
+		)
 
-	if #hudSlots == 0 and #lobbySlots == 0 then
-		return janitor
-	end
+		if #hudSlots == 0 then
+			return
+		end
 
-	local function _paintAll(slots: { Slot }, progress: any, claimed: any)
-		for _, slot in slots do
-			local def = DailyTasks.GetById(slot.id)
-			if def then
-				local current = math.max(0, math.floor((progress :: any)[def.Kind] or 0))
-				local isClaimed = (claimed :: any)[def.Id] == true
-				_paintSlot(slot, def, current, isClaimed)
+		local function _paintAll(slots: { Slot }, progress: any, claimed: any)
+			for _, slot in slots do
+				local def = DailyTasks.GetById(slot.id)
+				if def then
+					local current = math.max(0, math.floor((progress :: any)[def.Kind] or 0))
+					local isClaimed = (claimed :: any)[def.Id] == true
+					_paintSlot(slot, def, current, isClaimed)
+				end
 			end
 		end
-	end
 
-	local function _render()
-		local state = Fusion.peek(DataController.DailyTasks)
-		local progress = state and state.Progress or {}
-		local claimed = state and state.Claimed or {}
-		_paintAll(hudSlots, progress, claimed)
-		_paintAll(lobbySlots, progress, claimed)
-	end
+		local function _render()
+			local state = Fusion.peek(DataController.DailyTasks)
+			local progress = state and state.Progress or {}
+			local claimed = state and state.Claimed or {}
+			_paintAll(hudSlots, progress, claimed)
+		end
 
-	DataController:WhenReady():andThen(function()
 		_render()
 		-- Fusion 0.3 Observer: re-render cuando cambia el Value.
 		local scope = Fusion.scoped(Fusion)

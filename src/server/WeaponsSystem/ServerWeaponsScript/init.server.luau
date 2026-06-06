@@ -58,7 +58,8 @@ if weaponsSystemFolder == nil then
 end
 
 if ServerScriptService:FindFirstChild("ServerWeaponsScript") == nil then
-	script.Parent = ServerScriptService
+	local thisScript = script
+	thisScript.Parent = ServerScriptService
 	initializeWeaponsSystemAssets()
 
 	local WeaponsSystem = require(weaponsSystemFolder.WeaponsSystem)

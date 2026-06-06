@@ -131,13 +131,13 @@ end
 
 local function _populateCard(refs: Refs, killer: KillerInfo?)
 	if killer then
-		_setCardLabel(refs.cardName, killer.name)
-		_setCardLabel(refs.cardKills, tostring(killer.kills))
-		_setCardLabel(refs.cardLevel, tostring(killer.level))
+		_setCardLabel(refs.cardName, "Eliminated by " .. killer.name)
+		_setCardLabel(refs.cardKills, tostring(killer.kills) .. " Kills")
+		_setCardLabel(refs.cardLevel, tostring(killer.level) .. " Lvl")
 	else
 		_setCardLabel(refs.cardName, "")
-		_setCardLabel(refs.cardKills, "0")
-		_setCardLabel(refs.cardLevel, "0")
+		_setCardLabel(refs.cardKills, "0 Kills")
+		_setCardLabel(refs.cardLevel, "0 Lvl")
 	end
 end
 

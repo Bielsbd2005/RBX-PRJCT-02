@@ -20,6 +20,7 @@ local UITheme = require(Client.core.ui.UITheme)
 local BlurController = require(Client.core.ui.BlurController)
 local CameraFovEffect = require(Client.core.ui.CameraFovEffect)
 local StoreProducts = require(Shared.constants.StoreProducts)
+local GiftingController = require(script.GiftingController)
 
 local BLUR_KEY = "Store"
 
@@ -32,14 +33,17 @@ function StoreFeature.start(menuController: any): any
 	local player = Players.LocalPlayer
 	local playerGui = player:WaitForChild("PlayerGui")
 	local menuGui = menuController:getGui()
-	local storeButton = UIUtils.findBottomButton(menuGui, "Store")
+
+	-- Botón de apertura opcional en Menu.Nav.Store. Si no existe, el Store se
+	-- configura igual, solo sin abrirse desde el menú.
+	local navContainer = menuGui:FindFirstChild("Nav")
+	local storeButtonInstance = navContainer and navContainer:FindFirstChild("Store")
+	local storeButton: GuiButton? = if storeButtonInstance and storeButtonInstance:IsA("GuiButton")
+		then storeButtonInstance
+		else nil
 
 	local uiGui = playerGui:WaitForChild("UserInterface") :: ScreenGui
 	local storeFrame = uiGui:WaitForChild("Store") :: Frame
-
-	if not storeButton then
-		return janitor
-	end
 
 	local nav = storeFrame:WaitForChild("Nav")
 	local closeButton = nav:WaitForChild("CloseBtn") :: GuiButton
@@ -236,6 +240,34 @@ function StoreFeature.start(menuController: any): any
 		table.clear(navFrameScales)
 	end, true)
 
+	-- ── Gifting ──────────────────────────────────────────────
+	-- Selección del destinatario de un regalo. La pestaña se auto-registra arriba
+	-- (Store.Nav.Gifting + Store.Gifting); aquí cableamos su máquina de estados.
+	-- Si la GUI aún no tiene los hijos esperados, la pestaña queda inerte.
+	local giftingController: any = nil
+	local giftingFrame = storeFrame:FindFirstChild("Gifting")
+	if giftingFrame and giftingFrame:IsA("GuiObject") then
+		local textBox = giftingFrame:FindFirstChild("TextBox")
+		local actionBtn = giftingFrame:FindFirstChild("ActionBtn")
+		local profile = giftingFrame:FindFirstChild("Profile")
+		local title = giftingFrame:FindFirstChild("Title")
+		if textBox and textBox:IsA("TextBox")
+			and actionBtn and actionBtn:IsA("GuiButton")
+			and profile and profile:IsA("GuiObject")
+			and title and title:IsA("GuiObject")
+		then
+			giftingController = GiftingController.new({
+				frame = giftingFrame,
+				textBox = textBox,
+				actionBtn = actionBtn,
+				profile = profile,
+				title = title,
+			}, janitor)
+		else
+			warn("[StoreFeature] Gifting: faltan hijos (TextBox/ActionBtn/Profile/Title); pestaña inactiva.")
+		end
+	end
+
 	-- ── Panel controller ──────────────────────────────────────
 	local panel = PanelController.new(menuController, storeFrame, storeButton, closeButton, {
 		animationMode = "none",
@@ -248,6 +280,10 @@ function StoreFeature.start(menuController: any): any
 		onClose = function()
 			BlurController.release(BLUR_KEY)
 			fovEffect:restore()
+			-- Cerrar el panel (CloseBtn) cancela el regalo en curso.
+			if giftingController then
+				giftingController:reset()
+			end
 		end,
 	})
 	janitor:Add(panel, "Destroy")

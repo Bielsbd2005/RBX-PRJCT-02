@@ -1,8 +1,27 @@
 --!strict
+--[[
+	rewards/init.luau (Client Feature)
+	Panel de recompensas. Estructura de la GUI nueva (UserInterface.Rewards):
+
+		Rewards
+		  Header
+		    CloseBtn
+		  LikeAndJoin
+		    ClaimBtn        ← unirse al grupo y reclamar
+		  Redeem
+		    Container
+		      RedeemBtn     ← canjear código
+		      TextBox       ← input del código
+
+	Like&Join: la fuente de verdad es Rewards.GroupClaimed (server). Una vez
+	reclamado, el frame LikeAndJoin se oculta para siempre (al cargar y tras un
+	claim exitoso). El grupo a unirse es el de la experiencia (game.CreatorId),
+	que es justo el que el server comprueba con player:IsInGroup.
+]]
+
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local StarterGui = game:GetService("StarterGui")
-local GuiService = game:GetService("GuiService")
+local GroupService = game:GetService("GroupService")
 
 local Client = script.Parent.Parent
 local Shared = ReplicatedStorage:WaitForChild("Shared")
@@ -15,85 +34,16 @@ local DataController = require(Client.core.data.DataController)
 local PanelController = require(Client.core.ui.PanelController)
 local BlurController = require(Client.core.ui.BlurController)
 local CameraFovEffect = require(Client.core.ui.CameraFovEffect)
+local Notify = require(Client.core.ui.NotificationController)
 
 local BLUR_KEY = "Rewards"
+local RESPONSE_TIMEOUT = 5
 
 local RewardsFeature = {}
 
-local function notify(message: string)
-	pcall(function()
-		StarterGui:SetCore("SendNotification", {
-			Title = "Rewards",
-			Text = message,
-			Duration = 3,
-		})
-	end)
-end
-
-local function trySetCore(coreName: string, payload: any?): boolean
-	local ok, result = pcall(function()
-		if payload == nil then
-			StarterGui:SetCore(coreName, nil)
-		else
-			StarterGui:SetCore(coreName, payload)
-		end
-	end)
-
-	if not ok then
-		return false
-	end
-
-	return result == nil or result == true
-end
-
-local function promptEnableNotifications()
-	if trySetCore("PromptNotificationsPermission") then
-		return
-	end
-
-	if trySetCore("PromptEnableNotifications") then
-		return
-	end
-
-	notify("No se pudo abrir el prompt de notificaciones en este dispositivo.")
-end
-
-local function promptCommunity()
-	if game.CreatorType ~= Enum.CreatorType.Group then
-		notify("Este juego no esta publicado bajo grupo/comunidad.")
-		return
-	end
-
-	local groupId = game.CreatorId
-	local communityUrl = "https://www.roblox.com/communities/" .. tostring(groupId)
-
-	local opened = pcall(function()
-		if typeof((GuiService :: any).OpenBrowserWindow) == "function" then
-			(GuiService :: any):OpenBrowserWindow(communityUrl)
-		else
-			error("OpenBrowserWindow not available")
-		end
-	end)
-
-	if opened then
-		return
-	end
-
-	if trySetCore("PromptOpenURL", { Url = communityUrl }) then
-		return
-	end
-
-	if trySetCore("PromptOpenURL", { URL = communityUrl }) then
-		return
-	end
-
-	notify("No se pudo abrir el prompt de comunidad en este dispositivo.")
-end
-
-local function setClaimedVisual(button: ImageButton, claimed: boolean)
-	button.AutoButtonColor = not claimed
-	button.Active = not claimed
-	button.ImageColor3 = if claimed then Color3.fromRGB(140, 140, 140) else Color3.fromRGB(255, 255, 255)
+-- Grupo de la experiencia: 0 si la experiencia no pertenece a un grupo.
+local function getGroupId(): number
+	return if game.CreatorType == Enum.CreatorType.Group then game.CreatorId else 0
 end
 
 function RewardsFeature.start(menuController: any): any
@@ -101,21 +51,31 @@ function RewardsFeature.start(menuController: any): any
 
 	local player = Players.LocalPlayer
 	local playerGui = player:WaitForChild("PlayerGui")
-	local menuGui = menuController:getGui()
 
-	local menuBtn = menuGui:WaitForChild("Top"):WaitForChild("rewards") :: GuiButton
+	-- Botón de apertura opcional (Menu.Rewards).
+	local menuGui = menuController:getGui()
+	local menuBtnInstance = menuGui:FindFirstChild("Rewards")
+	local menuBtn: GuiButton? = if menuBtnInstance and menuBtnInstance:IsA("GuiButton")
+		then menuBtnInstance
+		else nil
 
 	local uiGui = playerGui:WaitForChild("UserInterface") :: ScreenGui
 	local frame = uiGui:WaitForChild("Rewards") :: Frame
 
-	local closeBtn = frame:WaitForChild("CloseBtn") :: GuiButton
-	local contentBackground = frame:WaitForChild("ContentBackground") :: Frame
+	local likeAndJoin = frame:WaitForChild("LikeAndJoin") :: Frame
+	local likeClaimBtn = likeAndJoin:WaitForChild("ClaimBtn") :: GuiButton
 
-	local likeJoinClaimBtn = contentBackground:WaitForChild("Like&Join"):WaitForChild("Claim") :: ImageButton
-	local notificationsClaimBtn = contentBackground:WaitForChild("Notifications"):WaitForChild("Claim") :: ImageButton
-	local claimCodesNode = contentBackground:WaitForChild("ClaimCodes") :: Frame
-	local claimCodeBtn = claimCodesNode:WaitForChild("Claim") :: ImageButton
-	local codeTextBox = claimCodesNode:WaitForChild("TextBox") :: TextBox
+	local redeem = frame:WaitForChild("Redeem")
+	local redeemContainer = redeem:WaitForChild("Container")
+	local redeemBtn = redeemContainer:WaitForChild("RedeemBtn") :: GuiButton
+	local codeTextBox = redeemContainer:WaitForChild("TextBox") :: TextBox
+
+	-- CloseBtn en Rewards.Redeem.Header.CloseBtn (defensivo/opcional por migración).
+	local redeemHeader = redeem:FindFirstChild("Header")
+	local closeInstance = redeemHeader and redeemHeader:FindFirstChild("CloseBtn")
+	local closeBtn: GuiButton? = if closeInstance and closeInstance:IsA("GuiButton")
+		then closeInstance
+		else nil
 
 	local fovEffect = CameraFovEffect.new()
 	janitor:Add(fovEffect, "Destroy")
@@ -124,6 +84,8 @@ function RewardsFeature.start(menuController: any): any
 		onOpen = function()
 			BlurController.acquire(BLUR_KEY)
 			fovEffect:expand()
+			-- Empezar siempre con el input de código limpio al (re)entrar.
+			codeTextBox.Text = ""
 		end,
 		onClose = function()
 			BlurController.release(BLUR_KEY)
@@ -132,115 +94,114 @@ function RewardsFeature.start(menuController: any): any
 	})
 	janitor:Add(panel, "Destroy")
 
-	local REWARDS_REQUEST_TIMEOUT = 5
+	-- Guard anti-spam por botón: token incremental para que un timeout obsoleto
+	-- no reactive un botón que ya respondió.
+	local likePending = false
+	local codePending = false
+	local likeToken = 0
+	local codeToken = 0
 
-	local pending = {
-		LikeJoin = false,
-		Notifications = false,
-		Code = false,
-	}
-
-	local pendingTokens = {
-		LikeJoin = 0,
-		Notifications = 0,
-		Code = 0,
-	}
-
-	local pendingButtons: { [string]: ImageButton } = {}
-
-	local function setPending(button: ImageButton, key: string, isPending: boolean)
-		pending[key] = isPending
-		pendingButtons[key] = button
-		button.Active = not isPending
-		button.AutoButtonColor = not isPending
-		button.ImageTransparency = if isPending then 0.35 else 0
+	local function setLikePending(pending: boolean)
+		likePending = pending
+		likeClaimBtn.Active = not pending
+		likeClaimBtn.AutoButtonColor = not pending
 	end
 
-	local function armTimeout(key: string)
-		pendingTokens[key] += 1
-		local token = pendingTokens[key]
-		task.delay(REWARDS_REQUEST_TIMEOUT, function()
-			if pendingTokens[key] == token and pending[key] then
-				local button = pendingButtons[key]
-				if button then
-					setPending(button, key, false)
-				end
-				notify("Sin respuesta del servidor")
-			end
-		end)
+	local function setCodePending(pending: boolean)
+		codePending = pending
+		redeemBtn.Active = not pending
+		redeemBtn.AutoButtonColor = not pending
 	end
 
-	janitor:Add(likeJoinClaimBtn.MouseButton1Click:Connect(function()
-		if pending.LikeJoin then
+	-- Reclamado → ocultar para siempre (persistido en GroupClaimed server-side).
+	local function hideLikeAndJoin()
+		likeAndJoin.Visible = false
+	end
+
+	janitor:Add(likeClaimBtn.MouseButton1Click:Connect(function()
+		if likePending then
 			return
 		end
 
-		promptCommunity()
-		setPending(likeJoinClaimBtn, "LikeJoin", true)
-		armTimeout("LikeJoin")
+		local groupId = getGroupId()
+		if groupId <= 0 then
+			Notify.warning("Esta experiencia no pertenece a un grupo.")
+			return
+		end
+
+		pcall(function()
+			GroupService:PromptJoinAsync(groupId)
+		end)
+
+		setLikePending(true)
+		likeToken += 1
+		local token = likeToken
+		task.delay(RESPONSE_TIMEOUT, function()
+			if token == likeToken and likePending then
+				setLikePending(false)
+				Notify.warning("Sin respuesta del servidor.")
+			end
+		end)
+
 		Network.Rewards.ClaimLikeJoin.Send({})
 	end), "Disconnect")
 
-	janitor:Add(notificationsClaimBtn.MouseButton1Click:Connect(function()
-		if pending.Notifications then
-			return
-		end
-
-		promptEnableNotifications()
-		setPending(notificationsClaimBtn, "Notifications", true)
-		armTimeout("Notifications")
-		Network.Rewards.ClaimNotifications.Send({})
-	end), "Disconnect")
-
-	janitor:Add(claimCodeBtn.MouseButton1Click:Connect(function()
-		if pending.Code then
+	janitor:Add(redeemBtn.MouseButton1Click:Connect(function()
+		if codePending then
 			return
 		end
 
 		local code = codeTextBox.Text
 		if code == "" then
-			notify("Escribe un codigo para reclamar.")
+			Notify.warning("Escribe un código para canjear.")
 			return
 		end
 
-		setPending(claimCodeBtn, "Code", true)
-		armTimeout("Code")
-		Network.Rewards.RedeemCode.Send({
-			code = code,
-		})
+		setCodePending(true)
+		codeToken += 1
+		local token = codeToken
+		task.delay(RESPONSE_TIMEOUT, function()
+			if token == codeToken and codePending then
+				setCodePending(false)
+				Notify.warning("Sin respuesta del servidor.")
+			end
+		end)
+
+		Network.Rewards.RedeemCode.Send({ code = code })
 	end), "Disconnect")
 
-	local stopListeningRewardsResponse = Network.Rewards.Response.Listen(function(data: {
+	janitor:Add(Network.Rewards.Response.Listen(function(data: {
 		success: boolean,
 		message: string,
 		claimType: string,
 		rewardCash: number,
 	})
-		notify(data.message)
+		if data.success then
+			Notify.success(data.message)
+		else
+			Notify.warning(data.message)
+		end
 
 		if data.claimType == "LikeJoin" then
-			setPending(likeJoinClaimBtn, "LikeJoin", false)
+			likeToken += 1
+			setLikePending(false)
 			if data.success then
-				setClaimedVisual(likeJoinClaimBtn, true)
-			end
-		elseif data.claimType == "Notifications" then
-			setPending(notificationsClaimBtn, "Notifications", false)
-			if data.success then
-				setClaimedVisual(notificationsClaimBtn, true)
+				hideLikeAndJoin()
 			end
 		elseif data.claimType == "Code" then
-			setPending(claimCodeBtn, "Code", false)
+			codeToken += 1
+			setCodePending(false)
 			if data.success then
 				codeTextBox.Text = ""
 			end
 		end
-	end)
-	janitor:Add(stopListeningRewardsResponse, true)
+	end), true)
 
 	DataController:WhenReady():andThen(function()
 		local rewardsData = Fusion.peek(DataController.Rewards)
-		setClaimedVisual(likeJoinClaimBtn, rewardsData.LikeState == "Claimed")
-		setClaimedVisual(notificationsClaimBtn, rewardsData.NotificationsClaimed == true)
+		if rewardsData.GroupClaimed == true then
+			hideLikeAndJoin()
+		end
 	end)
 
 	return janitor

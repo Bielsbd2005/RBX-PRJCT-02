@@ -5,7 +5,6 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local StarterGui = game:GetService("StarterGui")
 
 local Packages = ReplicatedStorage:WaitForChild("Packages")
-local Shared = ReplicatedStorage:WaitForChild("Shared")
 
 local Janitor = require(Packages.janitor) :: any
 local Fusion = require(Packages.fusion) :: any
@@ -26,7 +25,6 @@ type StatsData = {
 type HudRefs = {
 	cashValue: TextLabel?,
 	level: TextLabel?,
-	next: TextLabel?,
 	barFill: Frame?,
 	barValue: TextLabel?,
 }
@@ -59,43 +57,40 @@ local function setText(label: TextLabel?, value: string): ()
 	end
 end
 
+local function asTextLabel(inst: Instance?): TextLabel?
+	return if inst and inst:IsA("TextLabel") then inst else nil
+end
+
+local function asFrame(inst: Instance?): Frame?
+	return if inst and inst:IsA("Frame") then inst else nil
+end
+
+-- Estructura del HUD (Menu plano):
+--   Menu.Cash.Value          → efectivo
+--   Menu.Level.Value         → nivel
+--   Menu.Level.Bar.Fill      → progreso de XP hacia el siguiente nivel
+--   Menu.Level.Bar.Value     → texto XP "actual/necesaria" (opcional)
 local function resolveHudRefs(menuGui: ScreenGui): HudRefs
-	local top = menuGui:FindFirstChild("Top")
-	if not top then
-		return {
-			cashValue = nil,
-			level = nil,
-			next = nil,
-			barFill = nil,
-			barValue = nil,
-		}
-	end
+	local cashNode = menuGui:FindFirstChild("Cash")
+	local cashValue = asTextLabel(cashNode and cashNode:FindFirstChild("Value"))
 
-	local cashNode = top:FindFirstChild("Cash")
-	local cashValue = if cashNode and cashNode:FindFirstChild("Value") then (if cashNode.Value:IsA("TextLabel") then cashNode.Value else nil) else nil
+	local levelNode = menuGui:FindFirstChild("Level")
+	local level = asTextLabel(levelNode and levelNode:FindFirstChild("Value"))
 
-	local levelNode = top:FindFirstChild("Level")
-	local level = if levelNode and levelNode:IsA("TextLabel") then levelNode else nil
-
-	local nextNode = top:FindFirstChild("Next")
-	local next = if nextNode and nextNode:IsA("TextLabel") then nextNode else nil
-
-	local barNode = top:FindFirstChild("Bar")
-	local barFill = if barNode then (if barNode:FindFirstChild("Fill") then (if barNode.Fill:IsA("Frame") then barNode.Fill else nil) else nil) else nil
-	local barValueNode = if barNode then barNode:FindFirstChild("Value") else nil
-	local barValue = if barValueNode and barValueNode:IsA("TextLabel") then barValueNode else nil
+	local barNode = levelNode and levelNode:FindFirstChild("Bar")
+	local barFill = asFrame(barNode and barNode:FindFirstChild("Fill"))
+	local barValue = asTextLabel(barNode and barNode:FindFirstChild("Value"))
 
 	return {
 		cashValue = cashValue,
 		level = level,
-		next = next,
 		barFill = barFill,
 		barValue = barValue,
 	}
 end
 
 local function updateTopHud(hudRefs: HudRefs, stats: StatsData): ()
-	if not hudRefs.cashValue and not hudRefs.level and not hudRefs.next and not hudRefs.barFill and not hudRefs.barValue then
+	if not hudRefs.cashValue and not hudRefs.level and not hudRefs.barFill and not hudRefs.barValue then
 		return
 	end
 
@@ -111,18 +106,17 @@ local function updateTopHud(hudRefs: HudRefs, stats: StatsData): ()
 
 	setText(hudRefs.barValue, string.format("%d/%d", currentXP, xpToNext))
 	setText(hudRefs.level, "Lvl " .. tostring(stats.Level))
-	setText(hudRefs.next, "Lvl " .. tostring(stats.Level + 1))
 end
 
 -- Hover animations específicas por botón. Los listados con liftOffset > 0
 -- suben además de crecer; el resto solo escala. Botones no listados conservan
 -- su comportamiento por defecto (solo el stroke tween de MenuHover).
 local MENU_BUTTON_HOVER_BINDINGS: { { path: { string }, lift: number } } = {
-	{ path = { "Top", "settings" }, lift = 0 },
-	{ path = { "Top", "rewards" }, lift = 0 },
-	{ path = { "Bottom", "Play" }, lift = 0 },
-	{ path = { "Bottom", "BattlePass" }, lift = 0 },
-	{ path = { "Bottom", "Store" }, lift = 8 },
+	{ path = { "settings" }, lift = 0 },
+	{ path = { "Rewards" }, lift = 0 },
+	{ path = { "PlayBtn" }, lift = 0 },
+	{ path = { "Nav", "BattlePass" }, lift = 0 },
+	{ path = { "Nav", "Store" }, lift = 0 },
 	{ path = { "Bottom", "Locker" }, lift = 8 },
 }
 
@@ -172,9 +166,6 @@ function MenuController.new(): MenuController
 
 	bindMenuButtonHovers(menuGui, self._janitor)
 
-	local mapVoteNode = menuGui:FindFirstChild("MapVote")
-	self._mapVote = if mapVoteNode and mapVoteNode:IsA("GuiObject") then mapVoteNode else nil
-
 	self._janitor:Add(self._animator, "Destroy")
 	self._janitor:Add(self._hover, "Destroy")
 	self._janitor:Add(function()
@@ -196,20 +187,6 @@ end
 
 function MenuController:getGui(): ScreenGui
 	return self._gui
-end
-
-function MenuController:_applyMapVoteVisibility(): ()
-	if self._mapVote then
-		-- MapVote solo visible cuando: la votación está activa, el menú no está
-		-- oculto (no estamos dentro del match), y no hay otro panel abierto encima
-		-- (locker, settings, etc.).
-		local shouldShow = self._mapVoteShouldBeVisible == true
-			and not self._isHidden
-			and not self:hasOpenPanel()
-		self._mapVote.Visible = shouldShow
-	end
-
-	self:_fireStateChanged()
 end
 
 function MenuController:_fireStateChanged(): ()
@@ -240,34 +217,28 @@ function MenuController:isHidden(): boolean
 	return self._isHidden == true
 end
 
-function MenuController:setMapVoteVisible(visible: boolean): ()
-	self._mapVoteShouldBeVisible = visible
-	self:_applyMapVoteVisibility()
-end
-
 function MenuController:hide(): ()
 	self._isHidden = true
 	self._animator:hide()
-	self:_applyMapVoteVisibility()
+	self:_fireStateChanged()
 end
 
 function MenuController:show(): ()
 	self._isHidden = false
 	self._animator:show()
-	self:_applyMapVoteVisibility()
+	self:_fireStateChanged()
 end
 
 function MenuController:registerPanel(panel: Instance): ()
 	if self._openPanels[panel] then return end
-	-- Reaccionar también cuando el panel se abre/cierra (.Enabled/.Visible).
-	-- Sin esto, abrir el locker después de que arranque la votación no
-	-- recalculaba la visibilidad de MapVote.
+	-- Reaccionar también cuando el panel se abre/cierra (.Enabled/.Visible) para
+	-- notificar a los suscriptores de onStateChanged (p. ej. otros paneles).
 	local prop = if panel:IsA("ScreenGui") then "Enabled" else "Visible"
 	local conn = panel:GetPropertyChangedSignal(prop):Connect(function()
-		self:_applyMapVoteVisibility()
+		self:_fireStateChanged()
 	end)
 	self._openPanels[panel] = conn
-	self:_applyMapVoteVisibility()
+	self:_fireStateChanged()
 end
 
 function MenuController:unregisterPanel(panel: Instance): ()
@@ -276,7 +247,7 @@ function MenuController:unregisterPanel(panel: Instance): ()
 		conn:Disconnect()
 	end
 	self._openPanels[panel] = nil
-	self:_applyMapVoteVisibility()
+	self:_fireStateChanged()
 end
 
 function MenuController:hasOpenPanel(): boolean

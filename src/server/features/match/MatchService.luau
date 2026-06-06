@@ -136,7 +136,11 @@ local function _setPhase(nextPhase: string, reason: string?)
 end
 
 local function _sendMapLoadStateToAll()
-	local key = string.format("%s|%s|%s", tostring(_isMapLoading), tostring(_isPlayEnabled), _activeMapName)
+	local isVoting = VotingService:HasActiveVote()
+	local key = string.format(
+		"%s|%s|%s|%s",
+		tostring(_isMapLoading), tostring(_isPlayEnabled), _activeMapName, tostring(isVoting)
+	)
 	if _lastMapLoadStateBroadcastKey == key then
 		return
 	end
@@ -146,6 +150,7 @@ local function _sendMapLoadStateToAll()
 		isLoading = _isMapLoading,
 		playEnabled = _isPlayEnabled,
 		mapName = _activeMapName,
+		isVoting = isVoting,
 	})
 end
 
@@ -155,6 +160,7 @@ local function _sendMapLoadStateToPlayer(player: Player)
 			isLoading = _isMapLoading,
 			playEnabled = _isPlayEnabled,
 			mapName = _activeMapName,
+			isVoting = VotingService:HasActiveVote(),
 		}, player)
 	end)
 	if not ok then
@@ -512,7 +518,28 @@ local function _persistAttackerKillStats(attacker: Player, wasHeadshot: boolean,
 	end)
 end
 
+local function _resolveKillerName(attackerUserId: number?): string
+	if not attackerUserId then
+		return ""
+	end
+	if attackerUserId > 0 then
+		local player = Players:GetPlayerByUserId(attackerUserId)
+		return if player then player.Name else ""
+	else
+		return _resolveBotKillerName(attackerUserId)
+	end
+end
+
 local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?, attackerWeaponId: string?, attackerWasHeadshot: boolean?)
+	local killerName = _resolveKillerName(attackerUserId)
+	pcall(function()
+		Network.Combat.KillFeed.SendToAll({
+			killerName = killerName,
+			victimName = deadPlayer.Name,
+			weaponId = attackerWeaponId or "",
+		})
+	end)
+
 	KillAttributionService:ResetStreak(deadPlayer.UserId)
 	if _matchKillsByUserId[deadPlayer.UserId] == nil then
 		_matchKillsByUserId[deadPlayer.UserId] = 0
@@ -1373,6 +1400,15 @@ local function _handleBotDied(botTeam: string, _botName: string, botHumanoid: Hu
 	-- estaba in-match. Si el daño es reciente y el bot muere justo cuando
 	-- vuelve al menú, la kill es legítima — no robarla.
 
+	local killerName = _resolveKillerName(attackerUserId)
+	pcall(function()
+		Network.Combat.KillFeed.SendToAll({
+			killerName = killerName,
+			victimName = _botName,
+			weaponId = attackerWeaponId or "",
+		})
+	end)
+
 	if attackerUserId and attackerUserId ~= botFakeUserId then
 		_matchKillsByUserId[attackerUserId] = (_matchKillsByUserId[attackerUserId] or 0) + 1
 		-- Solo los jugadores humanos acumulan streak/timer/stats.
@@ -1803,6 +1839,10 @@ function MatchService:Start(dataService: DataService): ()
 		KillAttributionService:InitStreak(player.UserId)
 		KillAttributionService:SendStreakBroadcast(player.UserId)
 		_bindCharacterTracking(player)
+		-- Intentar iniciar votación cuando un nuevo jugador llega (cubre el
+		-- caso de servidor vacío donde Start() se ejecutó con 0 players).
+		-- task.defer para que el jugador ya esté en Players:GetPlayers().
+		task.defer(_startVoteIfPossible)
 	end)
 
 	Players.PlayerRemoving:Connect(function(player)

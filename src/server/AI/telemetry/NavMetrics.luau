@@ -46,6 +46,7 @@ type Event = {
 }
 
 local NavMetrics = {}
+NavMetrics.ENABLED = ENABLED
 
 local _ring: { Event } = {}
 local _ringHead = 1

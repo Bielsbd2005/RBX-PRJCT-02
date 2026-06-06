@@ -1,9 +1,26 @@
 --!strict
+--[[
+	settings/init.luau (Client Feature)
+	Panel de ajustes. La GUI nueva vive en UserInterface.Settings:
+
+		Settings
+		  Header
+		    CloseBtn
+		  Content
+		    MusicVolume   (slider) → SliderFrame { Slider, Value }
+		    SfxVolume     (slider)
+		    Sensitivity   (slider)
+		    Vibration     (toggle) → Toggle { Circle } + Title
+		    AutoShoot     (toggle)
+		    CreditsBtn    (sin acción por ahora)
+
+	Toda la mecánica de slider/toggle vive en SliderController/ToggleController;
+	aquí solo cableamos: onChange aplica el efecto inmediato y onCommit persiste.
+]]
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local SoundService = game:GetService("SoundService")
-local TweenService = game:GetService("TweenService")
 
 local Client = script.Parent.Parent
 local Shared = ReplicatedStorage:WaitForChild("Shared")
@@ -16,135 +33,24 @@ local DataController = require(Client.core.data.DataController)
 local PanelController = require(Client.core.ui.PanelController)
 local BlurController = require(Client.core.ui.BlurController)
 local CameraFovEffect = require(Client.core.ui.CameraFovEffect)
+local SliderController = require(Client.core.ui.SliderController)
+local ToggleController = require(Client.core.ui.ToggleController)
 
 local BLUR_KEY = "Settings"
+local CREDITS_BLUR_KEY = "Credits"
 
-local SettingsFeature = {}
-
-type PendingChanges = {
-	[string]: boolean,
+-- Defaults espejados de DataTemplate.Settings (fallback si el perfil no trae valor).
+local SLIDER_DEFAULTS: { [string]: number } = {
+	MusicVolume = 0.5,
+	SFXVolume = 0.8,
+	CameraSensitivity = 0.5,
+}
+local TOGGLE_DEFAULTS: { [string]: boolean } = {
+	Vibration = true,
+	AutoShoot = true,
 }
 
-local function setupSlider(
-	settingNode: Instance,
-	configKey: string,
-	currentConfig: { [string]: boolean | number },
-	janitor: any,
-	onChange: ((number) -> ())?
-): (number) -> ()
-	local container = settingNode:WaitForChild("SliderContainer") :: Frame
-	local drag = container:WaitForChild("Drag") :: Frame
-	local dragDetector = drag:WaitForChild("UIDragDetector") :: UIDragDetector
-	local indicatorFrame = settingNode:WaitForChild("SliderIndicatorFrame") :: Frame
-	local indicator = indicatorFrame:WaitForChild("SliderIndicator") :: Frame
-	local valueLabel = settingNode:WaitForChild("Value") :: TextLabel
-
-	drag.AnchorPoint = Vector2.new(0.5, 0.5)
-	indicator.AnchorPoint = Vector2.new(0, 0.5)
-	indicator.Position = UDim2.new(0, 0, 0.5, 0)
-
-	dragDetector.DragStyle = Enum.UIDragDetectorDragStyle.TranslateLine
-	dragDetector.DragAxis = Vector2.new(1, 0)
-	dragDetector.BoundingUI = container
-	dragDetector.BoundingBehavior = Enum.UIDragDetectorBoundingBehavior.EntireObject
-
-	janitor:Add(dragDetector.DragContinue:Connect(function()
-		local minX = container.AbsolutePosition.X
-		local maxX = minX + container.AbsoluteSize.X - drag.AbsoluteSize.X
-		local currentX = drag.AbsolutePosition.X
-		local travelSpace = maxX - minX
-
-		local percentage = if travelSpace > 0
-			then math.clamp((currentX - minX) / travelSpace, 0, 1)
-			else 0
-
-		currentConfig[configKey] = percentage
-
-		local fillWidth = (currentX - minX) + (drag.AbsoluteSize.X / 2)
-		indicator.Size = UDim2.new(0, fillWidth, 1, 0)
-		valueLabel.Text = math.round(percentage * 100) .. "%"
-
-		if onChange then
-			onChange(percentage)
-		end
-	end), "Disconnect")
-
-	return function(percentage: number)
-		local clamped = math.clamp(percentage, 0, 1)
-		currentConfig[configKey] = clamped
-
-		local travelSpace = container.AbsoluteSize.X - drag.AbsoluteSize.X
-		local centerPos = (travelSpace * clamped) + (drag.AbsoluteSize.X / 2)
-
-		drag.Position = UDim2.new(0, centerPos, 0.5, 0)
-		indicator.Size = UDim2.new(0, centerPos, 1, 0)
-		valueLabel.Text = math.round(clamped * 100) .. "%"
-
-		if onChange then
-			onChange(clamped)
-		end
-	end
-end
-
-local function setupToggle(
-	settingNode: Instance,
-	configKey: string,
-	currentConfig: { [string]: boolean | number },
-	janitor: any
-): (boolean) -> ()
-	local toggleFrame = settingNode:WaitForChild("ToggleFrame") :: Frame
-	local toggleBtn = toggleFrame:WaitForChild("Toggle") :: TextButton
-
-	toggleBtn.AnchorPoint = Vector2.new(0, 0.5)
-
-	local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-	local activeTweens = {} :: { Tween }
-
-	janitor:Add(function()
-		for _, tween in ipairs(activeTweens) do
-			tween:Cancel()
-		end
-	end, true)
-
-	return function(state: boolean)
-		currentConfig[configKey] = state
-
-		local targetPos: UDim2
-		local buttonColor: Color3
-		local frameColor: Color3
-
-		if state then
-			targetPos = UDim2.new(1, -toggleBtn.AbsoluteSize.X, 0.5, 0)
-			buttonColor = Color3.fromRGB(255, 255, 255)
-			frameColor = Color3.fromRGB(255, 139, 0)
-			toggleBtn.Text = "ON"
-		else
-			targetPos = UDim2.new(0, 0, 0.5, 0)
-			buttonColor = Color3.fromRGB(200, 200, 200)
-			frameColor = Color3.fromRGB(55, 55, 74)
-			toggleBtn.Text = "OFF"
-		end
-
-		for _, tween in ipairs(activeTweens) do
-			tween:Cancel()
-		end
-		table.clear(activeTweens)
-
-		local buttonTween = TweenService:Create(toggleBtn, tweenInfo, {
-			Position = targetPos,
-			BackgroundColor3 = buttonColor,
-		})
-		local frameTween = TweenService:Create(toggleFrame, tweenInfo, {
-			BackgroundColor3 = frameColor,
-		})
-
-		table.insert(activeTweens, buttonTween)
-		table.insert(activeTweens, frameTween)
-
-		buttonTween:Play()
-		frameTween:Play()
-	end
-end
+local SettingsFeature = {}
 
 local function saveSlider(key: string, value: number)
 	Network.Settings.UpdateSlider.Send({
@@ -165,21 +71,26 @@ function SettingsFeature.start(menuController: any): any
 
 	local player = Players.LocalPlayer
 	local playerGui = player:WaitForChild("PlayerGui")
+
+	-- Botón de apertura opcional (Menu.settings). Si no existe, Settings se
+	-- configura igual, solo sin abrirse desde el menú.
 	local menuGui = menuController:getGui()
-	local settingsBtn = menuGui.Top:WaitForChild("settings") :: GuiButton
+	local settingsBtnInstance = menuGui:FindFirstChild("settings")
+	local settingsBtn: GuiButton? = if settingsBtnInstance and settingsBtnInstance:IsA("GuiButton")
+		then settingsBtnInstance
+		else nil
 
 	local uiGui = playerGui:WaitForChild("UserInterface") :: ScreenGui
 	local frame = uiGui:WaitForChild("Settings") :: Frame
+	local content = frame:WaitForChild("Content") :: Frame
 
-	local contentBg = frame:WaitForChild("ContentBackground") :: Frame
-	local settingsList = contentBg:WaitForChild("SettingsList") :: Frame
-	local closeBtn = frame:WaitForChild("CloseBtn") :: GuiButton
-	local resetBtn = contentBg:WaitForChild("Reset") :: GuiButton
-
-	local musicSetting = settingsList:WaitForChild("Music")
-	local sensSetting = settingsList:WaitForChild("Sensitivity")
-	local vibSetting = settingsList:WaitForChild("Vibration")
-	local aimSetting = settingsList:WaitForChild("AutoShoot")
+	-- CloseBtn en Settings.Header.CloseBtn. Se resuelve de forma defensiva por si
+	-- el Header aún no está durante la migración (opcional, sin colgar el feature).
+	local header = frame:FindFirstChild("Header")
+	local closeInstance = header and header:FindFirstChild("CloseBtn")
+	local closeBtn: GuiButton? = if closeInstance and closeInstance:IsA("GuiButton")
+		then closeInstance
+		else nil
 
 	local fovEffect = CameraFovEffect.new()
 	janitor:Add(fovEffect, "Destroy")
@@ -196,116 +107,120 @@ function SettingsFeature.start(menuController: any): any
 	})
 	janitor:Add(panel, "Destroy")
 
-	local currentConfig = {
-		MusicVolume = 0.5,
-		CameraSensitivity = 0.5,
-		Vibration = true,
-		AutoShoot = true,
-	}
-	local pendingChanges: PendingChanges = {}
+	-- Credits: panel hermano abierto desde Settings.Content.CreditsBtn. Abrirlo
+	-- cierra Settings; cerrar Credits (Credits.Header.CloseBtn) lleva al Menu.
+	local creditsBtnInstance = content:FindFirstChild("CreditsBtn")
+	if creditsBtnInstance and creditsBtnInstance:IsA("GuiButton") then
+		local creditsFrame = uiGui:WaitForChild("Credits") :: Frame
+		local creditsHeader = creditsFrame:FindFirstChild("Header")
+		local creditsCloseInstance = creditsHeader and creditsHeader:FindFirstChild("CloseBtn")
+		local creditsCloseBtn: GuiButton? = if creditsCloseInstance and creditsCloseInstance:IsA("GuiButton")
+			then creditsCloseInstance
+			else nil
 
-	local function markPending(key: string)
-		pendingChanges[key] = true
+		local creditsFov = CameraFovEffect.new()
+		janitor:Add(creditsFov, "Destroy")
+
+		-- menuBtn = nil: la apertura se cablea a mano para cerrar Settings antes
+		-- (el toggle del Menu de ambos pasos se cancela en el mismo frame).
+		local creditsPanel = PanelController.new(menuController, creditsFrame, nil, creditsCloseBtn, {
+			onOpen = function()
+				BlurController.acquire(CREDITS_BLUR_KEY)
+				creditsFov:expand()
+			end,
+			onClose = function()
+				BlurController.release(CREDITS_BLUR_KEY)
+				creditsFov:restore()
+			end,
+		})
+		janitor:Add(creditsPanel, "Destroy")
+
+		janitor:Add((creditsBtnInstance :: GuiButton).MouseButton1Click:Connect(function()
+			panel:close()
+			creditsPanel:open()
+		end), "Disconnect")
 	end
 
-	local function flushPendingSaves()
-		for key in pendingChanges do
-			if key == "MusicVolume" or key == "CameraSensitivity" then
-				saveSlider(key, currentConfig[key] :: number)
-			else
-				saveToggle(key, currentConfig[key] :: boolean)
-			end
-			pendingChanges[key] = nil
-		end
-	end
-
-	local lobbyMusic: Sound? = nil
-	do
-		local s = SoundService:FindFirstChild("LobbyMusic")
-		if s and s:IsA("Sound") then
-			lobbyMusic = s
-		end
-	end
-
+	-- Efectos inmediatos (onChange) ------------------------------------------
+	local lobbyMusic = SoundService:FindFirstChild("LobbyMusic")
 	local function applyMusicVolume(value: number)
-		if lobbyMusic then
-			(lobbyMusic :: Sound):SetAttribute("VolumeMultiplier", value)
+		if lobbyMusic and lobbyMusic:IsA("Sound") then
+			lobbyMusic:SetAttribute("VolumeMultiplier", value)
 		end
 	end
 
-	local function applySensitivity(value: number)
-		player:SetAttribute("CameraSensitivity", value)
-	end
+	-- Slider de música: aplica volumen al vuelo, persiste al soltar.
+	local musicSlider = SliderController.new({
+		root = content:WaitForChild("MusicVolume"),
+		onChange = applyMusicVolume,
+		onCommit = function(value)
+			saveSlider("MusicVolume", value)
+		end,
+	})
+	janitor:Add(musicSlider, "Destroy")
 
-	local updateMusic = setupSlider(musicSetting, "MusicVolume", currentConfig, janitor, applyMusicVolume)
-	local updateSens = setupSlider(sensSetting, "CameraSensitivity", currentConfig, janitor, applySensitivity)
-	local updateVib = setupToggle(vibSetting, "Vibration", currentConfig, janitor)
-	local updateAim = setupToggle(aimSetting, "AutoShoot", currentConfig, janitor)
+	local sfxSlider = SliderController.new({
+		root = content:WaitForChild("SfxVolume"),
+		onChange = function(value)
+			player:SetAttribute("SFXVolume", value)
+		end,
+		onCommit = function(value)
+			saveSlider("SFXVolume", value)
+		end,
+	})
+	janitor:Add(sfxSlider, "Destroy")
 
-	local musicDragDetector = (musicSetting :: Instance):WaitForChild("SliderContainer"):WaitForChild("Drag"):WaitForChild("UIDragDetector") :: UIDragDetector
-	local sensDragDetector = (sensSetting :: Instance):WaitForChild("SliderContainer"):WaitForChild("Drag"):WaitForChild("UIDragDetector") :: UIDragDetector
-	local vibToggleBtn = (vibSetting :: Instance):WaitForChild("ToggleFrame"):WaitForChild("Toggle") :: TextButton
-	local aimToggleBtn = (aimSetting :: Instance):WaitForChild("ToggleFrame"):WaitForChild("Toggle") :: TextButton
+	local sensSlider = SliderController.new({
+		root = content:WaitForChild("Sensitivity"),
+		onChange = function(value)
+			player:SetAttribute("CameraSensitivity", value)
+		end,
+		onCommit = function(value)
+			saveSlider("CameraSensitivity", value)
+		end,
+	})
+	janitor:Add(sensSlider, "Destroy")
 
-	janitor:Add(musicDragDetector.DragEnd:Connect(function()
-		markPending("MusicVolume")
-	end), "Disconnect")
+	local vibrationToggle = ToggleController.new({
+		root = content:WaitForChild("Vibration"),
+		onChange = function(state)
+			player:SetAttribute("Vibration", state)
+		end,
+		onCommit = function(state)
+			saveToggle("Vibration", state)
+		end,
+	})
+	janitor:Add(vibrationToggle, "Destroy")
 
-	janitor:Add(sensDragDetector.DragEnd:Connect(function()
-		markPending("CameraSensitivity")
-	end), "Disconnect")
+	local autoShootToggle = ToggleController.new({
+		root = content:WaitForChild("AutoShoot"),
+		onChange = function(state)
+			player:SetAttribute("AutoShoot", state)
+		end,
+		onCommit = function(state)
+			saveToggle("AutoShoot", state)
+		end,
+	})
+	janitor:Add(autoShootToggle, "Destroy")
 
-	janitor:Add(vibToggleBtn.MouseButton1Click:Connect(function()
-		local newState = not (currentConfig.Vibration :: boolean)
-		updateVib(newState)
-		markPending("Vibration")
-		player:SetAttribute("Vibration", newState)
-	end), "Disconnect")
-
-	janitor:Add(aimToggleBtn.MouseButton1Click:Connect(function()
-		local newState = not (currentConfig.AutoShoot :: boolean)
-		updateAim(newState)
-		markPending("AutoShoot")
-		player:SetAttribute("AutoShoot", newState)
-	end), "Disconnect")
-
-	janitor:Add(resetBtn.MouseButton1Click:Connect(function()
-		updateMusic(0.5)
-		updateSens(0.5)
-		updateVib(true)
-		updateAim(true)
-
-		markPending("MusicVolume")
-		markPending("CameraSensitivity")
-		markPending("Vibration")
-		markPending("AutoShoot")
-		player:SetAttribute("Vibration", true)
-		player:SetAttribute("AutoShoot", true)
-	end), "Disconnect")
-
-	janitor:Add(closeBtn.MouseButton1Click:Connect(function()
-		flushPendingSaves()
-	end), "Disconnect")
-
-	janitor:Add(frame:GetPropertyChangedSignal("Visible"):Connect(function()
-		if frame.Visible == false then
-			flushPendingSaves()
-		end
-	end), "Disconnect")
-
-	janitor:Add(function()
-		flushPendingSaves()
-	end, true)
-
+	-- Carga inicial: aplica los valores guardados (onChange) sin re-persistir.
 	DataController:WhenReady():andThen(function()
-		local savedSettings = Fusion.peek(DataController.Settings)
+		local saved = Fusion.peek(DataController.Settings)
 
-		updateMusic(savedSettings.MusicVolume or 0.5)
-		updateSens(savedSettings.CameraSensitivity or 0.5)
-		updateVib(if savedSettings.Vibration ~= nil then savedSettings.Vibration else true)
-		updateAim(if savedSettings.AutoShoot ~= nil then savedSettings.AutoShoot else true)
-		player:SetAttribute("Vibration", if savedSettings.Vibration ~= nil then savedSettings.Vibration else true)
-		player:SetAttribute("AutoShoot", if savedSettings.AutoShoot ~= nil then savedSettings.AutoShoot else true)
+		local function num(key: string): number
+			local value = saved[key]
+			return if type(value) == "number" then value else SLIDER_DEFAULTS[key]
+		end
+		local function bool(key: string): boolean
+			local value = saved[key]
+			return if type(value) == "boolean" then value else TOGGLE_DEFAULTS[key]
+		end
+
+		musicSlider:set(num("MusicVolume"))
+		sfxSlider:set(num("SFXVolume"))
+		sensSlider:set(num("CameraSensitivity"))
+		vibrationToggle:set(bool("Vibration"))
+		autoShootToggle:set(bool("AutoShoot"))
 	end)
 
 	return janitor
