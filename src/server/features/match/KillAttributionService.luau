@@ -36,9 +36,10 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Network = require(Shared.networking.Network)
 
 type Deps = {
-	-- Shared tables — leemos kills/deaths para componer el packet de streak.
+	-- Shared tables — leemos kills/deaths/asistencias para componer el packet de streak.
 	matchKillsByUserId: { [number]: number },
 	matchDeathsByUserId: { [number]: number },
+	matchAssistsByUserId: { [number]: number },
 }
 
 local KillAttributionService = {}
@@ -123,7 +124,8 @@ function KillAttributionService:SendStreakBroadcast(userId: number)
 	local streak = _killStreakByUserId[userId] or 0
 	local kills = _deps.matchKillsByUserId[userId] or 0
 	local deaths = _deps.matchDeathsByUserId[userId] or 0
-	local key = string.format("%d|%d|%d", kills, streak, deaths)
+	local assists = _deps.matchAssistsByUserId[userId] or 0
+	local key = string.format("%d|%d|%d|%d", kills, streak, deaths, assists)
 	if _lastBroadcastStreakKeyByUserId[userId] == key then
 		return
 	end
@@ -133,6 +135,7 @@ function KillAttributionService:SendStreakBroadcast(userId: number)
 		kills = kills,
 		streak = streak,
 		deaths = deaths,
+		assists = assists,
 	})
 end
 
@@ -143,6 +146,7 @@ function KillAttributionService:SendStreakSnapshotTo(player: Player, userId: num
 			kills = _deps.matchKillsByUserId[userId] or 0,
 			streak = _killStreakByUserId[userId] or 0,
 			deaths = _deps.matchDeathsByUserId[userId] or 0,
+			assists = _deps.matchAssistsByUserId[userId] or 0,
 		}, player)
 	end)
 end

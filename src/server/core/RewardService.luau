@@ -124,4 +124,44 @@ function RewardService.Award(
 	return ok, xpAmount, cashAmount
 end
 
+--[[
+	AwardCash: concede un monto de cash ARBITRARIO (no atado a ActionRewards),
+	con su registro de analytics. Pensado para bonus configurables fuera del
+	catálogo de acciones — p. ej. los bonus de fin de partida (MatchResultsService),
+	cuyos montos viven en `shared/constants/ResultsRewards.luau`.
+
+	`sourceLabel` es el transactionType para EconomyAnalytics (p. ej.
+	"MatchEnd::Victory"). Devuelve true si se persistió.
+]]
+function RewardService.AwardCash(player: Player, amount: number, sourceLabel: string): boolean
+	if not _dataService or not player or type(amount) ~= "number" or amount <= 0 then
+		return false
+	end
+
+	amount = math.floor(amount)
+	if not _dataService:GetProfile(player) then
+		return false
+	end
+
+	local updates: { BatchUpdateEntry } = {
+		{ path = { "Stats", "Cash" }, delta = amount },
+		{ path = { "Stats", "TotalCashEarned" }, delta = amount },
+	}
+
+	local batchOk, batchErr = pcall(function()
+		return _dataService:BatchUpdate(player, updates)
+	end)
+	if not batchOk then
+		warn(("[RewardService] AwardCash BatchUpdate falló para %s (%s): %s"):format(player.Name, sourceLabel, tostring(batchErr)))
+		return false
+	elseif batchErr == false then
+		return false
+	end
+
+	local profile = _dataService:GetProfile(player)
+	local balance = if profile and profile.Data then profile.Data.Stats.Cash else 0
+	EconomyAnalytics.Source(player, amount, balance, sourceLabel, nil)
+	return true
+end
+
 return RewardService

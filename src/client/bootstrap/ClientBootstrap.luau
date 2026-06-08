@@ -41,15 +41,15 @@ local function disableDefaultCoreGui(): ()
 	end)
 end
 
+-- Busca un GuiButton llamado "Locker" en cualquier parte del menú. Antes estaba
+-- anclado a un contenedor "Bottom"; ese contenedor se eliminó, así que ahora la
+-- búsqueda es por nombre+clase y tolera que el botón viva en otro lado (o que no
+-- exista todavía).
 local function findLockerButton(menuGui: ScreenGui): GuiButton?
-	local bottom = menuGui:FindFirstChild("Bottom")
-	if not bottom then
-		return nil
-	end
-
-	local lockerButton = bottom:FindFirstChild("Locker")
-	if lockerButton and lockerButton:IsA("GuiButton") then
-		return lockerButton
+	for _, descendant in menuGui:GetDescendants() do
+		if descendant.Name == "Locker" and descendant:IsA("GuiButton") then
+			return descendant
+		end
 	end
 
 	return nil
@@ -185,8 +185,10 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 			end
 		end, true)
 	else
-		-- Fallback to previous eager behavior when the button cannot be resolved.
-		bootLockerFeature(false)
+		-- Sin botón Locker en el menú (se quitó la barra inferior): el locker
+		-- queda dormido en vez de bootear sin forma de abrirlo. Si más adelante
+		-- se agrega un GuiButton llamado "Locker" en cualquier parte del menú,
+		-- findLockerButton lo tomará y se booteará on-click, sin tocar código.
 	end
 end
 

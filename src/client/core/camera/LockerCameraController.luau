@@ -5,16 +5,15 @@ local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
 local Lighting = game:GetService("Lighting")
 
-local APPROACH_TWEEN_INFO = TweenInfo.new(0.45, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
+-- Travelling entre cámaras del locker (entrada, cambio de pestaña y salida): la
+-- cámara se desplaza desde su posición actual hasta el target con ease-in-out.
+local MOVE_TWEEN_INFO = TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut)
 local DOF_APPLY_TWEEN_INFO = TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local DOF_RESET_TWEEN_INFO = TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-local FOV_APPLY_TWEEN_INFO = TweenInfo.new(0.55, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local WRAP_ZOOM_TWEEN_INFO = TweenInfo.new(0.85, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
-local TRANSITION_OFFSET = CFrame.new(0, -2.25, 1.5)
 local DEFAULT_FOCUS_DISTANCE = 16.66
 local TARGET_DOF_FAR_INTENSITY = 0.55
 local TARGET_DOF_IN_FOCUS_RADIUS = 9
-local FOV_ENTRY_OFFSET = 8
 
 export type LockerCameraController = {
 	_camera: Camera,
@@ -30,11 +29,11 @@ export type LockerCameraController = {
 	_fovTween: Tween?,
 	_dofFadeOutConnection: RBXScriptConnection?,
 	_cameraApproachCompletedConnection: RBXScriptConnection?,
-	setTargetPartName: (self: LockerCameraController, targetPartName: string, refreshIfApplied: boolean?) -> (),
+	setTargetPartName: (self: LockerCameraController, targetPartName: string) -> (),
 	zoomOnPosition: (self: LockerCameraController, targetPosition: Vector3) -> (),
 	unzoom: (self: LockerCameraController) -> (),
 	apply: (self: LockerCameraController) -> (),
-	restore: (self: LockerCameraController) -> (),
+	restore: (self: LockerCameraController, animated: boolean?) -> (),
 	Destroy: (self: LockerCameraController) -> (),
 }
 
@@ -116,27 +115,17 @@ function LockerCameraController:_cancelActiveTweens()
 	end
 end
 
-function LockerCameraController:_playEntryTweenSequence(targetCFrame: CFrame)
-	self._camera.CFrame = targetCFrame * TRANSITION_OFFSET
-	self._cameraApproachTween = TweenService:Create(self._camera, APPROACH_TWEEN_INFO, {
-		CFrame = targetCFrame,
-	})
-	self._cameraApproachTween:Play()
-end
-
-function LockerCameraController:setTargetPartName(targetPartName: string, refreshIfApplied: boolean?)
+-- Cambia la cámara objetivo. Si el locker ya está aplicado, hace un travelling
+-- desde la posición actual hasta el nuevo target (mismo movimiento que la entrada).
+function LockerCameraController:setTargetPartName(targetPartName: string)
 	local nextTargetPart = resolveTargetPart(targetPartName)
-	self:_setTargetPart(nextTargetPart, refreshIfApplied)
-end
-
-function LockerCameraController:_setTargetPart(nextTargetPart: BasePart, refreshIfApplied: boolean?)
 	if self._targetPart == nextTargetPart then
 		return
 	end
 
 	self._targetPart = nextTargetPart
 
-	if refreshIfApplied ~= false and self._isApplied then
+	if self._isApplied then
 		self:apply()
 	end
 end
@@ -185,52 +174,45 @@ function LockerCameraController:unzoom()
 	self._fovTween:Play()
 end
 
+-- Desplaza la cámara (travelling) hasta el target actual. La primera vez (al abrir)
+-- guarda el estado de cámara previo y enciende la DOF; en llamadas posteriores
+-- (cambio de pestaña) solo desplaza, sin re-tocar la DOF para que no parpadee.
 function LockerCameraController:apply()
 	self:_cancelActiveTweens()
 
-	local targetCFrame = self._targetPart.CFrame
-	local finalFov = self._savedFieldOfView or self._camera.FieldOfView
-	local entryFov = math.min(finalFov + FOV_ENTRY_OFFSET, 90)
+	if not self._isApplied then
+		self._savedCameraType = self._camera.CameraType
+		self._savedCameraSubject = self._camera.CameraSubject
+		self._savedCFrame = self._camera.CFrame
+		self._savedFieldOfView = self._camera.FieldOfView
+		self._isApplied = true
 
-	self._dof.Enabled = true
-	self._dof.FocusDistance = DEFAULT_FOCUS_DISTANCE
-	self._dof.FarIntensity = 0
-	self._dof.InFocusRadius = 0
-	self._dof.NearIntensity = 0
-	self._dofTween = TweenService:Create(self._dof, DOF_APPLY_TWEEN_INFO, {
-		FarIntensity = TARGET_DOF_FAR_INTENSITY,
-		InFocusRadius = TARGET_DOF_IN_FOCUS_RADIUS,
-	})
-	self._dofTween:Play()
-
-	if self._isApplied then
-		self._camera.CameraType = Enum.CameraType.Scriptable
-		self._camera.FieldOfView = entryFov
-		self._fovTween = TweenService:Create(self._camera, FOV_APPLY_TWEEN_INFO, {
-			FieldOfView = finalFov,
+		self._dof.Enabled = true
+		self._dof.FocusDistance = DEFAULT_FOCUS_DISTANCE
+		self._dof.FarIntensity = 0
+		self._dof.InFocusRadius = 0
+		self._dof.NearIntensity = 0
+		self._dofTween = TweenService:Create(self._dof, DOF_APPLY_TWEEN_INFO, {
+			FarIntensity = TARGET_DOF_FAR_INTENSITY,
+			InFocusRadius = TARGET_DOF_IN_FOCUS_RADIUS,
 		})
-		self._fovTween:Play()
-		self:_playEntryTweenSequence(targetCFrame)
-		return
+		self._dofTween:Play()
 	end
 
-	self._savedCameraType = self._camera.CameraType
-	self._savedCameraSubject = self._camera.CameraSubject
-	self._savedCFrame = self._camera.CFrame
-	self._savedFieldOfView = self._camera.FieldOfView
-
+	-- Siempre (no solo la primera vez): si una restauración anterior quedó a medias
+	-- la cámara podría seguir en Custom y el tween de CFrame no movería nada.
 	self._camera.CameraType = Enum.CameraType.Scriptable
-	self._camera.FieldOfView = entryFov
-	self._fovTween = TweenService:Create(self._camera, FOV_APPLY_TWEEN_INFO, {
-		FieldOfView = finalFov,
-	})
-	self._fovTween:Play()
-	self:_playEntryTweenSequence(targetCFrame)
 
-	self._isApplied = true
+	self._cameraApproachTween = TweenService:Create(self._camera, MOVE_TWEEN_INFO, {
+		CFrame = self._targetPart.CFrame,
+	})
+	self._cameraApproachTween:Play()
 end
 
-function LockerCameraController:restore()
+-- Restaura el estado de cámara previo a entrar al locker. Con `animated`, la cámara
+-- hace un travelling de vuelta hasta la posición guardada y solo al terminar se
+-- restaura el tipo/subject de cámara; sin él, la restauración es instantánea.
+function LockerCameraController:restore(animated: boolean?)
 	if not self._isApplied then
 		return
 	end
@@ -247,35 +229,69 @@ function LockerCameraController:restore()
 	end)
 	self._dofTween:Play()
 
-	local player = Players.LocalPlayer
-	local character = player.Character
-	local humanoid = if character then character:FindFirstChildOfClass("Humanoid") else nil
+	local savedCFrame = self._savedCFrame
+	local savedFieldOfView = self._savedFieldOfView
 
-	if self._savedFieldOfView ~= nil then
-		self._camera.FieldOfView = self._savedFieldOfView
+	-- Restaura tipo/subject de cámara y limpia el estado guardado. `_isApplied` se
+	-- mantiene true hasta aquí para que el estado guardado (la cámara del lobby) no
+	-- se pierda si algo re-aplica durante el travelling.
+	local function finalizeRestore()
+		local player = Players.LocalPlayer
+		local character = player.Character
+		local humanoid = if character then character:FindFirstChildOfClass("Humanoid") else nil
+
+		if self._savedCameraType ~= nil then
+			self._camera.CameraType = self._savedCameraType
+		else
+			self._camera.CameraType = Enum.CameraType.Custom
+		end
+
+		if self._savedCameraSubject and self._savedCameraSubject.Parent then
+			self._camera.CameraSubject = self._savedCameraSubject
+		elseif humanoid then
+			self._camera.CameraSubject = humanoid
+		end
+
+		self._savedCameraType = nil
+		self._savedCameraSubject = nil
+		self._savedCFrame = nil
+		self._savedFieldOfView = nil
+		self._isApplied = false
 	end
 
-	if self._savedCFrame ~= nil then
-		self._camera.CFrame = self._savedCFrame
+	if animated and savedCFrame ~= nil then
+		self._camera.CameraType = Enum.CameraType.Scriptable
+		if savedFieldOfView ~= nil then
+			self._fovTween = TweenService:Create(self._camera, MOVE_TWEEN_INFO, {
+				FieldOfView = savedFieldOfView,
+			})
+			self._fovTween:Play()
+		end
+		self._cameraApproachTween = TweenService:Create(self._camera, MOVE_TWEEN_INFO, {
+			CFrame = savedCFrame,
+		})
+		self._cameraApproachCompletedConnection = self._cameraApproachTween.Completed:Connect(function(playbackState)
+			-- `Cancel()` también dispara Completed (estado Cancelled). Si el travelling
+			-- se interrumpe NO finalizamos: el estado guardado (la cámara del menú) debe
+			-- conservarse para quien retome el control, y no restauramos tipo/subject a
+			-- medias.
+			if playbackState ~= Enum.PlaybackState.Completed then
+				return
+			end
+			self._cameraApproachCompletedConnection = nil
+			finalizeRestore()
+		end)
+		self._cameraApproachTween:Play()
+		return
 	end
 
-	if self._savedCameraType ~= nil then
-		self._camera.CameraType = self._savedCameraType
-	else
-		self._camera.CameraType = Enum.CameraType.Custom
+	if savedFieldOfView ~= nil then
+		self._camera.FieldOfView = savedFieldOfView
 	end
-
-	if self._savedCameraSubject and self._savedCameraSubject.Parent then
-		self._camera.CameraSubject = self._savedCameraSubject
-	elseif humanoid then
-		self._camera.CameraSubject = humanoid
+	if savedCFrame ~= nil then
+		self._camera.CFrame = savedCFrame
 	end
-
-	self._savedCameraType = nil
-	self._savedCameraSubject = nil
-	self._savedCFrame = nil
-	self._savedFieldOfView = nil
-	self._isApplied = false
+	finalizeRestore()
 end
 
 function LockerCameraController:Destroy()

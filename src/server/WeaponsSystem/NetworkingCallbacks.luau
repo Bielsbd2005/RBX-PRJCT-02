@@ -231,9 +231,6 @@ function NetworkingCallbacks.PlayerEliminated(victimName, xpGained, wasHeadshot,
 		if WeaponsSystem.camera then
 			WeaponsSystem.camera:playKillCameraShake(wasHeadshot or false)
 		end
-		if WeaponsSystem.gui then
-			WeaponsSystem.gui:showKillContainer()
-		end
 	end
 
 	if StreakController then
@@ -257,18 +254,11 @@ end
 function NetworkingCallbacks.PlayerAssist()
 	if IsServer then return end
 
-	local WeaponsSystem = NetworkingCallbacks.WeaponsSystem
-
 	_playEliminationSound()
 
 	local PersonalKillFeed = _getPersonalKillFeed()
 	if PersonalKillFeed then
 		PersonalKillFeed.showAssist()
-	end
-
-	-- Las assists no disparan FOV kick (reservado para kills propias).
-	if WeaponsSystem and WeaponsSystem.gui then
-		WeaponsSystem.gui:showKillContainer()
 	end
 end
 

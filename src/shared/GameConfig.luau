@@ -39,6 +39,10 @@ export type GameConfigType = {
 	KillAttributionWindow: number,
 	MatchCashCap: number,
 	MatchXPCap: number,
+	-- Gamepass de Roblox que otorga VIP (bonus de cash de fin de partida). 0 =
+	-- sin configurar → nadie es VIP (el bonus se muestra siempre "Locked").
+	-- Pegar acá el id real del gamepass.
+	VIPGamePassId: number,
 	Teams: TeamsDefinition,
 	Maps: { MapDefinition },
 }
@@ -65,6 +69,8 @@ local GameConfig: GameConfigType = {
 	KillAttributionWindow = 2,
 	MatchCashCap = 500,
 	MatchXPCap = 800,
+	-- TODO: pegar el id real del gamepass VIP de Roblox. 0 = sin configurar.
+	VIPGamePassId = 0,
 
 	Teams = {
 		A = {

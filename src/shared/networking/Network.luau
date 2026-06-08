@@ -227,13 +227,15 @@ local MatchNamespace = ByteNet.DefineNamespace("Match", function()
 			ReliabilityType = "Reliable",
 		}),
 
-		-- S → C: Estado global de kills, muertes y racha por jugador en la partida actual.
+		-- S → C: Estado global de kills, muertes, asistencias y racha por jugador en
+		-- la partida actual.
 		PlayerStreakState = ByteNet.DefinePacket({
 			Value = ByteNet.Struct({
 				userId = ByteNet.String,
 				kills = ByteNet.Int32,
 				streak = ByteNet.Int32,
 				deaths = ByteNet.Int32,
+				assists = ByteNet.Int32,
 			}),
 			ReliabilityType = "Reliable",
 		}),
@@ -250,6 +252,31 @@ local MatchNamespace = ByteNet.DefineNamespace("Match", function()
 
 		-- S → C: Roster de bots activos (JSON-encoded array).
 		BotRoster = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				json = ByteNet.String,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- S → C: Cosméticos (outfit/face/hat) de los compañeros REALES del receptor,
+		-- para reconstruir sus réplicas en la pantalla de Resultados. Se envía solo
+		-- a cada jugador su propio equipo (JSON: [{ userId, outfitId, faceId, hatId }]).
+		TeamCosmetics = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				json = ByteNet.String,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- S → C: Recompensas de fin de partida del receptor para la pantalla de
+		-- Resultados (JSON). Se envía solo a jugadores elegibles, JUSTO antes de
+		-- RoundEnded para que el cliente ya las tenga al mostrar la pantalla.
+		-- El cash ya fue concedido server-side (independiente de que se vea o no).
+		-- Forma: { outcome = "Victory"|"Defeat",
+		--          rewards = { { title, image, amount, locked }, ... } }
+		-- `rewards` es la lista aplanada (cash + items) — el cliente usa UN solo
+		-- template (amount>0 = cash con Amount; amount==0 = item sin Amount).
+		MatchResults = ByteNet.DefinePacket({
 			Value = ByteNet.Struct({
 				json = ByteNet.String,
 			}),

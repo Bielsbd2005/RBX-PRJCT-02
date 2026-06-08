@@ -849,11 +849,14 @@ function AIService:OnRoundEnd()
 	table.clear(_teamByFakeUserId)
 end
 
-function AIService:GetBotRoster(): { { fakeUserId: number, displayName: string, team: string, image: string, level: number, historicalKills: number } }
+function AIService:GetBotRoster(): { { fakeUserId: number, displayName: string, team: string, image: string, level: number, historicalKills: number, outfitId: string, faceId: string, hatId: string } }
 	local roster = {}
 	for fakeUserId, identity in _identityByFakeUserId do
 		local team = _teamByFakeUserId[fakeUserId]
 		if team then
+			-- Apariencia (outfit/face/hat) para reconstruir la réplica del bot en la
+			-- pantalla de Resultados con el mismo look que tuvo en partida.
+			local appearance = identity.appearance
 			table.insert(roster, {
 				fakeUserId = fakeUserId,
 				displayName = identity.name,
@@ -861,6 +864,9 @@ function AIService:GetBotRoster(): { { fakeUserId: number, displayName: string, 
 				image = identity.image,
 				level = identity.level,
 				historicalKills = identity.historicalKills,
+				outfitId = if appearance and appearance.outfitId then appearance.outfitId else "",
+				faceId = if appearance and appearance.faceId then appearance.faceId else "",
+				hatId = if appearance and appearance.hatId then appearance.hatId else "",
 			})
 		end
 	end

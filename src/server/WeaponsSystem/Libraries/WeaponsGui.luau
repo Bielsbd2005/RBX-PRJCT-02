@@ -308,7 +308,6 @@ function WeaponsGui:setEnabled(enabled: boolean)
 		end)
 	else
 		self:setZoomed(false)
-		self.scope:hideKillContainer(true)
 		self:stopReloadProgressAnimation()
 		self.mobileControls:stopTouchFire()
 		self.mobileControls:setReloadButtonsPressed(false)
@@ -629,14 +628,6 @@ end
 
 function WeaponsGui:setCrosshairScale(scale: number)
 	self.crosshair:setScale(scale)
-end
-
-function WeaponsGui:showKillContainer()
-	self.scope:showKillContainer()
-end
-
-function WeaponsGui:hideKillContainer(immediate: boolean)
-	self.scope:hideKillContainer(immediate)
 end
 
 return WeaponsGui

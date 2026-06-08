@@ -17,11 +17,10 @@ local Fusion = require(Packages.fusion) :: any
 local LockerCameraController = require(Client.core.camera.LockerCameraController)
 local CameraLock = require(Client.core.camera.CameraLock)
 local LightingPresetController = require(Client.core.lighting.LightingPresetController)
+local LobbyCharacterPreview = require(Client.core.character.LobbyCharacterPreview)
 local LockerCatalog = require(script:WaitForChild("LockerCatalog"))
 local LockerGrid = require(script:WaitForChild("LockerGrid"))
 local WeaponPreviewController = require(script:WaitForChild("WeaponPreviewController"))
-local FaceApplier = require(script.Appliers.FaceApplier)
-local HatApplier = require(script.Appliers.HatApplier)
 local MenuHover = require(Client.core.ui.MenuHover)
 local NavStaggerController = require(Client.core.ui.NavStaggerController)
 local UIUtils = require(Client.core.ui.UIUtils)
@@ -50,6 +49,10 @@ local PURCHASE_BUTTON_HOVER_SCALE = 1.03
 local PURCHASE_BUTTON_CLICK_SCALE = 0.96
 local DEFAULT_NAV_THUMBNAIL = "rbxasset://textures/ui/GuiImagePlaceholder.png"
 local ACTION_FRAME_TWEEN_INFO = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local ACTION_ICON_LOCKED = "rbxassetid://86881935952206"
+local ACTION_ICON_PURCHASE = "rbxassetid://120069483795815"
+local ACTION_BTN_COLOR_PURCHASE = Color3.fromRGB(255, 0, 127)
+local ACTION_BTN_COLOR_LOCKED = Color3.fromRGB(161, 161, 161)
 local LOCKER_PREVIEW_IDLE_ANIMATION_ID = "rbxassetid://115197033304718"
 local SHOP_REQUEST_TIMEOUT = 5
 
@@ -114,7 +117,8 @@ local CATEGORY_TO_LOADOUT_SLOT = LockerConfig.CategoryToLoadoutSlot :: { [string
 local RARITY_RANK = LockerConfig.RarityRank :: { [string]: number }
 
 local CAMERA_TARGET_BY_MAIN_CATEGORY = {
-	Style = "clothing",
+	-- Character (Style) usa su propia cámara Workspace.Cameras.character.
+	Style = "character",
 	Arsenal = "weapons",
 	Effects = "killEffects",
 } :: { [LockerCategoryKey]: string }
@@ -133,27 +137,25 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local playerGui = player:WaitForChild("PlayerGui")
 	local menuGui = menuController:getGui()
 	local lockerBodiesFolder = Shared:WaitForChild("LockerBodies") :: Folder
-	local defaultLockerBodyTemplate = lockerBodiesFolder:WaitForChild("Default") :: Instance
 	local killEffectDummyTemplate = lockerBodiesFolder:WaitForChild("KillEffectDummy") :: Model
 
-	local function resolveLockerBodyTemplate(outfitId: string?): Model?
-		local byId = if outfitId and outfitId ~= "" then lockerBodiesFolder:FindFirstChild(outfitId) else nil
-		if byId and byId:IsA("Model") then
-			return byId :: Model
-		end
-		return if defaultLockerBodyTemplate:IsA("Model") then defaultLockerBodyTemplate :: Model else nil
-	end
+	-- El preview del personaje (outfit/cara/hat) ya no usa un maniquí propio en
+	-- Workspace.Locker.CharacterSpawn: se previsualiza sobre el personaje del lobby
+	-- (Workspace.Lobby.Spawners.P1) vía este singleton compartido con LobbyFeature.
+	local lobbyCharacter = LobbyCharacterPreview.get()
 
 	local lockerFolder = Workspace:WaitForChild("Locker")
 	local lockerWeaponsFolder = lockerFolder:WaitForChild("weapons")
-	local characterSpawn = lockerFolder:WaitForChild("CharacterSpawn")
 	local dummySpawn = lockerFolder:WaitForChild("DummySpawn")
 	local mainWeaponSpawn = lockerFolder:WaitForChild("MainSpawn")
 	local specialWeaponSpawn = lockerFolder:WaitForChild("SpecialSpawn")
 	local mainIndicator = lockerWeaponsFolder:FindFirstChild("MainIndicator")
 	local specialIndicator = lockerWeaponsFolder:FindFirstChild("SpecialIndicator")
 
-	local lockerBtn = menuGui.Bottom:WaitForChild("Locker") :: GuiButton
+	-- El botón vive donde sea dentro del menú (antes estaba fijo en "Bottom", que
+	-- se eliminó). Es opcional: si no existe, el locker se inicializa igual pero
+	-- sin enganchar el click de apertura (ver más abajo).
+	local lockerBtn = menuGui:FindFirstChild("Locker", true) :: GuiButton?
 	local uiGui = playerGui:WaitForChild("UserInterface") :: ScreenGui
 	local lockerFrame = uiGui:WaitForChild("Locker") :: Frame
 
@@ -171,25 +173,56 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local defaultNavItemSize = navTemplate.Size
 	local nav1 = lockerFrame:WaitForChild("Nav1")
 	local closeBtn = nav1:WaitForChild("CloseBtn") :: GuiButton
-	local styleBtn = nav1:WaitForChild("Style") :: GuiButton
-	local arsenalBtn = nav1:WaitForChild("Arsenal") :: GuiButton
+	-- Los botones de Nav1 se renombraron en Studio (Style→Character, Arsenal→Weapons);
+	-- las claves internas de categoría siguen siendo "Style"/"Arsenal"/"Effects"
+	-- (ver mainCategoryButtons), porque NavTabController indexa por key, no por Name.
+	local styleBtn = nav1:WaitForChild("Character") :: GuiButton
+	local arsenalBtn = nav1:WaitForChild("Weapons") :: GuiButton
 	local effectsBtn = nav1:WaitForChild("Effects") :: GuiButton
-	local mainFrame = lockerFrame:WaitForChild("MainFrame")
 	local wrapsTitle = lockerFrame:WaitForChild("WrapsTitle") :: TextLabel
-	local itemGrid = mainFrame:WaitForChild("ItemGrid")
-	local itemGridTemplate = itemGrid:WaitForChild("Template") :: GuiObject
+	local itemGrid = lockerFrame:WaitForChild("ScrollingFrame")
+	local itemGridTemplate = itemGrid:WaitForChild("ItemTemplate") :: GuiObject
 	-- ⚠️ Requiere que el Frame en Studio se llame "WeaponWraps" (renombrado manual).
 	local itemGridWrapsTemplate = itemGrid:WaitForChild("WeaponWraps") :: GuiObject
 	local actionFrame = lockerFrame:WaitForChild("ActionFrame") :: GuiObject
-	local purchaseButtonContainer = actionFrame:WaitForChild("PurchaseButton") :: GuiButton
-	-- ⚠️ Requiere que el GuiButton en Studio se llame "WeaponWraps" (renombrado manual).
-	local wrapsButtonContainer = actionFrame:WaitForChild("WeaponWraps") :: GuiButton
-	local wrapsButton = wrapsButtonContainer
-	local purchaseButton = purchaseButtonContainer
-	local purchasePriceLabel = purchaseButtonContainer:WaitForChild("Price") :: TextLabel
-	local purchaseIconLocked = purchaseButtonContainer:WaitForChild("IconLocked") :: GuiObject
-	local purchaseLockedGradient = purchaseButtonContainer:WaitForChild("Locked") :: UIGradient
-	local purchaseUnlockedGradient = purchaseButtonContainer:WaitForChild("Unlocked") :: UIGradient
+	-- Estructura nueva del ActionFrame:
+	--   ActionFrame.Title.Text.Title / .Subtitle  → título y subtítulo
+	--   ActionFrame.Title.Icon                     → icono (candado / compra)
+	--   ActionBtn (bajo ActionFrame o Title)       → botón de acción
+	local actionTitle = actionFrame:WaitForChild("Title")
+	local actionTextContainer = actionTitle:WaitForChild("Text")
+	local actionTitleLabel = actionTextContainer:WaitForChild("Title") :: TextLabel
+	local actionSubtitleLabel = actionTextContainer:WaitForChild("Subtitle") :: TextLabel
+	local actionIcon = actionTitle:WaitForChild("Icon") :: ImageLabel
+	-- ActionBtn se describió colgando tanto de ActionFrame como de ActionFrame.Title;
+	-- lo buscamos recursivamente para tolerar ambas ubicaciones. (El nombre interno
+	-- `purchaseButton` se mantiene: la animación de hover/escala y el handler de
+	-- compra ya colgaban de él.)
+	local purchaseButton = actionFrame:FindFirstChild("ActionBtn", true) :: GuiButton
+	-- Botón separado (fuera del ActionFrame) para personalizar los wraps de un arma poseída.
+	local wrapsButton = lockerFrame:WaitForChild("Wraps") :: GuiButton
+
+	-- El texto del ActionBtn puede vivir en el propio botón (TextButton) o en un hijo
+	-- (Title/Label/Text). Resolvemos el destino una vez.
+	local function resolveActionButtonTextTarget(button: GuiButton): Instance?
+		for _, name in { "Title", "Label", "Text", "Price", "Value" } do
+			local child = button:FindFirstChild(name)
+			if child and child:IsA("TextLabel") then
+				return child
+			end
+		end
+		if button:IsA("TextButton") then
+			return button
+		end
+		return button:FindFirstChildWhichIsA("TextLabel", true)
+	end
+	local actionButtonTextTarget = resolveActionButtonTextTarget(purchaseButton)
+	local function setActionButtonText(text: string)
+		if actionButtonTextTarget then
+			(actionButtonTextTarget :: any).Text = text
+		end
+	end
+
 	local cashFrame = lockerFrame:WaitForChild("CashFrame")
 	local cashValueNode = cashFrame:WaitForChild("Value")
 	local cashValueLabel = if cashValueNode:IsA("TextLabel") then cashValueNode else nil
@@ -252,6 +285,9 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		if cashFrame then cashFrame.Visible = not enabled end
 		if nav then nav.Visible = not enabled end
 		if wrapsTitle then wrapsTitle.Visible = enabled end
+		-- Entrar al modo wraps oculta el botón de entrada (Locker.Wraps); al salir,
+		-- updateActionFrameForSelected lo vuelve a mostrar si toca.
+		if enabled then wrapsButton.Visible = false end
 
 		for _, child in nav1:GetChildren() do
 			if child.Name ~= "CloseBtn" and child:IsA("GuiObject") then
@@ -261,6 +297,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	actionFrame.Visible = false
+	wrapsButton.Visible = false
 	if wrapsTitle then wrapsTitle.Visible = false end
 	actionFrame.Position = actionFrameHiddenPosition
 
@@ -398,46 +435,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end, true)
 	end
 
-	local previewCharacter: Model? = nil
-	local faceApplier: any = nil
-	local hatApplier: any = nil
-	local lastPreviewOutfitId: string? = nil
-
-	local function rebuildPreviewCharacter(outfitId: string?)
-		local spawnTarget = characterSpawn :: LockerPreviewSpawnTarget
-		local targetParent = spawnTarget :: Instance
-
-		-- Limpieza defensiva: cualquier preview previo (incluido el de un build
-		-- anterior con nombre "CharacterTemplate") cae aquí.
-		if previewCharacter and previewCharacter.Parent then
-			previewCharacter:Destroy()
-		end
-		local stale = targetParent:FindFirstChild("PreviewCharacter")
-		if stale then stale:Destroy() end
-		local staleLegacy = targetParent:FindFirstChild("CharacterTemplate")
-		if staleLegacy then staleLegacy:Destroy() end
-
-		previewCharacter = nil
-		faceApplier = nil
-		hatApplier = nil
-
-		local template = resolveLockerBodyTemplate(outfitId)
-		if not template then
-			return
-		end
-
-		local clone = template:Clone()
-		clone.Name = "PreviewCharacter"
-		clone.Parent = targetParent
-		placePreviewCharacter(clone, spawnTarget)
-		playPreviewIdleAnimation(clone)
-
-		previewCharacter = clone
-		faceApplier = FaceApplier.new(clone, ItemsConfig)
-		hatApplier = HatApplier.new(clone, ItemsConfig)
-		lastPreviewOutfitId = outfitId
-	end
-
 	local KILL_EFFECT_PREVIEW_COOLDOWN = 0.4
 
 	local currentKillEffectDummy: Model? = nil
@@ -490,6 +487,10 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		destroyKillEffectDummy()
 		local clone = killEffectDummyTemplate:Clone()
 		clone.Name = "KillEffectDummy"
+		local humanoid = clone:FindFirstChildOfClass("Humanoid")
+		if humanoid then
+			humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+		end
 		clone.Parent = lockerFolder
 		placePreviewCharacter(clone, dummySpawn :: LockerPreviewSpawnTarget)
 		snapPartsToCanonicalPose(clone)
@@ -532,16 +533,19 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 	janitor:Add(destroyKillEffectDummy, true)
 
-	local applyEquippedFacePreview: () -> ()
-	local applyEquippedHatPreview: () -> ()
+	-- Todo el preview de outfit/cara/hat se aplica sobre el personaje del lobby
+	-- (LobbyCharacterPreview), no sobre un maniquí del locker.
+	local function applyEquippedFacePreview()
+		lobbyCharacter:applyFaceId(getOptionalString(equippedLookup.Faces) or getCurrentLoadout().Face)
+	end
+
+	local function applyEquippedHatPreview()
+		lobbyCharacter:applyHatId(getOptionalString(equippedLookup.Hats) or getCurrentLoadout().Hat)
+	end
 
 	local function applySelectedFacePreview(item: LockerCatalogItem?)
-		if not faceApplier then
-			return
-		end
-
 		if item and item.Category == LockerCategory.FACES then
-			faceApplier:ApplyImage(item.Image)
+			lobbyCharacter:applyFaceImage(item.Image)
 			return
 		end
 
@@ -549,44 +553,20 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	local function applySelectedHatPreview(item: LockerCatalogItem?)
-		if not hatApplier then
-			return
-		end
-
 		if item and item.Category == LockerCategory.HATS then
-			hatApplier:Apply(item)
+			lobbyCharacter:applyHatItem(item)
 			return
 		end
 
 		applyEquippedHatPreview()
 	end
 
-	applyEquippedFacePreview = function()
-		if not faceApplier then
-			return
-		end
-
-		faceApplier:ApplyItemId(getOptionalString(equippedLookup.Faces) or getCurrentLoadout().Face)
-	end
-
-	applyEquippedHatPreview = function()
-		if not hatApplier then
-			return
-		end
-
-		hatApplier:ApplyItemId(getOptionalString(equippedLookup.Hats) or getCurrentLoadout().Hat)
-	end
-
-	-- Body preview: a diferencia de face/hat, reconstruir el modelo entero. Por eso
-	-- comparamos contra `lastPreviewOutfitId` para evitar clonar si el item
-	-- seleccionado ya coincide con lo que está parenteado. Tras la reconstrucción,
-	-- los appliers se reasignan dentro de rebuildPreviewCharacter — los siguientes
-	-- applySelectedFace/HatPreview del onSelectionChanged ven los nuevos.
+	-- Body preview: a diferencia de face/hat reconstruye el modelo entero, por eso
+	-- el controlador solo lo rehace si el outfit cambió. Tras reconstruir, los
+	-- appliers se recrean dentro del controlador — los siguientes applySelectedFace/
+	-- HatPreview del onSelectionChanged ven los nuevos.
 	local function applyEquippedBodyPreview()
-		local outfitId = getOptionalString(equippedLookup.Outfits) or getCurrentLoadout().Outfit
-		if outfitId ~= lastPreviewOutfitId then
-			rebuildPreviewCharacter(outfitId)
-		end
+		lobbyCharacter:applyOutfit(getOptionalString(equippedLookup.Outfits) or getCurrentLoadout().Outfit)
 	end
 
 	local function applySelectedBodyPreview(item: LockerCatalogItem?)
@@ -596,16 +576,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		else
 			targetOutfitId = getOptionalString(equippedLookup.Outfits) or getCurrentLoadout().Outfit
 		end
-		if targetOutfitId ~= lastPreviewOutfitId then
-			rebuildPreviewCharacter(targetOutfitId)
-		end
+		lobbyCharacter:applyOutfit(targetOutfitId)
 	end
-
-	janitor:Add(function()
-		if previewCharacter and previewCharacter.Parent then
-			previewCharacter:Destroy()
-		end
-	end, true)
 
 	-- WeaponPreviewController se inicializa después de las funciones que necesita como dependencia.
 	local weaponPreviewController: any = nil
@@ -917,24 +889,25 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	local function showActionFrameForItem(item: LockerCatalogItem)
-		purchaseButtonContainer.Visible = true
-		wrapsButtonContainer.Visible = false
-
 		local isLevelLocked = getCurrentLevel() < item.LevelRequired
 
-		purchasePriceLabel.Text = if isLevelLocked then "LOCKED" else UIUtils.formatCashAmount(item.Price)
-		purchaseIconLocked.Visible = isLevelLocked
-		purchaseLockedGradient.Enabled = isLevelLocked
-		purchaseUnlockedGradient.Enabled = not isLevelLocked
+		if isLevelLocked then
+			actionTitleLabel.Text = "THIS ITEM IS LOCKED"
+			actionSubtitleLabel.Text = string.format("Reach level %d to unlock this item.", item.LevelRequired)
+			actionIcon.Image = ACTION_ICON_LOCKED
+			setActionButtonText("LOCKED")
+			purchaseButton.BackgroundColor3 = ACTION_BTN_COLOR_LOCKED
+		else
+			actionTitleLabel.Text = item.Name
+			actionSubtitleLabel.Text = item.Rarity
+			actionIcon.Image = ACTION_ICON_PURCHASE
+			-- Item comprable: el botón muestra el precio (en lugar de "PURCHASE").
+			setActionButtonText(UIUtils.formatCashAmount(item.Price))
+			purchaseButton.BackgroundColor3 = ACTION_BTN_COLOR_PURCHASE
+		end
+
 		purchaseButton.Active = not isLevelLocked
 		purchaseButton.Selectable = not isLevelLocked
-
-		tweenActionFrame(actionFrameVisiblePosition, true)
-	end
-
-	local function showOwnedWeaponActionFrame()
-		purchaseButtonContainer.Visible = false
-		wrapsButtonContainer.Visible = true
 
 		tweenActionFrame(actionFrameVisiblePosition, true)
 	end
@@ -1194,20 +1167,22 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	updateActionFrameForSelected = function()
 		local selectedItem = selectedCatalogItem
 		if not selectedItem then
+			wrapsButton.Visible = false
 			hideActionFrame()
 			return
 		end
 
 		if isItemOwned(selectedItem) then
-			if isWeaponCategory(selectedItem.Category) then
-				showOwnedWeaponActionFrame()
-			else
-				hideActionFrame()
-			end
+			-- Arma poseída: el ActionFrame se oculta y se ofrece el botón separado
+			-- Locker.Wraps para personalizar sus wraps. Otros items poseídos: nada.
+			wrapsButton.Visible = isWeaponCategory(selectedItem.Category) and not isWrapsMode
+			hideActionFrame()
 		elseif selectedItem.KillGoal ~= nil and selectedItem.KillGoal > 0 then
 			-- Wraps de desafío de kills: no se compran, solo se desbloquean por progreso.
+			wrapsButton.Visible = false
 			hideActionFrame()
 		else
+			wrapsButton.Visible = false
 			showActionFrameForItem(selectedItem)
 		end
 	end
@@ -1261,6 +1236,10 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			end)
 
 			navItemsJanitor:Add(navButton.Activated:Connect(function()
+				-- Si ya estamos en esta nav, no repoblar (clic sobre la nav activa).
+				if selectedNavKey == definition.key then
+					return
+				end
 				setSelectedNavButton(navButton)
 				populateMainContentForNavItem(categoryKey, definition.key, nil, true)
 			end), "Disconnect")
@@ -1318,7 +1297,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end
 
 		if levelValueLabel then
-			levelValueLabel.Text = tostring(stats.Level)
+			levelValueLabel.Text = "Lvl " .. tostring(stats.Level)
 		end
 	end
 
@@ -1529,9 +1508,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	DataController:WhenReady():andThen(function()
 		rebuildOwnedLookup()
 		rebuildEquippedLookup()
-		rebuildPreviewCharacter(getOptionalString(getCurrentLoadout().Outfit))
-		applyEquippedFacePreview()
-		applyEquippedHatPreview()
+		-- El preview del personaje (outfit/cara/hat) lo mantiene LobbyFeature
+		-- mientras el locker está cerrado; aquí solo preparamos las armas.
 		restoreEquippedWeaponPreviews()
 
 		local statsObserver = fusionScope:Observer(DataController.Stats)
@@ -1578,9 +1556,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			rebuildEquippedLookup()
 			local previewingBody = selectedCatalogItem ~= nil
 				and selectedCatalogItem.Category == LockerCategory.OUTFITS
-			local currentOutfit = getOptionalString(getCurrentLoadout().Outfit)
-			if not previewingBody and currentOutfit ~= lastPreviewOutfitId then
-				rebuildPreviewCharacter(currentOutfit)
+			if not previewingBody then
+				applyEquippedBodyPreview()
 			end
 			applyEquippedFacePreview()
 			applyEquippedHatPreview()
@@ -1597,12 +1574,14 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end
 	end
 
-	local function restoreLockerSceneState()
+	-- Al cerrar, la cámara vuelve al lobby con un travelling; en teardown del feature
+	-- se restaura al instante (animateCamera nil/false).
+	local function restoreLockerSceneState(animateCamera: boolean?)
 		restoreEquippedWeaponPreviews()
-		applyEquippedBodyPreview()
-		applyEquippedFacePreview()
-		applyEquippedHatPreview()
-		cameraController:restore()
+		-- Soltar el preview del personaje del lobby: vuelve a mostrar lo equipado y
+		-- LobbyFeature retoma el control de los cambios de loadout.
+		lobbyCharacter:endPreview()
+		cameraController:restore(animateCamera)
 		CameraLock.release("locker")
 		setMenuVisibleInstant(true)
 	end
@@ -1627,6 +1606,10 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 		isOpen = true
 		CameraLock.acquire("locker")
+		-- Tomar el preview del personaje del lobby: a partir de aquí el locker
+		-- controla lo que se muestra (selección sin equipar) y LobbyFeature deja
+		-- de sincronizarlo al loadout hasta que se cierre.
+		lobbyCharacter:beginPreview()
 		if dirtyWhileClosed then
 			dirtyWhileClosed = false
 			rebuildOwnedLookup()
@@ -1635,7 +1618,9 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		applyEquippedFacePreview()
 		applyEquippedHatPreview()
 		hideActionFrame()
-		selectItem(LockerMainCategory.ARSENAL)
+		selectItem(LockerMainCategory.STYLE)
+		-- Abrimos en Character: la cámara parte de la del lobby/menú y se desplaza
+		-- (travelling) hasta Workspace.Cameras.character.
 		cameraController:apply()
 		lockerFrame.Visible = true
 		setMenuVisibleInstant(false)
@@ -1654,14 +1639,16 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		selectedNavKey = nil
 		selectedCatalogItem = nil
 		hideActionFrame()
-		restoreLockerSceneState()
+		restoreLockerSceneState(true)
 		setWrapsMode(false)
 		destroyKillEffectDummy()
 		lockerFrame.Visible = false
 		LightingPresetController.apply("Lobby")
 	end
 
-	janitor:Add(lockerBtn.MouseButton1Click:Connect(openLockerGui), "Disconnect")
+	if lockerBtn then
+		janitor:Add(lockerBtn.MouseButton1Click:Connect(openLockerGui), "Disconnect")
+	end
 	janitor:Add(closeBtn.MouseButton1Click:Connect(function()
 		if isWrapsMode then
 			setWrapsMode(false)
@@ -1690,7 +1677,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	janitor:Add(lockerFrame:GetPropertyChangedSignal("Visible"):Connect(function()
 		if lockerFrame.Visible == false and isOpen then
 			isOpen = false
-			restoreLockerSceneState()
+			restoreLockerSceneState(true)
 			LightingPresetController.apply("Lobby")
 		end
 	end), "Disconnect")

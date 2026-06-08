@@ -117,7 +117,7 @@ local MENU_BUTTON_HOVER_BINDINGS: { { path: { string }, lift: number } } = {
 	{ path = { "PlayBtn" }, lift = 0 },
 	{ path = { "Nav", "BattlePass" }, lift = 0 },
 	{ path = { "Nav", "Store" }, lift = 0 },
-	{ path = { "Bottom", "Locker" }, lift = 8 },
+	{ path = { "Nav", "Locker" }, lift = 8 },
 }
 
 local function resolveDescendant(root: Instance, path: { string }): Instance?

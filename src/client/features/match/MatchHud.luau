@@ -74,6 +74,15 @@ export type BotRosterEntry = {
 	image: string,
 	level: number,
 	historicalKills: number,
+	outfitId: string,
+	faceId: string,
+	hatId: string,
+}
+
+export type PlayerCosmetics = {
+	outfitId: string,
+	faceId: string,
+	hatId: string,
 }
 
 export type EndResultsPlayerEntry = {
@@ -82,7 +91,14 @@ export type EndResultsPlayerEntry = {
 	team: "A" | "B",
 	kills: number,
 	deaths: number,
+	assists: number,
 	level: number,
+	isBot: boolean,
+	-- Apariencia para la réplica de Resultados. Para bots viene del roster; para
+	-- jugadores reales queda vacía (la réplica usa el loadout local si es el local).
+	outfitId: string,
+	faceId: string,
+	hatId: string,
 }
 
 -- ── Helpers de resolución de GUI ─────────────────────────────
@@ -377,8 +393,12 @@ function MatchHud.new(matchHudGui: ScreenGui?): any
 	-- Tracking de partida
 	self._killsByUserId = {} :: { [number]: number }
 	self._deathsByUserId = {} :: { [number]: number }
+	self._assistsByUserId = {} :: { [number]: number }
 	self._streakByUserId = {} :: { [number]: number }
 	self._botRoster = {} :: { [number]: BotRosterEntry }
+	-- Cosméticos de compañeros reales (outfit/face/hat) para sus réplicas en
+	-- Resultados. Lo llena el packet TeamCosmetics.
+	self._playerCosmeticsByUserId = {} :: { [number]: PlayerCosmetics }
 
 	-- Thumbnails
 	self._thumbnailByUserId = {} :: { [number]: string }
@@ -600,18 +620,21 @@ end
 function MatchHud:resetMatchState()
 	table.clear(self._killsByUserId)
 	table.clear(self._deathsByUserId)
+	table.clear(self._assistsByUserId)
 	table.clear(self._streakByUserId)
+	table.clear(self._playerCosmeticsByUserId)
 	-- NOTE: _botRoster no se limpia aquí porque el servidor lo envía
 	-- de forma asíncrona vía Network.Match.BotRoster y puede llegar
 	-- antes de JoinMatchSpawned. Se reemplaza completamente cada vez
 	-- que llega un BotRoster nuevo desde el servidor.
 	self._killsByUserId[self._localUserId] = 0
 	self._deathsByUserId[self._localUserId] = 0
+	self._assistsByUserId[self._localUserId] = 0
 	self:_clearTimerEffects()
 	self:queuePlayerRowsUpdate()
 end
 
-function MatchHud:applyPlayerState(userId: number, kills: number, deaths: number?, streak: number?)
+function MatchHud:applyPlayerState(userId: number, kills: number, deaths: number?, streak: number?, assists: number?)
 	local oldKills = self._killsByUserId[userId] or 0
 	local newKills = math.max(0, kills)
 	self._killsByUserId[userId] = newKills
@@ -622,6 +645,9 @@ function MatchHud:applyPlayerState(userId: number, kills: number, deaths: number
 	end
 	if streak ~= nil then
 		self._streakByUserId[userId] = math.max(0, streak)
+	end
+	if assists ~= nil then
+		self._assistsByUserId[userId] = math.max(0, assists)
 	end
 
 	-- Fast paths para evitar reconstruir + ordenar las 12 filas en cada kill:
@@ -648,12 +674,17 @@ function MatchHud:setBotRoster(roster: { [number]: BotRosterEntry })
 	self:queuePlayerRowsUpdate()
 end
 
+function MatchHud:setPlayerCosmetics(byUserId: { [number]: PlayerCosmetics })
+	self._playerCosmeticsByUserId = byUserId
+end
+
 function MatchHud:onPlayerRemoved(userId: number)
 	self._killsByUserId[userId] = nil
 	self:queuePlayerRowsUpdate()
 end
 
---- Captura datos para EndResultsView antes de resetear el roster.
+--- Captura datos (kills/assists/deaths/level/equipo) para la pantalla de
+--- Resultados antes de resetear el roster.
 function MatchHud:captureEndResultsData(): (string, { EndResultsPlayerEntry })
 	local localTeam = TeamUtils.getSide(Players.LocalPlayer.Character) or ""
 	local entries = {} :: { EndResultsPlayerEntry }
@@ -673,13 +704,22 @@ function MatchHud:captureEndResultsData(): (string, { EndResultsPlayerEntry })
 			end
 		end
 
+		-- Cosméticos de compañeros reales (del packet TeamCosmetics). El jugador
+		-- local queda vacío: su réplica usa el loadout local en ResultsView.
+		local cos = self._playerCosmeticsByUserId[player.UserId]
+
 		table.insert(entries, {
 			userId = player.UserId,
 			name = player.Name,
 			team = side :: "A" | "B",
 			kills = self._killsByUserId[player.UserId] or 0,
 			deaths = self._deathsByUserId[player.UserId] or 0,
+			assists = self._assistsByUserId[player.UserId] or 0,
 			level = level,
+			isBot = false,
+			outfitId = if cos then cos.outfitId else "",
+			faceId = if cos then cos.faceId else "",
+			hatId = if cos then cos.hatId else "",
 		})
 	end
 
@@ -690,7 +730,12 @@ function MatchHud:captureEndResultsData(): (string, { EndResultsPlayerEntry })
 			team = entry.team :: "A" | "B",
 			kills = self._killsByUserId[fakeUserId] or 0,
 			deaths = self._deathsByUserId[fakeUserId] or 0,
-			level = 0,
+			assists = self._assistsByUserId[fakeUserId] or 0,
+			level = entry.level,
+			isBot = true,
+			outfitId = entry.outfitId,
+			faceId = entry.faceId,
+			hatId = entry.hatId,
 		})
 	end
 

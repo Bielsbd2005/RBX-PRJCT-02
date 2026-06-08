@@ -51,14 +51,10 @@ type ItemGridCardRefs = {
 	itemNodeDefaultSize: UDim2?,
 	viewportNode: ViewportFrame?,
 	amountNode: TextLabel?,
-	priceNode: TextLabel?,
-	currencyNode: GuiObject?,
-	ownedNode: TextLabel?,
 	equippedNode: GuiObject?,
+	-- Default (ItemTemplate): label único de estado dentro de Status.
+	statusValueNode: TextLabel?,
 	lockedNode: GuiObject?,
-	lockedLevelNode: TextLabel?,
-	lockedTemplate: GuiObject?,
-	lockedParent: Instance?,
 	titleNode: GuiObject?,
 	titleDefaultText: string?,
 	barNode: GuiObject?,
@@ -130,7 +126,7 @@ local GRID_BUTTON_DEFAULT_SCALE = 1
 local GRID_BUTTON_HOVER_SCALE = UITheme.ButtonHoverScale
 local GRID_BUTTON_CLICK_SCALE = UITheme.ButtonClickScale
 local GRID_ITEM_DEFAULT_COLOR = Color3.fromRGB(255, 255, 255)
-local GRID_ITEM_LOCKED_WEAPON_COLOR = Color3.fromRGB(0, 0, 0)
+local GRID_ITEM_LOCKED_COLOR = Color3.fromRGB(24, 24, 24)
 local STROKE_DEFAULT = UITheme.StrokeDefault
 local STROKE_WHITE = UITheme.StrokeHover
 local POPULATE_SYNC_ITEM_COUNT = 24
@@ -164,11 +160,6 @@ function LockerGrid.new(
 	}
 	self._currentTemplateKey = nil
 	self._cachedGridCardRefs = {}
-	-- Audit mobile: lockedTemplate compartido por templateKey en vez de un
-	-- clone por card. Antes 50+ cards mantenían cada una su propio clone del
-	-- template Locked (pool memory bloat). El clone único se hace lazy en el
-	-- primer card construido y se reusa por todos.
-	self._lockedTemplateByKey = {} :: { [string]: GuiObject }
 	self._cardPreviewJanitors = {}
 	self._gridButtonItems = {}
 	self._selectedCatalogButton = nil
@@ -204,8 +195,13 @@ function LockerGrid:_getButtonStroke(button: GuiButton): UIStroke?
 end
 
 function LockerGrid:_buildGridCardRefs(card: GuiObject, templateKey: TemplateKey): ItemGridCardRefs
-	local buttonNode = card:FindFirstChild("Button")
-	local button = if buttonNode and buttonNode:IsA("GuiButton") then buttonNode else nil
+	-- El ItemTemplate (default) ES el GuiButton; la template de wraps mantiene un
+	-- hijo "Button" que envuelve su contenido.
+	local button: GuiButton? = if card:IsA("GuiButton") then card :: GuiButton else nil
+	if not button then
+		local buttonNode = card:FindFirstChild("Button")
+		button = if buttonNode and buttonNode:IsA("GuiButton") then buttonNode :: GuiButton else nil
+	end
 
 	if templateKey == "wraps" then
 		local viewportNode = if button then button:FindFirstChild("ViewportFrame") else nil
@@ -229,14 +225,8 @@ function LockerGrid:_buildGridCardRefs(card: GuiObject, templateKey: TemplateKey
 			itemNodeDefaultSize = nil,
 			viewportNode = viewport,
 			amountNode = if amountNode and amountNode:IsA("TextLabel") then amountNode else nil,
-			priceNode = nil,
-			currencyNode = nil,
-			ownedNode = nil,
 			equippedNode = if equippedNode and equippedNode:IsA("GuiObject") then equippedNode else nil,
 			lockedNode = wrapsLockedGui,
-			lockedLevelNode = nil,
-			lockedTemplate = nil,
-			lockedParent = nil,
 			titleNode = if titleNode and titleNode:IsA("GuiObject") then titleNode else nil,
 			titleDefaultText = if titleNode and titleNode:IsA("TextLabel") then titleNode.Text else nil,
 			barNode = barGui,
@@ -249,34 +239,23 @@ function LockerGrid:_buildGridCardRefs(card: GuiObject, templateKey: TemplateKey
 		return refs
 	end
 
+	-- ItemTemplate plano: Item (imagen) + Status { Value (label de estado), Locked (imagen) }.
 	local itemNode = if button then button:FindFirstChild("Item") else nil
 	local resolvedItemNode = if itemNode and (itemNode:IsA("ImageLabel") or itemNode:IsA("ImageButton")) then itemNode else nil
-	local viewportNode = if button then button:FindFirstChild("ViewportFrame") else nil
-	local amountNode = if button then button:FindFirstChild("Amount") else nil
-	local priceNode = if button then button:FindFirstChild("Price") else nil
-	local currencyNode = if button then button:FindFirstChild("Currency") else nil
-	local ownedNode = if button then button:FindFirstChild("Owned") else nil
-	local equippedNode = if button then button:FindFirstChild("Equiped") else nil
-	local lockedNode = if button then button:FindFirstChild("Locked") else nil
-	local lockedGui = if lockedNode and lockedNode:IsA("GuiObject") then lockedNode else nil
-	local lockedLevelNode = if lockedGui then lockedGui:FindFirstChild("Value") else nil
+	local statusNode = if button then button:FindFirstChild("Status") else nil
+	local statusValueNode = if statusNode then statusNode:FindFirstChild("Value") else nil
+	local statusLockedNode = if statusNode then statusNode:FindFirstChild("Locked") else nil
 
 	local refs: ItemGridCardRefs = {
 		templateKey = templateKey,
 		button = button,
 		itemNode = resolvedItemNode,
 		itemNodeDefaultSize = if resolvedItemNode then resolvedItemNode.Size else nil,
-		viewportNode = if viewportNode and viewportNode:IsA("ViewportFrame") then viewportNode else nil,
-		amountNode = if amountNode and amountNode:IsA("TextLabel") then amountNode else nil,
-		priceNode = if priceNode and priceNode:IsA("TextLabel") then priceNode else nil,
-		currencyNode = if currencyNode and currencyNode:IsA("GuiObject") then currencyNode else nil,
-		ownedNode = if ownedNode and ownedNode:IsA("TextLabel") then ownedNode else nil,
-		equippedNode = if equippedNode and equippedNode:IsA("GuiObject") then equippedNode else nil,
-		lockedNode = lockedGui,
-		lockedLevelNode = if lockedLevelNode and lockedLevelNode:IsA("TextLabel") then lockedLevelNode else nil,
-		-- Template lazy + compartido por templateKey (ver _lockedTemplateByKey).
-		lockedTemplate = nil,
-		lockedParent = if lockedGui then lockedGui.Parent else nil,
+		viewportNode = nil,
+		amountNode = nil,
+		equippedNode = nil,
+		statusValueNode = if statusValueNode and statusValueNode:IsA("TextLabel") then statusValueNode else nil,
+		lockedNode = if statusLockedNode and statusLockedNode:IsA("GuiObject") then statusLockedNode else nil,
 		titleNode = nil,
 		barNode = nil,
 		barFillNode = nil,
@@ -478,68 +457,24 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 
 	local currentLevel = self._cachedLevel
 	local isLevelLocked = not isOwned and currentLevel < item.LevelRequired
-	local shouldBlackoutWeaponImage = shouldUseFullSizeWeaponImage(item) and isLevelLocked
 
+	-- Oscurecer la imagen de cualquier item bloqueado por nivel.
 	if refs.itemNode then
-		refs.itemNode.ImageColor3 = if shouldBlackoutWeaponImage then GRID_ITEM_LOCKED_WEAPON_COLOR else GRID_ITEM_DEFAULT_COLOR
+		refs.itemNode.ImageColor3 = if isLevelLocked then GRID_ITEM_LOCKED_COLOR else GRID_ITEM_DEFAULT_COLOR
 	end
 
-	if isLevelLocked then
-		if refs.lockedNode == nil or refs.lockedNode.Parent == nil then
-			-- Resolver el template compartido lazy. Si ya existe uno cacheado
-			-- por templateKey, reusarlo; sino, clonar el lockedNode que tenga
-			-- otra card actualmente o el original (refs.lockedNode previo).
-			local sharedTemplate = self._lockedTemplateByKey[refs.templateKey]
-			if not sharedTemplate and refs.lockedNode then
-				sharedTemplate = refs.lockedNode:Clone()
-				sharedTemplate.Parent = nil
-				self._lockedTemplateByKey[refs.templateKey] = sharedTemplate
-			end
-			local lockedParent = refs.lockedParent
-			if sharedTemplate and lockedParent and lockedParent:IsDescendantOf(card) then
-				local clonedLocked = sharedTemplate:Clone()
-				clonedLocked.Parent = lockedParent
-				refs.lockedNode = clonedLocked
-
-				local clonedLevelNode = clonedLocked:FindFirstChild("Value")
-				refs.lockedLevelNode = if clonedLevelNode and clonedLevelNode:IsA("TextLabel") then clonedLevelNode else nil
-			end
-		end
-
-		if refs.lockedNode then
-			refs.lockedNode.Visible = true
-		end
-
-		if refs.lockedLevelNode then
-			refs.lockedLevelNode.Text = "Lvl. " .. tostring(item.LevelRequired)
-		end
-	else
-		if refs.lockedNode and refs.lockedNode.Parent then
-			refs.lockedNode.Visible = false
-		end
+	-- Status.Value: label único, precedencia EQUIPED → OWNED → "Lvl X" → precio.
+	if refs.statusValueNode then
+		refs.statusValueNode.Text = if isEquipped
+			then "EQUIPED"
+			elseif isOwned then "OWNED"
+			elseif isLevelLocked then "Lvl " .. tostring(item.LevelRequired)
+			else UIUtils.formatCashAmount(item.Price)
 	end
 
-	if refs.priceNode then
-		refs.priceNode.Visible = not isOwned
-	end
-
-	if refs.currencyNode then
-		refs.currencyNode.Visible = not isOwned
-	end
-
-	if refs.ownedNode then
-		refs.ownedNode.Visible = isOwned and not isEquipped
-	end
-
-	if refs.amountNode then
-		refs.amountNode.Visible = itemAmount > 1
-		if itemAmount > 1 then
-			refs.amountNode.Text = "x" .. tostring(itemAmount)
-		end
-	end
-
-	if refs.equippedNode then
-		refs.equippedNode.Visible = isEquipped
+	-- Status.Locked: imagen visible solo en bloqueo por nivel.
+	if refs.lockedNode then
+		refs.lockedNode.Visible = isLevelLocked
 	end
 
 	local stroke = self:_getButtonStroke(button)
@@ -661,25 +596,12 @@ function LockerGrid:_applyCatalogItemToCard(card: GuiObject, item: LockerCatalog
 	if refs.itemNode and (refs.itemNode:IsA("ImageLabel") or refs.itemNode:IsA("ImageButton")) then
 		refs.itemNode.Visible = not usesViewportPreview
 		refs.itemNode.Image = item.Image
+		-- El ImageColor3 (oscurecido si locked) lo fija _updateGridCardVisual justo después.
 		if shouldUseFullSizeWeaponImage(item) then
 			refs.itemNode.Size = UDim2.fromScale(1, 1)
-			refs.itemNode.ImageColor3 = if self._cachedLevel >= item.LevelRequired then GRID_ITEM_DEFAULT_COLOR else GRID_ITEM_LOCKED_WEAPON_COLOR
 		elseif refs.itemNodeDefaultSize then
 			refs.itemNode.Size = refs.itemNodeDefaultSize
 		end
-	end
-
-	if refs.priceNode then
-		refs.priceNode.Text = UIUtils.formatCashAmount(item.Price)
-		refs.priceNode.Visible = true
-	end
-
-	if refs.currencyNode then
-		refs.currencyNode.Visible = true
-	end
-
-	if refs.ownedNode then
-		refs.ownedNode.Visible = false
 	end
 
 	if refs.amountNode then

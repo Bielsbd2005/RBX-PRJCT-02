@@ -191,9 +191,13 @@ function LockerCatalog:GetItems(categoryKey: LockerCategoryKey, navKey: string):
 		table.insert(catalogItems, item)
 	end
 
+	-- Orden: (1) poseídos primero, (2) por precio ascendente, (3) por nombre como
+	-- desempate. (Tanto poseídos como no-poseídos se ordenan por precio.)
 	table.sort(catalogItems, function(a, b)
-		if a.LevelRequired ~= b.LevelRequired then
-			return a.LevelRequired < b.LevelRequired
+		local aOwned = self._isItemOwned(a)
+		local bOwned = self._isItemOwned(b)
+		if aOwned ~= bOwned then
+			return aOwned
 		end
 
 		if a.Price ~= b.Price then

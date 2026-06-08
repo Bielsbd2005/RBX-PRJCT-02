@@ -73,6 +73,9 @@ local _voteCooldownsByUserId: { [number]: number } = {}
 local _lastVoteBroadcastKey: string? = nil
 local _hasCompletedInitialVote = false
 local _castVoteConn: any = nil
+-- Retención: ninguna votación puede arrancar antes de este time() (se usa para
+-- que la votación no empiece hasta que termine la pantalla de Resultados).
+local _voteHoldUntil = 0
 
 -- ── Helpers privados ─────────────────────────────────────────
 
@@ -321,9 +324,16 @@ function VotingService:Start(deps: Deps)
 	_activeVote = nil
 	_hasCompletedInitialVote = false
 	_lastVoteBroadcastKey = nil
+	_voteHoldUntil = 0
 	table.clear(_voteCooldownsByUserId)
 
 	_castVoteConn = Network.Match.CastVote.Listen(_onCastVote)
+end
+
+-- Retiene el arranque de la votación durante `seconds` (p. ej. la duración de la
+-- pantalla de Resultados, para que el voto no empiece hasta que esta termine).
+function VotingService:HoldVotingFor(seconds: number)
+	_voteHoldUntil = time() + math.max(0, seconds)
 end
 
 function VotingService:HasActiveVote(): boolean
@@ -404,6 +414,13 @@ function VotingService:DisconnectPlayer(userId: number)
 end
 
 function VotingService:StartVoteIfPossible(): boolean
+	-- Retención post-Results: la votación no arranca hasta que termina la pantalla
+	-- de Resultados (cualquier disparador —RequestVoteSync, etc.— respeta esto).
+	if time() < _voteHoldUntil then
+		_deps.log("Vote start held: Results window still active.")
+		return false
+	end
+
 	if _activeVote ~= nil or _hasCompletedInitialVote then
 		if _activeVote ~= nil then
 			_deps.log("Vote start skipped: already voting.")

@@ -21,6 +21,7 @@ local HealthPickupService = require(script.Parent:WaitForChild("HealthPickupServ
 local TeamAssignmentService = require(script.Parent:WaitForChild("TeamAssignmentService"))
 local VotingService = require(script.Parent:WaitForChild("VotingService"))
 local KillAttributionService = require(script.Parent:WaitForChild("KillAttributionService"))
+local MatchResultsService = require(script.Parent:WaitForChild("MatchResultsService"))
 local KillEffectsRegistry = require(Shared.Locker.killEffects.KillEffectsRegistry)
 local CollisionGroups = require(Shared.CollisionGroups)
 local ItemsConfig = require(Shared.constants.ItemsConfig)
@@ -95,6 +96,9 @@ local _matchKillsByUserId: { [number]: number } = {}
 -- viven en KillAttributionService. Acá quedan kills/deaths que son
 -- accesados ampliamente (HUD broadcast, score updates).
 local _matchDeathsByUserId: { [number]: number } = {}
+-- Asistencias de la partida actual (incrementadas en GrantCombatReward "Assist").
+-- Se difunden en PlayerStreakState para la pantalla de Resultados.
+local _matchAssistsByUserId: { [number]: number } = {}
 local _matchCashEarnedByUserId: { [number]: number } = {}
 local _matchXPEarnedByUserId: { [number]: number } = {}
 local _recentKillTimestamps: { [number]: { number } } = {}
@@ -243,6 +247,53 @@ local function _sendBotRosterToPlayer(player: Player)
 	end)
 end
 
+-- Envía a `player` los cosméticos (outfit/face/hat) de sus compañeros REALES, para
+-- reconstruir sus réplicas en Resultados. Solo su propio equipo, y solo otros
+-- jugadores (los bots ya van en el BotRoster; el jugador local usa su loadout).
+local function _sendTeamCosmeticsTo(player: Player)
+	local side = _teamByUserId[player.UserId]
+	if not side or not _dataService then
+		return
+	end
+	local list = {}
+	for _, other in Players:GetPlayers() do
+		if other ~= player and _teamByUserId[other.UserId] == side then
+			local profile = _dataService:GetProfile(other)
+			local loadout = profile and profile.Data and profile.Data.Loadout
+			if type(loadout) == "table" then
+				table.insert(list, {
+					userId = other.UserId,
+					outfitId = if type(loadout.Outfit) == "string" then loadout.Outfit else "",
+					faceId = if type(loadout.Face) == "string" then loadout.Face else "",
+					hatId = if type(loadout.Hat) == "string" then loadout.Hat else "",
+				})
+			end
+		end
+	end
+	if #list == 0 then
+		return
+	end
+	local ok, json = pcall(HttpService.JSONEncode, HttpService, list)
+	if ok then
+		pcall(function()
+			Network.Match.TeamCosmetics.SendTo({ json = json }, player)
+		end)
+	end
+end
+
+-- Refresca los cosméticos de equipo de todos los jugadores reales de `side`
+-- (cada uno recibe la lista actualizada de sus compañeros).
+local function _refreshTeamCosmetics(side: string?)
+	if not side then
+		return
+	end
+	for _, player in Players:GetPlayers() do
+		if _teamByUserId[player.UserId] == side then
+			_sendTeamCosmeticsTo(player)
+		end
+	end
+end
+
 local function _resolveBotKillerName(attackerUserId: number): string
 	if _AIService and _AIService.GetBotDisplayName then
 		return _AIService:GetBotDisplayName(attackerUserId) or ""
@@ -271,9 +322,10 @@ local function _resetMatchScopedState()
 	table.clear(_deathAtByUserId)
 	table.clear(_respawnDebounceByUserId)
 	table.clear(_roundEndEligibleByUserId)
-	-- Kill/death tracking
+	-- Kill/death/assist tracking
 	table.clear(_matchKillsByUserId)
 	table.clear(_matchDeathsByUserId)
+	table.clear(_matchAssistsByUserId)
 	table.clear(_matchCashEarnedByUserId)
 	table.clear(_matchXPEarnedByUserId)
 	table.clear(_recentKillTimestamps)
@@ -284,6 +336,8 @@ local function _resetMatchScopedState()
 	-- BaseParts destruidos del round anterior podían quedar como keys).
 	-- table.clear preserva la metatable de weak keys.
 	table.clear(_recentDeathBySpawn)
+	-- Snapshots de inicio de partida (nivel/tier BP) para los items de Resultados.
+	MatchResultsService:ClearSnapshots()
 end
 
 local function _resolveWeaponItem(weaponId: string?): (string?, string?)
@@ -1251,8 +1305,13 @@ local function _endRoundAndRestartVoting(reason: string)
 	_lastMapLoadStateBroadcastKey = nil
 	_lastRoundStateBroadcastKey = nil
 	_lastBotRosterJsonBroadcast = nil
-	_setPhase("Idle", "round cleaned; starting next vote")
-	task.defer(function()
+	_setPhase("Idle", "round cleaned; vote after Results window")
+
+	-- La votación no arranca hasta que termina la pantalla de Resultados
+	-- (EndResultsDuration). El hold bloquea cualquier disparador anticipado
+	-- (RequestVoteSync, PlayerAdded), y el task.delay la lanza al expirar.
+	VotingService:HoldVotingFor(GameConfig.EndResultsDuration)
+	task.delay(GameConfig.EndResultsDuration, function()
 		_startVoteIfPossible()
 	end)
 end
@@ -1275,6 +1334,53 @@ function _finishRoundAndScheduleRestart(reason: string, winnerTeam: string)
 	for _, player in Players:GetPlayers() do
 		Network.Match.DeathScreenHide.SendTo({}, player)
 	end
+
+	-- ── Recompensas de fin de partida ────────────────────────
+	-- MVP = jugador(es) con más kills de SU equipo (kills > 0). Solo players reales.
+	local teamMaxKills = { A = 0, B = 0 }
+	for userId in _roundEndEligibleByUserId do
+		if userId > 0 then
+			local side = _teamByUserId[userId]
+			if side == "A" or side == "B" then
+				local kills = _matchKillsByUserId[userId] or 0
+				if kills > teamMaxKills[side] then
+					teamMaxKills[side] = kills
+				end
+			end
+		end
+	end
+
+	-- Computar + ENVIAR las recompensas a cada elegible ANTES de RoundEnded (el
+	-- cliente debe tenerlas al mostrar la pantalla). El cash se concede más abajo
+	-- (task.defer) — server-authoritative, independiente de que se vea o no.
+	local resultsByUserId: { [number]: any } = {}
+	local winnerIsTeam = winnerTeam == "A" or winnerTeam == "B"
+	for userId in _roundEndEligibleByUserId do
+		local player = Players:GetPlayerByUserId(userId)
+		if not player then
+			continue
+		end
+		local side = _teamByUserId[userId]
+		local won = winnerIsTeam and side == winnerTeam
+		local maxForSide = if side == "A" or side == "B" then teamMaxKills[side] else 0
+		local context = {
+			won = won,
+			lost = not won, -- perder o empatar cuentan como "Defeat"
+			isMVP = maxForSide > 0 and (_matchKillsByUserId[userId] or 0) == maxForSide,
+			isVIP = MatchResultsService:IsVIPCached(player),
+		}
+		local results = MatchResultsService:BuildResults(player, context)
+		resultsByUserId[userId] = results
+		-- Solo el payload de display viaja al cliente (no `cash`, que lleva id interno).
+		local payload = { outcome = results.outcome, rewards = results.rewards }
+		local ok, json = pcall(HttpService.JSONEncode, HttpService, payload)
+		if ok then
+			pcall(function()
+				Network.Match.MatchResults.SendTo({ json = json }, player)
+			end)
+		end
+	end
+
 	_setPhase("RoundEnded", reason .. " | winner=" .. winnerTeam)
 	for _, player in Players:GetPlayers() do
 		Network.Match.RoundEnded.SendTo({
@@ -1325,6 +1431,13 @@ function _finishRoundAndScheduleRestart(reason: string, winnerTeam: string)
 				pcall(function()
 					_dataService:BatchUpdate(player, updates)
 				end)
+			end
+
+			-- Conceder el cash de fin de partida (no bloqueado). Se otorga aunque el
+			-- jugador no vea la pantalla de Resultados (esté en el menú u otra pantalla).
+			local results = resultsByUserId[userId]
+			if results then
+				MatchResultsService:GrantCash(player, results.cash)
 			end
 		end
 	end)
@@ -1671,6 +1784,14 @@ local function _onRequestJoinMatch(_: {}, player: Player)
 			Network.Match.JoinMatchSpawned.SendTo({}, player)
 			_log(string.format("Player %s joined and spawned.", player.Name))
 
+			-- Cosméticos de equipo para Resultados: el recién llegado recibe a sus
+			-- compañeros y los compañeros se actualizan para incluirlo a él.
+			_refreshTeamCosmetics(_teamByUserId[player.UserId])
+
+			-- Snapshot de nivel/tier de BP al entrar (set-if-absent) para computar
+			-- los items desbloqueados durante la partida en la pantalla de Resultados.
+			MatchResultsService:CaptureMatchStart(player)
+
 			if MatchService.OnPlayerJoinedMatch then
 				pcall(MatchService.OnPlayerJoinedMatch, player)
 			end
@@ -1754,6 +1875,12 @@ function MatchService:GrantCombatReward(player: Player, actionKey: string, extra
 	if ok then
 		_matchCashEarnedByUserId[player.UserId] = (_matchCashEarnedByUserId[player.UserId] or 0) + cashGranted
 		_matchXPEarnedByUserId[player.UserId] = (_matchXPEarnedByUserId[player.UserId] or 0) + xpGranted
+
+		-- Asistencias de la partida: las difundimos vía streak para Resultados.
+		if actionKey == "Assist" then
+			_matchAssistsByUserId[player.UserId] = (_matchAssistsByUserId[player.UserId] or 0) + 1
+			KillAttributionService:SendStreakBroadcast(player.UserId)
+		end
 	end
 	return ok, xpGranted, cashGranted
 end
@@ -1856,6 +1983,7 @@ function MatchService:Start(dataService: DataService): ()
 		_respawnDebounceByUserId[player.UserId] = nil
 		_matchKillsByUserId[player.UserId] = nil
 		_matchDeathsByUserId[player.UserId] = nil
+		_matchAssistsByUserId[player.UserId] = nil
 		_recentKillTimestamps[player.UserId] = nil
 		KillAttributionService:OnPlayerRemoving(player.UserId)
 		_pendingProfileActionsByUserId[player.UserId] = nil
@@ -1899,7 +2027,12 @@ function MatchService:Start(dataService: DataService): ()
 	KillAttributionService:Start({
 		matchKillsByUserId = _matchKillsByUserId,
 		matchDeathsByUserId = _matchDeathsByUserId,
+		matchAssistsByUserId = _matchAssistsByUserId,
 	})
+
+	-- MatchResultsService: VIP cache + snapshots de inicio + recompensas de
+	-- fin de partida (cash configurable + items desbloqueados, display-only).
+	MatchResultsService:Start({ dataService = _dataService })
 
 	-- VotingService: owns _activeVote, vote cooldowns, vote timer, CastVote
 	-- handler. Wire callback `onVoteFinished` que dispara mapload.

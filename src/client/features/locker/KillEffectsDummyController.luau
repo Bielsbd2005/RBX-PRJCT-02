@@ -65,6 +65,10 @@ function KillEffectsDummyController:spawnDummy()
 	self:destroyDummy()
 	local clone = self.killEffectDummyTemplate:Clone()
 	clone.Name = "KillEffectDummy"
+	local humanoid = clone:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+	end
 	clone.Parent = self.lockerFolder
 	LockerUtils.placePreviewCharacter(clone, self.dummySpawn)
 	snapPartsToCanonicalPose(clone)

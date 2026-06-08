@@ -1,11 +1,9 @@
 --!strict
 -- Scope.luau (Client/Server Library)
--- Gestiona la mira de francotirador (Scope) y los efectos de viñeta (Vignette) de daño y eliminación.
+-- Gestiona la mira de francotirador (Scope) y los efectos de viñeta (Vignette) de daño y curación.
 
-local TweenService = game:GetService("TweenService")
-
-local VIGNETTE_KILL_COLOR = Color3.fromRGB(0, 172, 237)
-local VIGNETTE_HEALTH_COLOR = Color3.fromRGB(255, 0, 0)
+local VIGNETTE_DAMAGE_COLOR = Color3.fromRGB(255, 0, 0) -- rojo, vida baja
+local VIGNETTE_HEAL_COLOR = Color3.fromRGB(0, 255, 128) -- verde, curación
 
 type VignetteNode = {
 	instance: GuiObject,
@@ -73,15 +71,12 @@ function Scope.new(weaponsGui: any)
 	self.weaponsGui = weaponsGui
 
 	self.scopeEnabled = false
-	self.vignetteHideToken = 0
-	self.vignetteDisplayTime = 0.45
 
 	self._vignetteNodes = nil
-	self.vignetteKillAlphaDriver = nil
-	self.vignetteHealthAlphaDriver = nil
-	self.vignetteStateConn = nil
+	self.vignetteHealthAlphaDriver = nil -- rojo, vida baja
+	self.vignetteHealAlphaDriver = nil -- verde, curación
 	self.vignetteHealthConn = nil
-	self.vignetteFadeTween = nil
+	self.vignetteHealConn = nil
 
 	return self
 end
@@ -96,16 +91,6 @@ function Scope:setup(gui: ScreenGui)
 	if self.vignette and self.vignette:IsA("GuiObject") then
 		self.vignette.Visible = false
 
-		self.vignetteKillAlphaDriver = self.vignette:FindFirstChild("KillAlphaDriver") :: NumberValue?
-		if not self.vignetteKillAlphaDriver then
-			local val = Instance.new("NumberValue")
-			val.Name = "KillAlphaDriver"
-			val.Value = 0
-			val.Parent = self.vignette
-			self.vignetteKillAlphaDriver = val
-		end
-		self.vignetteKillAlphaDriver.Value = 0
-
 		self.vignetteHealthAlphaDriver = self.vignette:FindFirstChild("HealthAlphaDriver") :: NumberValue?
 		if not self.vignetteHealthAlphaDriver then
 			local val = Instance.new("NumberValue")
@@ -116,29 +101,41 @@ function Scope:setup(gui: ScreenGui)
 		end
 		self.vignetteHealthAlphaDriver.Value = self.vignetteHealthAlphaDriver.Value or 0
 
+		self.vignetteHealAlphaDriver = self.vignette:FindFirstChild("HealAlphaDriver") :: NumberValue?
+		if not self.vignetteHealAlphaDriver then
+			local val = Instance.new("NumberValue")
+			val.Name = "HealAlphaDriver"
+			val.Value = 0
+			val.Parent = self.vignette
+			self.vignetteHealAlphaDriver = val
+		end
+		self.vignetteHealAlphaDriver.Value = self.vignetteHealAlphaDriver.Value or 0
+
 		self._vignetteNodes = buildVignetteNodeList(self.vignette)
 
+		-- Combina los dos efectos: gana el de mayor alpha y su color tiñe el
+		-- vignette. Prioridad en empate: daño (rojo) > heal (verde).
 		local function refreshVignette()
 			if not self.vignette or not self._vignetteNodes then
 				return
 			end
-			local killAlpha = if self.vignetteKillAlphaDriver then self.vignetteKillAlphaDriver.Value else 0
 			local healthAlpha = if self.vignetteHealthAlphaDriver then self.vignetteHealthAlphaDriver.Value else 0
-			local visibleAlpha = math.max(killAlpha, healthAlpha)
+			local healAlpha = if self.vignetteHealAlphaDriver then self.vignetteHealAlphaDriver.Value else 0
+			local visibleAlpha = math.max(healthAlpha, healAlpha)
 			if visibleAlpha <= 0 then
 				applyVignetteAlpha(self._vignetteNodes, 1)
 				self.vignette.Visible = false
 				return
 			end
 
-			local color = if killAlpha >= healthAlpha then VIGNETTE_KILL_COLOR else VIGNETTE_HEALTH_COLOR
+			local color = if healthAlpha >= healAlpha then VIGNETTE_DAMAGE_COLOR else VIGNETTE_HEAL_COLOR
 			applyVignetteColor(self._vignetteNodes, color)
 			applyVignetteAlpha(self._vignetteNodes, 1 - math.clamp(visibleAlpha, 0, 1))
 			self.vignette.Visible = true
 		end
 
-		self.vignetteStateConn = self.vignetteKillAlphaDriver.Changed:Connect(refreshVignette)
 		self.vignetteHealthConn = self.vignetteHealthAlphaDriver.Changed:Connect(refreshVignette)
+		self.vignetteHealConn = self.vignetteHealAlphaDriver.Changed:Connect(refreshVignette)
 		refreshVignette()
 	end
 end
@@ -150,64 +147,14 @@ function Scope:setScopeEnabled(scopeEnabled: boolean)
 	end
 end
 
-function Scope:hideKillContainer(immediate: boolean)
-	if not self.vignette then return end
-	self.vignetteHideToken += 1
-	if self.vignetteFadeTween then
-		self.vignetteFadeTween:Cancel()
-		self.vignetteFadeTween = nil
-	end
-
-	if immediate then
-		if self.vignetteKillAlphaDriver then
-			self.vignetteKillAlphaDriver.Value = 0
-		elseif self._vignetteNodes then
-			applyVignetteAlpha(self._vignetteNodes, 1)
-		end
-		if not self.vignetteHealthAlphaDriver or self.vignetteHealthAlphaDriver.Value <= 0 then
-			self.vignette.Visible = false
-		end
-		return
-	end
-
-	local hideToken = self.vignetteHideToken
-	local alphaDriver = self.vignetteKillAlphaDriver
-	if alphaDriver then
-		self.vignetteFadeTween = TweenService:Create(alphaDriver, TweenInfo.new(0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.In), { Value = 0 })
-		self.vignetteFadeTween:Play()
-		self.vignetteFadeTween.Completed:Once(function()
-			if self.vignetteHideToken ~= hideToken or not self.vignette then
-				return
-			end
-			if not self.vignetteHealthAlphaDriver or self.vignetteHealthAlphaDriver.Value <= 0 then
-				self.vignette.Visible = false
-			end
-			self.vignetteFadeTween = nil
-		end)
-	elseif self._vignetteNodes then
-		applyVignetteAlpha(self._vignetteNodes, 1)
-		self.vignette.Visible = false
-	end
-end
-
-function Scope:showKillContainer()
-	if self.vignetteKillAlphaDriver then
-		self.vignetteKillAlphaDriver.Value = 0
-	end
-end
-
 function Scope:Destroy()
-	if self.vignetteStateConn then
-		self.vignetteStateConn:Disconnect()
-		self.vignetteStateConn = nil
-	end
 	if self.vignetteHealthConn then
 		self.vignetteHealthConn:Disconnect()
 		self.vignetteHealthConn = nil
 	end
-	if self.vignetteFadeTween then
-		self.vignetteFadeTween:Cancel()
-		self.vignetteFadeTween = nil
+	if self.vignetteHealConn then
+		self.vignetteHealConn:Disconnect()
+		self.vignetteHealConn = nil
 	end
 end
 
