@@ -1,6 +1,5 @@
 --!strict
 
-local Debris = game:GetService("Debris")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
@@ -14,8 +13,7 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local GameConfig = require(Shared:WaitForChild("GameConfig"))
 local MatchSnapshot = require(Shared:WaitForChild("MatchSnapshot"))
 local Network = require(Shared.networking.Network)
-local SpawnSelector = require(script.Parent:WaitForChild("SpawnSelector"))
-local LoadoutService = require(script.Parent:WaitForChild("LoadoutService"))
+local SpawnService = require(script.Parent:WaitForChild("SpawnService"))
 local HealthPickupService = require(script.Parent:WaitForChild("HealthPickupService"))
 local TeamAssignmentService = require(script.Parent:WaitForChild("TeamAssignmentService"))
 local VotingService = require(script.Parent:WaitForChild("VotingService"))
@@ -34,12 +32,6 @@ local EconomyAnalytics = require(script.Parent.Parent.Parent.core.EconomyAnalyti
 local LastAttackerStore = require(ReplicatedStorage:WaitForChild("WeaponsSystem"):WaitForChild("Libraries"):WaitForChild("LastAttackerStore"))
 type DataService = DataServiceMod.DataServiceModule
 
-type MapDefinition = {
-	Name: string,
-	PlaceholderImage: string,
-	UseIntelligentSpawning: boolean?,
-}
-
 local MatchService = {}
 MatchService.__index = MatchService
 
@@ -53,11 +45,6 @@ local _started = false
 -- Cooldown duro contra spam de remotes expensive (MatchSync envía streaks +
 -- roster; ReturnToMenu hace LoadCharacter).
 local REMOTE_RATE_LIMIT_SECONDS = 0.5
-
--- Forward-declaración: el listener de muerte (_registerDeathListener) llama a este
--- helper, que se define más abajo (depende de _findLobbySpawn/_teleportCharacterToSpawn).
--- Declararlo aquí permite capturarlo como upvalue en el closure de Died.
-local _spawnPlayerAtLobby: (player: Player) -> ()
 
 -- Tras morir, el cuerpo del jugador se reubica en el LobbySpawn pasado este margen
 -- (deja que el kill effect / ragdoll cosmético se vea un momento). Poner a 0 para
@@ -73,11 +60,6 @@ local PICKUP_ELIGIBILITY_MAX_QUEUED = 8
 local _activeMapName = ""
 local _activeMapContainer: BasePart? = nil
 local _activeMapModel: Instance? = nil
--- Caches por-round del mapa activo. Los spawn points y la carpeta de bots no
--- cambian durante un round, así evitamos escanear `_activeMapModel:GetDescendants()`
--- (potencialmente miles de instances) en cada respawn/spawn.
-local _cachedSpawnPoints: { BasePart }? = nil
-local _cachedBotsFolder: Instance? = nil
 local _lastBotRosterJsonBroadcast: string? = nil
 
 local _teamA: Team? = nil
@@ -691,6 +673,83 @@ local function _resolveKillerName(attackerUserId: number?): string
 	end
 end
 
+--[[
+	Camino ÚNICO de acreditación de una kill al atacante — lo comparten el
+	path PvP (víctima jugador) y PvE (víctima bot):
+	  • bots atacantes: SOLO contador de HUD (sin streak/rewards/persistencia)
+	  • humanos: stats de ronda, streak, weapon kill (mastery), crédito de
+	    health pickup, rewards (Kill/Headshot/Streak3/5), Stats lifetime,
+	    multikills y onboarding de primera kill.
+	No toca a la víctima ni resuelve la atribución — eso es del caller.
+]]
+local function _creditKillToAttacker(attackerUserId: number, weaponId: string?, wasHeadshot: boolean)
+	if attackerUserId < 0 then
+		local botStats = _roundStats(attackerUserId)
+		if botStats then
+			botStats.kills += 1
+		end
+		KillAttributionService:SendStreakBroadcast(attackerUserId)
+		return
+	end
+
+	local attacker = Players:GetPlayerByUserId(attackerUserId)
+	if not attacker then
+		return
+	end
+
+	local attackerStats = _roundStats(attackerUserId)
+	if not attackerStats then
+		return
+	end
+	attackerStats.kills += 1
+
+	if attackerStats.kills == 1 and MatchService.OnPlayerFirstKill then
+		pcall(MatchService.OnPlayerFirstKill, attacker)
+	end
+
+	local newStreak = KillAttributionService:RecordKill(attackerUserId)
+	KillAttributionService:SendStreakBroadcast(attackerUserId)
+	_registerWeaponKillForAttacker(attackerUserId, weaponId)
+	-- S2: una kill humana dropea un health pickup client-side; registramos el
+	-- crédito para que el RequestPickup correspondiente se valide server-side.
+	_recordPickupEligibility(attackerUserId)
+	_grantActionRewardsToAttacker(attacker, "Kill", weaponId)
+	if wasHeadshot then
+		_grantActionRewardsToAttacker(attacker, "Headshot", weaponId)
+	end
+	if newStreak == 3 then
+		_grantActionRewardsToAttacker(attacker, "Streak3", weaponId)
+	elseif newStreak == 5 then
+		_grantActionRewardsToAttacker(attacker, "Streak5", weaponId)
+	end
+
+	_persistAttackerKillStats(attacker, wasHeadshot, newStreak)
+
+	-- Multikills: ventana corta de kills consecutivas → Stats lifetime.
+	local round = _round
+	if not round then
+		return
+	end
+	local now = time()
+	local timestamps = round.recentKillTimestampsByUserId[attackerUserId]
+	if not timestamps then
+		timestamps = {}
+		round.recentKillTimestampsByUserId[attackerUserId] = timestamps
+	end
+	table.insert(timestamps, now)
+	while #timestamps > 0 and (now - timestamps[1]) > MULTIKILL_WINDOW do
+		table.remove(timestamps, 1)
+	end
+	if _dataService and _hasProfile(attacker) then
+		local killsInWindow = #timestamps
+		if killsInWindow == 2 then
+			pcall(_dataService.Increment, _dataService, attacker, { "Stats", "DoubleKills" }, 1)
+		elseif killsInWindow == 3 then
+			pcall(_dataService.Increment, _dataService, attacker, { "Stats", "TripleKills" }, 1)
+		end
+	end
+end
+
 local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?, attackerWeaponId: string?, attackerWasHeadshot: boolean?)
 	local killerName = _resolveKillerName(attackerUserId)
 	pcall(function()
@@ -724,70 +783,14 @@ local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?, a
 		return
 	end
 
-	-- Solo contar kills de jugadores, NO de bots
-	if attackerUserId < 0 then
+	-- Kills sobre jugadores solo se acreditan a HUMANOS (comportamiento
+	-- histórico del HUD: los bots solo suman contador al matar bots) y solo
+	-- si el atacante sigue in-match — la muerte cuenta igual.
+	if attackerUserId < 0 or _isPlayerInMenu(attackerUserId) then
 		return
 	end
 
-	local attacker = Players:GetPlayerByUserId(attackerUserId)
-	if not attacker then
-		return
-	end
-
-	if _isPlayerInMenu(attackerUserId) then
-		return
-	end
-
-	local attackerStats = _roundStats(attackerUserId)
-	if not attackerStats then
-		return
-	end
-	attackerStats.kills += 1
-
-	if attackerStats.kills == 1 and MatchService.OnPlayerFirstKill then
-		pcall(MatchService.OnPlayerFirstKill, attacker)
-	end
-
-	local newStreak = KillAttributionService:RecordKill(attackerUserId)
-	KillAttributionService:SendStreakBroadcast(attackerUserId)
-	_registerWeaponKillForAttacker(attackerUserId, attackerWeaponId)
-	-- S2: una kill PvP dropea un health pickup client-side; registramos el crédito
-	-- para que el RequestPickup correspondiente pueda validarse server-side.
-	_recordPickupEligibility(attackerUserId)
-	_grantActionRewardsToAttacker(attacker, "Kill", attackerWeaponId)
-	if attackerWasHeadshot then
-		_grantActionRewardsToAttacker(attacker, "Headshot", attackerWeaponId)
-	end
-	if newStreak == 3 then
-		_grantActionRewardsToAttacker(attacker, "Streak3", attackerWeaponId)
-	elseif newStreak == 5 then
-		_grantActionRewardsToAttacker(attacker, "Streak5", attackerWeaponId)
-	end
-
-	_persistAttackerKillStats(attacker, attackerWasHeadshot == true, newStreak)
-
-	local round = _round
-	if not round then
-		return
-	end
-	local now = time()
-	local timestamps = round.recentKillTimestampsByUserId[attackerUserId]
-	if not timestamps then
-		timestamps = {}
-		round.recentKillTimestampsByUserId[attackerUserId] = timestamps
-	end
-	table.insert(timestamps, now)
-	while #timestamps > 0 and (now - timestamps[1]) > MULTIKILL_WINDOW do
-		table.remove(timestamps, 1)
-	end
-	if _dataService and _hasProfile(attacker) then
-		local killsInWindow = #timestamps
-		if killsInWindow == 2 then
-			pcall(_dataService.Increment, _dataService, attacker, { "Stats", "DoubleKills" }, 1)
-		elseif killsInWindow == 3 then
-			pcall(_dataService.Increment, _dataService, attacker, { "Stats", "TripleKills" }, 1)
-		end
-	end
+	_creditKillToAttacker(attackerUserId, attackerWeaponId, attackerWasHeadshot == true)
 end
 
 local function _ensureTeams()
@@ -867,161 +870,6 @@ local function _rebalanceBotsForCurrentRound(reason: string)
 	end)
 end
 
-local function _collectSharedSpawnPoints(activeMapRoot: Instance): { BasePart }
-	-- Cache lazy: el primer call por round paga el escaneo, el resto reusa.
-	-- Se invalida en _clearActiveMap() cuando termina el round.
-	if _cachedSpawnPoints then
-		return _cachedSpawnPoints
-	end
-
-	local spawnsRoot = activeMapRoot:FindFirstChild("Spawns", true)
-	if not spawnsRoot then
-		_cachedSpawnPoints = {}
-		return _cachedSpawnPoints
-	end
-
-	local points = {} :: { BasePart }
-	for _, node in spawnsRoot:GetDescendants() do
-		if node:IsA("BasePart") then
-			table.insert(points, node)
-		end
-	end
-
-	_cachedSpawnPoints = points
-	return points
-end
-
-local function _findNearestSpawnToPosition(position: Vector3): BasePart?
-	if not _activeMapModel then
-		return nil
-	end
-
-	local spawns = _collectSharedSpawnPoints(_activeMapModel :: Instance)
-	if #spawns == 0 then
-		return nil
-	end
-
-	local nearest: BasePart? = nil
-	local nearestDistance = math.huge
-	for _, spawn in spawns do
-		local distance = (spawn.Position - position).Magnitude
-		if distance < nearestDistance then
-			nearestDistance = distance
-			nearest = spawn
-		end
-	end
-
-	return nearest
-end
-
-local function _getMapDefinitionByName(mapName: string): MapDefinition?
-	for _, mapDef in GameConfig.Maps do
-		if mapDef.Name == mapName then
-			return mapDef
-		end
-	end
-
-	return nil
-end
-
-local function _extractCharacterRootPart(character: Model): BasePart?
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	if not humanoid or humanoid.Health <= 0 then
-		return nil
-	end
-
-	local root = character:FindFirstChild("HumanoidRootPart")
-	if not root or not root:IsA("BasePart") then
-		return nil
-	end
-
-	return root
-end
-
-local TeamUtils = require(Shared.utils.TeamUtils)
-
-local function _resolveNpcSide(character: Model): "A" | "B"?
-	return TeamUtils.getSide(character) :: any
-end
-
--- Recolecta posiciones + lookVectors de combatientes vivos en un lado determinado
--- (excluyendo opcionalmente al jugador que pide el respawn). Combina jugadores
--- humanos y NPCs en una sola pasada por el mapa.
--- Audit mobile: single-pass por lado. Antes se llamaba 2 veces por respawn
--- (una por enemySide + una por allySide), cada una iterando Players +
--- botsFolder. Una sola pasada reduce las ~128 lookups del path crítico a 64.
-local function _collectAllCombatantData(excludePlayer: Player?): (
-	{ A: { Vector3 }, B: { Vector3 } },
-	{ A: { Vector3 }, B: { Vector3 } }
-)
-	local positionsBySide = {
-		A = {} :: { Vector3 },
-		B = {} :: { Vector3 },
-	}
-	local lookVectorsBySide = {
-		A = {} :: { Vector3 },
-		B = {} :: { Vector3 },
-	}
-
-	for _, candidatePlayer in Players:GetPlayers() do
-		if candidatePlayer == excludePlayer then
-			continue
-		end
-
-		local candidateSession = _sessions[candidatePlayer.UserId]
-		local candidateSide = if candidateSession then candidateSession.team else nil
-		if candidateSide ~= "A" and candidateSide ~= "B" then
-			continue
-		end
-
-		local character = candidatePlayer.Character
-		if not character then
-			continue
-		end
-
-		local root = _extractCharacterRootPart(character)
-		if root then
-			table.insert(positionsBySide[candidateSide], root.Position)
-			table.insert(lookVectorsBySide[candidateSide], root.CFrame.LookVector)
-		end
-	end
-
-	if not _activeMapModel then
-		return positionsBySide, lookVectorsBySide
-	end
-
-	-- Iteramos solo `mapRoot.Bots` (top-level): los bots de IA se parentan ahí
-	-- (ver AIService:_registerBot). Antes era `mapRoot:GetDescendants()` que
-	-- recorría miles de instances del mapa por cada respawn × cada lado (×2).
-	-- Cache lazy del folder, invalidado en _clearActiveMap.
-	if _cachedBotsFolder == nil or _cachedBotsFolder.Parent == nil then
-		_cachedBotsFolder = (_activeMapModel :: Instance):FindFirstChild("Bots")
-	end
-	local botsFolder = _cachedBotsFolder
-	if botsFolder then
-		for _, node in botsFolder:GetChildren() do
-			if not node:IsA("Model") then
-				continue
-			end
-
-			-- Ignorar NPCs muertos/ragdollados — no son amenaza, no deben influir en la
-			-- elección de spawn point.
-			local npcSide = _resolveNpcSide(node)
-			if npcSide ~= "A" and npcSide ~= "B" then
-				continue
-			end
-
-			local root = _extractCharacterRootPart(node)
-			if root then
-				table.insert(positionsBySide[npcSide], root.Position)
-				table.insert(lookVectorsBySide[npcSide], root.CFrame.LookVector)
-			end
-		end
-	end
-
-	return positionsBySide, lookVectorsBySide
-end
-
 local function _disconnectDeathConnection(userId: number)
 	local session = _sessions[userId]
 	if session and session.deathConn then
@@ -1088,7 +936,7 @@ local function _registerDeathListener(player: Player, character: Model)
 					return
 				end
 				session.lobbyRespawnAt = time()
-				_spawnPlayerAtLobby(player)
+				SpawnService.SpawnAtLobby(player)
 			end)
 			return
 		end
@@ -1104,7 +952,7 @@ local function _registerDeathListener(player: Player, character: Model)
 
 		local deathRoot = character:FindFirstChild("HumanoidRootPart")
 		if deathRoot and deathRoot:IsA("BasePart") then
-			local nearestSpawn = _findNearestSpawnToPosition(deathRoot.Position)
+			local nearestSpawn = SpawnService.FindNearestSpawn(deathRoot.Position)
 			if nearestSpawn then
 				round.recentDeathBySpawn[nearestSpawn] = time()
 			end
@@ -1203,197 +1051,9 @@ local function _registerDeathListener(player: Player, character: Model)
 			if session.deathAt ~= deathStamp then
 				return
 			end
-			_spawnPlayerAtLobby(player)
+			SpawnService.SpawnAtLobby(player)
 		end)
 	end)
-end
-
-local function _teleportCharacterToSpawn(player: Player, spawnPoint: BasePart)
-	if player.Parent ~= Players then
-		return nil
-	end
-
-	LoadoutService.loadCharacterWithBody(player, _dataService)
-	local character = player.Character or player.CharacterAdded:Wait()
-	if player.Parent ~= Players or not character or not character.Parent then
-		return nil
-	end
-
-	-- player:LoadCharacter() coloca el cuerpo en el spawn por defecto (lobby/origen)
-	-- y NOSOTROS lo reposicionamos al mapa. El bug del "vacío": tras un body-swap el
-	-- rig puede tardar un instante en estar completo, y leer HumanoidRootPart con
-	-- FindFirstChild demasiado pronto devolvía nil → la línea de reposición se
-	-- saltaba → el cuerpo se quedaba en el lobby y caía al vacío. WaitForChild con
-	-- timeout corto evita esa carrera; si aun así no aparece, el spawn falla limpio.
-	local rootInstance = character:FindFirstChild("HumanoidRootPart")
-		or character:WaitForChild("HumanoidRootPart", 3)
-	if not rootInstance or not rootInstance:IsA("BasePart") then
-		return nil
-	end
-	local root = rootInstance :: BasePart
-
-	-- Anclar mientras reposicionamos para que la física NO arrastre el cuerpo al
-	-- vacío durante el/los frames en que todavía está en el spawn por defecto.
-	-- Se suelta al final del frame, ya colocado sobre el mapa.
-	root.Anchored = true
-	root.CFrame = spawnPoint.CFrame + Vector3.new(0, 4, 0)
-	task.defer(function()
-		if root.Parent then
-			root.Anchored = false
-		end
-	end)
-
-	return character
-end
-
--- [Loadout functions extracted to LoadoutService.luau]
-
--- LobbySpawn vive directamente bajo Workspace.
-local function _findLobbySpawn(): BasePart?
-	local direct = Workspace:FindFirstChild("LobbySpawn")
-	if direct and direct:IsA("BasePart") then
-		return direct
-	end
-
-	return nil
-end
-
--- Garantiza un SpawnLocation Neutral+Enabled en el lobby.
---
--- El bug del "vacío al morir": en partida el jugador está en Team A/B
--- (_spawnPlayerOnAssignedTeam hace player.Team = team). Al morir, el auto-respawn
--- del MOTOR busca un SpawnLocation de SU equipo; los spawns del mapa son Part
--- normales (no SpawnLocation) y el del lobby no sirve para Team A/B, así que el
--- motor no encuentra punto válido y aparece en el origen (0,0,0) → el vacío.
---
--- Un SpawnLocation Neutral sirve para CUALQUIER equipo, así que el auto-respawn cae
--- en el lobby en lugar del vacío. Invisible y no-colisionable para no estorbar.
-local function _ensureLobbySpawnLocation()
-	local lobby = _findLobbySpawn()
-	if not lobby then
-		warn("[MatchService] Workspace.LobbySpawn no encontrado; el auto-respawn del motor caería al vacío.")
-		return
-	end
-
-	-- Si LobbySpawn ya es un SpawnLocation, basta con dejarlo neutral y activo.
-	if lobby:IsA("SpawnLocation") then
-		local sl = lobby :: SpawnLocation
-		sl.Enabled = true
-		sl.Neutral = true
-		return
-	end
-
-	-- Reusar o crear un SpawnLocation invisible colocado sobre LobbySpawn.
-	local existing = Workspace:FindFirstChild("LobbyAutoSpawn")
-	local spawnLocation: SpawnLocation
-	if existing and existing:IsA("SpawnLocation") then
-		spawnLocation = existing :: SpawnLocation
-	else
-		spawnLocation = Instance.new("SpawnLocation")
-		spawnLocation.Name = "LobbyAutoSpawn"
-	end
-	spawnLocation.Enabled = true
-	spawnLocation.Neutral = true
-	spawnLocation.Duration = 0 -- sin ForceField al aparecer en el lobby
-	spawnLocation.Transparency = 1
-	spawnLocation.CanCollide = false
-	spawnLocation.CanTouch = false
-	spawnLocation.Anchored = true
-	spawnLocation.Size = lobby.Size
-	spawnLocation.CFrame = lobby.CFrame
-	spawnLocation.Parent = Workspace
-end
-
--- Coloca al jugador en el lobby de forma controlada: carga su cuerpo y lo teleporta
--- a Workspace.LobbySpawn (sin armas). Con CharacterAutoLoads desactivado, TODO spawn
--- fuera de partida pasa por aquí (join, muerte→lobby, vuelta a menú); el motor nunca
--- respawnea solo, así que nunca cae al vacío. Asigna a la forward-declaración de arriba.
-function _spawnPlayerAtLobby(player: Player)
-	if player.Parent ~= Players then
-		return
-	end
-	-- En el lobby el jugador es neutral (sin equipo de combate).
-	player.Neutral = true
-	local lobbySpawn = _findLobbySpawn()
-	if lobbySpawn then
-		_teleportCharacterToSpawn(player, lobbySpawn)
-	else
-		LoadoutService.loadCharacterWithBody(player, _dataService)
-	end
-end
-
-local function _spawnPlayerOnAssignedTeam(player: Player): boolean
-	if not _activeMapModel then
-		return false
-	end
-
-	local session = _sessions[player.UserId]
-	local side = if session then session.team else nil
-	if not side then
-		return false
-	end
-
-	local team = if side == "A" then _teamA else _teamB
-	if team then
-		player.Neutral = false
-		player.Team = team
-	end
-
-	local spawnPoints = _collectSharedSpawnPoints(_activeMapModel :: Instance)
-	if #spawnPoints == 0 then
-		return false
-	end
-
-	local mapDefinition = _getMapDefinitionByName(_activeMapName)
-	local useIntelligentSpawning = mapDefinition ~= nil and mapDefinition.UseIntelligentSpawning == true
-	local enemySide: "A" | "B" = if side == "A" then "B" else "A"
-	-- Single-pass sobre Players + botsFolder, devuelve datos de ambos lados.
-	-- excludePlayer omite al jugador respawnando de su propio side (allies).
-	-- En el lado enemigo nunca aparecería de todas formas porque su team es
-	-- `side`, así que el efecto neto coincide con el viejo
-	-- `_collectCombatantDataForSide(enemySide, nil)` + `(side, player)`.
-	local positionsBySide, lookVectorsBySide = _collectAllCombatantData(player)
-	local enemyPositions = positionsBySide[enemySide]
-	local enemyLookVectors = lookVectorsBySide[enemySide]
-	local allyPositions = positionsBySide[side]
-	local round = _round
-	local chosenSpawn = SpawnSelector.select(spawnPoints, {
-		enemyPositions = enemyPositions,
-		enemyLookVectors = enemyLookVectors,
-		allyPositions = allyPositions,
-		recentDeaths = if round then round.recentDeathBySpawn else {},
-		now = time(),
-	}, useIntelligentSpawning)
-	if not chosenSpawn then
-		return false
-	end
-
-	local spawnedCharacter = _teleportCharacterToSpawn(player, chosenSpawn)
-	if not spawnedCharacter then
-		return false
-	end
-
-	-- Inmunidad al spawn: ForceField nativo bloquea Humanoid:TakeDamage (que es
-	-- la ruta que usan WeaponsSystem y BotAI), así que no toca cambiar nada en
-	-- el pipeline de daño. Duración configurada en GameConfig; el shield no se
-	-- rompe al disparar — expira solo por tiempo vía Debris.
-	-- Audit mobile: stampear attribute SpawnProtectedUntil = expiry timestamp.
-	-- BotAI lo lee en _getBestTarget en lugar de FindFirstChildOfClass("ForceField")
-	-- por candidato (~2.5K lookups/seg con 16 bots × 16 candidates × 10Hz).
-	if GameConfig.SpawnProtectionDuration > 0 then
-		local forceField = Instance.new("ForceField")
-		forceField.Visible = true
-		forceField.Parent = spawnedCharacter
-		Debris:AddItem(forceField, GameConfig.SpawnProtectionDuration)
-		spawnedCharacter:SetAttribute("SpawnProtectedUntil", time() + GameConfig.SpawnProtectionDuration)
-	end
-
-	LoadoutService.applyCosmetics(player, spawnedCharacter, _dataService)
-
-	task.spawn(function()
-		LoadoutService.grantWeaponsWithRetry(player, _dataService, 8)
-	end)
-	return true
 end
 
 local function _ensureActiveMapContainer(): BasePart
@@ -1428,8 +1088,7 @@ local function _clearActiveMap()
 	_activeMapContainer = nil
 	_activeMapModel = nil
 	_activeMapName = ""
-	_cachedSpawnPoints = nil
-	_cachedBotsFolder = nil
+	SpawnService.InvalidateMapCache()
 end
 
 -- Los helpers de votación viven en VotingService; aquí solo wireamos el
@@ -1633,7 +1292,6 @@ function _enterResults(winnerTeam: string)
 
 	-- Devolver jugadores elegibles al menú inmediatamente.
 	-- El cliente maneja la vuelta al menú al recibir RoundEnded.
-	local lobbySpawn = _findLobbySpawn()
 	for _, player in Players:GetPlayers() do
 		local session = _sessions[player.UserId]
 		if not session or not eligibleByUserId[player.UserId] then
@@ -1648,11 +1306,7 @@ function _enterResults(winnerTeam: string)
 			pcall(MatchService.OnPlayerMatchCompleted, player)
 		end
 
-		if lobbySpawn then
-			_teleportCharacterToSpawn(player, lobbySpawn)
-		else
-			LoadoutService.loadCharacterWithBody(player, _dataService)
-		end
+		SpawnService.SpawnAtLobby(player)
 
 		if player.Parent == Players and MatchService.OnPlayerReturnedToLobby then
 			pcall(MatchService.OnPlayerReturnedToLobby, player)
@@ -1722,36 +1376,7 @@ local function _handleBotDied(botTeam: string, _botName: string, botHumanoid: Hu
 	end)
 
 	if attackerUserId and attackerUserId ~= botFakeUserId then
-		local attackerStats = _roundStats(attackerUserId)
-		if attackerStats then
-			attackerStats.kills += 1
-		end
-		-- Solo los jugadores humanos acumulan streak/timer/stats.
-		if attackerUserId > 0 then
-			local attackerPlayer = Players:GetPlayerByUserId(attackerUserId)
-			if attackerPlayer then
-				local newStreak = KillAttributionService:RecordKill(attackerUserId)
-				_registerWeaponKillForAttacker(attackerUserId, attackerWeaponId)
-				_grantActionRewardsToAttacker(attackerPlayer, "Kill", attackerWeaponId)
-				if attackerWasHeadshot then
-					_grantActionRewardsToAttacker(attackerPlayer, "Headshot", attackerWeaponId)
-				end
-				if newStreak == 3 then
-					_grantActionRewardsToAttacker(attackerPlayer, "Streak3", attackerWeaponId)
-				elseif newStreak == 5 then
-					_grantActionRewardsToAttacker(attackerPlayer, "Streak5", attackerWeaponId)
-				end
-				-- S2: una kill vs bot también dropea un health pickup client-side;
-				-- registramos el crédito igual que en el path PvP para que el
-				-- RequestPickup correspondiente pueda validarse server-side.
-				_recordPickupEligibility(attackerUserId)
-				-- C1 fix: persistir Stats.Kills/Headshots/KillStreakBest lifetime
-				-- también para kills vs bots. Antes el path PvE solo
-				-- actualizaba contadores en memoria.
-				_persistAttackerKillStats(attackerPlayer, attackerWasHeadshot, newStreak)
-			end
-		end
-		KillAttributionService:SendStreakBroadcast(attackerUserId)
+		_creditKillToAttacker(attackerUserId, attackerWeaponId, attackerWasHeadshot)
 	end
 
 	-- Los bots no usan streak: solo contabilizar kills/deaths para HUD.
@@ -1803,7 +1428,7 @@ local function _enterInRound()
 	})
 
 	if _AIService then
-		local sharedSpawnPoints = _collectSharedSpawnPoints(_activeMapModel :: Instance)
+		local sharedSpawnPoints = SpawnService.GetSpawnPoints()
 		local ok, err = pcall(function()
 			_AIService:OnRoundStart({
 				spawnPoints = sharedSpawnPoints,
@@ -1964,7 +1589,7 @@ local function _onRequestJoinMatch(_: {}, player: Player)
 			return
 		end
 
-		if not _spawnPlayerOnAssignedTeam(player) then
+		if not SpawnService.SpawnOnAssignedTeam(player) then
 			warn("[MatchService] No fue posible spawnear al jugador en su equipo.")
 			session.inMenu = true
 			session.pendingSpawn = false
@@ -2040,7 +1665,7 @@ local function _onRequestRespawn(_: {}, player: Player)
 			if player.Parent ~= Players or not _isRoundActive() or session.inMenu then
 				break
 			end
-			if _spawnPlayerOnAssignedTeam(player) then
+			if SpawnService.SpawnOnAssignedTeam(player) then
 				spawned = true
 				break
 			end
@@ -2079,12 +1704,7 @@ local function _onRequestReturnToMenu(_: {}, player: Player)
 	_rebalanceBotsForCurrentRound("return to menu")
 	KillAttributionService:SendStreakBroadcast(player.UserId)
 
-	local lobbySpawn = _findLobbySpawn()
-	if lobbySpawn then
-		_teleportCharacterToSpawn(player, lobbySpawn)
-	else
-		LoadoutService.loadCharacterWithBody(player, _dataService)
-	end
+	SpawnService.SpawnAtLobby(player)
 
 	if player.Parent == Players then
 		Network.Match.DeathScreenHide.SendTo({}, player)
@@ -2139,16 +1759,36 @@ function MatchService:Start(dataService: DataService): ()
 	MatchSnapshot.set({ Phase = "Idle" })
 
 	-- Control total del spawn: el motor NO auto-respawnea (ni en join ni al morir),
-	-- así nunca suelta al jugador en el vacío. Todo spawn pasa por código:
-	--  · join / vuelta a menú / muerte → _spawnPlayerAtLobby (LobbySpawn)
-	--  · pulsar spawn en partida        → _spawnPlayerOnAssignedTeam (spawn del mapa)
+	-- así nunca suelta al jugador en el vacío. Todo spawn pasa por SpawnService:
+	--  · join / vuelta a menú / muerte → SpawnAtLobby (LobbySpawn)
+	--  · pulsar spawn en partida        → SpawnOnAssignedTeam (spawn del mapa)
 	Players.CharacterAutoLoads = false
 
 	_ensureTeams()
+	SpawnService.Start({
+		dataService = _dataService,
+		getActiveMapModel = function()
+			return _activeMapModel
+		end,
+		getActiveMapName = function()
+			return _activeMapName
+		end,
+		getPlayerSide = function(player: Player)
+			local session = _sessions[player.UserId]
+			return if session then session.team else nil
+		end,
+		getTeamInstance = function(side: "A" | "B")
+			return if side == "A" then _teamA else _teamB
+		end,
+		getRecentDeathBySpawn = function()
+			local round = _round
+			return if round then round.recentDeathBySpawn else {}
+		end,
+	})
 	-- Red de seguridad: SpawnLocation Neutral en el lobby por si algún LoadCharacter
 	-- sin reposicionar (o un auto-respawn que se cuele antes de Start) necesita un
 	-- punto válido — evita el origen (0,0,0).
-	_ensureLobbySpawnLocation()
+	SpawnService.EnsureLobbySpawnLocation()
 
 	-- Cargar AIService (require lazy para evitar dependencia circular).
 	-- Con Rojo, la carpeta Server/AI (con su init.luau) se compila directamente
@@ -2306,7 +1946,7 @@ function MatchService:Start(dataService: DataService): ()
 		-- Spawn inicial en el lobby por código (CharacterAutoLoads está desactivado,
 		-- el motor no spawnea solo). task.defer para no bloquear el flujo de join.
 		task.defer(function()
-			_spawnPlayerAtLobby(player)
+			SpawnService.SpawnAtLobby(player)
 		end)
 		-- Intentar iniciar votación cuando un nuevo jugador llega (cubre el
 		-- caso de servidor vacío donde Start() se ejecutó con 0 players).
@@ -2319,7 +1959,7 @@ function MatchService:Start(dataService: DataService): ()
 	for _, player in Players:GetPlayers() do
 		_initJoinedPlayerState(player)
 		task.defer(function()
-			_spawnPlayerAtLobby(player)
+			SpawnService.SpawnAtLobby(player)
 		end)
 	end
 
