@@ -12,6 +12,7 @@ local ServerScriptService = game:GetService("ServerScriptService")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 
 local GameConfig = require(Shared:WaitForChild("GameConfig"))
+local MatchSnapshot = require(Shared:WaitForChild("MatchSnapshot"))
 local Network = require(Shared.networking.Network)
 local SpawnSelector = require(script.Parent:WaitForChild("SpawnSelector"))
 local LoadoutService = require(script.Parent:WaitForChild("LoadoutService"))
@@ -49,12 +50,12 @@ MatchService.OnPlayerMatchCompleted = nil :: ((Player) -> ())?
 MatchService.OnPlayerReturnedToLobby = nil :: ((Player) -> ())?
 
 local _started = false
--- Rate limit por-userId para RemoteEvents de match (vote sync / return to menu).
+-- Rate limit por-userId para RemoteEvents de match (match sync / return to menu).
 -- El `_joinDebounceByUserId` y `_respawnDebounceByUserId` ya tenían debounce de
 -- estado; estos timestamps añaden un cooldown duro contra spam de eventos
--- expensive (VoteSync hace 5 SendTo a un solo player, ReturnToMenu hace LoadCharacter).
+-- expensive (MatchSync envía streaks + roster, ReturnToMenu hace LoadCharacter).
 local REMOTE_RATE_LIMIT_SECONDS = 0.5
-local _voteSyncCooldownByUserId: { [number]: number } = {}
+local _matchSyncCooldownByUserId: { [number]: number } = {}
 local _returnToMenuCooldownByUserId: { [number]: number } = {}
 
 -- Forward-declaración: el listener de muerte (_registerDeathListener) llama a este
@@ -78,7 +79,6 @@ local _activeMapModel: Instance? = nil
 -- (potencialmente miles de instances) en cada respawn/spawn.
 local _cachedSpawnPoints: { BasePart }? = nil
 local _cachedBotsFolder: Instance? = nil
-local _roundEndAt = 0
 local _roundScoreA = 0
 local _roundScoreB = 0
 
@@ -171,8 +171,6 @@ local function _consumePickupEligibility(userId: number): boolean
 	table.remove(queue, 1)
 	return true
 end
-local _lastMapLoadStateBroadcastKey: string? = nil
-local _lastRoundStateBroadcastKey: string? = nil
 local _lastBotRosterJsonBroadcast: string? = nil
 -- Timestamp de la última muerte registrada en cada spawn point. Usado por
 -- SpawnSelector para penalizar respawnear donde alguien acaba de morir y evitar
@@ -204,26 +202,34 @@ local function _isRoundActive(): boolean
 	return _phase == "InRound"
 end
 
--- Forward-decl: el listener de muerte y _runRoundTimer disparan el fin de
+-- Forward-decl: el listener de muerte y el round timer disparan el fin de
 -- ronda antes de que la transición esté definida (cierra el ciclo del flujo).
 local _enterResults: (winnerTeam: string) -> ()
 
 local function _enterIdle()
 	_phase = "Idle"
 	_phaseGeneration += 1
+	MatchSnapshot.set({ MapName = "", PhaseEndsAt = 0, Phase = "Idle" })
 end
 
 local function _enterVoting()
 	_phase = "Voting"
 	_phaseGeneration += 1
+	-- StartVote escribe las opciones/votos en el snapshot ANTES de que aquí se
+	-- publique la fase — los clientes ven "Voting" con las opciones ya legibles.
 	if not VotingService:StartVote() then
 		-- Solo pasa con <3 mapas configurados (StartVote ya lo warnea).
 		_enterIdle()
+		return
 	end
+	MatchSnapshot.set({
+		PhaseEndsAt = MatchSnapshot.now() + GameConfig.VoteDuration,
+		Phase = "Voting",
+	})
 end
 
 -- Idle → Voting. Único punto de arranque de la votación; cualquier disparador
--- (PlayerAdded, RequestVoteSync, fin de la ventana de Results, map-load fail)
+-- (PlayerAdded, RequestMatchSync, fin de la ventana de Results, map-load fail)
 -- pasa por aquí y solo actúa en fase Idle.
 local function _tryStartVoting()
 	if _phase ~= "Idle" then
@@ -235,66 +241,10 @@ local function _tryStartVoting()
 	_enterVoting()
 end
 
-local function _buildMapLoadStatePacket()
-	return {
-		isLoading = _phase == "Loading",
-		playEnabled = _phase == "InRound",
-		mapName = _activeMapName,
-		isVoting = VotingService:HasActiveVote(),
-	}
-end
-
-local function _sendMapLoadStateToAll()
-	local packet = _buildMapLoadStatePacket()
-	local key = string.format(
-		"%s|%s|%s|%s",
-		tostring(packet.isLoading), tostring(packet.playEnabled), packet.mapName, tostring(packet.isVoting)
-	)
-	if _lastMapLoadStateBroadcastKey == key then
-		return
-	end
-	_lastMapLoadStateBroadcastKey = key
-
-	Network.Match.MapLoadState.SendToAll(packet)
-end
-
-local function _sendMapLoadStateToPlayer(player: Player)
-	pcall(function()
-		Network.Match.MapLoadState.SendTo(_buildMapLoadStatePacket(), player)
-	end)
-end
-
-local function _buildRoundStatePacket(timeLeft: number)
-	return {
-		scoreA = _roundScoreA,
-		scoreB = _roundScoreB,
-		timeLeft = math.max(0, timeLeft),
-	}
-end
-
-local function _broadcastRoundState()
-	if not _isRoundActive() then
-		return
-	end
-
-	local timeLeft = math.ceil(math.max(0, _roundEndAt - time()))
-	local key = string.format("%d|%d|%d", _roundScoreA, _roundScoreB, timeLeft)
-	if _lastRoundStateBroadcastKey == key then
-		return
-	end
-	_lastRoundStateBroadcastKey = key
-	Network.Match.RoundState.SendToAll(_buildRoundStatePacket(timeLeft))
-end
-
-local function _sendRoundStateToPlayer(player: Player)
-	if not _isRoundActive() then
-		return
-	end
-
-	local timeLeft = math.ceil(math.max(0, _roundEndAt - time()))
-	pcall(function()
-		Network.Match.RoundState.SendTo(_buildRoundStatePacket(timeLeft), player)
-	end)
+-- Publica el score actual en el snapshot (los clientes derivan el countdown
+-- de PhaseEndsAt localmente — el score es lo único que cambia por kill).
+local function _publishScore()
+	MatchSnapshot.set({ ScoreA = _roundScoreA, ScoreB = _roundScoreB })
 end
 
 -- Wrappers que delegan al KillAttributionService. Mantienen los call sites
@@ -398,10 +348,9 @@ end
 -- fuente de verdad y previene drift entre los dos call sites.
 -- NO toca:
 --   * Vote cooldowns (viven en VotingService).
---   * `_voteSyncCooldownByUserId` y `_returnToMenuCooldownByUserId` (scope
+--   * `_matchSyncCooldownByUserId` y `_returnToMenuCooldownByUserId` (scope
 --     sesión, no round — limpian en PlayerRemoving).
---   * Broadcast key caches (`_lastMapLoadStateBroadcastKey`, etc.) — se
---     manejan al lado de los broadcasts.
+--   * El snapshot replicado (MatchSnapshot) — lo escriben las transiciones.
 local function _resetMatchScopedState()
 	-- Asignación + spawn flow
 	table.clear(_teamByUserId)
@@ -1124,7 +1073,7 @@ local function _registerDeathListener(player: Player, character: Model)
 			_roundScoreA += 1
 		end
 
-		_broadcastRoundState()
+		_publishScore()
 
 		if _roundScoreA >= GameConfig.WinScoreLimit then
 			_enterResults("A")
@@ -1415,9 +1364,8 @@ local function _clearActiveMap()
 	_cachedBotsFolder = nil
 end
 
--- Los helpers de votación viven en VotingService. Aquí solo wireamos el
--- callback `onVoteFinished` y delegamos snapshots vía
--- `VotingService:SendSnapshotTo(player)`.
+-- Los helpers de votación viven en VotingService; aquí solo wireamos el
+-- callback `onVoteFinished`.
 
 -- Clone() no hace yield, así que la carga es síncrona — no hay timeout que
 -- aplicar (el viejo _loadMapCloneWithTimeout tenía un watcher de polling que
@@ -1479,8 +1427,10 @@ function _enterResults(winnerTeam: string)
 	local generation = _phaseGeneration
 
 	_captureRoundEndEligiblePlayers()
-	_roundEndAt = 0
-	_sendMapLoadStateToAll()
+	MatchSnapshot.set({
+		PhaseEndsAt = MatchSnapshot.now() + GameConfig.EndResultsDuration,
+		Phase = "Results",
+	})
 
 	-- Despawnear bots inmediatamente al finalizar la ronda.
 	if _AIService then
@@ -1615,12 +1565,8 @@ function _enterResults(winnerTeam: string)
 			LoadoutService.loadCharacterWithBody(player, _dataService)
 		end
 
-		if player.Parent == Players then
-			_sendMapLoadStateToPlayer(player)
-
-			if MatchService.OnPlayerReturnedToLobby then
-				pcall(MatchService.OnPlayerReturnedToLobby, player)
-			end
+		if player.Parent == Players and MatchService.OnPlayerReturnedToLobby then
+			pcall(MatchService.OnPlayerReturnedToLobby, player)
 		end
 	end
 
@@ -1630,8 +1576,6 @@ function _enterResults(winnerTeam: string)
 		_disconnectDeathConnection(userId)
 	end
 	_resetMatchScopedState()
-	_lastMapLoadStateBroadcastKey = nil
-	_lastRoundStateBroadcastKey = nil
 	_lastBotRosterJsonBroadcast = nil
 
 	-- La votación no arranca hasta que termina la pantalla de Resultados.
@@ -1642,19 +1586,6 @@ function _enterResults(winnerTeam: string)
 		_enterIdle()
 		_tryStartVoting()
 	end)
-end
-
-local function _runRoundTimer(generation: number)
-	while _phase == "InRound" and _phaseGeneration == generation do
-		local timeLeft = _roundEndAt - time()
-		if timeLeft <= 0 then
-			_enterResults(_resolveScoreWinner())
-			return
-		end
-
-		_broadcastRoundState()
-		task.wait(1)
-	end
 end
 
 -- Handler de muerte de un bot de IA. Extraído del callback inline en
@@ -1734,7 +1665,7 @@ local function _handleBotDied(botTeam: string, _botName: string, botHumanoid: Hu
 		_roundScoreA += 1
 	end
 
-	_broadcastRoundState()
+	_publishScore()
 	_rebalanceBotsForCurrentRound("bot death")
 
 	if _roundScoreA >= GameConfig.WinScoreLimit then
@@ -1750,9 +1681,9 @@ end
 local function _enterInRound()
 	_phase = "InRound"
 	_phaseGeneration += 1
+	local generation = _phaseGeneration
 	_roundScoreA = 0
 	_roundScoreB = 0
-	_roundEndAt = time() + GameConfig.MaxRoundDuration
 	_resetMatchScopedState()
 	-- Tras el clear, re-inicializar kill/death/streak a 0 para los players
 	-- actuales y broadcastear (UI sync); marcar a todos como en-menú (el
@@ -1764,8 +1695,12 @@ local function _enterInRound()
 		KillAttributionService:SendStreakBroadcast(player.UserId)
 		_isInMenuByUserId[player.UserId] = true
 	end
-	_sendMapLoadStateToAll()
-	_broadcastRoundState()
+	MatchSnapshot.set({
+		ScoreA = 0,
+		ScoreB = 0,
+		PhaseEndsAt = MatchSnapshot.now() + GameConfig.MaxRoundDuration,
+		Phase = "InRound",
+	})
 
 	if _AIService then
 		local sharedSpawnPoints = _collectSharedSpawnPoints(_activeMapModel :: Instance)
@@ -1784,7 +1719,13 @@ local function _enterInRound()
 		end
 	end
 
-	task.spawn(_runRoundTimer, _phaseGeneration)
+	-- Fin de ronda por tiempo: un único delay con guard de generación (el
+	-- countdown visible lo computa cada cliente desde PhaseEndsAt).
+	task.delay(GameConfig.MaxRoundDuration, function()
+		if _phase == "InRound" and _phaseGeneration == generation then
+			_enterResults(_resolveScoreWinner())
+		end
+	end)
 end
 
 -- Voting → Loading. Clona el mapa ganador; si falla vuelve a Idle y relanza
@@ -1793,17 +1734,14 @@ local function _enterLoading(winnerMapName: string)
 	_phase = "Loading"
 	_phaseGeneration += 1
 	_activeMapName = winnerMapName
-	_lastMapLoadStateBroadcastKey = nil
-	_lastRoundStateBroadcastKey = nil
 	_lastBotRosterJsonBroadcast = nil
-	_sendMapLoadStateToAll()
+	MatchSnapshot.set({ MapName = winnerMapName, PhaseEndsAt = 0, Phase = "Loading" })
 
 	local success, reason = _loadMapClone(winnerMapName)
 	if not success then
 		warn("[MatchService] Error loading map:", reason)
 		_activeMapName = ""
 		_enterIdle()
-		_sendMapLoadStateToAll()
 		_tryStartVoting()
 		return
 	end
@@ -1811,20 +1749,18 @@ local function _enterLoading(winnerMapName: string)
 	_enterInRound()
 end
 
--- Handler de sync general (vote + map + round + streaks + roster). El bit de
--- vote lo delega VotingService:SendSnapshotTo; el resto vive aquí.
-local function _onRequestVoteSync(_: {}, player: Player)
+-- Sync inicial para un cliente recién cargado: estado event-driven (streaks de
+-- todos + roster de bots). El estado ambiental (fase/voto/score) viaja por
+-- MatchSnapshot y no necesita resync.
+local function _onRequestMatchSync(_: {}, player: Player)
 	local now = time()
-	local last = _voteSyncCooldownByUserId[player.UserId] or 0
+	local last = _matchSyncCooldownByUserId[player.UserId] or 0
 	if now - last < REMOTE_RATE_LIMIT_SECONDS then
 		return
 	end
-	_voteSyncCooldownByUserId[player.UserId] = now
+	_matchSyncCooldownByUserId[player.UserId] = now
 
 	_tryStartVoting()
-	VotingService:SendSnapshotTo(player)
-	_sendMapLoadStateToPlayer(player)
-	_sendRoundStateToPlayer(player)
 	_sendAllPlayerStreaksToPlayer(player)
 	_sendBotRosterToPlayer(player)
 end
@@ -2057,8 +1993,6 @@ local function _onRequestReturnToMenu(_: {}, player: Player)
 	if player.Parent == Players then
 		Network.Match.DeathScreenHide.SendTo({}, player)
 		Network.Match.ReturnToMenuDone.SendTo({}, player)
-		_sendMapLoadStateToPlayer(player)
-		_sendRoundStateToPlayer(player)
 	end
 end
 
@@ -2101,6 +2035,10 @@ function MatchService:Start(dataService: DataService): ()
 	_dataService = dataService
 
 	_started = true
+
+	-- Crea el folder replicado del snapshot con su estado inicial (los clientes
+	-- hacen WaitForChild sobre él al arrancar su feature de match).
+	MatchSnapshot.set({ Phase = "Idle" })
 
 	-- Control total del spawn: el motor NO auto-respawnea (ni en join ni al morir),
 	-- así nunca suelta al jugador en el vacío. Todo spawn pasa por código:
@@ -2177,7 +2115,7 @@ function MatchService:Start(dataService: DataService): ()
 		local wasActiveReal = _isInMenuByUserId[player.UserId] == false
 		local wasPendingSpawn = _pendingSpawnByUserId[player.UserId] == true
 		-- _voteCooldownsByUserId vive en VotingService:DisconnectPlayer (más abajo).
-		_voteSyncCooldownByUserId[player.UserId] = nil
+		_matchSyncCooldownByUserId[player.UserId] = nil
 		_returnToMenuCooldownByUserId[player.UserId] = nil
 		_isInMenuByUserId[player.UserId] = nil
 		_deathAtByUserId[player.UserId] = nil
@@ -2217,7 +2155,7 @@ function MatchService:Start(dataService: DataService): ()
 		end
 	end)
 
-	Network.Match.RequestVoteSync.Listen(_onRequestVoteSync)
+	Network.Match.RequestMatchSync.Listen(_onRequestMatchSync)
 	Network.Match.RequestJoinMatch.Listen(_onRequestJoinMatch)
 	Network.Match.RequestRespawn.Listen(_onRequestRespawn)
 	Network.Match.RequestReturnToMenu.Listen(_onRequestReturnToMenu)

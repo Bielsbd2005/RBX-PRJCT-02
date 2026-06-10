@@ -12,6 +12,7 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Janitor = require(Packages.janitor) :: any
 local Fusion = require(Packages.fusion)
 local GameConfig = require(Shared.GameConfig)
+local MatchSnapshot = require(Shared.MatchSnapshot)
 local Network = require(Shared.networking.Network)
 
 local IrisTransition = require(Client.core.ui.IrisTransition)
@@ -162,9 +163,9 @@ function MatchFeature.start(menuController: any): any
 
 	-- Lighting: aplicar preset Lobby al arrancar (sin tween) y alternar
 	-- entre Match/Lobby según la fase. El Locker se controla en su feature.
-	-- `activeMapName` lo actualiza el listener de MapLoadState más abajo;
-	-- al entrar a una fase de match se mapea a un preset específico del mapa
-	-- (MAP_TO_LIGHTING_PRESET) o se cae al genérico "Match".
+	-- `activeMapName` lo actualiza el observer de MatchSnapshot.MapName más
+	-- abajo; al entrar a una fase de match se mapea a un preset específico del
+	-- mapa (MAP_TO_LIGHTING_PRESET) o se cae al genérico "Match".
 	local activeMapName = ""
 	LightingPresetController.applyImmediate("Lobby")
 	-- DOF de fondo del menú: encendido al arrancar (estamos en Lobby) y alternado
@@ -407,8 +408,6 @@ function MatchFeature.start(menuController: any): any
 	local function onPlayPressed()
 		if isVoting then
 			if votingPanel then
-				-- Refresca opciones/votos por si se perdió algún StartVote/VoteState.
-				Network.Match.RequestVoteSync.Send({})
 				votingPanel:open()
 			end
 			return
@@ -434,37 +433,142 @@ function MatchFeature.start(menuController: any): any
 		onPlayPressed()
 	end), "Disconnect")
 
-	-- ── Network: MapLoadState ────────────────────────────────
-	janitor:Add(Network.Match.MapLoadState.Listen(function(data: {
-		isLoading: boolean,
-		playEnabled: boolean,
-		mapName: string,
-		isVoting: boolean,
-	})
-		-- Capturado para que el handler de fase pueda elegir el preset de
-		-- iluminación específico del mapa (ver MAP_TO_LIGHTING_PRESET arriba).
-		activeMapName = data.mapName
+	-- ── MatchSnapshot: estado ambiental replicado ────────────
+	-- Fase/mapa/voto/score viajan como attributes (ReplicatedStorage.
+	-- MatchSnapshot): el valor vigente está siempre disponible —late joiners
+	-- incluidos— y los cambios llegan por AttributeChanged, sin resyncs ni
+	-- timeouts de recuperación. Los countdowns se derivan localmente de
+	-- PhaseEndsAt (reloj de servidor sincronizado), sin ticks de red.
+	local snapshotPhase: string = MatchSnapshot.getPhase()
 
-		-- MapLoadState es la fuente de verdad del estado de votación: si perdimos el
-		-- StartVote (carrera al unirse / arrancar el servidor), aquí lo recuperamos.
-		if data.isVoting and not isVoting then
-			isVoting = true
-			-- No tenemos las opciones (perdimos StartVote): pídelas para poblar la vista.
-			Network.Match.RequestVoteSync.Send({})
-		elseif not data.isVoting and isVoting then
-			-- La votación acabó sin que recibiéramos EndVote: limpieza de seguridad.
-			isVoting = false
-			selectedVoteKey = ""
-			view:hide()
-			if votingPanel then
-				votingPanel:close()
+	local function getPhaseTimeLeft(): number
+		local endsAt = MatchSnapshot.getNumber("PhaseEndsAt")
+		if endsAt <= 0 then
+			return 0
+		end
+		return math.ceil(math.max(0, endsAt - MatchSnapshot.now()))
+	end
+
+	local function readVoteOptions()
+		return {
+			option1 = { mapName = MatchSnapshot.getString("Option1Name"), mapImage = MatchSnapshot.getString("Option1Image") },
+			option2 = { mapName = MatchSnapshot.getString("Option2Name"), mapImage = MatchSnapshot.getString("Option2Image") },
+			option3 = { mapName = MatchSnapshot.getString("Option3Name"), mapImage = MatchSnapshot.getString("Option3Image") },
+		}
+	end
+
+	local function applyVoterIds()
+		if not isVoting then
+			return
+		end
+		view:updateVotes({
+			random = MatchSnapshot.getString("VotesRandom"),
+			option1 = MatchSnapshot.getString("Votes1"),
+			option2 = MatchSnapshot.getString("Votes2"),
+			option3 = MatchSnapshot.getString("Votes3"),
+		})
+		if selectedVoteKey ~= "" then
+			view:setSelectedMap(selectedVoteKey)
+		end
+	end
+
+	-- HUD de ronda: score por AttributeChanged + countdown del ticker (abajo).
+	local function updateRoundHud()
+		if snapshotPhase ~= "InRound" then
+			return
+		end
+		local scoreA = MatchSnapshot.getNumber("ScoreA")
+		local scoreB = MatchSnapshot.getNumber("ScoreB")
+		local timeLeft = getPhaseTimeLeft()
+		hud:setScores(scoreA, scoreB, timeLeft)
+
+		-- Precargar las réplicas de Resultados un poco antes del fin de ronda (por
+		-- tiempo o por puntuación cercana al límite) para evitar el "pop".
+		if not resultsPreloaded and MatchState.isActive() then
+			local nearTime = timeLeft <= RESULTS_PRELOAD_LEAD_SECONDS
+			local nearScore = math.max(scoreA, scoreB)
+				>= GameConfig.WinScoreLimit - RESULTS_PRELOAD_SCORE_LEAD
+			if nearTime or nearScore then
+				resultsPreloaded = true
+				local lt, entries = hud:captureEndResultsData()
+				resultsView:preload(lt, entries)
 			end
 		end
+	end
 
-		matchMenu:setPhaseLabel(if isVoting then "VOTING" else "DEPLOY")
-		setPlayEnabled(data.playEnabled and not data.isLoading)
+	local function applySnapshotPhase(phase: string)
+		snapshotPhase = phase
+		local wasVoting = isVoting
+		isVoting = phase == "Voting"
+		setPlayEnabled(phase == "InRound")
+
+		if isVoting and not wasVoting then
+			matchMenu:setPhaseLabel("VOTING")
+			selectedVoteKey = ""
+			view:show(readVoteOptions(), GameConfig.VoteDuration)
+			view:setSelectedMap("")
+			view:updateTimer(getPhaseTimeLeft())
+			applyVoterIds()
+			-- Quien venía de ver Results entra a la votación automáticamente.
+			if pendingAutoVote then
+				pendingAutoVote = false
+				if votingPanel then
+					votingPanel:open()
+				end
+			end
+		elseif wasVoting and not isVoting then
+			selectedVoteKey = ""
+			pendingAutoVote = false
+			local function finishVote()
+				matchMenu:setPhaseLabel("DEPLOY")
+				view:hide()
+				if votingPanel then
+					votingPanel:close()
+				end
+			end
+			-- Solo animamos el ganador si el jugador está viendo la pantalla; si
+			-- no, reseteamos en silencio (sigue en el menú).
+			local winnerMapName = MatchSnapshot.getString("WinnerMapName")
+			if votingPanelOpen and winnerMapName ~= "" then
+				view:showWinner(winnerMapName, finishVote)
+			else
+				finishVote()
+			end
+		else
+			matchMenu:setPhaseLabel(if isVoting then "VOTING" else "DEPLOY")
+		end
+
+		updateRoundHud()
 		matchMenu:enforceHidden()
-	end), true)
+	end
+
+	janitor:Add(MatchSnapshot.observe("MapName", function(value)
+		-- Capturado para que el handler de fase pueda elegir el preset de
+		-- iluminación específico del mapa (ver MAP_TO_LIGHTING_PRESET arriba).
+		activeMapName = if type(value) == "string" then value else ""
+	end), "Disconnect")
+	janitor:Add(MatchSnapshot.observe("Phase", function(value)
+		applySnapshotPhase(if type(value) == "string" then value else "Idle")
+	end), "Disconnect")
+	for _, votesKey in { "Votes1", "Votes2", "Votes3", "VotesRandom" } do
+		janitor:Add(MatchSnapshot.observe(votesKey, applyVoterIds), "Disconnect")
+	end
+	for _, scoreKey in { "ScoreA", "ScoreB" } do
+		janitor:Add(MatchSnapshot.observe(scoreKey, updateRoundHud), "Disconnect")
+	end
+
+	-- Ticker local 1 Hz para los countdowns (voto y ronda) derivados de
+	-- PhaseEndsAt — el servidor ya no emite ticks periódicos.
+	task.spawn(function()
+		while featureAlive do
+			if isVoting then
+				view:updateTimer(getPhaseTimeLeft())
+			else
+				updateRoundHud()
+			end
+			task.wait(1)
+		end
+	end)
 
 	-- ── Menu GUI tracking ────────────────────────────────────
 	janitor:Add(menuGui:GetPropertyChangedSignal("Enabled"):Connect(function()
@@ -578,28 +682,6 @@ function MatchFeature.start(menuController: any): any
 			MatchCamera.setGameplay(character)
 		end)
 		iris:open()
-	end), true)
-
-	-- ── Network: RoundState ──────────────────────────────────
-	janitor:Add(Network.Match.RoundState.Listen(function(data: {
-		scoreA: number,
-		scoreB: number,
-		timeLeft: number,
-	})
-		hud:setScores(data.scoreA, data.scoreB, data.timeLeft)
-
-		-- Precargar las réplicas de Resultados un poco antes del fin de ronda (por
-		-- tiempo o por puntuación cercana al límite) para que no se vea el "pop".
-		if not resultsPreloaded and MatchState.isActive() then
-			local nearTime = data.timeLeft <= RESULTS_PRELOAD_LEAD_SECONDS
-			local nearScore = math.max(data.scoreA, data.scoreB)
-				>= GameConfig.WinScoreLimit - RESULTS_PRELOAD_SCORE_LEAD
-			if nearTime or nearScore then
-				resultsPreloaded = true
-				local lt, entries = hud:captureEndResultsData()
-				resultsView:preload(lt, entries)
-			end
-		end
 	end), true)
 
 	-- ── Network: PlayerStreakState ────────────────────────────
@@ -751,7 +833,6 @@ function MatchFeature.start(menuController: any): any
 		MatchCamera.forceLobbyWithRetries(notInActiveMatch)
 		matchMenu:forceShow()
 		iris:open()
-		Network.Match.RequestVoteSync.Send({})
 	end), true)
 
 	-- ── Network: RoundEnded ──────────────────────────────────
@@ -811,8 +892,9 @@ function MatchFeature.start(menuController: any): any
 				latestMatchResults = nil
 
 				-- Tras Results, enviar a la votación automáticamente. Si ya empezó,
-				-- abrir directo; si no (suele llegar StartVote casi a la vez), esperar
-				-- a StartVote vía pendingAutoVote, con fallback al menú por timeout.
+				-- abrir directo; si no (la fase Voting suele llegar casi a la vez),
+				-- esperar al observer de fase vía pendingAutoVote, con fallback al
+				-- menú por timeout.
 				matchMenu:setPhaseLabel("VOTING")
 				if isVoting and votingPanel then
 					votingPanel:open()
@@ -832,88 +914,6 @@ function MatchFeature.start(menuController: any): any
 			MatchCamera.forceLobbyWithRetries(notInActiveMatch)
 			iris:open()
 			matchMenu:forceShow()
-		end
-	end), true)
-
-	-- ── Network: StartVote ───────────────────────────────────
-	-- No abre la pantalla por sí sola salvo para quien acaba de ver Results
-	-- (pendingAutoVote). El resto entra con Play (label "VOTING").
-	janitor:Add(Network.Match.StartVote.Listen(function(data: {
-		option1Name: string,
-		option1Image: string,
-		option2Name: string,
-		option2Image: string,
-		option3Name: string,
-		option3Image: string,
-		duration: number,
-	})
-		isVoting = true
-		matchMenu:setPhaseLabel("VOTING")
-		selectedVoteKey = ""
-		setPlayEnabled(playEnabled) -- recalcula Active (clickeable durante votación)
-		view:show({
-			option1 = { mapName = data.option1Name, mapImage = data.option1Image },
-			option2 = { mapName = data.option2Name, mapImage = data.option2Image },
-			option3 = { mapName = data.option3Name, mapImage = data.option3Image },
-		}, data.duration)
-		view:setSelectedMap("")
-
-		-- Quien venía de ver Results entra a la votación automáticamente.
-		if pendingAutoVote then
-			pendingAutoVote = false
-			if votingPanel then
-				votingPanel:open()
-			end
-		end
-	end), true)
-
-	-- ── Network: VoteState ───────────────────────────────────
-	janitor:Add(Network.Match.VoteState.Listen(function(data: {
-		option1Name: string,
-		option1VoterIds: string,
-		option2Name: string,
-		option2VoterIds: string,
-		option3Name: string,
-		option3VoterIds: string,
-		randomVoterIds: string,
-		timeLeft: number,
-	})
-		if not isVoting then
-			return
-		end
-		view:updateTimer(data.timeLeft)
-		view:updateVotes({
-			random = data.randomVoterIds,
-			option1 = data.option1VoterIds,
-			option2 = data.option2VoterIds,
-			option3 = data.option3VoterIds,
-		})
-		if selectedVoteKey ~= "" then
-			view:setSelectedMap(selectedVoteKey)
-		end
-	end), true)
-
-	-- ── Network: EndVote ─────────────────────────────────────
-	janitor:Add(Network.Match.EndVote.Listen(function(data: { winnerMapName: string })
-		isVoting = false
-		selectedVoteKey = ""
-		pendingAutoVote = false
-		setPlayEnabled(playEnabled) -- ya no es clickeable por votación
-
-		local function finishVote()
-			matchMenu:setPhaseLabel("DEPLOY")
-			view:hide()
-			if votingPanel then
-				votingPanel:close()
-			end
-		end
-
-		-- Solo animamos el ganador si el jugador está viendo la pantalla; si no,
-		-- reseteamos en silencio (sigue en el menú).
-		if votingPanelOpen then
-			view:showWinner(data.winnerMapName, finishVote)
-		else
-			finishVote()
 		end
 	end), true)
 
@@ -948,7 +948,9 @@ function MatchFeature.start(menuController: any): any
 		Fusion.doCleanup(fusionScope)
 	end, true)
 
-	Network.Match.RequestVoteSync.Send({})
+	-- Sync inicial del estado event-driven (streaks + roster de bots); el
+	-- estado ambiental ya se reconcilió arriba al observar el snapshot.
+	Network.Match.RequestMatchSync.Send({})
 
 	return janitor
 end

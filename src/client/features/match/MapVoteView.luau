@@ -40,7 +40,7 @@ export type OptionModel = {
 	mapImage: string,
 }
 
--- CSV de userIds por slot, tal cual llega del packet VoteState.
+-- CSV de userIds por slot, tal cual llega del snapshot replicado (Votes1/2/3/Random).
 export type VoterData = {
 	random: string,
 	option1: string,

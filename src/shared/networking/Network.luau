@@ -170,39 +170,13 @@ end)
 
 -- ────────────────────────────────────────────────────────────
 -- NAMESPACE: Match
--- Flujo de votacion de mapa.
+-- Eventos one-shot del flujo de partida. El estado ambiental (fase, mapa,
+-- votación, score) NO viaja por aquí: se replica vía attributes en
+-- Shared/MatchSnapshot — los clientes leen el valor vigente y observan cambios.
 -- ────────────────────────────────────────────────────────────
 
 local MatchNamespace = ByteNet.DefineNamespace("Match", function()
 	return {
-		-- S → C: Inicio de votacion con 3 opciones de mapa fijas (Option1/2/3). La
-		-- opción "Random" siempre está presente en la UI y no necesita datos de mapa.
-		StartVote = ByteNet.DefinePacket({
-			Value = ByteNet.Struct({
-				option1Name = ByteNet.String,
-				option1Image = ByteNet.String,
-				option2Name = ByteNet.String,
-				option2Image = ByteNet.String,
-				option3Name = ByteNet.String,
-				option3Image = ByteNet.String,
-				duration = ByteNet.Int32,
-			}),
-			ReliabilityType = "Reliable",
-		}),
-
-		-- S → C: Estado de carga de mapa y disponibilidad de Play. isVoting permite
-		-- al cliente saber que el Play deshabilitado es por votación aunque se haya
-		-- perdido el StartVote (carrera al unirse / arrancar el servidor).
-		MapLoadState = ByteNet.DefinePacket({
-			Value = ByteNet.Struct({
-				isLoading = ByteNet.Bool,
-				playEnabled = ByteNet.Bool,
-				mapName = ByteNet.String,
-				isVoting = ByteNet.Bool,
-			}),
-			ReliabilityType = "Reliable",
-		}),
-
 		-- C → S: Solicitud para entrar a la partida (desde menu Play).
 		RequestJoinMatch = ByteNet.DefinePacket({
 			Value = ByteNet.Struct({}),
@@ -212,16 +186,6 @@ local MatchNamespace = ByteNet.DefineNamespace("Match", function()
 		-- S → C: Confirmacion de spawn completo; permite quitar fade.
 		JoinMatchSpawned = ByteNet.DefinePacket({
 			Value = ByteNet.Struct({}),
-			ReliabilityType = "Reliable",
-		}),
-
-		-- S → C: Estado de TeamDeathmatch (kills y tiempo restante).
-		RoundState = ByteNet.DefinePacket({
-			Value = ByteNet.Struct({
-				scoreA = ByteNet.Int32,
-				scoreB = ByteNet.Int32,
-				timeLeft = ByteNet.Int32,
-			}),
 			ReliabilityType = "Reliable",
 		}),
 
@@ -326,33 +290,11 @@ local MatchNamespace = ByteNet.DefineNamespace("Match", function()
 			ReliabilityType = "Reliable",
 		}),
 
-		-- C → S: Solicita re-sync del estado de votacion activo.
-		RequestVoteSync = ByteNet.DefinePacket({
+		-- C → S: Sync inicial del estado event-driven (streaks de todos los
+		-- jugadores + roster de bots) cuando el cliente termina de cargar. El
+		-- estado ambiental viaja por MatchSnapshot y no necesita resync.
+		RequestMatchSync = ByteNet.DefinePacket({
 			Value = ByteNet.Struct({}),
-			ReliabilityType = "Reliable",
-		}),
-
-		-- S → C: Snapshot de votos y tiempo restante. randomVoterIds = quienes
-		-- votaron la opción "Random" (sin mapa concreto).
-		VoteState = ByteNet.DefinePacket({
-			Value = ByteNet.Struct({
-				option1Name = ByteNet.String,
-				option1VoterIds = ByteNet.String,
-				option2Name = ByteNet.String,
-				option2VoterIds = ByteNet.String,
-				option3Name = ByteNet.String,
-				option3VoterIds = ByteNet.String,
-				randomVoterIds = ByteNet.String,
-				timeLeft = ByteNet.Int32,
-			}),
-			ReliabilityType = "Reliable",
-		}),
-
-		-- S → C: Fin de votacion con mapa ganador.
-		EndVote = ByteNet.DefinePacket({
-			Value = ByteNet.Struct({
-				winnerMapName = ByteNet.String,
-			}),
 			ReliabilityType = "Reliable",
 		}),
 

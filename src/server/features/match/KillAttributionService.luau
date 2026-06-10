@@ -152,7 +152,7 @@ function KillAttributionService:SendStreakSnapshotTo(player: Player, userId: num
 end
 
 -- Envía a `player` el estado de streak de todos los players + bots con actividad.
--- Usado en `RequestVoteSync` y onboarding.
+-- Usado en `RequestMatchSync` y onboarding.
 function KillAttributionService:SendAllStreaksTo(player: Player)
 	for _, otherPlayer in Players:GetPlayers() do
 		self:SendStreakSnapshotTo(player, otherPlayer.UserId)

@@ -2,16 +2,17 @@
 --[[
 	VotingService.luau
 	Flujo completo de votación de mapas: estado del voto activo, cooldowns,
-	timer, broadcasts y resolución del ganador.
+	timer y resolución del ganador.
+
+	El estado visible (opciones, votos por opción, ganador) se publica en el
+	snapshot replicado (Shared/MatchSnapshot) — no hay paquetes de voto S→C ni
+	resyncs; los clientes leen los attributes. El único paquete es CastVote
+	(C→S).
 
 	El CUÁNDO votar lo decide la máquina de fases de MatchService — StartVote
 	solo se llama desde la transición Idle → Voting. Al cerrar la votación se
 	invoca `onVoteFinished(winnerMapName)` (inyectado via Start), con el que
 	MatchService transiciona a Loading.
-
-	El handler `_onRequestVoteSync` permanece en MatchService porque hace 5
-	SendTo (sólo uno es voto). VotingService expone `SendSnapshotTo(player)`
-	para la parte de votación.
 ]]
 
 local AnalyticsService = game:GetService("AnalyticsService")
@@ -22,17 +23,13 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Network = require(Shared.networking.Network)
 local NetGuards = require(Shared.networking.NetGuards)
 local GameConfig = require(Shared.GameConfig)
+local MatchSnapshot = require(Shared.MatchSnapshot)
 
 type MapDefinition = typeof(GameConfig.Maps[1])
 
 type ActiveVoteState = {
-	options: { MapDefinition },
 	optionNames: { string },
-	optionImages: { [string]: string },
-	voteCounts: { [string]: number },
 	votesByUserId: { [number]: string },
-	endAt: number,
-	duration: number,
 }
 
 type Deps = {
@@ -45,7 +42,7 @@ VotingService.__index = VotingService
 -- ── Constantes ───────────────────────────────────────────────
 
 -- Cooldown entre cambios de voto del mismo jugador. 0.3s permite ~3 cambios/seg
--- — suficiente para UX responsive sin permitir spam que sature broadcasts.
+-- — suficiente para UX responsive sin permitir spam que sature la replicación.
 local VOTE_CHANGE_COOLDOWN = 0.3
 local DEFAULT_PLACEHOLDER_IMAGE = "rbxasset://textures/ui/GuiImagePlaceholder.png"
 
@@ -59,7 +56,6 @@ local _deps: Deps = nil :: any
 local _started = false
 local _activeVote: ActiveVoteState? = nil
 local _voteCooldownsByUserId: { [number]: number } = {}
-local _lastVoteBroadcastKey: string? = nil
 local _castVoteConn: any = nil
 
 -- ── Helpers privados ─────────────────────────────────────────
@@ -88,35 +84,15 @@ local function _collectVoterIds(vote: ActiveVoteState, mapName: string): string
 	return table.concat(ids, ",")
 end
 
-local function _buildVoteStatePacket(vote: ActiveVoteState, timeLeft: number)
-	return {
-		option1Name = vote.optionNames[1],
-		option1VoterIds = _collectVoterIds(vote, vote.optionNames[1]),
-		option2Name = vote.optionNames[2],
-		option2VoterIds = _collectVoterIds(vote, vote.optionNames[2]),
-		option3Name = vote.optionNames[3],
-		option3VoterIds = _collectVoterIds(vote, vote.optionNames[3]),
-		randomVoterIds = _collectVoterIds(vote, RANDOM_KEY),
-		timeLeft = math.max(0, timeLeft),
-	}
-end
-
-local function _broadcastVoteState(vote: ActiveVoteState)
-	local timeLeft = math.ceil(math.max(0, vote.endAt - time()))
-	local packet = _buildVoteStatePacket(vote, timeLeft)
-	local key = string.format(
-		"%s|%s|%s|%s|%s|%s|%s|%d",
-		tostring(packet.option1Name), packet.option1VoterIds,
-		tostring(packet.option2Name), packet.option2VoterIds,
-		tostring(packet.option3Name), packet.option3VoterIds,
-		packet.randomVoterIds,
-		packet.timeLeft
-	)
-	if key == _lastVoteBroadcastKey then
-		return
-	end
-	_lastVoteBroadcastKey = key
-	Network.Match.VoteState.SendToAll(packet)
+-- Publica los votantes por opción en el snapshot. Re-escribir un CSV sin
+-- cambios es un no-op de replicación, así que no hace falta dedupe manual.
+local function _publishVotes(vote: ActiveVoteState)
+	MatchSnapshot.set({
+		Votes1 = _collectVoterIds(vote, vote.optionNames[1]),
+		Votes2 = _collectVoterIds(vote, vote.optionNames[2]),
+		Votes3 = _collectVoterIds(vote, vote.optionNames[3]),
+		VotesRandom = _collectVoterIds(vote, RANDOM_KEY),
+	})
 end
 
 local function _isVoteChangeAllowed(player: Player): boolean
@@ -208,39 +184,21 @@ local function _onCastVote(data: { mapName: string }, player: Player)
 		return
 	end
 
-	local previous = vote.votesByUserId[player.UserId]
-	if previous == mapName then
+	if vote.votesByUserId[player.UserId] == mapName then
 		return
 	end
 
-	if previous then
-		local oldCount = vote.voteCounts[previous] or 0
-		vote.voteCounts[previous] = math.max(0, oldCount - 1)
-	end
-
 	vote.votesByUserId[player.UserId] = mapName
-	vote.voteCounts[mapName] = (vote.voteCounts[mapName] or 0) + 1
-
-	-- Broadcast inmediato: sin esto el cambio solo se vería en el siguiente tick
-	-- del timer (hasta ~1s de latencia). El dedupe-key evita reenvíos redundantes.
-	_broadcastVoteState(vote)
+	_publishVotes(vote)
 end
 
-local function _runVoteTimer(vote: ActiveVoteState)
-	while _activeVote == vote do
-		local remaining = vote.endAt - time()
-		if remaining <= 0 then
-			break
-		end
-		_broadcastVoteState(vote)
-		task.wait(1)
-	end
-
+-- Cierre de la votación (al expirar VoteDuration): resuelve el ganador, lo
+-- publica en el snapshot (limpiando las opciones) y notifica a MatchService.
+local function _finishVote(vote: ActiveVoteState)
 	if _activeVote ~= vote then
 		return
 	end
 
-	_broadcastVoteState(vote)
 	local winner = _resolveWinner(vote)
 
 	local totalVoters = 0
@@ -258,7 +216,13 @@ local function _runVoteTimer(vote: ActiveVoteState)
 		end)
 	end
 
-	Network.Match.EndVote.SendToAll({ winnerMapName = winner })
+	MatchSnapshot.set({
+		WinnerMapName = winner,
+		Option1Name = "", Option1Image = "",
+		Option2Name = "", Option2Image = "",
+		Option3Name = "", Option3Image = "",
+		Votes1 = "", Votes2 = "", Votes3 = "", VotesRandom = "",
+	})
 
 	_activeVote = nil
 	task.defer(function()
@@ -275,64 +239,16 @@ function VotingService:Start(deps: Deps)
 	_started = true
 	_deps = deps
 	_activeVote = nil
-	_lastVoteBroadcastKey = nil
 	table.clear(_voteCooldownsByUserId)
 
 	_castVoteConn = Network.Match.CastVote.Listen(_onCastVote)
 end
 
-function VotingService:HasActiveVote(): boolean
-	return _activeVote ~= nil
-end
-
-function VotingService:SendSnapshotTo(player: Player)
-	local vote = _activeVote
-	if not vote then
-		return
-	end
-
-	local option1Name = vote.optionNames[1]
-	local option2Name = vote.optionNames[2]
-	local option3Name = vote.optionNames[3]
-	if not option1Name or not option2Name or not option3Name then
-		return
-	end
-
-	local okStart = pcall(function()
-		Network.Match.StartVote.SendTo({
-			option1Name = option1Name,
-			option1Image = vote.optionImages[option1Name] or DEFAULT_PLACEHOLDER_IMAGE,
-			option2Name = option2Name,
-			option2Image = vote.optionImages[option2Name] or DEFAULT_PLACEHOLDER_IMAGE,
-			option3Name = option3Name,
-			option3Image = vote.optionImages[option3Name] or DEFAULT_PLACEHOLDER_IMAGE,
-			duration = vote.duration,
-		}, player)
-	end)
-
-	if not okStart then
-		return
-	end
-
-	local timeLeft = math.ceil(math.max(0, vote.endAt - time()))
-	pcall(function()
-		Network.Match.VoteState.SendTo(_buildVoteStatePacket(vote, timeLeft), player)
-	end)
-end
-
 function VotingService:DisconnectPlayer(userId: number)
 	local vote = _activeVote
-	if not vote then
-		_voteCooldownsByUserId[userId] = nil
-		return
-	end
-
-	local previous = vote.votesByUserId[userId]
-	if previous then
+	if vote and vote.votesByUserId[userId] then
 		vote.votesByUserId[userId] = nil
-		local oldCount = vote.voteCounts[previous] or 0
-		vote.voteCounts[previous] = math.max(0, oldCount - 1)
-		_broadcastVoteState(vote)
+		_publishVotes(vote)
 	end
 	_voteCooldownsByUserId[userId] = nil
 end
@@ -352,49 +268,28 @@ function VotingService:StartVote(): boolean
 	end
 
 	local options = _pickRandomMapOptions(pool, 3)
-	local optionNames = { options[1].Name, options[2].Name, options[3].Name }
-	local voteCounts = {
-		[optionNames[1]] = 0,
-		[optionNames[2]] = 0,
-		[optionNames[3]] = 0,
-		[RANDOM_KEY] = 0,
-	}
-	local optionImages = {
-		[optionNames[1]] = options[1].PlaceholderImage ~= "" and options[1].PlaceholderImage or DEFAULT_PLACEHOLDER_IMAGE,
-		[optionNames[2]] = options[2].PlaceholderImage ~= "" and options[2].PlaceholderImage or DEFAULT_PLACEHOLDER_IMAGE,
-		[optionNames[3]] = options[3].PlaceholderImage ~= "" and options[3].PlaceholderImage or DEFAULT_PLACEHOLDER_IMAGE,
-	}
-
-	local voteState: ActiveVoteState = {
-		options = options,
-		optionNames = optionNames,
-		optionImages = optionImages,
-		voteCounts = voteCounts,
+	local vote: ActiveVoteState = {
+		optionNames = { options[1].Name, options[2].Name, options[3].Name },
 		votesByUserId = {},
-		endAt = time() + GameConfig.VoteDuration,
-		duration = GameConfig.VoteDuration,
 	}
 
-	_activeVote = voteState
-	-- Reset del dedupe key — el nuevo vote tiene otras opciones, debemos
-	-- broadcastear el primer estado aunque numéricamente coincida con basura.
-	_lastVoteBroadcastKey = nil
+	_activeVote = vote
 	-- Limpiar cooldowns viejos del voto anterior para que el primer voto del
 	-- nuevo ciclo no quede bloqueado.
 	table.clear(_voteCooldownsByUserId)
 
-	Network.Match.StartVote.SendToAll({
-		option1Name = optionNames[1],
-		option1Image = optionImages[optionNames[1]],
-		option2Name = optionNames[2],
-		option2Image = optionImages[optionNames[2]],
-		option3Name = optionNames[3],
-		option3Image = optionImages[optionNames[3]],
-		duration = GameConfig.VoteDuration,
+	local function imageOf(definition: MapDefinition): string
+		return if definition.PlaceholderImage ~= "" then definition.PlaceholderImage else DEFAULT_PLACEHOLDER_IMAGE
+	end
+	MatchSnapshot.set({
+		WinnerMapName = "",
+		Option1Name = vote.optionNames[1], Option1Image = imageOf(options[1]),
+		Option2Name = vote.optionNames[2], Option2Image = imageOf(options[2]),
+		Option3Name = vote.optionNames[3], Option3Image = imageOf(options[3]),
+		Votes1 = "", Votes2 = "", Votes3 = "", VotesRandom = "",
 	})
 
-	_broadcastVoteState(voteState)
-	task.spawn(_runVoteTimer, voteState)
+	task.delay(GameConfig.VoteDuration, _finishVote, vote)
 	return true
 end
 
