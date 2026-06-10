@@ -56,7 +56,6 @@ local _started = false
 local REMOTE_RATE_LIMIT_SECONDS = 0.5
 local _voteSyncCooldownByUserId: { [number]: number } = {}
 local _returnToMenuCooldownByUserId: { [number]: number } = {}
-local _phase = "Idle"
 
 -- Forward-declaración: el listener de muerte (_registerDeathListener) llama a este
 -- helper, que se define más abajo (depende de _findLobbySpawn/_teleportCharacterToSpawn).
@@ -71,8 +70,6 @@ local DEATH_BODY_TO_LOBBY_DELAY = 3
 -- una muerte en lobby vuelve a disparar el respawn de lobby de inmediato).
 local LOBBY_RESPAWN_DEBOUNCE = 2
 
-local _isMapLoading = false
-local _isPlayEnabled = false
 local _activeMapName = ""
 local _activeMapContainer: BasePart? = nil
 local _activeMapModel: Instance? = nil
@@ -81,8 +78,6 @@ local _activeMapModel: Instance? = nil
 -- (potencialmente miles de instances) en cada respawn/spawn.
 local _cachedSpawnPoints: { BasePart }? = nil
 local _cachedBotsFolder: Instance? = nil
-local _roundId = 0
-local _isRoundActive = false
 local _roundEndAt = 0
 local _roundScoreA = 0
 local _roundScoreB = 0
@@ -189,52 +184,83 @@ local _recentDeathBySpawn: { [BasePart]: number } = setmetatable({}, { __mode = 
 
 local _teamA: Team? = nil
 local _teamB: Team? = nil
-local _finishRoundAndScheduleRestart: any = nil
--- Forward-decl: _endRoundAndRestartVoting + el path de map load fail llaman a
--- _startVoteIfPossible antes de que su implementación (delegate a VotingService)
--- esté declarada más abajo. Mantenemos el patrón que ya usa _finishRoundAndScheduleRestart.
-local _startVoteIfPossible: any = nil
 local _AIService: any = nil
 local _dataService: DataService = nil :: any
 
+-- ── Máquina de fases ─────────────────────────────────────────
+-- Única fuente de verdad del flujo de partida:
+--   Idle → Voting → Loading → InRound → Results → Idle
+-- `_phase` SOLO muta dentro de las transiciones (_enter*); el resto del código
+-- la lee. Los viejos flags sueltos (_isMapLoading / _isPlayEnabled /
+-- _isRoundActive) son derivados de la fase.
+type Phase = "Idle" | "Voting" | "Loading" | "InRound" | "Results"
+local _phase: Phase = "Idle"
+-- Bumpeada en cada transición. Los timers de fase (round timer, ventana de
+-- Results) la capturan y abortan si hubo una transición debajo (sustituye al
+-- viejo _roundId).
+local _phaseGeneration = 0
 
--- El parámetro reason no se consume: documenta el motivo del cambio de fase
--- en cada call site.
-local function _setPhase(nextPhase: string, _reason: string?)
-	if _phase == nextPhase then
+local function _isRoundActive(): boolean
+	return _phase == "InRound"
+end
+
+-- Forward-decl: el listener de muerte y _runRoundTimer disparan el fin de
+-- ronda antes de que la transición esté definida (cierra el ciclo del flujo).
+local _enterResults: (winnerTeam: string) -> ()
+
+local function _enterIdle()
+	_phase = "Idle"
+	_phaseGeneration += 1
+end
+
+local function _enterVoting()
+	_phase = "Voting"
+	_phaseGeneration += 1
+	if not VotingService:StartVote() then
+		-- Solo pasa con <3 mapas configurados (StartVote ya lo warnea).
+		_enterIdle()
+	end
+end
+
+-- Idle → Voting. Único punto de arranque de la votación; cualquier disparador
+-- (PlayerAdded, RequestVoteSync, fin de la ventana de Results, map-load fail)
+-- pasa por aquí y solo actúa en fase Idle.
+local function _tryStartVoting()
+	if _phase ~= "Idle" then
 		return
 	end
+	if #Players:GetPlayers() < GameConfig.MinPlayersToStart then
+		return
+	end
+	_enterVoting()
+end
 
-	_phase = nextPhase
+local function _buildMapLoadStatePacket()
+	return {
+		isLoading = _phase == "Loading",
+		playEnabled = _phase == "InRound",
+		mapName = _activeMapName,
+		isVoting = VotingService:HasActiveVote(),
+	}
 end
 
 local function _sendMapLoadStateToAll()
-	local isVoting = VotingService:HasActiveVote()
+	local packet = _buildMapLoadStatePacket()
 	local key = string.format(
 		"%s|%s|%s|%s",
-		tostring(_isMapLoading), tostring(_isPlayEnabled), _activeMapName, tostring(isVoting)
+		tostring(packet.isLoading), tostring(packet.playEnabled), packet.mapName, tostring(packet.isVoting)
 	)
 	if _lastMapLoadStateBroadcastKey == key then
 		return
 	end
 	_lastMapLoadStateBroadcastKey = key
 
-	Network.Match.MapLoadState.SendToAll({
-		isLoading = _isMapLoading,
-		playEnabled = _isPlayEnabled,
-		mapName = _activeMapName,
-		isVoting = isVoting,
-	})
+	Network.Match.MapLoadState.SendToAll(packet)
 end
 
 local function _sendMapLoadStateToPlayer(player: Player)
 	pcall(function()
-		Network.Match.MapLoadState.SendTo({
-			isLoading = _isMapLoading,
-			playEnabled = _isPlayEnabled,
-			mapName = _activeMapName,
-			isVoting = VotingService:HasActiveVote(),
-		}, player)
+		Network.Match.MapLoadState.SendTo(_buildMapLoadStatePacket(), player)
 	end)
 end
 
@@ -247,7 +273,7 @@ local function _buildRoundStatePacket(timeLeft: number)
 end
 
 local function _broadcastRoundState()
-	if not _isRoundActive then
+	if not _isRoundActive() then
 		return
 	end
 
@@ -261,7 +287,7 @@ local function _broadcastRoundState()
 end
 
 local function _sendRoundStateToPlayer(player: Player)
-	if not _isRoundActive then
+	if not _isRoundActive() then
 		return
 	end
 
@@ -366,8 +392,8 @@ end
 
 -- Helper consolidado: limpia todas las tablas con "scope match" (state
 -- por-jugador y por-round) en un orden documentado. Llamado por:
---   * `_endRoundAndRestartVoting`: cleanup final tras un round.
---   * `_startMapLoadFlow`: slate limpio antes del siguiente round.
+--   * `_enterResults`: cleanup final tras un round.
+--   * `_enterInRound`: slate limpio antes del siguiente round.
 -- Cualquier tabla nueva con scope match debe agregarse acá — esta es la
 -- fuente de verdad y previene drift entre los dos call sites.
 -- NO toca:
@@ -396,10 +422,8 @@ local function _resetMatchScopedState()
 	table.clear(_pickupEligibilityByUserId)
 	-- Streak state (counts + timeouts + broadcast keys) vive en KillAttributionService.
 	KillAttributionService:Clear()
-	-- Recent deaths por spawn point (audit fix: antes solo se limpiaba en
-	-- _startMapLoadFlow, no en _endRoundAndRestartVoting → references a
-	-- BaseParts destruidos del round anterior podían quedar como keys).
-	-- table.clear preserva la metatable de weak keys.
+	-- Recent deaths por spawn point. table.clear preserva la metatable de
+	-- weak keys.
 	table.clear(_recentDeathBySpawn)
 	-- Snapshots de inicio de partida (nivel/tier BP) para los items de Resultados.
 	MatchResultsService:ClearSnapshots()
@@ -798,7 +822,7 @@ local _rebalancePending = false
 local _rebalanceLastReason: string? = nil
 
 local function _doRebalanceNow(reason: string)
-	if not _isRoundActive or not _AIService then
+	if not _isRoundActive() or not _AIService then
 		return
 	end
 
@@ -1035,12 +1059,12 @@ local function _registerDeathListener(player: Player, character: Model)
 		-- (CharacterAutoLoads off), así que devolvemos el cuerpo al LobbySpawn para
 		-- que no quede muerto/sin cuerpo. Con debounce: si el lobby resultara letal
 		-- o el spawn fallara, no encadenamos Died→respawn→Died sin freno.
-		if not _isRoundActive or _isInMenuByUserId[player.UserId] then
+		if not _isRoundActive() or _isInMenuByUserId[player.UserId] then
 			task.defer(function()
 				if player.Parent ~= Players then
 					return
 				end
-				if not (not _isRoundActive or _isInMenuByUserId[player.UserId]) then
+				if not (not _isRoundActive() or _isInMenuByUserId[player.UserId]) then
 					return
 				end
 				local last = _lobbyRespawnAtByUserId[player.UserId] or 0
@@ -1103,10 +1127,10 @@ local function _registerDeathListener(player: Player, character: Model)
 		_broadcastRoundState()
 
 		if _roundScoreA >= GameConfig.WinScoreLimit then
-			_finishRoundAndScheduleRestart("win score limit reached", "A")
+			_enterResults("A")
 			return
 		elseif _roundScoreB >= GameConfig.WinScoreLimit then
-			_finishRoundAndScheduleRestart("win score limit reached", "B")
+			_enterResults("B")
 			return
 		end
 
@@ -1152,7 +1176,7 @@ local function _registerDeathListener(player: Player, character: Model)
 		-- la ronda terminó.
 		local deathStamp = _deathAtByUserId[player.UserId]
 		task.delay(DEATH_BODY_TO_LOBBY_DELAY, function()
-			if player.Parent ~= Players or not _isRoundActive then
+			if player.Parent ~= Players or not _isRoundActive() then
 				return
 			end
 			if _isInMenuByUserId[player.UserId] then
@@ -1442,49 +1466,20 @@ local function _captureRoundEndEligiblePlayers()
 	end
 end
 
-local function _endRoundAndRestartVoting(reason: string)
-	_setPhase("RoundEnding", reason)
-
-	_isRoundActive = false
-	_isMapLoading = false
-	_isPlayEnabled = false
-	_roundEndAt = 0
-	_sendMapLoadStateToAll()
-
-	-- Despawnear todos los bots de IA
-	if _AIService then
-		_AIService:OnRoundEnd()
-	end
-
-	_clearActiveMap()
-	for userId in _deathConnectionsByUserId do
-		_disconnectDeathConnection(userId)
-	end
-	_resetMatchScopedState()
-
-	VotingService:ResetCompletedFlag()
-	_lastMapLoadStateBroadcastKey = nil
-	_lastRoundStateBroadcastKey = nil
-	_lastBotRosterJsonBroadcast = nil
-	_setPhase("Idle", "round cleaned; vote after Results window")
-
-	-- La votación no arranca hasta que termina la pantalla de Resultados
-	-- (EndResultsDuration). El hold bloquea cualquier disparador anticipado
-	-- (RequestVoteSync, PlayerAdded), y el task.delay la lanza al expirar.
-	VotingService:HoldVotingFor(GameConfig.EndResultsDuration)
-	task.delay(GameConfig.EndResultsDuration, function()
-		_startVoteIfPossible()
-	end)
-end
-
-function _finishRoundAndScheduleRestart(reason: string, winnerTeam: string)
-	if not _isRoundActive then
+-- InRound → Results. Reparte recompensas, devuelve a los elegibles al lobby y
+-- desmonta la ronda; al expirar la ventana de Resultados pasa a Idle y relanza
+-- la votación. La fase Results bloquea cualquier disparador anticipado de voto
+-- (_tryStartVoting solo actúa en Idle).
+function _enterResults(winnerTeam: string)
+	if _phase ~= "InRound" then
 		return
 	end
+	_phase = "Results"
+	_phaseGeneration += 1
+	local generation = _phaseGeneration
 
 	_captureRoundEndEligiblePlayers()
-	_isRoundActive = false
-	_isPlayEnabled = false
+	_roundEndAt = 0
 	_sendMapLoadStateToAll()
 
 	-- Despawnear bots inmediatamente al finalizar la ronda.
@@ -1540,7 +1535,6 @@ function _finishRoundAndScheduleRestart(reason: string, winnerTeam: string)
 		end
 	end
 
-	_setPhase("RoundEnded", reason .. " | winner=" .. winnerTeam)
 	Network.Match.RoundEnded.SendToAll({
 		winnerTeam = winnerTeam,
 		scoreA = _roundScoreA,
@@ -1630,14 +1624,31 @@ function _finishRoundAndScheduleRestart(reason: string, winnerTeam: string)
 		end
 	end
 
-	_endRoundAndRestartVoting(reason)
+	-- Desmontar la ronda: mapa, listeners de muerte y estado match-scoped.
+	_clearActiveMap()
+	for userId in _deathConnectionsByUserId do
+		_disconnectDeathConnection(userId)
+	end
+	_resetMatchScopedState()
+	_lastMapLoadStateBroadcastKey = nil
+	_lastRoundStateBroadcastKey = nil
+	_lastBotRosterJsonBroadcast = nil
+
+	-- La votación no arranca hasta que termina la pantalla de Resultados.
+	task.delay(GameConfig.EndResultsDuration, function()
+		if _phaseGeneration ~= generation then
+			return
+		end
+		_enterIdle()
+		_tryStartVoting()
+	end)
 end
 
-local function _runRoundTimer(roundId: number)
-	while _isRoundActive and roundId == _roundId do
+local function _runRoundTimer(generation: number)
+	while _phase == "InRound" and _phaseGeneration == generation do
 		local timeLeft = _roundEndAt - time()
 		if timeLeft <= 0 then
-			_finishRoundAndScheduleRestart("max round duration reached", _resolveScoreWinner())
+			_enterResults(_resolveScoreWinner())
 			return
 		end
 
@@ -1652,7 +1663,7 @@ end
 -- cuando un bot muere — toca state interno de MatchService (scoreA/B, streaks,
 -- match kills/deaths) y dispara broadcasts.
 local function _handleBotDied(botTeam: string, _botName: string, botHumanoid: Humanoid, botFakeUserId: number)
-	if not _isRoundActive then
+	if not _isRoundActive() then
 		return
 	end
 
@@ -1727,44 +1738,18 @@ local function _handleBotDied(botTeam: string, _botName: string, botHumanoid: Hu
 	_rebalanceBotsForCurrentRound("bot death")
 
 	if _roundScoreA >= GameConfig.WinScoreLimit then
-		_finishRoundAndScheduleRestart("win score limit reached", "A")
+		_enterResults("A")
 	elseif _roundScoreB >= GameConfig.WinScoreLimit then
-		_finishRoundAndScheduleRestart("win score limit reached", "B")
+		_enterResults("B")
 	end
 end
 
-local function _startMapLoadFlow(winnerMapName: string)
-	_isMapLoading = true
-	_isPlayEnabled = false
-	_activeMapName = winnerMapName
-	_lastMapLoadStateBroadcastKey = nil
-	_lastRoundStateBroadcastKey = nil
-	_lastBotRosterJsonBroadcast = nil
-	_setPhase("MapLoading", winnerMapName)
-	_sendMapLoadStateToAll()
-
-	local success, reason = _loadMapClone(winnerMapName)
-	if not success then
-		warn("[MatchService] Error loading map:", reason)
-		_isMapLoading = false
-		_isPlayEnabled = false
-		_activeMapName = ""
-		_sendMapLoadStateToAll()
-
-		VotingService:ResetCompletedFlag()
-		_setPhase("Idle", "map load failed; retry vote")
-		_startVoteIfPossible()
-		return
-	end
-
-	_isMapLoading = false
-	_isPlayEnabled = true
-	_isRoundActive = true
-	-- C3 fix: bumpear _roundId ANTES de cualquier task.spawn que lo capture.
-	-- Si el AI service o cualquier callback dispara _finishRoundAndScheduleRestart
-	-- en el mismo frame que iniciamos la ronda, la guard `roundId == _roundId`
-	-- en _runRoundTimer previene timers huérfanos.
-	_roundId += 1
+-- Loading → InRound. Resetea el estado de ronda, arranca bots y el round timer.
+-- La generación se bumpea ANTES de cualquier task.spawn que la capture: si un
+-- callback termina la ronda en el mismo frame, el guard del timer lo detecta.
+local function _enterInRound()
+	_phase = "InRound"
+	_phaseGeneration += 1
 	_roundScoreA = 0
 	_roundScoreB = 0
 	_roundEndAt = time() + GameConfig.MaxRoundDuration
@@ -1779,7 +1764,6 @@ local function _startMapLoadFlow(winnerMapName: string)
 		KillAttributionService:SendStreakBroadcast(player.UserId)
 		_isInMenuByUserId[player.UserId] = true
 	end
-	_setPhase("PregameReady", "map loaded; play enabled")
 	_sendMapLoadStateToAll()
 	_broadcastRoundState()
 
@@ -1800,8 +1784,31 @@ local function _startMapLoadFlow(winnerMapName: string)
 		end
 	end
 
-	-- _roundId ya bumpeado más arriba; aquí solo arrancamos el timer con el id actual.
-	task.spawn(_runRoundTimer, _roundId)
+	task.spawn(_runRoundTimer, _phaseGeneration)
+end
+
+-- Voting → Loading. Clona el mapa ganador; si falla vuelve a Idle y relanza
+-- la votación.
+local function _enterLoading(winnerMapName: string)
+	_phase = "Loading"
+	_phaseGeneration += 1
+	_activeMapName = winnerMapName
+	_lastMapLoadStateBroadcastKey = nil
+	_lastRoundStateBroadcastKey = nil
+	_lastBotRosterJsonBroadcast = nil
+	_sendMapLoadStateToAll()
+
+	local success, reason = _loadMapClone(winnerMapName)
+	if not success then
+		warn("[MatchService] Error loading map:", reason)
+		_activeMapName = ""
+		_enterIdle()
+		_sendMapLoadStateToAll()
+		_tryStartVoting()
+		return
+	end
+
+	_enterInRound()
 end
 
 -- Handler de sync general (vote + map + round + streaks + roster). El bit de
@@ -1814,17 +1821,12 @@ local function _onRequestVoteSync(_: {}, player: Player)
 	end
 	_voteSyncCooldownByUserId[player.UserId] = now
 
-	_startVoteIfPossible()
+	_tryStartVoting()
 	VotingService:SendSnapshotTo(player)
 	_sendMapLoadStateToPlayer(player)
 	_sendRoundStateToPlayer(player)
 	_sendAllPlayerStreaksToPlayer(player)
 	_sendBotRosterToPlayer(player)
-end
-
--- Implementación del forward-decl: delega al VotingService.
-_startVoteIfPossible = function()
-	VotingService:StartVoteIfPossible()
 end
 
 local function _onCharacterAdded(player: Player, character: Model)
@@ -1877,7 +1879,7 @@ local function _initJoinedPlayerState(player: Player)
 end
 
 local function _onRequestJoinMatch(_: {}, player: Player)
-	if not _isPlayEnabled or not _activeMapModel then
+	if _phase ~= "InRound" or not _activeMapModel then
 		return
 	end
 
@@ -1912,7 +1914,7 @@ local function _onRequestJoinMatch(_: {}, player: Player)
 
 		-- Si la ronda terminó entre el RequestJoinMatch y este defer, abortamos
 		-- para no spawnear al jugador en una ronda terminada (causa desync de phase).
-		if not _isRoundActive then
+		if not _isRoundActive() then
 			_isInMenuByUserId[player.UserId] = true
 			_pendingSpawnByUserId[player.UserId] = nil
 			_joinDebounceByUserId[player.UserId] = nil
@@ -1967,7 +1969,7 @@ local function _onRequestJoinMatch(_: {}, player: Player)
 end
 
 local function _onRequestRespawn(_: {}, player: Player)
-	if not _isRoundActive or _isInMenuByUserId[player.UserId] then
+	if not _isRoundActive() or _isInMenuByUserId[player.UserId] then
 		return
 	end
 
@@ -2003,7 +2005,7 @@ local function _onRequestRespawn(_: {}, player: Player)
 		-- o cayendo al vacío. Reintentamos unas pocas veces con pausa corta.
 		local spawned = false
 		for _ = 1, 3 do
-			if player.Parent ~= Players or not _isRoundActive or _isInMenuByUserId[player.UserId] then
+			if player.Parent ~= Players or not _isRoundActive() or _isInMenuByUserId[player.UserId] then
 				break
 			end
 			if _spawnPlayerOnAssignedTeam(player) then
@@ -2149,8 +2151,6 @@ function MatchService:Start(dataService: DataService): ()
 		end)
 	end
 
-	_setPhase("Idle", "service started")
-
 	Players.PlayerAdded:Connect(function(player)
 		_initJoinedPlayerState(player)
 		-- Spawn inicial en el lobby por código (CharacterAutoLoads está desactivado,
@@ -2161,7 +2161,7 @@ function MatchService:Start(dataService: DataService): ()
 		-- Intentar iniciar votación cuando un nuevo jugador llega (cubre el
 		-- caso de servidor vacío donde Start() se ejecutó con 0 players).
 		-- task.defer para que el jugador ya esté en Players:GetPlayers().
-		task.defer(_startVoteIfPossible)
+		task.defer(_tryStartVoting)
 	end)
 
 	-- Jugadores ya presentes cuando arranca el servicio (Start tras un join):
@@ -2212,7 +2212,7 @@ function MatchService:Start(dataService: DataService): ()
 
 		_teamByUserId[player.UserId] = nil
 
-		if _isRoundActive and (wasActiveReal or wasPendingSpawn) then
+		if _isRoundActive() and (wasActiveReal or wasPendingSpawn) then
 			_rebalanceBotsForCurrentRound("player leaving")
 		end
 	end)
@@ -2235,22 +2235,20 @@ function MatchService:Start(dataService: DataService): ()
 	MatchResultsService:Start({ dataService = _dataService })
 
 	-- VotingService: owns _activeVote, vote cooldowns, vote timer, CastVote
-	-- handler. Wire callback `onVoteFinished` que dispara mapload.
+	-- handler. Al cerrar la votación transicionamos a Loading.
 	VotingService:Start({
-		setPhase = function(phase: string, reason: string)
-			_setPhase(phase, reason)
-		end,
-		getIsMapLoading = function() return _isMapLoading end,
-		getIsPlayEnabled = function() return _isPlayEnabled end,
 		onVoteFinished = function(winnerMapName: string)
-			_startMapLoadFlow(winnerMapName)
+			if _phase ~= "Voting" then
+				return
+			end
+			_enterLoading(winnerMapName)
 		end,
 	})
 
 	-- HealthPickup extraído (Sprint 4 P2 #17). Inyectamos predicates para
 	-- que el service no se acople a state interno de MatchService.
 	HealthPickupService:Start({
-		isRoundActive = function() return _isRoundActive end,
+		isRoundActive = _isRoundActive,
 		isPlayerInMenu = function(userId: number): boolean
 			return _isInMenuByUserId[userId] == true
 		end,
@@ -2280,7 +2278,7 @@ function MatchService:Start(dataService: DataService): ()
 		_bindCharacterTracking(player)
 	end
 
-	_startVoteIfPossible()
+	_tryStartVoting()
 end
 
 return MatchService

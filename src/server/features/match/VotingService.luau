@@ -1,17 +1,13 @@
 --!strict
 --[[
 	VotingService.luau
-	Flujo completo de votación de mapas. Extraído de MatchService como parte
-	del split estructural (audit AAA).
+	Flujo completo de votación de mapas: estado del voto activo, cooldowns,
+	timer, broadcasts y resolución del ganador.
 
-	Estado propio:
-		_activeVote, _voteCooldownsByUserId, _hasCompletedInitialVote,
-		_lastVoteBroadcastKey
-
-	Dependencias inyectadas (via Start):
-		setPhase  -- phase transitions del state machine
-		getIsMapLoading, getIsPlayEnabled  -- gates externos para no arrancar voto
-		onVoteFinished  -- callback con winnerMapName, MatchService inicia mapload
+	El CUÁNDO votar lo decide la máquina de fases de MatchService — StartVote
+	solo se llama desde la transición Idle → Voting. Al cerrar la votación se
+	invoca `onVoteFinished(winnerMapName)` (inyectado via Start), con el que
+	MatchService transiciona a Loading.
 
 	El handler `_onRequestVoteSync` permanece en MatchService porque hace 5
 	SendTo (sólo uno es voto). VotingService expone `SendSnapshotTo(player)`
@@ -40,9 +36,6 @@ type ActiveVoteState = {
 }
 
 type Deps = {
-	setPhase: (phase: string, reason: string) -> (),
-	getIsMapLoading: () -> boolean,
-	getIsPlayEnabled: () -> boolean,
 	onVoteFinished: (winnerMapName: string) -> (),
 }
 
@@ -67,11 +60,7 @@ local _started = false
 local _activeVote: ActiveVoteState? = nil
 local _voteCooldownsByUserId: { [number]: number } = {}
 local _lastVoteBroadcastKey: string? = nil
-local _hasCompletedInitialVote = false
 local _castVoteConn: any = nil
--- Retención: ninguna votación puede arrancar antes de este time() (se usa para
--- que la votación no empiece hasta que termine la pantalla de Resultados).
-local _voteHoldUntil = 0
 
 -- ── Helpers privados ─────────────────────────────────────────
 
@@ -238,11 +227,6 @@ local function _onCastVote(data: { mapName: string }, player: Player)
 end
 
 local function _runVoteTimer(vote: ActiveVoteState)
-	_deps.setPhase("Voting", string.format(
-		"options=[%s, %s, %s], duration=%ds",
-		vote.optionNames[1], vote.optionNames[2], vote.optionNames[3], vote.duration
-	))
-
 	while _activeVote == vote do
 		local remaining = vote.endAt - time()
 		if remaining <= 0 then
@@ -258,7 +242,6 @@ local function _runVoteTimer(vote: ActiveVoteState)
 
 	_broadcastVoteState(vote)
 	local winner = _resolveWinner(vote)
-	_deps.setPhase("VoteEnded", "winner=" .. winner)
 
 	local totalVoters = 0
 	for _ in vote.votesByUserId do
@@ -278,7 +261,6 @@ local function _runVoteTimer(vote: ActiveVoteState)
 	Network.Match.EndVote.SendToAll({ winnerMapName = winner })
 
 	_activeVote = nil
-	_hasCompletedInitialVote = true
 	task.defer(function()
 		_deps.onVoteFinished(winner)
 	end)
@@ -293,30 +275,14 @@ function VotingService:Start(deps: Deps)
 	_started = true
 	_deps = deps
 	_activeVote = nil
-	_hasCompletedInitialVote = false
 	_lastVoteBroadcastKey = nil
-	_voteHoldUntil = 0
 	table.clear(_voteCooldownsByUserId)
 
 	_castVoteConn = Network.Match.CastVote.Listen(_onCastVote)
 end
 
--- Retiene el arranque de la votación durante `seconds` (p. ej. la duración de la
--- pantalla de Resultados, para que el voto no empiece hasta que esta termine).
-function VotingService:HoldVotingFor(seconds: number)
-	_voteHoldUntil = time() + math.max(0, seconds)
-end
-
 function VotingService:HasActiveVote(): boolean
 	return _activeVote ~= nil
-end
-
-function VotingService:HasCompletedInitialVote(): boolean
-	return _hasCompletedInitialVote
-end
-
-function VotingService:ResetCompletedFlag()
-	_hasCompletedInitialVote = false
 end
 
 function VotingService:SendSnapshotTo(player: Player)
@@ -371,23 +337,11 @@ function VotingService:DisconnectPlayer(userId: number)
 	_voteCooldownsByUserId[userId] = nil
 end
 
-function VotingService:StartVoteIfPossible(): boolean
-	-- Retención post-Results: la votación no arranca hasta que termina la pantalla
-	-- de Resultados (cualquier disparador —RequestVoteSync, etc.— respeta esto).
-	if time() < _voteHoldUntil then
-		return false
-	end
-
-	if _activeVote ~= nil or _hasCompletedInitialVote then
-		return false
-	end
-
-	if _deps.getIsMapLoading() or _deps.getIsPlayEnabled() then
-		return false
-	end
-
-	local playerCount = #Players:GetPlayers()
-	if playerCount < GameConfig.MinPlayersToStart then
+-- Arranca una votación. Devuelve false si ya hay una activa o faltan mapas.
+-- Las condiciones de flujo (fase Idle, jugadores suficientes) las valida la
+-- máquina de fases de MatchService antes de llamar.
+function VotingService:StartVote(): boolean
+	if _activeVote ~= nil then
 		return false
 	end
 
@@ -398,12 +352,6 @@ function VotingService:StartVoteIfPossible(): boolean
 	end
 
 	local options = _pickRandomMapOptions(pool, 3)
-	if #options < 3 then
-		return false
-	end
-
-	_deps.setPhase("VoteStarting", string.format("players=%d", playerCount))
-
 	local optionNames = { options[1].Name, options[2].Name, options[3].Name }
 	local voteCounts = {
 		[optionNames[1]] = 0,

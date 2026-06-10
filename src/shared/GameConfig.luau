@@ -22,7 +22,6 @@ export type GameConfigType = {
 	-- El cliente la envía como mapName al votar Random; el servidor la resuelve a
 	-- un mapa concreto aleatorio entre las opciones al cerrar la votación.
 	RandomVoteKey: string,
-	PregameCountdown: number,
 	EndResultsDuration: number,
 	RespawnCooldown: number,
 	SpawnProtectionDuration: number,
@@ -46,7 +45,6 @@ export type GameConfigType = {
 local GameConfig: GameConfigType = {
 	VoteDuration = 4,
 	RandomVoteKey = "__RANDOM__",
-	PregameCountdown = 5,
 	EndResultsDuration = 10,
 	RespawnCooldown = 1,
 	-- Segundos de inmunidad (ForceField) tras spawn — aplica a jugadores y bots.
