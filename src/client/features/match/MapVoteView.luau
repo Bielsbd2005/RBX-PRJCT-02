@@ -38,7 +38,6 @@ MapVoteView.__index = MapVoteView
 export type OptionModel = {
 	mapName: string,
 	mapImage: string,
-	mapMode: string,
 }
 
 -- CSV de userIds por slot, tal cual llega del packet VoteState.

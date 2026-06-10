@@ -841,13 +841,10 @@ function MatchFeature.start(menuController: any): any
 	janitor:Add(Network.Match.StartVote.Listen(function(data: {
 		option1Name: string,
 		option1Image: string,
-		option1Mode: string,
 		option2Name: string,
 		option2Image: string,
-		option2Mode: string,
 		option3Name: string,
 		option3Image: string,
-		option3Mode: string,
 		duration: number,
 	})
 		isVoting = true
@@ -855,9 +852,9 @@ function MatchFeature.start(menuController: any): any
 		selectedVoteKey = ""
 		setPlayEnabled(playEnabled) -- recalcula Active (clickeable durante votación)
 		view:show({
-			option1 = { mapName = data.option1Name, mapImage = data.option1Image, mapMode = data.option1Mode },
-			option2 = { mapName = data.option2Name, mapImage = data.option2Image, mapMode = data.option2Mode },
-			option3 = { mapName = data.option3Name, mapImage = data.option3Image, mapMode = data.option3Mode },
+			option1 = { mapName = data.option1Name, mapImage = data.option1Image },
+			option2 = { mapName = data.option2Name, mapImage = data.option2Image },
+			option3 = { mapName = data.option3Name, mapImage = data.option3Image },
 		}, data.duration)
 		view:setSelectedMap("")
 

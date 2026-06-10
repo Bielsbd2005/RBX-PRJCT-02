@@ -35,7 +35,6 @@ type DataService = DataServiceMod.DataServiceModule
 
 type MapDefinition = {
 	Name: string,
-	Modes: { string },
 	PlaceholderImage: string,
 	UseIntelligentSpawning: boolean?,
 }
@@ -1392,12 +1391,14 @@ local function _clearActiveMap()
 	_cachedBotsFolder = nil
 end
 
--- Voting helpers (_buildVoteStatePacket / _broadcastVoteState /
--- _sendActiveVoteToPlayer / _collectCompatibleMaps / _pickRandomMapOptions)
--- viven en VotingService. Aquí solo wireamos el callback `onVoteFinished` y
--- delegamos snapshots vía `VotingService:SendSnapshotTo(player)`.
+-- Los helpers de votación viven en VotingService. Aquí solo wireamos el
+-- callback `onVoteFinished` y delegamos snapshots vía
+-- `VotingService:SendSnapshotTo(player)`.
 
-local function _loadMapCloneWithTimeout(mapName: string, timeoutSec: number): (boolean, string)
+-- Clone() no hace yield, así que la carga es síncrona — no hay timeout que
+-- aplicar (el viejo _loadMapCloneWithTimeout tenía un watcher de polling que
+-- nunca llegaba a correr antes de que el clone terminara).
+local function _loadMapClone(mapName: string): (boolean, string)
 	local mapsFolder = ServerStorage:FindFirstChild("Maps")
 	if not mapsFolder then
 		return false, "ServerStorage/Maps no existe"
@@ -1408,52 +1409,15 @@ local function _loadMapCloneWithTimeout(mapName: string, timeoutSec: number): (b
 		return false, string.format("No existe ServerStorage/Maps/%s", mapName)
 	end
 
-	local isDone = false
-	local cancelled = false
-	local cloned: Instance? = nil
-	local cloneError: string? = nil
-
-	task.spawn(function()
-		local ok, result = pcall(function()
-			return mapTemplate:Clone()
-		end)
-		if not ok then
-			cloneError = tostring(result)
-			isDone = true
-			return
-		end
-
-		if cancelled then
-			(result :: Instance):Destroy()
-			isDone = true
-			return
-		end
-
-		cloned = result :: Instance
-		isDone = true
-	end)
-
-	local startedAt = time()
-	while not isDone do
-		if time() - startedAt >= timeoutSec then
-			cancelled = true
-			return false, string.format("Map clone timeout (%ds)", timeoutSec)
-		end
-		task.wait(0.05)
-	end
-
-	if cloneError then
-		return false, "Error clonando mapa: " .. cloneError
-	end
-
-	if not cloned then
-		return false, "El mapa clonado resulto nil"
+	local ok, result = pcall(mapTemplate.Clone, mapTemplate)
+	if not ok then
+		return false, "Error clonando mapa: " .. tostring(result)
 	end
 
 	local container = _ensureActiveMapContainer()
-	cloned.Parent = container
+	result.Parent = container
 	_activeMapContainer = container
-	_activeMapModel = cloned
+	_activeMapModel = result
 	_activeMapName = mapName
 
 	return true, "ok"
@@ -1528,9 +1492,7 @@ function _finishRoundAndScheduleRestart(reason: string, winnerTeam: string)
 		_AIService:OnRoundEnd()
 	end
 
-	for _, player in Players:GetPlayers() do
-		Network.Match.DeathScreenHide.SendTo({}, player)
-	end
+	Network.Match.DeathScreenHide.SendToAll({})
 
 	-- ── Recompensas de fin de partida ────────────────────────
 	-- MVP = jugador(es) con más kills de SU equipo (kills > 0). Solo players reales.
@@ -1579,13 +1541,11 @@ function _finishRoundAndScheduleRestart(reason: string, winnerTeam: string)
 	end
 
 	_setPhase("RoundEnded", reason .. " | winner=" .. winnerTeam)
-	for _, player in Players:GetPlayers() do
-		Network.Match.RoundEnded.SendTo({
-			winnerTeam = winnerTeam,
-			scoreA = _roundScoreA,
-			scoreB = _roundScoreB,
-		}, player)
-	end
+	Network.Match.RoundEnded.SendToAll({
+		winnerTeam = winnerTeam,
+		scoreA = _roundScoreA,
+		scoreB = _roundScoreB,
+	})
 
 	-- Daily task: WinMatches — solo jugadores elegibles (que jugaron la ronda)
 	-- y que estaban en el equipo ganador. Empate ("Tie") no cuenta.
@@ -1783,7 +1743,7 @@ local function _startMapLoadFlow(winnerMapName: string)
 	_setPhase("MapLoading", winnerMapName)
 	_sendMapLoadStateToAll()
 
-	local success, reason = _loadMapCloneWithTimeout(winnerMapName, GameConfig.MapLoadTimeout)
+	local success, reason = _loadMapClone(winnerMapName)
 	if not success then
 		warn("[MatchService] Error loading map:", reason)
 		_isMapLoading = false

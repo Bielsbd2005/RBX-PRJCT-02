@@ -21,8 +21,6 @@
 local AnalyticsService = game:GetService("AnalyticsService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local ServerStorage = game:GetService("ServerStorage")
-local _ = ServerStorage  -- silenciar selene unused warning, no usado directo
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Network = require(Shared.networking.Network)
@@ -35,7 +33,6 @@ type ActiveVoteState = {
 	options: { MapDefinition },
 	optionNames: { string },
 	optionImages: { [string]: string },
-	optionModes: { [string]: string },
 	voteCounts: { [string]: number },
 	votesByUserId: { [number]: string },
 	endAt: number,
@@ -54,7 +51,7 @@ VotingService.__index = VotingService
 
 -- ── Constantes ───────────────────────────────────────────────
 
--- Cooldown entre cambios de voto del mismo jugador. 0.5s permite ~2 cambios/seg
+-- Cooldown entre cambios de voto del mismo jugador. 0.3s permite ~3 cambios/seg
 -- — suficiente para UX responsive sin permitir spam que sature broadcasts.
 local VOTE_CHANGE_COOLDOWN = 0.3
 local DEFAULT_PLACEHOLDER_IMAGE = "rbxasset://textures/ui/GuiImagePlaceholder.png"
@@ -77,25 +74,6 @@ local _castVoteConn: any = nil
 local _voteHoldUntil = 0
 
 -- ── Helpers privados ─────────────────────────────────────────
-
-local function _containsMode(modes: { string }, mode: string): boolean
-	for _, candidate in modes do
-		if candidate == mode then
-			return true
-		end
-	end
-	return false
-end
-
-local function _collectCompatibleMaps(mode: string): { MapDefinition }
-	local compatible = {} :: { MapDefinition }
-	for _, mapDef in GameConfig.Maps do
-		if mapDef.Name ~= "" and _containsMode(mapDef.Modes, mode) then
-			table.insert(compatible, mapDef)
-		end
-	end
-	return compatible
-end
 
 local function _pickRandomMapOptions(pool: { MapDefinition }, count: number): { MapDefinition }
 	local shuffled = table.clone(pool)
@@ -358,13 +336,10 @@ function VotingService:SendSnapshotTo(player: Player)
 		Network.Match.StartVote.SendTo({
 			option1Name = option1Name,
 			option1Image = vote.optionImages[option1Name] or DEFAULT_PLACEHOLDER_IMAGE,
-			option1Mode = vote.optionModes[option1Name] or "TeamDeathmatch",
 			option2Name = option2Name,
 			option2Image = vote.optionImages[option2Name] or DEFAULT_PLACEHOLDER_IMAGE,
-			option2Mode = vote.optionModes[option2Name] or "TeamDeathmatch",
 			option3Name = option3Name,
 			option3Image = vote.optionImages[option3Name] or DEFAULT_PLACEHOLDER_IMAGE,
-			option3Mode = vote.optionModes[option3Name] or "TeamDeathmatch",
 			duration = vote.duration,
 		}, player)
 	end)
@@ -416,9 +391,9 @@ function VotingService:StartVoteIfPossible(): boolean
 		return false
 	end
 
-	local pool = _collectCompatibleMaps("TeamDeathmatch")
+	local pool = GameConfig.Maps
 	if #pool < 3 then
-		warn("[VotingService] Se requieren al menos 3 mapas compatibles para iniciar la votacion.")
+		warn("[VotingService] Se requieren al menos 3 mapas para iniciar la votacion.")
 		return false
 	end
 
@@ -441,17 +416,11 @@ function VotingService:StartVoteIfPossible(): boolean
 		[optionNames[2]] = options[2].PlaceholderImage ~= "" and options[2].PlaceholderImage or DEFAULT_PLACEHOLDER_IMAGE,
 		[optionNames[3]] = options[3].PlaceholderImage ~= "" and options[3].PlaceholderImage or DEFAULT_PLACEHOLDER_IMAGE,
 	}
-	local optionModes = {
-		[optionNames[1]] = options[1].Modes[1] or "TeamDeathmatch",
-		[optionNames[2]] = options[2].Modes[1] or "TeamDeathmatch",
-		[optionNames[3]] = options[3].Modes[1] or "TeamDeathmatch",
-	}
 
 	local voteState: ActiveVoteState = {
 		options = options,
 		optionNames = optionNames,
 		optionImages = optionImages,
-		optionModes = optionModes,
 		voteCounts = voteCounts,
 		votesByUserId = {},
 		endAt = time() + GameConfig.VoteDuration,
@@ -469,13 +438,10 @@ function VotingService:StartVoteIfPossible(): boolean
 	Network.Match.StartVote.SendToAll({
 		option1Name = optionNames[1],
 		option1Image = optionImages[optionNames[1]],
-		option1Mode = optionModes[optionNames[1]],
 		option2Name = optionNames[2],
 		option2Image = optionImages[optionNames[2]],
-		option2Mode = optionModes[optionNames[2]],
 		option3Name = optionNames[3],
 		option3Image = optionImages[optionNames[3]],
-		option3Mode = optionModes[optionNames[3]],
 		duration = GameConfig.VoteDuration,
 	})
 

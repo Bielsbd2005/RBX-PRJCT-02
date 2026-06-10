@@ -10,11 +10,8 @@ export type TeamsDefinition = {
 	B: TeamDefinition,
 }
 
-export type GameMode = "TeamDeathmatch"
-
 export type MapDefinition = {
 	Name: string,
-	Modes: { GameMode },
 	PlaceholderImage: string,
 	UseIntelligentSpawning: boolean?,
 }
@@ -25,7 +22,6 @@ export type GameConfigType = {
 	-- El cliente la envía como mapName al votar Random; el servidor la resuelve a
 	-- un mapa concreto aleatorio entre las opciones al cerrar la votación.
 	RandomVoteKey: string,
-	MapLoadTimeout: number,
 	PregameCountdown: number,
 	EndResultsDuration: number,
 	RespawnCooldown: number,
@@ -50,7 +46,6 @@ export type GameConfigType = {
 local GameConfig: GameConfigType = {
 	VoteDuration = 4,
 	RandomVoteKey = "__RANDOM__",
-	MapLoadTimeout = 12,
 	PregameCountdown = 5,
 	EndResultsDuration = 10,
 	RespawnCooldown = 1,
@@ -84,9 +79,9 @@ local GameConfig: GameConfigType = {
 	},
 
 	Maps = {
-		{ Name = "Canyon",   Modes = { "TeamDeathmatch" }, PlaceholderImage = "rbxassetid://138703710359327", UseIntelligentSpawning = true },
-		{ Name = "Factory",  Modes = { "TeamDeathmatch" }, PlaceholderImage = "rbxassetid://138703710359327", UseIntelligentSpawning = true },
-		{ Name = "Rooftops", Modes = { "TeamDeathmatch" }, PlaceholderImage = "rbxassetid://138703710359327", UseIntelligentSpawning = true },
+		{ Name = "Canyon",   PlaceholderImage = "rbxassetid://138703710359327", UseIntelligentSpawning = true },
+		{ Name = "Factory",  PlaceholderImage = "rbxassetid://138703710359327", UseIntelligentSpawning = true },
+		{ Name = "Rooftops", PlaceholderImage = "rbxassetid://138703710359327", UseIntelligentSpawning = true },
 	},
 }
 
