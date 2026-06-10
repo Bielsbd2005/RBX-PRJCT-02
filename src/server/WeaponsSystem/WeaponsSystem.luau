@@ -807,6 +807,14 @@ function WeaponsSystem.setWeaponEquipped(weapon, equipped)
 		return
 	end
 
+	-- Red de seguridad: la cámara y la GUI de arma son SIEMPRE locales, así que un
+	-- arma que pertenece explícitamente a OTRO jugador nunca debe conducir el estado
+	-- equipado local (encendería ShoulderCamera/GUI por error). Las armas sin dueño
+	-- (player == nil, p. ej. montadas en el mundo) se dejan pasar como antes.
+	if weapon.player ~= nil and weapon.player ~= Players.LocalPlayer then
+		return
+	end
+
 	local lastWeapon = WeaponsSystem.currentWeapon
 	local weaponChanged = false
 

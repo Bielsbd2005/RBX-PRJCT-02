@@ -61,6 +61,19 @@ local _voteSyncCooldownByUserId: { [number]: number } = {}
 local _returnToMenuCooldownByUserId: { [number]: number } = {}
 local _phase = "Idle"
 
+-- Forward-declaración: el listener de muerte (_registerDeathListener) llama a este
+-- helper, que se define más abajo (depende de _findLobbySpawn/_teleportCharacterToSpawn).
+-- Declararlo aquí permite capturarlo como upvalue en el closure de Died.
+local _spawnPlayerAtLobby: (player: Player) -> ()
+
+-- Tras morir, el cuerpo del jugador se reubica en el LobbySpawn pasado este margen
+-- (deja que el kill effect / ragdoll cosmético se vea un momento). Poner a 0 para
+-- reubicar de inmediato (perdería el ragdoll visible).
+local DEATH_BODY_TO_LOBBY_DELAY = 3
+-- Debounce mínimo entre reapariciones de lobby por jugador (anti-bucle infinito si
+-- una muerte en lobby vuelve a disparar el respawn de lobby de inmediato).
+local LOBBY_RESPAWN_DEBOUNCE = 2
+
 local _isMapLoading = false
 local _isPlayEnabled = false
 local _activeMapName = ""
@@ -91,6 +104,13 @@ local _characterConnectionsByUserId: { [number]: RBXScriptConnection } = {}
 local _charDescendantConnectionsByUserId: { [number]: RBXScriptConnection } = {}
 local _deathAtByUserId: { [number]: number } = {}
 local _respawnDebounceByUserId: { [number]: boolean } = {}
+-- Respawn al mapa en curso (desde que se solicita hasta que termina). La reubicación
+-- al lobby por inactividad lo consulta para no pisar un respawn y mandar al jugador
+-- al lobby en vez de a la partida.
+local _respawningByUserId: { [number]: boolean } = {}
+-- Última reaparición de lobby por jugador, para debounce anti-bucle (si el lobby
+-- resultara letal o el spawn fallara, no encadenar Died→respawn→Died sin freno).
+local _lobbyRespawnAtByUserId: { [number]: number } = {}
 local _matchKillsByUserId: { [number]: number } = {}
 -- _killStreakByUserId, _killStreakTimeoutByUserId, _lastBroadcastStreakKeyByUserId
 -- viven en KillAttributionService. Acá quedan kills/deaths que son
@@ -949,11 +969,25 @@ local function _registerDeathListener(player: Player, character: Model)
 	humanoid.BreakJointsOnDeath = false
 
 	_deathConnectionsByUserId[player.UserId] = humanoid.Died:Connect(function()
-		if not _isRoundActive then
-			return
-		end
-
-		if _isInMenuByUserId[player.UserId] then
+		-- Muerte fuera de partida (lobby/menú): el motor no auto-respawnea
+		-- (CharacterAutoLoads off), así que devolvemos el cuerpo al LobbySpawn para
+		-- que no quede muerto/sin cuerpo. Con debounce: si el lobby resultara letal
+		-- o el spawn fallara, no encadenamos Died→respawn→Died sin freno.
+		if not _isRoundActive or _isInMenuByUserId[player.UserId] then
+			task.defer(function()
+				if player.Parent ~= Players then
+					return
+				end
+				if not (not _isRoundActive or _isInMenuByUserId[player.UserId]) then
+					return
+				end
+				local last = _lobbyRespawnAtByUserId[player.UserId] or 0
+				if time() - last < LOBBY_RESPAWN_DEBOUNCE then
+					return
+				end
+				_lobbyRespawnAtByUserId[player.UserId] = time()
+				_spawnPlayerAtLobby(player)
+			end)
 			return
 		end
 
@@ -1048,6 +1082,28 @@ local function _registerDeathListener(player: Player, character: Model)
 				weaponId = attackerWeaponId,
 			}, player)
 		end
+
+		-- El cuerpo se reubica al LobbySpawn tras un margen (deja ver el ragdoll del
+		-- kill effect). El jugador solo vuelve a partida pulsando spawn (RequestRespawn).
+		-- Guardas: cancelar si ya respawneó (deathAt vuelve a 0), murió de nuevo
+		-- (deathAt cambia), hay un respawn al mapa en curso, se fue al menú, salió, o
+		-- la ronda terminó.
+		local deathStamp = _deathAtByUserId[player.UserId]
+		task.delay(DEATH_BODY_TO_LOBBY_DELAY, function()
+			if player.Parent ~= Players or not _isRoundActive then
+				return
+			end
+			if _isInMenuByUserId[player.UserId] then
+				return
+			end
+			if _respawningByUserId[player.UserId] then
+				return
+			end
+			if _deathAtByUserId[player.UserId] ~= deathStamp then
+				return
+			end
+			_spawnPlayerAtLobby(player)
+		end)
 	end)
 end
 
@@ -1058,14 +1114,33 @@ local function _teleportCharacterToSpawn(player: Player, spawnPoint: BasePart)
 
 	LoadoutService.loadCharacterWithBody(player, _dataService)
 	local character = player.Character or player.CharacterAdded:Wait()
-	if player.Parent ~= Players then
+	if player.Parent ~= Players or not character or not character.Parent then
 		return nil
 	end
 
-	local root = character:FindFirstChild("HumanoidRootPart") :: BasePart?
-	if root then
-		root.CFrame = spawnPoint.CFrame + Vector3.new(0, 4, 0)
+	-- player:LoadCharacter() coloca el cuerpo en el spawn por defecto (lobby/origen)
+	-- y NOSOTROS lo reposicionamos al mapa. El bug del "vacío": tras un body-swap el
+	-- rig puede tardar un instante en estar completo, y leer HumanoidRootPart con
+	-- FindFirstChild demasiado pronto devolvía nil → la línea de reposición se
+	-- saltaba → el cuerpo se quedaba en el lobby y caía al vacío. WaitForChild con
+	-- timeout corto evita esa carrera; si aun así no aparece, el spawn falla limpio.
+	local rootInstance = character:FindFirstChild("HumanoidRootPart")
+		or character:WaitForChild("HumanoidRootPart", 3)
+	if not rootInstance or not rootInstance:IsA("BasePart") then
+		return nil
 	end
+	local root = rootInstance :: BasePart
+
+	-- Anclar mientras reposicionamos para que la física NO arrastre el cuerpo al
+	-- vacío durante el/los frames en que todavía está en el spawn por defecto.
+	-- Se suelta al final del frame, ya colocado sobre el mapa.
+	root.Anchored = true
+	root.CFrame = spawnPoint.CFrame + Vector3.new(0, 4, 0)
+	task.defer(function()
+		if root.Parent then
+			root.Anchored = false
+		end
+	end)
 
 	return character
 end
@@ -1084,6 +1159,70 @@ local function _findLobbySpawn(): BasePart?
 	end
 
 	return nil
+end
+
+-- Garantiza un SpawnLocation Neutral+Enabled en el lobby.
+--
+-- El bug del "vacío al morir": en partida el jugador está en Team A/B
+-- (_spawnPlayerOnAssignedTeam hace player.Team = team). Al morir, el auto-respawn
+-- del MOTOR busca un SpawnLocation de SU equipo; los spawns del mapa son Part
+-- normales (no SpawnLocation) y el del lobby no sirve para Team A/B, así que el
+-- motor no encuentra punto válido y aparece en el origen (0,0,0) → el vacío.
+--
+-- Un SpawnLocation Neutral sirve para CUALQUIER equipo, así que el auto-respawn cae
+-- en el lobby en lugar del vacío. Invisible y no-colisionable para no estorbar.
+local function _ensureLobbySpawnLocation()
+	local lobby = _findLobbySpawn()
+	if not lobby then
+		warn("[MatchService] Workspace.LobbySpawn no encontrado; el auto-respawn del motor caería al vacío.")
+		return
+	end
+
+	-- Si LobbySpawn ya es un SpawnLocation, basta con dejarlo neutral y activo.
+	if lobby:IsA("SpawnLocation") then
+		local sl = lobby :: SpawnLocation
+		sl.Enabled = true
+		sl.Neutral = true
+		return
+	end
+
+	-- Reusar o crear un SpawnLocation invisible colocado sobre LobbySpawn.
+	local existing = Workspace:FindFirstChild("LobbyAutoSpawn")
+	local spawnLocation: SpawnLocation
+	if existing and existing:IsA("SpawnLocation") then
+		spawnLocation = existing :: SpawnLocation
+	else
+		spawnLocation = Instance.new("SpawnLocation")
+		spawnLocation.Name = "LobbyAutoSpawn"
+	end
+	spawnLocation.Enabled = true
+	spawnLocation.Neutral = true
+	spawnLocation.Duration = 0 -- sin ForceField al aparecer en el lobby
+	spawnLocation.Transparency = 1
+	spawnLocation.CanCollide = false
+	spawnLocation.CanTouch = false
+	spawnLocation.Anchored = true
+	spawnLocation.Size = lobby.Size
+	spawnLocation.CFrame = lobby.CFrame
+	spawnLocation.Parent = Workspace
+end
+
+-- Coloca al jugador en el lobby de forma controlada: carga su cuerpo y lo teleporta
+-- a Workspace.LobbySpawn (sin armas). Con CharacterAutoLoads desactivado, TODO spawn
+-- fuera de partida pasa por aquí (join, muerte→lobby, vuelta a menú); el motor nunca
+-- respawnea solo, así que nunca cae al vacío. Asigna a la forward-declaración de arriba.
+function _spawnPlayerAtLobby(player: Player)
+	if player.Parent ~= Players then
+		return
+	end
+	-- En el lobby el jugador es neutral (sin equipo de combate).
+	player.Neutral = true
+	local lobbySpawn = _findLobbySpawn()
+	if lobbySpawn then
+		_teleportCharacterToSpawn(player, lobbySpawn)
+	else
+		LoadoutService.loadCharacterWithBody(player, _dataService)
+	end
 end
 
 local function _spawnPlayerOnAssignedTeam(player: Player): boolean
@@ -1705,6 +1844,17 @@ local function _bindCharacterTracking(player: Player)
 	end
 end
 
+-- Init de estado por-jugador al entrar (o al arrancar el servicio con jugadores ya
+-- presentes). Centralizado para que ambos caminos dejen el mismo estado consistente.
+local function _initJoinedPlayerState(player: Player)
+	_isInMenuByUserId[player.UserId] = true
+	_deathAtByUserId[player.UserId] = 0
+	_matchKillsByUserId[player.UserId] = 0
+	KillAttributionService:InitStreak(player.UserId)
+	KillAttributionService:SendStreakBroadcast(player.UserId)
+	_bindCharacterTracking(player)
+end
+
 local function _onRequestJoinMatch(_: {}, player: Player)
 	if not _isPlayEnabled or not _activeMapModel then
 		_log(string.format("Ignored RequestJoinMatch from %s: play not enabled.", player.Name))
@@ -1815,13 +1965,32 @@ local function _onRequestRespawn(_: {}, player: Player)
 	end
 
 	_respawnDebounceByUserId[player.UserId] = true
+	-- Marcamos "respawn al mapa en curso" de forma SÍNCRONA (antes del defer), para
+	-- que la reubicación al lobby por inactividad lo vea en cuanto se pulsa spawn y
+	-- no mande al jugador al lobby en vez de a la partida (carrera #1).
+	_respawningByUserId[player.UserId] = true
 	task.defer(function()
 		_respawnDebounceByUserId[player.UserId] = nil
-		if player.Parent ~= Players or not _isRoundActive or _isInMenuByUserId[player.UserId] then
-			return
+
+		-- Reintento defensivo: al acabar la votación, jugadores y bots respawnean
+		-- a la vez y el body-swap puede fallar puntualmente (contención del lock,
+		-- rig a medio construir). Sin reintento, un fallo dejaba al jugador muerto
+		-- o cayendo al vacío. Reintentamos unas pocas veces con pausa corta.
+		local spawned = false
+		for _ = 1, 3 do
+			if player.Parent ~= Players or not _isRoundActive or _isInMenuByUserId[player.UserId] then
+				break
+			end
+			if _spawnPlayerOnAssignedTeam(player) then
+				spawned = true
+				break
+			end
+			task.wait(0.15)
 		end
 
-		if _spawnPlayerOnAssignedTeam(player) then
+		_respawningByUserId[player.UserId] = nil
+
+		if spawned then
 			_deathAtByUserId[player.UserId] = 0
 			Network.Match.DeathScreenHide.SendTo({}, player)
 		end
@@ -1899,7 +2068,18 @@ function MatchService:Start(dataService: DataService): ()
 	_dataService = dataService
 
 	_started = true
+
+	-- Control total del spawn: el motor NO auto-respawnea (ni en join ni al morir),
+	-- así nunca suelta al jugador en el vacío. Todo spawn pasa por código:
+	--  · join / vuelta a menú / muerte → _spawnPlayerAtLobby (LobbySpawn)
+	--  · pulsar spawn en partida        → _spawnPlayerOnAssignedTeam (spawn del mapa)
+	Players.CharacterAutoLoads = false
+
 	_ensureTeams()
+	-- Red de seguridad: SpawnLocation Neutral en el lobby por si algún LoadCharacter
+	-- sin reposicionar (o un auto-respawn que se cuele antes de Start) necesita un
+	-- punto válido — evita el origen (0,0,0).
+	_ensureLobbySpawnLocation()
 
 	-- Cargar AIService (require lazy para evitar dependencia circular)
 	local serverRoot = ServerScriptService:FindFirstChild("Server")
@@ -1960,17 +2140,26 @@ function MatchService:Start(dataService: DataService): ()
 
 	Players.PlayerAdded:Connect(function(player)
 		_log(string.format("Player added. Connected players=%d.", #Players:GetPlayers()))
-		_isInMenuByUserId[player.UserId] = true
-		_deathAtByUserId[player.UserId] = 0
-		_matchKillsByUserId[player.UserId] = 0
-		KillAttributionService:InitStreak(player.UserId)
-		KillAttributionService:SendStreakBroadcast(player.UserId)
-		_bindCharacterTracking(player)
+		_initJoinedPlayerState(player)
+		-- Spawn inicial en el lobby por código (CharacterAutoLoads está desactivado,
+		-- el motor no spawnea solo). task.defer para no bloquear el flujo de join.
+		task.defer(function()
+			_spawnPlayerAtLobby(player)
+		end)
 		-- Intentar iniciar votación cuando un nuevo jugador llega (cubre el
 		-- caso de servidor vacío donde Start() se ejecutó con 0 players).
 		-- task.defer para que el jugador ya esté en Players:GetPlayers().
 		task.defer(_startVoteIfPossible)
 	end)
+
+	-- Jugadores ya presentes cuando arranca el servicio (Start tras un join):
+	-- misma init que PlayerAdded + su cuerpo de lobby, ya que el motor no lo hará.
+	for _, player in Players:GetPlayers() do
+		_initJoinedPlayerState(player)
+		task.defer(function()
+			_spawnPlayerAtLobby(player)
+		end)
+	end
 
 	Players.PlayerRemoving:Connect(function(player)
 		local wasActiveReal = _isInMenuByUserId[player.UserId] == false
@@ -1981,6 +2170,8 @@ function MatchService:Start(dataService: DataService): ()
 		_isInMenuByUserId[player.UserId] = nil
 		_deathAtByUserId[player.UserId] = nil
 		_respawnDebounceByUserId[player.UserId] = nil
+		_respawningByUserId[player.UserId] = nil
+		_lobbyRespawnAtByUserId[player.UserId] = nil
 		_matchKillsByUserId[player.UserId] = nil
 		_matchDeathsByUserId[player.UserId] = nil
 		_matchAssistsByUserId[player.UserId] = nil

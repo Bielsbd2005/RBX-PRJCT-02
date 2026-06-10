@@ -16,8 +16,8 @@ local LocalPlayer = Players.LocalPlayer
 
 local IMAGE_ID = "rbxassetid://117688967482768"
 local HEAL_COLOR = Color3.fromRGB(120, 255, 150)
-local GLOW_THICKNESS = 0.22
-local GLOW_MAX_OPACITY = 0.18
+local GLOW_THICKNESS = 0.19
+local GLOW_MAX_OPACITY = 0.13
 
 local HealEffect = {}
 
@@ -112,18 +112,18 @@ local function spawnHealImage()
 	local targetSize, depth
 	local roll = math.random()
 	if roll < 0.10 then
-		targetSize = math.random(160, 230)
+		targetSize = math.random(135, 195)
 		depth = "front"
 	elseif roll < 0.30 then
-		targetSize = math.random(95, 140)
+		targetSize = math.random(80, 118)
 		depth = "front"
 	else
-		targetSize = math.random(45, 80)
+		targetSize = math.random(38, 68)
 		depth = "back"
 	end
 
 	-- Profundidad: fondo tenue y detrás, frente nítido y delante.
-	local maxOpacity = if depth == "front" then 0 else 0.35
+	local maxOpacity = if depth == "front" then 0.1 else 0.4
 	local zIndex = if depth == "front" then 20 else 8
 
 	local img = Instance.new("ImageLabel")
@@ -212,9 +212,9 @@ function HealEffect.play(duration: number?)
 			setGlow(intensity)
 
 			-- Más items en el pico de intensidad: ritmo más corto + extra.
-			local spawnRate = 0.13 - (0.06 * intensity)
+			local spawnRate = 0.17 - (0.05 * intensity)
 			spawnHealImage()
-			if intensity > 0.6 and math.random() < 0.6 then
+			if intensity > 0.6 and math.random() < 0.35 then
 				spawnHealImage()
 			end
 

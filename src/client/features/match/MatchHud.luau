@@ -11,7 +11,6 @@ local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
-local GameConfig = require(Shared.GameConfig)
 local TeamUtils = require(Shared.utils.TeamUtils)
 local UIUtils = require(script.Parent.Parent.Parent.core.ui.UIUtils)
 local Janitor = require(ReplicatedStorage:WaitForChild("Packages").janitor) :: any
@@ -54,15 +53,10 @@ type HudPlayerRowRefs = {
 type HudRefs = {
 	scoreA: TextLabel?,
 	scoreB: TextLabel?,
-	objective: TextLabel?,
 	timer: TextLabel?,
 	cashValue: TextLabel?,
 	levelValue: TextLabel?,
 	levelBarFill: GuiObject?,
-	teamABarFill: GuiObject?,
-	teamAScore: TextLabel?,
-	teamBBarFill: GuiObject?,
-	teamBScore: TextLabel?,
 	version: TextLabel?,
 	teamAPlayerRows: { HudPlayerRowRefs },
 	teamBPlayerRows: { HudPlayerRowRefs },
@@ -165,36 +159,6 @@ local function _setHorizontalFill(fillNode: GuiObject?, ratio: number)
 	fillNode.Size = UDim2.new(nextScale, baseOffset, currentSize.Y.Scale, currentSize.Y.Offset)
 end
 
-local function _setHorizontalFillFromRight(fillNode: GuiObject?, ratio: number)
-	if not fillNode then
-		return
-	end
-	local currentPosition = fillNode.Position
-	_setHorizontalFill(fillNode, ratio)
-	fillNode.AnchorPoint = Vector2.new(1, fillNode.AnchorPoint.Y)
-	fillNode.Position = UDim2.new(1, 0, currentPosition.Y.Scale, currentPosition.Y.Offset)
-end
-
-local function _alignScoreLabelToFillRight(scoreLabel: TextLabel?, fillNode: GuiObject?)
-	if not scoreLabel or not fillNode then
-		return
-	end
-	fillNode.ClipsDescendants = true
-	scoreLabel.AnchorPoint = Vector2.new(1, scoreLabel.AnchorPoint.Y)
-	scoreLabel.Position = UDim2.new(1, -15, scoreLabel.Position.Y.Scale, scoreLabel.Position.Y.Offset)
-	scoreLabel.TextXAlignment = Enum.TextXAlignment.Right
-end
-
-local function _alignScoreLabelToFillLeft(scoreLabel: TextLabel?, fillNode: GuiObject?)
-	if not scoreLabel or not fillNode then
-		return
-	end
-	fillNode.ClipsDescendants = true
-	scoreLabel.AnchorPoint = Vector2.new(0, scoreLabel.AnchorPoint.Y)
-	scoreLabel.Position = UDim2.new(0, 15, scoreLabel.Position.Y.Scale, scoreLabel.Position.Y.Offset)
-	scoreLabel.TextXAlignment = Enum.TextXAlignment.Left
-end
-
 local function _formatMatchTime(timeLeft: number): (string, number)
 	local totalSeconds = math.max(0, math.floor(timeLeft))
 	if totalSeconds <= TIMER_SHORT_FORMAT_THRESHOLD then
@@ -283,10 +247,8 @@ end
 local function _resolveHudRefs(matchHudGui: ScreenGui?): HudRefs
 	if not matchHudGui then
 		return {
-			scoreA = nil, scoreB = nil, objective = nil, timer = nil,
+			scoreA = nil, scoreB = nil, timer = nil,
 			cashValue = nil, levelValue = nil, levelBarFill = nil,
-			teamABarFill = nil, teamAScore = nil,
-			teamBBarFill = nil, teamBScore = nil,
 			version = nil,
 			teamAPlayerRows = {}, teamBPlayerRows = {},
 		}
@@ -294,15 +256,12 @@ local function _resolveHudRefs(matchHudGui: ScreenGui?): HudRefs
 
 	local containerNode = _findChildGuiObject(matchHudGui, "Container")
 	local matchNode = _findChildGuiObject(containerNode, "Match")
-	local statusNode = _findChildGuiObject(matchNode, "Status")
 	local cashNode = _findChildGuiObject(containerNode, "Cash")
 	local levelNode = _findChildGuiObject(containerNode, "Level")
-	local teamABarNode = _findDescendantGuiObject(matchNode, { "TeamA", "BarA", "Bar" })
-	local teamAFillNode = _findDescendantGuiObject(teamABarNode, { "Fill" }) or _findDescendantGuiObject(teamABarNode, { "FIll" })
-	local teamBBarNode = _findDescendantGuiObject(matchNode, { "TeamB", "BarB", "Bar" })
-	local teamBFillNode = _findDescendantGuiObject(teamBBarNode, { "Fill" }) or _findDescendantGuiObject(teamBBarNode, { "FIll" })
-	local teamAPlayersNode = _findDescendantGuiObject(matchNode, { "TeamA", "PlayersA" })
-	local teamBPlayersNode = _findDescendantGuiObject(matchNode, { "TeamB", "PlayersB" })
+	-- Las filas de jugadores cuelgan directamente de TeamA/TeamB (los nodos
+	-- intermedios PlayersA/PlayersB ya no existen).
+	local teamAPlayersNode = _findDescendantGuiObject(matchNode, { "TeamA" })
+	local teamBPlayersNode = _findDescendantGuiObject(matchNode, { "TeamB" })
 
 	-- Container.Version puede ser un TextLabel directo (caso simple) o un
 	-- contenedor con un hijo `Value` que muestra el número (patrón usado por
@@ -311,17 +270,18 @@ local function _resolveHudRefs(matchHudGui: ScreenGui?): HudRefs
 		or _findDescendantTextLabel(containerNode, { "Version", "Value" })
 
 	return {
-		scoreA = _findDescendantTextLabel(teamAFillNode, { "ScoreA" }),
-		scoreB = _findDescendantTextLabel(teamBFillNode, { "ScoreB" }),
-		objective = _findDescendantTextLabel(statusNode, { "Objective" }),
-		timer = _findDescendantTextLabel(statusNode, { "Timer" }),
+		-- El marcador ahora son labels directos bajo Match (sin barras). Aceptamos
+		-- ScoreA como TextLabel directo o como contenedor con un hijo `Value`.
+		scoreA = _findDescendantTextLabel(matchNode, { "ScoreA" })
+			or _findDescendantTextLabel(matchNode, { "ScoreA", "Value" }),
+		scoreB = _findDescendantTextLabel(matchNode, { "ScoreB" })
+			or _findDescendantTextLabel(matchNode, { "ScoreB", "Value" }),
+		-- El timer ahora vive en Match.Timer.Value (antes Status.Timer).
+		timer = _findDescendantTextLabel(matchNode, { "Timer", "Value" })
+			or _findDescendantTextLabel(matchNode, { "Timer" }),
 		cashValue = _findDescendantTextLabel(cashNode, { "Value" }),
 		levelValue = _findDescendantTextLabel(levelNode, { "Value" }),
 		levelBarFill = _findDescendantGuiObject(levelNode, { "Fill" }),
-		teamABarFill = teamAFillNode,
-		teamAScore = _findDescendantTextLabel(teamAFillNode, { "ScoreA" }),
-		teamBBarFill = teamBFillNode,
-		teamBScore = _findDescendantTextLabel(teamBFillNode, { "ScoreB" }),
 		version = versionLabel,
 		teamAPlayerRows = _collectHudPlayerRows(teamAPlayersNode),
 		teamBPlayerRows = _collectHudPlayerRows(teamBPlayersNode),
@@ -544,29 +504,18 @@ end
 
 function MatchHud:setScores(scoreA: number, scoreB: number, timeLeft: number)
 	local refs = self._hudRefs
-	local clampedA = math.max(0, scoreA)
-	local clampedB = math.max(0, scoreB)
-	local objectiveScore = math.max(1, GameConfig.WinScoreLimit)
 
 	if refs.scoreA then
-		refs.scoreA.Text = tostring(clampedA)
+		refs.scoreA.Text = tostring(math.max(0, scoreA))
 	end
 	if refs.scoreB then
-		refs.scoreB.Text = tostring(clampedB)
-	end
-	if refs.objective then
-		refs.objective.Text = tostring(objectiveScore)
+		refs.scoreB.Text = tostring(math.max(0, scoreB))
 	end
 	if refs.timer then
 		local text, totalSeconds = _formatMatchTime(timeLeft)
 		refs.timer.Text = text
 		self:_updateTimerEffects(refs.timer, totalSeconds)
 	end
-
-	_setHorizontalFill(refs.teamABarFill, clampedA / objectiveScore)
-	_alignScoreLabelToFillRight(refs.teamAScore, refs.teamABarFill)
-	_setHorizontalFillFromRight(refs.teamBBarFill, clampedB / objectiveScore)
-	_alignScoreLabelToFillLeft(refs.teamBScore, refs.teamBBarFill)
 end
 
 -- Tipos públicos exportados desde MatchNotificationsQueue. Se re-exportan

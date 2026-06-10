@@ -25,13 +25,14 @@ local MatchProgressionObserver = require(script.MatchProgressionObserver)
 
 local DeathScreenView = require(script.DeathScreenView)
 local ResultsView = require(script.ResultsView)
-local KillCamController = require(script.KillCamController)
+local KillCamFollowController = require(script.KillCamFollowController)
 local CharacterHighlightController = require(script.CharacterHighlightController)
 local HealthBillboardController = require(script.HealthBillboardController)
 local MapVoteView = require(script.MapVoteView)
 local PanelController = require(Client.core.ui.PanelController)
 local BlurController = require(Client.core.ui.BlurController)
 local LightingPresetController = require(Client.core.lighting.LightingPresetController)
+local DepthOfFieldController = require(Client.core.lighting.DepthOfFieldController)
 
 
 local MatchFeature = {}
@@ -63,6 +64,16 @@ local MAP_TO_LIGHTING_PRESET: { [string]: string } = {
 local function _resolveResultsFrame(playerGui: PlayerGui): GuiObject?
 	local ui = playerGui:FindFirstChild("UserInterface")
 	local node = if ui then ui:FindFirstChild("Results") else nil
+	if node and node:IsA("GuiObject") then
+		return node
+	end
+	return nil
+end
+
+-- Pantalla de muerte: frame bajo PlayerGui.UserInterface.DeathScreen.
+local function _resolveDeathScreen(playerGui: PlayerGui): GuiObject?
+	local ui = playerGui:FindFirstChild("UserInterface")
+	local node = if ui then ui:FindFirstChild("DeathScreen") else nil
 	if node and node:IsA("GuiObject") then
 		return node
 	end
@@ -105,9 +116,9 @@ local function _resolveKillerCharacter(killerUserIdStr: string): Model?
 		return if player then player.Character else nil
 	end
 
-	-- Bot: reusamos el cache de KillCamController (mapRoot.Bots) en lugar de
+	-- Bot: reusamos el cache de KillCamFollowController (mapRoot.Bots) en lugar de
 	-- escanear workspace:GetChildren() en cada muerte.
-	local botsFolder = KillCamController.getBotsFolder()
+	local botsFolder = KillCamFollowController.getBotsFolder()
 	if botsFolder then
 		for _, bot in botsFolder:GetChildren() do
 			if bot:IsA("Model") and bot:GetAttribute("FakeUserId") == killerUserId then
@@ -127,7 +138,7 @@ function MatchFeature.start(menuController: any): any
 	local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui") :: PlayerGui
 	local menuGui = menuController:getGui()
 	local votingFrame, votingCloseBtn = _resolveVotingFrame(playerGui)
-	local deathScreenGui = playerGui:FindFirstChild("DeathScreen")
+	local deathScreenGui = _resolveDeathScreen(playerGui)
 	local resultsFrame = _resolveResultsFrame(playerGui)
 	local iris = IrisTransition.new(playerGui)
 
@@ -156,8 +167,13 @@ function MatchFeature.start(menuController: any): any
 	-- (MAP_TO_LIGHTING_PRESET) o se cae al genérico "Match".
 	local activeMapName = ""
 	LightingPresetController.applyImmediate("Lobby")
+	-- DOF de fondo del menú: encendido al arrancar (estamos en Lobby) y alternado
+	-- por fase abajo. El locker lo suprime mientras usa su propio ShowcaseDOF.
+	DepthOfFieldController.setEnabled(true)
 	MatchState.setOnPhaseChanged(function(_prev, nextPhase)
-		if nextPhase == "Lobby" or nextPhase == "ReturningToMenu" then
+		local inMenu = nextPhase == "Lobby" or nextPhase == "ReturningToMenu"
+		DepthOfFieldController.setEnabled(inMenu)
+		if inMenu then
 			LightingPresetController.apply("Lobby")
 		else
 			-- Joining/InMatch/Dying/ShowingResults usan el look del mapa actual.
@@ -167,6 +183,7 @@ function MatchFeature.start(menuController: any): any
 	end)
 	janitor:Add(function()
 		MatchState.setOnPhaseChanged(nil)
+		DepthOfFieldController.setEnabled(false)
 	end, true)
 
 	local matchMenu = MatchMenu.new(menuController, playerGui, menuGui, MatchState.shouldKeepMenuHidden)
@@ -209,11 +226,12 @@ function MatchFeature.start(menuController: any): any
 		janitor:Add(votingPanel, "Destroy")
 	end
 
-	local deathView = if deathScreenGui and deathScreenGui:IsA("ScreenGui")
+	local deathView = if deathScreenGui
 		then DeathScreenView.new(deathScreenGui)
 		else nil
 
-	local killCam = KillCamController.new(playerGui)
+	-- Killcam que sigue al asesino desde delante (con karma cam si el asesino muere).
+	local killCam = KillCamFollowController.new(playerGui)
 	janitor:Add(killCam, "Destroy")
 
 	-- Scan compartido de workspace para evitar que cada controller haga su
@@ -526,8 +544,8 @@ function MatchFeature.start(menuController: any): any
 
 		-- InMatch: restaurar HUD y cámara de gameplay.
 		hud:setEnabled(true)
-		if deathScreenGui and deathScreenGui:IsA("ScreenGui") then
-			deathScreenGui.Enabled = false
+		if deathScreenGui then
+			deathScreenGui.Visible = false
 		end
 		task.defer(function()
 			MatchCamera.setGameplay(character)
@@ -725,8 +743,8 @@ function MatchFeature.start(menuController: any): any
 			deathView:hide()
 		end
 		resultsView:hide()
-		if deathScreenGui and deathScreenGui:IsA("ScreenGui") then
-			deathScreenGui.Enabled = false
+		if deathScreenGui then
+			deathScreenGui.Visible = false
 		end
 		hud:setEnabled(false)
 		MatchWeapons.cleanAllWithRetries(playerGui, notInActiveMatch)
@@ -755,8 +773,8 @@ function MatchFeature.start(menuController: any): any
 		if deathView then
 			deathView:hide()
 		end
-		if deathScreenGui and deathScreenGui:IsA("ScreenGui") then
-			deathScreenGui.Enabled = false
+		if deathScreenGui then
+			deathScreenGui.Visible = false
 		end
 
 		MatchWeapons.cleanAllWithRetries(playerGui, notInActiveMatch)

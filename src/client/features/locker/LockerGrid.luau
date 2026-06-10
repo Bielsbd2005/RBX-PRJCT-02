@@ -50,17 +50,9 @@ type ItemGridCardRefs = {
 	itemNode: GuiObject?,
 	itemNodeDefaultSize: UDim2?,
 	viewportNode: ViewportFrame?,
-	amountNode: TextLabel?,
-	equippedNode: GuiObject?,
-	-- Default (ItemTemplate): label único de estado dentro de Status.
+	-- Status { Value (label de estado/progreso), Locked (imagen) }.
 	statusValueNode: TextLabel?,
 	lockedNode: GuiObject?,
-	titleNode: GuiObject?,
-	titleDefaultText: string?,
-	barNode: GuiObject?,
-	barFillNode: GuiObject?,
-	barFillDefaultSize: UDim2?,
-	barValueNode: TextLabel?,
 	buttonStroke: UIStroke?,
 	hasButtonStrokeCached: boolean?,
 }
@@ -68,7 +60,6 @@ type ItemGridCardRefs = {
 type LockerGridCallbacks = {
 	canInteract: (() -> boolean)?,
 	isItemOwned: (LockerCatalogItem) -> boolean,
-	getItemAmount: ((LockerCatalogItem) -> number)?,
 	isItemEquipped: (LockerCatalogItem) -> boolean,
 	getCurrentLevel: () -> number,
 	onSelectionChanged: (LockerCatalogItem?) -> (),
@@ -195,53 +186,21 @@ function LockerGrid:_getButtonStroke(button: GuiButton): UIStroke?
 end
 
 function LockerGrid:_buildGridCardRefs(card: GuiObject, templateKey: TemplateKey): ItemGridCardRefs
-	-- El ItemTemplate (default) ES el GuiButton; la template de wraps mantiene un
-	-- hijo "Button" que envuelve su contenido.
+	-- Plantilla única ItemTemplate (la vista de wraps la reutiliza): el card ES el
+	-- GuiButton y contiene ViewportFrame (preview 3D), Item (imagen) y
+	-- Status { Value, Locked, Bar { Fill } }.
 	local button: GuiButton? = if card:IsA("GuiButton") then card :: GuiButton else nil
 	if not button then
 		local buttonNode = card:FindFirstChild("Button")
 		button = if buttonNode and buttonNode:IsA("GuiButton") then buttonNode :: GuiButton else nil
 	end
 
-	if templateKey == "wraps" then
-		local viewportNode = if button then button:FindFirstChild("ViewportFrame") else nil
-		local viewport = if viewportNode and viewportNode:IsA("ViewportFrame") then viewportNode else nil
+	local viewportNode = if button then button:FindFirstChild("ViewportFrame") else nil
+	local viewport = if viewportNode and viewportNode:IsA("ViewportFrame") then viewportNode else nil
 
-		local equippedNode = if button then button:FindFirstChild("Equiped") else nil
-		local amountNode = if viewport then viewport:FindFirstChild("Amount") else nil
-		local titleNode = if button then button:FindFirstChild("Title") else nil
-		local barNode = if button then button:FindFirstChild("Bar") else nil
-		local wrapsLockedNode = if button then button:FindFirstChild("Locked") else nil
-		local wrapsLockedGui = if wrapsLockedNode and wrapsLockedNode:IsA("GuiObject") then wrapsLockedNode else nil
-		local barGui = if barNode and barNode:IsA("GuiObject") then barNode else nil
-		local barFillNode = if barGui then barGui:FindFirstChild("Fill") else nil
-		local barFillGui = if barFillNode and barFillNode:IsA("GuiObject") then barFillNode else nil
-		local barValueNode = if barGui then barGui:FindFirstChild("Value") else nil
-
-		local refs: ItemGridCardRefs = {
-			templateKey = templateKey,
-			button = button,
-			itemNode = nil,
-			itemNodeDefaultSize = nil,
-			viewportNode = viewport,
-			amountNode = if amountNode and amountNode:IsA("TextLabel") then amountNode else nil,
-			equippedNode = if equippedNode and equippedNode:IsA("GuiObject") then equippedNode else nil,
-			lockedNode = wrapsLockedGui,
-			titleNode = if titleNode and titleNode:IsA("GuiObject") then titleNode else nil,
-			titleDefaultText = if titleNode and titleNode:IsA("TextLabel") then titleNode.Text else nil,
-			barNode = barGui,
-			barFillNode = barFillGui,
-			barFillDefaultSize = if barFillGui then barFillGui.Size else nil,
-			barValueNode = if barValueNode and barValueNode:IsA("TextLabel") then barValueNode else nil,
-		}
-
-		self._cachedGridCardRefs[card] = refs
-		return refs
-	end
-
-	-- ItemTemplate plano: Item (imagen) + Status { Value (label de estado), Locked (imagen) }.
 	local itemNode = if button then button:FindFirstChild("Item") else nil
 	local resolvedItemNode = if itemNode and (itemNode:IsA("ImageLabel") or itemNode:IsA("ImageButton")) then itemNode else nil
+
 	local statusNode = if button then button:FindFirstChild("Status") else nil
 	local statusValueNode = if statusNode then statusNode:FindFirstChild("Value") else nil
 	local statusLockedNode = if statusNode then statusNode:FindFirstChild("Locked") else nil
@@ -251,16 +210,9 @@ function LockerGrid:_buildGridCardRefs(card: GuiObject, templateKey: TemplateKey
 		button = button,
 		itemNode = resolvedItemNode,
 		itemNodeDefaultSize = if resolvedItemNode then resolvedItemNode.Size else nil,
-		viewportNode = nil,
-		amountNode = nil,
-		equippedNode = nil,
+		viewportNode = viewport,
 		statusValueNode = if statusValueNode and statusValueNode:IsA("TextLabel") then statusValueNode else nil,
 		lockedNode = if statusLockedNode and statusLockedNode:IsA("GuiObject") then statusLockedNode else nil,
-		titleNode = nil,
-		barNode = nil,
-		barFillNode = nil,
-		barFillDefaultSize = nil,
-		barValueNode = nil,
 	}
 
 	self._cachedGridCardRefs[card] = refs
@@ -387,40 +339,13 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 	end
 
 	local isOwned = self._callbacks.isItemOwned(item)
-	local itemAmount = if self._callbacks.getItemAmount then self._callbacks.getItemAmount(item) else if isOwned then 1 else 0
 	local isEquipped = self._callbacks.isItemEquipped(item)
 	local isSelectedButton = button == self._selectedCatalogButton
 
 	if refs.templateKey == "wraps" then
-		if refs.amountNode then
-			refs.amountNode.Visible = itemAmount > 1
-			if itemAmount > 1 then
-				refs.amountNode.Text = "x" .. tostring(itemAmount)
-			end
-		end
-
-		if refs.equippedNode then
-			refs.equippedNode.Visible = isEquipped
-		end
-
 		local isChallenge = isKillChallengeItem(item) and not isOwned
-		local isDefaultWrap = item.id == ItemDefaults.ITEM_ID
-		if refs.titleNode then
-			-- Si esta equipado se muestra solo el badge `Equiped`, sin titulo.
-			refs.titleNode.Visible = not isEquipped
-			if refs.titleNode:IsA("TextLabel") then
-				if isChallenge then
-					refs.titleNode.Text = refs.titleDefaultText or refs.titleNode.Text
-				elseif isDefaultWrap then
-					refs.titleNode.Text = "DEFAULT"
-				else
-					refs.titleNode.Text = tostring(item.Rarity)
-				end
-			end
-		end
-		if refs.barNode then
-			refs.barNode.Visible = isChallenge
-		end
+
+		-- Status.Locked: candado visible solo en wraps de desafío bloqueados.
 		if refs.lockedNode then
 			refs.lockedNode.Visible = isChallenge
 		end
@@ -428,14 +353,12 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 		if isChallenge then
 			local goal = math.max(1, item.KillGoal or 0)
 			local progress = math.clamp(item.KillProgress or 0, 0, goal)
-			if refs.barFillNode then
-				local defaultSize = refs.barFillDefaultSize or refs.barFillNode.Size
-				local ratio = progress / goal
-				refs.barFillNode.Size = UDim2.new(defaultSize.X.Scale * ratio, defaultSize.X.Offset, defaultSize.Y.Scale, defaultSize.Y.Offset)
+			-- Status.Value muestra el progreso "999/1k" (objetivo en formato corto).
+			if refs.statusValueNode then
+				refs.statusValueNode.Text = UIUtils.formatCountShort(progress) .. "/" .. UIUtils.formatCountShort(goal)
 			end
-			if refs.barValueNode then
-				refs.barValueNode.Text = tostring(progress) .. "/" .. tostring(goal)
-			end
+		elseif refs.statusValueNode then
+			refs.statusValueNode.Text = if isEquipped then "EQUIPED" else "OWNED"
 		end
 
 		local stroke = self:_getButtonStroke(button)
@@ -602,23 +525,6 @@ function LockerGrid:_applyCatalogItemToCard(card: GuiObject, item: LockerCatalog
 		elseif refs.itemNodeDefaultSize then
 			refs.itemNode.Size = refs.itemNodeDefaultSize
 		end
-	end
-
-	if refs.amountNode then
-		refs.amountNode.Visible = false
-		refs.amountNode.Text = ""
-	end
-
-	if refs.equippedNode then
-		refs.equippedNode.Visible = false
-	end
-
-	if refs.titleNode then
-		refs.titleNode.Visible = false
-	end
-
-	if refs.barNode then
-		refs.barNode.Visible = false
 	end
 
 	local button = refs.button

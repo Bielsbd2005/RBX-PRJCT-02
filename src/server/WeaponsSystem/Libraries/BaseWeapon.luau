@@ -134,8 +134,19 @@ function BaseWeapon:doInitialSetup()
 				self:setEquipped(false)
 			end
 		end)
+		-- Auto-equip de un arma que ya está en el workspace cuando se crea este
+		-- BaseWeapon (caso típico: un cliente entra a la partida y barre los Tools
+		-- ya etiquetados via CollectionService:GetTagged en WeaponsSystem.setup).
+		-- En el CLIENTE solo debe auto-equiparse el arma del LocalPlayer: equipar
+		-- la de OTRO jugador dispara setWeaponEquipped → enciende la ShoulderCamera
+		-- (tercera persona) y la GUI de arma del jugador local aunque esté desarmado
+		-- en el lobby (bug: al conectarte con alguien jugando aparecías bugueado).
+		-- Coherente con los handlers Equipped/Unequipped de arriba, ya filtrados al
+		-- LocalPlayer en cliente.
 		if self.instance:IsDescendantOf(workspace) and self.player then
-			self:setEquipped(true)
+			if IsServer or self.player == Players.LocalPlayer then
+				self:setEquipped(true)
+			end
 		end
 
 		self.connections.activated = self.instance.Activated:Connect(function()

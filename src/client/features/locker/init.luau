@@ -181,9 +181,10 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local effectsBtn = nav1:WaitForChild("Effects") :: GuiButton
 	local wrapsTitle = lockerFrame:WaitForChild("WrapsTitle") :: TextLabel
 	local itemGrid = lockerFrame:WaitForChild("ScrollingFrame")
+	-- ItemTemplate es ahora la única plantilla del grid: la vista de wraps la
+	-- reutiliza (incluye ViewportFrame para el preview 3D; el progreso de los
+	-- wraps de desafío se muestra como texto en Status.Value).
 	local itemGridTemplate = itemGrid:WaitForChild("ItemTemplate") :: GuiObject
-	-- ⚠️ Requiere que el Frame en Studio se llame "WeaponWraps" (renombrado manual).
-	local itemGridWrapsTemplate = itemGrid:WaitForChild("WeaponWraps") :: GuiObject
 	local actionFrame = lockerFrame:WaitForChild("ActionFrame") :: GuiObject
 	-- Estructura nueva del ActionFrame:
 	--   ActionFrame.Title.Text.Title / .Subtitle  → título y subtítulo
@@ -959,19 +960,11 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local clearItemGrid: () -> ()
 	local syncWeaponPreviewsFromLoadout: () -> ()
 
-	grid = LockerGrid.new(itemGrid, { default = itemGridTemplate, wraps = itemGridWrapsTemplate }, canUseHoverAnimations, {
+	grid = LockerGrid.new(itemGrid, { default = itemGridTemplate, wraps = itemGridTemplate }, canUseHoverAnimations, {
 		canInteract = function(): boolean
 			return pendingShopAction == nil
 		end,
 		isItemOwned = isItemOwned,
-		getItemAmount = function(item: LockerCatalogItem): number
-			if item.Category ~= LockerCategory.WEAPON_WRAPS then
-				return if isItemOwned(item) then 1 else 0
-			end
-
-			local targetWeaponId = resolveWrapsTargetWeaponId(getCurrentLoadout())
-			return getWrapAmountForWeapon(wrapsTargetWeaponCategory, targetWeaponId, item.id)
-		end,
 		isItemEquipped = isItemEquipped,
 		getCurrentLevel = getCurrentLevel,
 		onSelectionChanged = function(item: LockerCatalogItem?)
@@ -1314,7 +1307,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 	navTemplate.Visible = false
 	itemGridTemplate.Visible = false
-	itemGridWrapsTemplate.Visible = false
 	do
 		purchaseButton.Active = true
 		purchaseButton.Selectable = true

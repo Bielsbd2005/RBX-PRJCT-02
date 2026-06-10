@@ -14,7 +14,7 @@ local STYLE = {
 local KILLER_VIEWPORT_ANIM_ID = "rbxassetid://126774009783214"
 
 type Refs = {
-	root: ScreenGui,
+	root: GuiObject,
 	container: GuiObject,
 	menuButton: GuiButton?,
 	respawnButton: GuiButton?,
@@ -75,20 +75,29 @@ local function _resolveCardLabel(cardNode: Instance?, name: string): TextLabel?
 	return nil
 end
 
-local function _resolveRefs(gui: ScreenGui): Refs?
+local function _resolveRefs(gui: GuiObject): Refs?
+	-- Backdrop (para el fade): wrapper `Container` si existe, si no el propio gui.
 	local containerNode = gui:FindFirstChild("Container")
-	if not containerNode or not containerNode:IsA("GuiObject") then
+	local container: GuiObject = if containerNode and containerNode:IsA("GuiObject")
+		then containerNode
+		else gui
+
+	-- Buscamos los nodos de contenido de forma recursiva: así funcionan tanto si
+	-- cuelgan del Container como si viven dentro de los paneles Up/Down.
+	local menuNode = gui:FindFirstChild("Menu", true)
+	local respawnNode = gui:FindFirstChild("Respawn", true)
+	local cardNode = gui:FindFirstChild("Card", true)
+	local viewportNode = gui:FindFirstChild("ViewportFrame", true)
+
+	-- Sin ningún botón no es una pantalla de muerte funcional (GUI incompleta o
+	-- nodo equivocado): devolvemos nil para no crear una view rota.
+	if not menuNode and not respawnNode then
 		return nil
 	end
 
-	local menuNode = containerNode:FindFirstChild("Menu")
-	local respawnNode = containerNode:FindFirstChild("Respawn")
-	local cardNode = containerNode:FindFirstChild("Card")
-	local viewportNode = containerNode:FindFirstChild("ViewportFrame")
-
 	return {
 		root = gui,
-		container = containerNode,
+		container = container,
 		menuButton = if menuNode and menuNode:IsA("GuiButton") then menuNode else nil,
 		respawnButton = if respawnNode and respawnNode:IsA("GuiButton") then respawnNode else nil,
 		menuPcLabel = _resolvePcLabel(menuNode),
@@ -223,7 +232,7 @@ end
 -- DeathScreenView
 -- ────────────────────────────────────────────────────────────────
 
-function DeathScreenView.new(gui: ScreenGui): any
+function DeathScreenView.new(gui: GuiObject): any
 	local refs = _resolveRefs(gui)
 	if not refs then
 		return nil
@@ -244,8 +253,7 @@ function DeathScreenView.new(gui: ScreenGui): any
 	-- viewport). Lo cancelamos en show/hide/Destroy.
 	self._countdownTween = nil :: Tween?
 
-	refs.root.Enabled = false
-	refs.root.ResetOnSpawn = false
+	refs.root.Visible = false
 	refs.container.BackgroundTransparency = self._baseTransparency
 	_setPcHintsVisible(refs)
 
@@ -280,7 +288,7 @@ function DeathScreenView:bind(onRespawn: () -> (), onMenu: () -> ())
 	end
 
 	table.insert(self._connections, UserInputService.InputBegan:Connect(function(input, gameProcessed)
-		if gameProcessed or not self._refs.root.Enabled then
+		if gameProcessed or not self._refs.root.Visible then
 			return
 		end
 
@@ -301,7 +309,7 @@ function DeathScreenView:show(respawnCooldown: number, killer: KillerInfo?)
 	self._countdownToken += 1
 	local token = self._countdownToken
 	_setPcHintsVisible(self._refs)
-	self._refs.root.Enabled = true
+	self._refs.root.Visible = true
 	self._refs.container.BackgroundTransparency = self._baseTransparency
 	TweenService:Create(self._refs.container, STYLE.showTween, {
 		BackgroundTransparency = self._baseTransparency,
@@ -376,6 +384,7 @@ end
 
 function DeathScreenView:hide()
 	self._countdownToken += 1
+	local token = self._countdownToken
 	self._respawnReady = false
 	_setButtonEnabled(self._refs.respawnButton, false)
 	if self._countdownTween then
@@ -400,8 +409,12 @@ function DeathScreenView:hide()
 		BackgroundTransparency = self._baseTransparency,
 	})
 	tween:Play()
+	-- Guardado con token: si llega un show() durante el fade, no ocultamos.
 	task.delay(STYLE.hideTween.Time, function()
-		self._refs.root.Enabled = false
+		if self._destroyed or self._countdownToken ~= token then
+			return
+		end
+		self._refs.root.Visible = false
 	end)
 end
 
@@ -425,7 +438,7 @@ function DeathScreenView:Destroy()
 	if self._refs.viewportFrame then
 		_clearViewport(self._refs.viewportFrame)
 	end
-	self._refs.root.Enabled = false
+	self._refs.root.Visible = false
 end
 
 return DeathScreenView

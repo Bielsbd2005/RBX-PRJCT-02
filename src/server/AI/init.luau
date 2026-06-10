@@ -45,6 +45,9 @@ type BotRecord = {
 	team: "A" | "B",
 	deathConnection: RBXScriptConnection?,
 	hasDeathBeenReported: boolean,
+	-- Manejo de muerte (ragdoll + Destroy + cleanup). Se dispara desde Humanoid.Died
+	-- y, como fallback, desde _refreshAliveLists si Died no llega a correr.
+	handleDeath: (() -> ())?,
 	ai: typeof(BotAI.new(({} :: any), "A")),
 	descendantConn: RBXScriptConnection?,
 }
@@ -281,13 +284,25 @@ local function _refreshAliveLists()
 	table.clear(listB)
 
 	local count = 0
+	local deadUnreported: { BotRecord }? = nil
 	for name, bot in _botsByName do
-		if bot.model.Parent == nil or bot.humanoid.Health <= 0 then
+		if bot.model.Parent == nil then
+			-- Modelo ya destruido: solo limpiar bookkeeping.
 			if bot.deathConnection then
 				bot.deathConnection:Disconnect()
 				bot.deathConnection = nil
 			end
 			_botsByName[name] = nil
+		elseif bot.humanoid.Health <= 0 then
+			-- Muerto pero el modelo sigue presente. NO desconectamos su deathConnection
+			-- (hacerlo orfanaba el cuerpo: sin ragdoll ni Destroy, congelado para
+			-- siempre). Si su Died handler aún no corrió, lo disparamos como fallback
+			-- (diferido, fuera del bucle, para no re-entrar esta iteración). No se
+			-- cuenta como vivo.
+			if not bot.hasDeathBeenReported then
+				deadUnreported = deadUnreported or {}
+				table.insert(deadUnreported, bot)
+			end
 		else
 			count += 1
 			if bot.team == "A" then
@@ -298,6 +313,18 @@ local function _refreshAliveLists()
 		end
 	end
 	_activeBotCount = count
+
+	-- Fallback de limpieza: bots con Health<=0 cuyo Humanoid.Died no llegó a correr.
+	-- El guard hasDeathBeenReported evita doble ejecución si Died sí dispara luego.
+	if deadUnreported then
+		for _, bot in deadUnreported do
+			task.defer(function()
+				if not bot.hasDeathBeenReported and bot.handleDeath then
+					bot.handleDeath()
+				end
+			end)
+		end
+	end
 end
 
 local function _getRandomSpawnPoint(): BasePart?
@@ -654,13 +681,19 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 		team = team,
 		deathConnection = nil,
 		hasDeathBeenReported = false,
+		handleDeath = nil,
 		ai = botAIInstance,
 		descendantConn = descendantConn,
 	}
 
 	botAIInstance:Start(mapRoot, _aliveTargets, _roamGraph, _botModelByFakeUserId)
 
-	record.deathConnection = humanoid.Died:Connect(function()
+	-- Manejo de muerte extraído a función para poder dispararlo también como FALLBACK
+	-- desde _refreshAliveLists si el Humanoid.Died del servidor no llega a correr
+	-- (p.ej. cuando otro bot muriendo a la vez desconectaba este handler antes de
+	-- tiempo). El guard hasDeathBeenReported garantiza que corre UNA sola vez, venga
+	-- del evento Died o del fallback.
+	local function handleBotDeath()
 		if record.hasDeathBeenReported then
 			return
 		end
@@ -730,7 +763,10 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 				warn(string.format("[AIService] _onBotDied error en %s: %s", botName, tostring(err)))
 			end
 		end
-	end)
+	end
+
+	record.handleDeath = handleBotDeath
+	record.deathConnection = humanoid.Died:Connect(handleBotDeath)
 
 	_botsByName[botName] = record
 	_activeBotCount += 1

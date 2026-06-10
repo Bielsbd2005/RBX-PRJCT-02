@@ -159,18 +159,17 @@ function MatchNotificationsQueue:_resolveSlideContext(): { container: GuiObject?
 		return { container = nil, hiddenFrames = {} }
 	end
 
+	-- El timer cuelga directo de Match (antes Match.Status.Timer) y las filas de
+	-- jugadores son los propios nodos TeamA/TeamB (ya no hay PlayersA/PlayersB).
 	local matchNode = _findChildGuiObject(container, "Match")
-	local statusNode = _findChildGuiObject(matchNode, "Status")
-	local timerNode = _findChildGuiObject(statusNode, "Timer")
+	local timerNode = _findChildGuiObject(matchNode, "Timer")
 	local teamANode = _findChildGuiObject(matchNode, "TeamA")
-	local playersANode = _findChildGuiObject(teamANode, "PlayersA")
 	local teamBNode = _findChildGuiObject(matchNode, "TeamB")
-	local playersBNode = _findChildGuiObject(teamBNode, "PlayersB")
 
 	local hiddenFrames: { GuiObject } = {}
 	if timerNode then table.insert(hiddenFrames, timerNode) end
-	if playersANode then table.insert(hiddenFrames, playersANode) end
-	if playersBNode then table.insert(hiddenFrames, playersBNode) end
+	if teamANode then table.insert(hiddenFrames, teamANode) end
+	if teamBNode then table.insert(hiddenFrames, teamBNode) end
 
 	return { container = container, hiddenFrames = hiddenFrames }
 end
@@ -218,7 +217,9 @@ function MatchNotificationsQueue:playLevelUpAnimation(newLevel: number, unlock: 
 		local levelUpFrame = _findChildGuiObject(container, "LevelUp")
 		if not levelUpFrame then onDone() return end
 
-		local hiddenFrames = ctx.hiddenFrames
+		-- El LevelUp no oculta ningún elemento del MatchHud: se muestra encima sin
+		-- esconder timer ni filas de equipos.
+		local hiddenFrames = {} :: { GuiObject }
 
 		local originalPosition = self._levelUpOriginalPosition
 		if not originalPosition then

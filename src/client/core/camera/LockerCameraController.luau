@@ -3,31 +3,22 @@
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
-local Lighting = game:GetService("Lighting")
 
 -- Travelling entre cámaras del locker (entrada, cambio de pestaña y salida): la
 -- cámara se desplaza desde su posición actual hasta el target con ease-in-out.
 local MOVE_TWEEN_INFO = TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut)
-local DOF_APPLY_TWEEN_INFO = TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-local DOF_RESET_TWEEN_INFO = TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local WRAP_ZOOM_TWEEN_INFO = TweenInfo.new(0.85, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
-local DEFAULT_FOCUS_DISTANCE = 16.66
-local TARGET_DOF_FAR_INTENSITY = 0.55
-local TARGET_DOF_IN_FOCUS_RADIUS = 9
 
 export type LockerCameraController = {
 	_camera: Camera,
 	_targetPart: BasePart,
-	_dof: DepthOfFieldEffect,
 	_isApplied: boolean,
 	_savedCameraType: Enum.CameraType?,
 	_savedCameraSubject: Instance?,
 	_savedCFrame: CFrame?,
 	_savedFieldOfView: number?,
 	_cameraApproachTween: Tween?,
-	_dofTween: Tween?,
 	_fovTween: Tween?,
-	_dofFadeOutConnection: RBXScriptConnection?,
 	_cameraApproachCompletedConnection: RBXScriptConnection?,
 	setTargetPartName: (self: LockerCameraController, targetPartName: string) -> (),
 	zoomOnPosition: (self: LockerCameraController, targetPosition: Vector3) -> (),
@@ -48,24 +39,6 @@ local function resolveTargetPart(targetPartName: string): BasePart
 	return target
 end
 
-local function resolveDepthOfField(): DepthOfFieldEffect
-	local existing = Lighting:FindFirstChild("ShowcaseDOF")
-	if existing and existing:IsA("DepthOfFieldEffect") then
-		return existing
-	end
-
-	local dof = Instance.new("DepthOfFieldEffect")
-	dof.Name = "ShowcaseDOF"
-	dof.Enabled = false
-	dof.FarIntensity = 1
-	dof.FocusDistance = DEFAULT_FOCUS_DISTANCE
-	dof.InFocusRadius = 0
-	dof.NearIntensity = 0
-	dof.Parent = Lighting
-
-	return dof
-end
-
 function LockerCameraController.new(targetPartName: string?): LockerCameraController
 	local camera = Workspace.CurrentCamera
 	assert(camera ~= nil, "CurrentCamera is not available")
@@ -73,16 +46,13 @@ function LockerCameraController.new(targetPartName: string?): LockerCameraContro
 	local self = setmetatable({}, LockerCameraController) :: any
 	self._camera = camera :: Camera
 	self._targetPart = resolveTargetPart(targetPartName or "locker")
-	self._dof = resolveDepthOfField()
 	self._isApplied = false
 	self._savedCameraType = nil
 	self._savedCameraSubject = nil
 	self._savedCFrame = nil
 	self._savedFieldOfView = nil
 	self._cameraApproachTween = nil
-	self._dofTween = nil
 	self._fovTween = nil
-	self._dofFadeOutConnection = nil
 	self._cameraApproachCompletedConnection = nil
 
 	return self
@@ -99,19 +69,9 @@ function LockerCameraController:_cancelActiveTweens()
 		self._cameraApproachCompletedConnection = nil
 	end
 
-	if self._dofTween then
-		self._dofTween:Cancel()
-		self._dofTween = nil
-	end
-
 	if self._fovTween then
 		self._fovTween:Cancel()
 		self._fovTween = nil
-	end
-
-	if self._dofFadeOutConnection then
-		self._dofFadeOutConnection:Disconnect()
-		self._dofFadeOutConnection = nil
 	end
 end
 
@@ -186,17 +146,6 @@ function LockerCameraController:apply()
 		self._savedCFrame = self._camera.CFrame
 		self._savedFieldOfView = self._camera.FieldOfView
 		self._isApplied = true
-
-		self._dof.Enabled = true
-		self._dof.FocusDistance = DEFAULT_FOCUS_DISTANCE
-		self._dof.FarIntensity = 0
-		self._dof.InFocusRadius = 0
-		self._dof.NearIntensity = 0
-		self._dofTween = TweenService:Create(self._dof, DOF_APPLY_TWEEN_INFO, {
-			FarIntensity = TARGET_DOF_FAR_INTENSITY,
-			InFocusRadius = TARGET_DOF_IN_FOCUS_RADIUS,
-		})
-		self._dofTween:Play()
 	end
 
 	-- Siempre (no solo la primera vez): si una restauración anterior quedó a medias
@@ -218,16 +167,6 @@ function LockerCameraController:restore(animated: boolean?)
 	end
 
 	self:_cancelActiveTweens()
-
-	self._dofTween = TweenService:Create(self._dof, DOF_RESET_TWEEN_INFO, {
-		FarIntensity = 0,
-		InFocusRadius = 0,
-	})
-	self._dofFadeOutConnection = self._dofTween.Completed:Connect(function()
-		self._dof.Enabled = false
-		self._dofFadeOutConnection = nil
-	end)
-	self._dofTween:Play()
 
 	local savedCFrame = self._savedCFrame
 	local savedFieldOfView = self._savedFieldOfView

@@ -26,4 +26,18 @@ function UIUtils.formatCashAmount(amount: number): string
 	return withSeparators
 end
 
+-- Formato corto para contadores: a partir de mil usa sufijo "k" (1000 → "1k",
+-- 1500 → "1.5k"). Por debajo de mil se muestra el número tal cual (999 → "999").
+function UIUtils.formatCountShort(amount: number): string
+	local n = math.max(0, math.floor(amount))
+	if n < 1000 then
+		return tostring(n)
+	end
+	local thousands = n / 1000
+	if thousands == math.floor(thousands) then
+		return string.format("%dk", thousands)
+	end
+	return string.format("%.1fk", thousands)
+end
+
 return UIUtils
