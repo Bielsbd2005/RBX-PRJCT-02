@@ -462,12 +462,6 @@ local GiftingNamespace = ByteNet.DefineNamespace("Gifting", function()
 end)
 
 -- ────────────────────────────────────────────────────────────
--- NAMESPACE: Debug
--- Herramientas de depuracion (solo Studio/dev en servidor).
--- ────────────────────────────────────────────────────────────
-
-
--- ────────────────────────────────────────────────────────────
 -- EXPORT
 -- ────────────────────────────────────────────────────────────
 

@@ -4,21 +4,11 @@ local Players = game:GetService("Players")
 local ContentProvider = game:GetService("ContentProvider")
 local ReplicatedFirst = game:GetService("ReplicatedFirst")
 
-local SKIP_IN_STUDIO = false
-
 ReplicatedFirst:RemoveDefaultLoadingScreen()
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 playerGui.ScreenOrientation = Enum.ScreenOrientation.LandscapeSensor
-
-if SKIP_IN_STUDIO and RunService:IsStudio() then
-	local loadingScreen = playerGui:FindFirstChild("LoadingScreen")
-	if loadingScreen then
-		loadingScreen:Destroy()
-	end
-	return
-end
 
 local MIN_LOAD_TIME = 6
 local DOTS_SPEED = 3
@@ -31,11 +21,8 @@ if not loadingScreen then
 end
 local background = loadingScreen:WaitForChild("Background")
 local titleContainer = background:WaitForChild("TitleContainer")
-local textOutline = titleContainer:WaitForChild("TextOutline")
-local outlineStroke = textOutline:WaitForChild("UIStroke")
 local maskFrame = titleContainer:WaitForChild("Mask")
 local textFilled = maskFrame:WaitForChild("TextFilled")
-local filledStroke = textFilled:WaitForChild("UIStroke")
 local subtitle = background:WaitForChild("Subtitle")
 
 -- Conexión en RenderStepped para forzar que textFilled tenga siempre la posición (0,0) y el ancho absoluto exacto de titleContainer

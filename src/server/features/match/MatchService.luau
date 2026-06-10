@@ -11,10 +11,8 @@ local HttpService = game:GetService("HttpService")
 local ServerScriptService = game:GetService("ServerScriptService")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 
-local ActionRewards = require(Shared:WaitForChild("constants"):WaitForChild("ActionRewards"))
 local GameConfig = require(Shared:WaitForChild("GameConfig"))
 local Network = require(Shared.networking.Network)
-local NetGuards = require(Shared.networking.NetGuards)
 local SpawnSelector = require(script.Parent:WaitForChild("SpawnSelector"))
 local LoadoutService = require(script.Parent:WaitForChild("LoadoutService"))
 local HealthPickupService = require(script.Parent:WaitForChild("HealthPickupService"))
@@ -145,17 +143,13 @@ local _AIService: any = nil
 local _dataService: DataService = nil :: any
 
 
-local function _log(message: string)
-	return
-end
-
-local function _setPhase(nextPhase: string, reason: string?)
+-- El parámetro reason no se consume: documenta el motivo del cambio de fase
+-- en cada call site.
+local function _setPhase(nextPhase: string, _reason: string?)
 	if _phase == nextPhase then
 		return
 	end
 
-	local suffix = if reason and reason ~= "" then (" | " .. reason) else ""
-	_log(string.format("Phase: %s -> %s%s", _phase, nextPhase, suffix))
 	_phase = nextPhase
 end
 
@@ -179,7 +173,7 @@ local function _sendMapLoadStateToAll()
 end
 
 local function _sendMapLoadStateToPlayer(player: Player)
-	local ok, err = pcall(function()
+	pcall(function()
 		Network.Match.MapLoadState.SendTo({
 			isLoading = _isMapLoading,
 			playEnabled = _isPlayEnabled,
@@ -187,9 +181,6 @@ local function _sendMapLoadStateToPlayer(player: Player)
 			isVoting = VotingService:HasActiveVote(),
 		}, player)
 	end)
-	if not ok then
-		_log(string.format("Failed MapLoadState snapshot to %s: %s", player.Name, tostring(err)))
-	end
 end
 
 local function _buildRoundStatePacket(timeLeft: number)
@@ -220,12 +211,9 @@ local function _sendRoundStateToPlayer(player: Player)
 	end
 
 	local timeLeft = math.ceil(math.max(0, _roundEndAt - time()))
-	local ok, err = pcall(function()
+	pcall(function()
 		Network.Match.RoundState.SendTo(_buildRoundStatePacket(timeLeft), player)
 	end)
-	if not ok then
-		_log(string.format("Failed RoundState snapshot to %s: %s", player.Name, tostring(err)))
-	end
 end
 
 -- Wrappers que delegan al KillAttributionService. Mantienen los call sites
@@ -1147,15 +1135,11 @@ end
 
 -- [Loadout functions extracted to LoadoutService.luau]
 
+-- LobbySpawn vive directamente bajo Workspace.
 local function _findLobbySpawn(): BasePart?
 	local direct = Workspace:FindFirstChild("LobbySpawn")
 	if direct and direct:IsA("BasePart") then
 		return direct
-	end
-
-	local nested = Workspace:FindFirstChild("LobbySpawn", true)
-	if nested and nested:IsA("BasePart") then
-		return nested
 	end
 
 	return nil
@@ -1420,7 +1404,6 @@ local function _captureRoundEndEligiblePlayers()
 end
 
 local function _endRoundAndRestartVoting(reason: string)
-	_log("Round finalizing: " .. reason)
 	_setPhase("RoundEnding", reason)
 
 	_isRoundActive = false
@@ -1792,7 +1775,6 @@ local function _onRequestVoteSync(_: {}, player: Player)
 	end
 	_voteSyncCooldownByUserId[player.UserId] = now
 
-	_log(string.format("Received RequestVoteSync from %s.", player.Name))
 	_startVoteIfPossible()
 	VotingService:SendSnapshotTo(player)
 	_sendMapLoadStateToPlayer(player)
@@ -1857,12 +1839,10 @@ end
 
 local function _onRequestJoinMatch(_: {}, player: Player)
 	if not _isPlayEnabled or not _activeMapModel then
-		_log(string.format("Ignored RequestJoinMatch from %s: play not enabled.", player.Name))
 		return
 	end
 
 	if _joinDebounceByUserId[player.UserId] then
-		_log(string.format("Ignored duplicate RequestJoinMatch from %s.", player.Name))
 		return
 	end
 
@@ -1871,7 +1851,6 @@ local function _onRequestJoinMatch(_: {}, player: Player)
 		_isInMenuByUserId[player.UserId] = true
 		_pendingSpawnByUserId[player.UserId] = nil
 		_joinDebounceByUserId[player.UserId] = nil
-		_log(string.format("Ignored RequestJoinMatch from %s: both teams are full.", player.Name))
 		return
 	end
 
@@ -1932,7 +1911,6 @@ local function _onRequestJoinMatch(_: {}, player: Player)
 
 		if player.Parent == Players then
 			Network.Match.JoinMatchSpawned.SendTo({}, player)
-			_log(string.format("Player %s joined and spawned.", player.Name))
 
 			-- Cosméticos de equipo para Resultados: el recién llegado recibe a sus
 			-- compañeros y los compañeros se actualizan para incluirlo a él.
@@ -2061,7 +2039,6 @@ end
 
 function MatchService:Start(dataService: DataService): ()
 	if _started then
-		_log("Start ignored: service already started.")
 		return
 	end
 
@@ -2081,40 +2058,23 @@ function MatchService:Start(dataService: DataService): ()
 	-- punto válido — evita el origen (0,0,0).
 	_ensureLobbySpawnLocation()
 
-	-- Cargar AIService (require lazy para evitar dependencia circular)
+	-- Cargar AIService (require lazy para evitar dependencia circular).
+	-- Con Rojo, la carpeta Server/AI (con su init.luau) se compila directamente
+	-- como ModuleScript: Server.AI ES el módulo.
 	local serverRoot = ServerScriptService:FindFirstChild("Server")
-	if serverRoot then
-		local aiFolder = serverRoot:FindFirstChild("AI")
-		if aiFolder then
-			-- Con Rojo, una carpeta con init.luau se compila directamente como ModuleScript.
-			-- En ese caso aiFolder ya ES el módulo; si no, buscamos un hijo llamado init o AIService.
-			local aiModule: ModuleScript?
-			if aiFolder:IsA("ModuleScript") then
-				aiModule = aiFolder :: ModuleScript
-			else
-				local child = aiFolder:FindFirstChild("init") or aiFolder:FindFirstChild("AIService")
-				if child and child:IsA("ModuleScript") then
-					aiModule = child :: ModuleScript
-				end
-			end
-
-			if aiModule then
-				local ok, result = pcall(require, aiModule)
-				if ok then
-					_AIService = result
-					if _AIService.SetDataService then
-						_AIService:SetDataService(_dataService)
-					end
-					_log("AIService loaded successfully.")
-				else
-					warn("[MatchService] Failed to load AIService: " .. tostring(result))
-				end
-			else
-				_log("AIService module not found (init.luau or AIService.luau not in Server/AI)")
+	local aiModule = if serverRoot then serverRoot:FindFirstChild("AI") else nil
+	if aiModule and aiModule:IsA("ModuleScript") then
+		local ok, result = pcall(require, aiModule)
+		if ok then
+			_AIService = result
+			if _AIService.SetDataService then
+				_AIService:SetDataService(_dataService)
 			end
 		else
-			_log("AI folder not found in Server (bots will not spawn)")
+			warn("[MatchService] Failed to load AIService: " .. tostring(result))
 		end
+	else
+		warn("[MatchService] Server.AI module not found (bots will not spawn)")
 	end
 
 	-- C2: flush de acciones diferidas cuando el profile termine de cargar.
@@ -2136,10 +2096,8 @@ function MatchService:Start(dataService: DataService): ()
 	end
 
 	_setPhase("Idle", "service started")
-	_log("MatchService started. Waiting for conditions to begin map vote.")
 
 	Players.PlayerAdded:Connect(function(player)
-		_log(string.format("Player added. Connected players=%d.", #Players:GetPlayers()))
 		_initJoinedPlayerState(player)
 		-- Spawn inicial en el lobby por código (CharacterAutoLoads está desactivado,
 		-- el motor no spawnea solo). task.defer para no bloquear el flujo de join.
@@ -2179,7 +2137,6 @@ function MatchService:Start(dataService: DataService): ()
 		KillAttributionService:OnPlayerRemoving(player.UserId)
 		_pendingProfileActionsByUserId[player.UserId] = nil
 		_roundEndEligibleByUserId[player.UserId] = nil
-		_log(string.format("Player removing: %s (%d).", player.Name, player.UserId))
 		VotingService:DisconnectPlayer(player.UserId)
 		_joinDebounceByUserId[player.UserId] = nil
 		_disconnectDeathConnection(player.UserId)
@@ -2196,10 +2153,7 @@ function MatchService:Start(dataService: DataService): ()
 			_charDescendantConnectionsByUserId[player.UserId] = nil
 		end
 
-		if _pendingSpawnByUserId[player.UserId] then
-			_pendingSpawnByUserId[player.UserId] = nil
-			_log(string.format("Released team assignment for %s (left before spawn).", player.Name))
-		end
+		_pendingSpawnByUserId[player.UserId] = nil
 
 		_teamByUserId[player.UserId] = nil
 
@@ -2228,7 +2182,6 @@ function MatchService:Start(dataService: DataService): ()
 	-- VotingService: owns _activeVote, vote cooldowns, vote timer, CastVote
 	-- handler. Wire callback `onVoteFinished` que dispara mapload.
 	VotingService:Start({
-		log = _log,
 		setPhase = function(phase: string, reason: string)
 			_setPhase(phase, reason)
 		end,

@@ -64,17 +64,13 @@ local function _findLoadoutToolTemplate(loadoutCategory: WeaponCategory.WeaponCa
 		return nil
 	end
 
+	-- Ruta canónica: ServerStorage.WeaponTools.<categoría>.<weaponId>
 	local byCategory = root:FindFirstChild(loadoutCategory)
 	if byCategory then
 		local direct = byCategory:FindFirstChild(weaponId)
 		if direct and direct:IsA("Tool") then
 			return direct
 		end
-	end
-
-	local fallback = root:FindFirstChild(weaponId)
-	if fallback and fallback:IsA("Tool") then
-		return fallback
 	end
 
 	return nil
@@ -160,7 +156,7 @@ local function _grantMatchLoadoutTools(player: Player, dataService: any): (boole
 	local mainWrapId = _resolveWeaponWrapForLoadout(profileData, WeaponCategory.MAIN, mainWeaponId)
 	local specialWrapId = _resolveWeaponWrapForLoadout(profileData, WeaponCategory.SPECIAL, specialWeaponId)
 
-	local backpackNode = player:FindFirstChild("Backpack") or player:WaitForChild("Backpack", 1)
+	local backpackNode = player:WaitForChild("Backpack", 1)
 	local backpack = if backpackNode and backpackNode:IsA("Backpack") then backpackNode else nil
 	if not backpack then
 		return false, true, nil

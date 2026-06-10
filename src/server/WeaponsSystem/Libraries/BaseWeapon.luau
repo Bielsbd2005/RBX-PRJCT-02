@@ -819,11 +819,7 @@ function BaseWeapon:onStepped(dt)
 	else
 		local muzzlePart = self._cachedMuzzlePart
 		if not muzzlePart or not muzzlePart.Parent then
-			muzzlePart = self.instance:FindFirstChild("TipAttachment", true) or
-				self.instance:FindFirstChild("Muzzle", true) or
-				self.instance:FindFirstChild("FirePoint", true) or
-				self.instance:FindFirstChild("Tip", true) or
-				self.instance:FindFirstChild("Hole", true)
+			muzzlePart = self.instance:FindFirstChild("TipAttachment", true)
 			self._cachedMuzzlePart = muzzlePart
 		end
 

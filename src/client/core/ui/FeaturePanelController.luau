@@ -65,7 +65,7 @@ function FeaturePanelController.new(options: FeaturePanelOptions): FeaturePanelC
 	end
 
 	self._janitor:Add(options.screenGui:GetPropertyChangedSignal("Enabled"):Connect(function()
-		if options.screenGui.Enabled == false and self._isOpen then
+		if not options.screenGui.Enabled and self._isOpen then
 			self:_handleExternalClose()
 		end
 	end), "Disconnect")

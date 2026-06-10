@@ -858,7 +858,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			iconNode.Image = definition.thumbnail
 		end
 
-		local titleNode = button:FindFirstChild("Title") or button:FindFirstChild("Tiltle")
+		local titleNode = button:FindFirstChild("Title")
 		if titleNode and titleNode:IsA("TextLabel") then
 			titleNode.Text = definition.title
 		end
@@ -1667,7 +1667,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	janitor:Add(lockerFrame:GetPropertyChangedSignal("Visible"):Connect(function()
-		if lockerFrame.Visible == false and isOpen then
+		if not lockerFrame.Visible and isOpen then
 			isOpen = false
 			restoreLockerSceneState(true)
 			LightingPresetController.apply("Lobby")
