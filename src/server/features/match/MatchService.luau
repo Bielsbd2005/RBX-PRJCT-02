@@ -50,13 +50,9 @@ MatchService.OnPlayerMatchCompleted = nil :: ((Player) -> ())?
 MatchService.OnPlayerReturnedToLobby = nil :: ((Player) -> ())?
 
 local _started = false
--- Rate limit por-userId para RemoteEvents de match (match sync / return to menu).
--- El `_joinDebounceByUserId` y `_respawnDebounceByUserId` ya tenían debounce de
--- estado; estos timestamps añaden un cooldown duro contra spam de eventos
--- expensive (MatchSync envía streaks + roster, ReturnToMenu hace LoadCharacter).
+-- Cooldown duro contra spam de remotes expensive (MatchSync envía streaks +
+-- roster; ReturnToMenu hace LoadCharacter).
 local REMOTE_RATE_LIMIT_SECONDS = 0.5
-local _matchSyncCooldownByUserId: { [number]: number } = {}
-local _returnToMenuCooldownByUserId: { [number]: number } = {}
 
 -- Forward-declaración: el listener de muerte (_registerDeathListener) llama a este
 -- helper, que se define más abajo (depende de _findLobbySpawn/_teleportCharacterToSpawn).
@@ -70,6 +66,9 @@ local DEATH_BODY_TO_LOBBY_DELAY = 3
 -- Debounce mínimo entre reapariciones de lobby por jugador (anti-bucle infinito si
 -- una muerte en lobby vuelve a disparar el respawn de lobby de inmediato).
 local LOBBY_RESPAWN_DEBOUNCE = 2
+local MULTIKILL_WINDOW = 4
+local PICKUP_ELIGIBILITY_WINDOW = 15
+local PICKUP_ELIGIBILITY_MAX_QUEUED = 8
 
 local _activeMapName = ""
 local _activeMapContainer: BasePart? = nil
@@ -79,72 +78,172 @@ local _activeMapModel: Instance? = nil
 -- (potencialmente miles de instances) en cada respawn/spawn.
 local _cachedSpawnPoints: { BasePart }? = nil
 local _cachedBotsFolder: Instance? = nil
-local _roundScoreA = 0
-local _roundScoreB = 0
+local _lastBotRosterJsonBroadcast: string? = nil
 
-local _teamByUserId: { [number]: "A" | "B" } = {}
-local _isInMenuByUserId: { [number]: boolean } = {}
-local _roundEndEligibleByUserId: { [number]: true } = {}
-local _joinDebounceByUserId: { [number]: boolean } = {}
-local _pendingSpawnByUserId: { [number]: boolean } = {}
-local _deathConnectionsByUserId: { [number]: RBXScriptConnection } = {}
-local _characterConnectionsByUserId: { [number]: RBXScriptConnection } = {}
--- Connection a character.DescendantAdded del character vivo actual del jugador.
--- Se desconecta al respawn (CharacterAdded vuelve a disparar), al morir, y al
--- salirse del juego — evita acumular listeners en characters viejos que pueden
--- seguir parented (ragdoll/kill effects) hasta que el GC los barra.
-local _charDescendantConnectionsByUserId: { [number]: RBXScriptConnection } = {}
-local _deathAtByUserId: { [number]: number } = {}
-local _respawnDebounceByUserId: { [number]: boolean } = {}
--- Respawn al mapa en curso (desde que se solicita hasta que termina). La reubicación
--- al lobby por inactividad lo consulta para no pisar un respawn y mandar al jugador
--- al lobby en vez de a la partida.
-local _respawningByUserId: { [number]: boolean } = {}
--- Última reaparición de lobby por jugador, para debounce anti-bucle (si el lobby
--- resultara letal o el spawn fallara, no encadenar Died→respawn→Died sin freno).
-local _lobbyRespawnAtByUserId: { [number]: number } = {}
-local _matchKillsByUserId: { [number]: number } = {}
--- _killStreakByUserId, _killStreakTimeoutByUserId, _lastBroadcastStreakKeyByUserId
--- viven en KillAttributionService. Acá quedan kills/deaths que son
--- accesados ampliamente (HUD broadcast, score updates).
-local _matchDeathsByUserId: { [number]: number } = {}
--- Asistencias de la partida actual (incrementadas en GrantCombatReward "Assist").
--- Se difunden en PlayerStreakState para la pantalla de Resultados.
-local _matchAssistsByUserId: { [number]: number } = {}
-local _matchCashEarnedByUserId: { [number]: number } = {}
-local _matchXPEarnedByUserId: { [number]: number } = {}
-local _recentKillTimestamps: { [number]: { number } } = {}
-local MULTIKILL_WINDOW = 4
+local _teamA: Team? = nil
+local _teamB: Team? = nil
+local _AIService: any = nil
+local _dataService: DataService = nil :: any
 
--- S2: elegibilidad server-side para health pickups.
--- Los health pickups son PURAMENTE client-visuales (PickupDropEffect.luau corre
--- en el cliente: spawnea el orbe bajo la víctima cuando el cliente local hace una
--- kill, lo imanta hacia su personaje y, al recogerlo, manda RequestPickup). No
--- existe ninguna entidad de pickup en el servidor que validar. Para evitar el
--- god-mode (cliente modificado spameando RequestPickup → +30 HP cada 0.2s),
--- registramos por jugador una cola de timestamps de kills NO reclamadas: cada
--- kill humana (PvP o vs bot) empuja un timestamp, y cada RequestPickup válida
--- consume el más antiguo dentro de la ventana. Así un heal exige una kill
--- reciente y distinta — un atacante no puede curarse más veces de las que mata.
--- GAP RESIDUAL (documentado): sin entidad server-side no podemos verificar que
--- el orbe existió ni la proximidad real al recogerlo; un cliente podría aún
--- diferir un heal legítimo o, como mucho, curarse una vez por kill real. Esto
--- recorta el exploit de "ilimitado" a "1 heal por kill", que es la mitigación
--- más fuerte posible dada la arquitectura client-visual actual.
-local _pickupEligibilityByUserId: { [number]: { number } } = {}
-local PICKUP_ELIGIBILITY_WINDOW = 15
-local PICKUP_ELIGIBILITY_MAX_QUEUED = 8
+-- ── PlayerSession ────────────────────────────────────────────
+-- TODO el estado por-jugador vive en un único registro por userId: se crea en
+-- PlayerAdded, se destruye atómicamente en PlayerRemoving (sin checklist de
+-- tablas paralelas que limpiar). Los campos de scope RONDA se resetean en
+-- bloque al desmontar la ronda (_resetSessionRoundState); el resto persiste
+-- toda la sesión.
+type PlayerSession = {
+	-- ── scope ronda ──
+	team: ("A" | "B")?,
+	inMenu: boolean,
+	-- Join request en vuelo (de RequestJoinMatch hasta spawn/abort). Hace
+	-- también de debounce del handler — el viejo _joinDebounceByUserId era un
+	-- duplicado exacto de este flag.
+	pendingSpawn: boolean,
+	deathAt: number, -- 0 = vivo / sin muerte registrada
+	respawnDebounce: boolean,
+	-- ── scope sesión ──
+	-- Respawn al mapa en curso (desde que se solicita hasta que termina). La
+	-- reubicación al lobby por inactividad lo consulta para no pisar un respawn.
+	respawning: boolean,
+	-- Última reaparición de lobby, para debounce anti-bucle (si el lobby
+	-- resultara letal, no encadenar Died→respawn→Died sin freno).
+	lobbyRespawnAt: number,
+	matchSyncCooldownAt: number,
+	returnToMenuCooldownAt: number,
+	-- C2: acciones de persistencia diferidas hasta que el profile cargue.
+	pendingProfileActions: { () -> () },
+	-- Connections del jugador. deathConn/charDescendantConn siguen al character
+	-- vivo actual (se re-registran en cada CharacterAdded).
+	deathConn: RBXScriptConnection?,
+	characterConn: RBXScriptConnection?,
+	charDescendantConn: RBXScriptConnection?,
+}
+
+local _sessions: { [number]: PlayerSession } = {}
+
+local function _newSession(): PlayerSession
+	return {
+		team = nil,
+		inMenu = true,
+		pendingSpawn = false,
+		deathAt = 0,
+		respawnDebounce = false,
+		respawning = false,
+		lobbyRespawnAt = 0,
+		matchSyncCooldownAt = 0,
+		returnToMenuCooldownAt = 0,
+		pendingProfileActions = {},
+		deathConn = nil,
+		characterConn = nil,
+		charDescendantConn = nil,
+	}
+end
+
+-- Resetea los campos de scope ronda de una sesión (parte por-jugador del
+-- desmontaje de ronda). Los campos de scope sesión no se tocan.
+local function _resetSessionRoundState(session: PlayerSession)
+	session.team = nil
+	session.inMenu = true
+	session.pendingSpawn = false
+	session.deathAt = 0
+	session.respawnDebounce = false
+end
+
+-- true si el jugador está en el menú. Sin sesión (desconectado) cuenta como
+-- en-menú: ningún flujo de combate debe actuar sobre él.
+local function _isPlayerInMenu(userId: number): boolean
+	local session = _sessions[userId]
+	return session == nil or session.inMenu
+end
+
+-- ── Round ────────────────────────────────────────────────────
+-- TODO el estado con scope ronda vive en un objeto creado en _enterInRound y
+-- tirado entero al desmontar (_enterResults). No hay "reset" de tablas de
+-- ronda: la ronda nueva nace limpia por construcción.
+-- Las stats se indexan por userId e INCLUYEN bots (fakeUserIds negativos).
+type CombatStats = {
+	kills: number,
+	deaths: number,
+	assists: number,
+}
+
+type Round = {
+	scoreA: number,
+	scoreB: number,
+	statsByUserId: { [number]: CombatStats },
+	-- Cash/XP concedidos esta ronda (caps por moneda independientes — L14).
+	cashEarnedByUserId: { [number]: number },
+	xpEarnedByUserId: { [number]: number },
+	-- Timestamps de kills recientes (ventana de multikill).
+	recentKillTimestampsByUserId: { [number]: { number } },
+	-- S2: elegibilidad server-side para health pickups. Los pickups son
+	-- puramente client-visuales (PickupDropEffect.luau spawnea el orbe en el
+	-- cliente y manda RequestPickup al recogerlo); no hay entidad server que
+	-- validar. Para evitar god-mode (spam de RequestPickup → +30 HP cada
+	-- 0.2s) registramos una cola de timestamps de kills NO reclamadas: cada
+	-- kill humana empuja un timestamp y cada RequestPickup válida consume el
+	-- más antiguo dentro de la ventana — nadie se cura más veces de las que
+	-- mata. GAP RESIDUAL (documentado): sin entidad server no se puede
+	-- verificar que el orbe existió ni la proximidad; el exploit queda
+	-- recortado de "ilimitado" a "1 heal por kill real".
+	pickupCreditsByUserId: { [number]: { number } },
+	-- Última muerte registrada cerca de cada spawn point; SpawnSelector lo usa
+	-- para penalizar respawnear donde alguien acaba de morir (anti spawn-trap).
+	-- Weak keys: si un spawn point se destruye, el GC libera la entry solo.
+	recentDeathBySpawn: { [BasePart]: number },
+}
+
+local _round: Round? = nil
+
+local function _newRound(): Round
+	return {
+		scoreA = 0,
+		scoreB = 0,
+		statsByUserId = {},
+		cashEarnedByUserId = {},
+		xpEarnedByUserId = {},
+		recentKillTimestampsByUserId = {},
+		pickupCreditsByUserId = {},
+		recentDeathBySpawn = setmetatable({}, { __mode = "k" }) :: any,
+	}
+end
+
+-- Stats de combate de `userId` en la ronda activa, creadas lazy. nil si no hay
+-- ronda en curso (el caller decide si el path debe no-op).
+local function _roundStats(userId: number): CombatStats?
+	local round = _round
+	if not round then
+		return nil
+	end
+	local stats = round.statsByUserId[userId]
+	if not stats then
+		stats = { kills = 0, deaths = 0, assists = 0 }
+		round.statsByUserId[userId] = stats
+	end
+	return stats
+end
+
+-- Acumula lo concedido esta ronda para los caps por moneda.
+local function _trackRoundEarnings(userId: number, cashGranted: number, xpGranted: number)
+	local round = _round
+	if not round then
+		return
+	end
+	round.cashEarnedByUserId[userId] = (round.cashEarnedByUserId[userId] or 0) + cashGranted
+	round.xpEarnedByUserId[userId] = (round.xpEarnedByUserId[userId] or 0) + xpGranted
+end
 
 -- Empuja una kill como crédito de pickup consumible. Llamado en ambos paths de
 -- kill (PvP y vs bot) sólo para jugadores humanos in-match.
 local function _recordPickupEligibility(userId: number)
-	if userId <= 0 then
+	local round = _round
+	if not round or userId <= 0 then
 		return
 	end
-	local queue = _pickupEligibilityByUserId[userId]
+	local queue = round.pickupCreditsByUserId[userId]
 	if not queue then
 		queue = {}
-		_pickupEligibilityByUserId[userId] = queue
+		round.pickupCreditsByUserId[userId] = queue
 	end
 	table.insert(queue, time())
 	-- Cap defensivo: nunca acumular más de N créditos pendientes (evita que un
@@ -157,7 +256,8 @@ end
 -- Consume (de existir) un crédito de pickup reciente. Devuelve true si había uno
 -- dentro de la ventana. Poda timestamps caducados antes de decidir.
 local function _consumePickupEligibility(userId: number): boolean
-	local queue = _pickupEligibilityByUserId[userId]
+	local round = _round
+	local queue = if round then round.pickupCreditsByUserId[userId] else nil
 	if not queue then
 		return false
 	end
@@ -171,19 +271,6 @@ local function _consumePickupEligibility(userId: number): boolean
 	table.remove(queue, 1)
 	return true
 end
-local _lastBotRosterJsonBroadcast: string? = nil
--- Timestamp de la última muerte registrada en cada spawn point. Usado por
--- SpawnSelector para penalizar respawnear donde alguien acaba de morir y evitar
--- spawn-trap loops. Se limpia en cada round restart.
--- Audit mobile: weak keys → si un spawn point se destruye (cambio de mapa
--- mid-round, race con vote.onVoteFinished), el GC libera la entry sola en
--- vez de mantener un BasePart huérfano referenciado para siempre.
-local _recentDeathBySpawn: { [BasePart]: number } = setmetatable({}, { __mode = "k" }) :: any
-
-local _teamA: Team? = nil
-local _teamB: Team? = nil
-local _AIService: any = nil
-local _dataService: DataService = nil :: any
 
 -- ── Máquina de fases ─────────────────────────────────────────
 -- Única fuente de verdad del flujo de partida:
@@ -244,7 +331,11 @@ end
 -- Publica el score actual en el snapshot (los clientes derivan el countdown
 -- de PhaseEndsAt localmente — el score es lo único que cambia por kill).
 local function _publishScore()
-	MatchSnapshot.set({ ScoreA = _roundScoreA, ScoreB = _roundScoreB })
+	local round = _round
+	if not round then
+		return
+	end
+	MatchSnapshot.set({ ScoreA = round.scoreA, ScoreB = round.scoreB })
 end
 
 -- Wrappers que delegan al KillAttributionService. Mantienen los call sites
@@ -290,13 +381,15 @@ end
 -- reconstruir sus réplicas en Resultados. Solo su propio equipo, y solo otros
 -- jugadores (los bots ya van en el BotRoster; el jugador local usa su loadout).
 local function _sendTeamCosmeticsTo(player: Player)
-	local side = _teamByUserId[player.UserId]
+	local session = _sessions[player.UserId]
+	local side = if session then session.team else nil
 	if not side or not _dataService then
 		return
 	end
 	local list = {}
 	for _, other in Players:GetPlayers() do
-		if other ~= player and _teamByUserId[other.UserId] == side then
+		local otherSession = _sessions[other.UserId]
+		if other ~= player and otherSession and otherSession.team == side then
 			local profile = _dataService:GetProfile(other)
 			local loadout = profile and profile.Data and profile.Data.Loadout
 			if type(loadout) == "table" then
@@ -327,7 +420,8 @@ local function _refreshTeamCosmetics(side: string?)
 		return
 	end
 	for _, player in Players:GetPlayers() do
-		if _teamByUserId[player.UserId] == side then
+		local session = _sessions[player.UserId]
+		if session and session.team == side then
 			_sendTeamCosmeticsTo(player)
 		end
 	end
@@ -338,44 +432,6 @@ local function _resolveBotKillerName(attackerUserId: number): string
 		return _AIService:GetBotDisplayName(attackerUserId) or ""
 	end
 	return ""
-end
-
--- Helper consolidado: limpia todas las tablas con "scope match" (state
--- por-jugador y por-round) en un orden documentado. Llamado por:
---   * `_enterResults`: cleanup final tras un round.
---   * `_enterInRound`: slate limpio antes del siguiente round.
--- Cualquier tabla nueva con scope match debe agregarse acá — esta es la
--- fuente de verdad y previene drift entre los dos call sites.
--- NO toca:
---   * Vote cooldowns (viven en VotingService).
---   * `_matchSyncCooldownByUserId` y `_returnToMenuCooldownByUserId` (scope
---     sesión, no round — limpian en PlayerRemoving).
---   * El snapshot replicado (MatchSnapshot) — lo escriben las transiciones.
-local function _resetMatchScopedState()
-	-- Asignación + spawn flow
-	table.clear(_teamByUserId)
-	table.clear(_isInMenuByUserId)
-	table.clear(_pendingSpawnByUserId)
-	table.clear(_joinDebounceByUserId)
-	table.clear(_deathAtByUserId)
-	table.clear(_respawnDebounceByUserId)
-	table.clear(_roundEndEligibleByUserId)
-	-- Kill/death/assist tracking
-	table.clear(_matchKillsByUserId)
-	table.clear(_matchDeathsByUserId)
-	table.clear(_matchAssistsByUserId)
-	table.clear(_matchCashEarnedByUserId)
-	table.clear(_matchXPEarnedByUserId)
-	table.clear(_recentKillTimestamps)
-	-- S2: créditos de elegibilidad de health pickup (kills recientes no reclamadas).
-	table.clear(_pickupEligibilityByUserId)
-	-- Streak state (counts + timeouts + broadcast keys) vive en KillAttributionService.
-	KillAttributionService:Clear()
-	-- Recent deaths por spawn point. table.clear preserva la metatable de
-	-- weak keys.
-	table.clear(_recentDeathBySpawn)
-	-- Snapshots de inicio de partida (nivel/tier BP) para los items de Resultados.
-	MatchResultsService:ClearSnapshots()
 end
 
 local function _resolveWeaponItem(weaponId: string?): (string?, string?)
@@ -401,30 +457,26 @@ local function _resolveWeaponItem(weaponId: string?): (string?, string?)
 end
 
 --[[
-	Cola de acciones diferidas por player a la espera de que el profile cargue.
-	C2: Sin esto, kills/deaths/XP en la window inicial (antes de que el profile
-	esté listo) se pierden silenciosamente — _dataService:GetProfile() devuelve
-	nil y :Increment/:AddXP/:BatchUpdate retornan early.
+	Cola de acciones diferidas (session.pendingProfileActions) a la espera de
+	que el profile cargue. C2: Sin esto, kills/deaths/XP en la window inicial
+	(antes de que el profile esté listo) se pierden silenciosamente —
+	_dataService:GetProfile() devuelve nil y :Increment/:AddXP/:BatchUpdate
+	retornan early.
 
 	Cualquier helper de persistencia llama a _deferUntilProfile(player, fn) si
 	el profile aún no está. ProfileLoaded handler hace flush en orden FIFO.
 ]]
-local _pendingProfileActionsByUserId: { [number]: { () -> () } } = {}
-
 -- Audit mobile: cap por jugador para evitar acumulación si el profile nunca
--- carga (backend caído). Con 50 kills/min × 5 min de round = 250 closures por
--- jugador retenidas. Si 16 jugadores caen así, son 4000 closures vivos. El
--- cap drop-oldest mantiene los últimos N que es lo que más probablemente
--- importa cuando el profile finalmente cargue.
+-- carga (backend caído). El cap drop-oldest mantiene los últimos N, que es lo
+-- que más probablemente importa cuando el profile finalmente cargue.
 local PROFILE_ACTION_QUEUE_CAP = 50
 
 local function _deferUntilProfile(player: Player, fn: () -> ()): ()
-	local userId = player.UserId
-	local queue = _pendingProfileActionsByUserId[userId]
-	if not queue then
-		queue = {}
-		_pendingProfileActionsByUserId[userId] = queue
+	local session = _sessions[player.UserId]
+	if not session then
+		return
 	end
+	local queue = session.pendingProfileActions
 	if #queue >= PROFILE_ACTION_QUEUE_CAP then
 		-- Drop oldest (FIFO): table.remove(queue, 1) es O(n) pero N <= cap.
 		table.remove(queue, 1)
@@ -448,11 +500,15 @@ end
 -- su cap; usamos opts.skipCash/skipXP en RewardService.Award para suprimir sólo
 -- la moneda capada y dejar pasar la otra.
 local function _isCashCapReached(userId: number): boolean
-	return (_matchCashEarnedByUserId[userId] or 0) >= GameConfig.MatchCashCap
+	local round = _round
+	local earned = if round then round.cashEarnedByUserId[userId] or 0 else 0
+	return earned >= GameConfig.MatchCashCap
 end
 
 local function _isXPCapReached(userId: number): boolean
-	return (_matchXPEarnedByUserId[userId] or 0) >= GameConfig.MatchXPCap
+	local round = _round
+	local earned = if round then round.xpEarnedByUserId[userId] or 0 else 0
+	return earned >= GameConfig.MatchXPCap
 end
 
 local function _grantActionRewardsToAttacker(attacker: Player?, action: string, weaponId: string?)
@@ -477,8 +533,7 @@ local function _grantActionRewardsToAttacker(attacker: Player?, action: string, 
 	local ok, xpGranted, cashGranted =
 		RewardService.Award(attacker, action, nil, weaponId, { skipCash = skipCash, skipXP = skipXP })
 	if ok then
-		_matchCashEarnedByUserId[attacker.UserId] = (_matchCashEarnedByUserId[attacker.UserId] or 0) + cashGranted
-		_matchXPEarnedByUserId[attacker.UserId] = (_matchXPEarnedByUserId[attacker.UserId] or 0) + xpGranted
+		_trackRoundEarnings(attacker.UserId, cashGranted, xpGranted)
 	end
 end
 
@@ -647,10 +702,10 @@ local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?, a
 	end)
 
 	KillAttributionService:ResetStreak(deadPlayer.UserId)
-	if _matchKillsByUserId[deadPlayer.UserId] == nil then
-		_matchKillsByUserId[deadPlayer.UserId] = 0
+	local deadStats = _roundStats(deadPlayer.UserId)
+	if deadStats then
+		deadStats.deaths += 1
 	end
-	_matchDeathsByUserId[deadPlayer.UserId] = (_matchDeathsByUserId[deadPlayer.UserId] or 0) + 1
 	KillAttributionService:SendStreakBroadcast(deadPlayer.UserId)
 
 	-- Persistir Stats.Deaths lifetime del que muere (siempre que sea jugador).
@@ -679,14 +734,17 @@ local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?, a
 		return
 	end
 
-	if _isInMenuByUserId[attackerUserId] then
+	if _isPlayerInMenu(attackerUserId) then
 		return
 	end
 
-	local prevKills = _matchKillsByUserId[attackerUserId] or 0
-	_matchKillsByUserId[attackerUserId] = prevKills + 1
+	local attackerStats = _roundStats(attackerUserId)
+	if not attackerStats then
+		return
+	end
+	attackerStats.kills += 1
 
-	if prevKills == 0 and MatchService.OnPlayerFirstKill then
+	if attackerStats.kills == 1 and MatchService.OnPlayerFirstKill then
 		pcall(MatchService.OnPlayerFirstKill, attacker)
 	end
 
@@ -708,11 +766,15 @@ local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?, a
 
 	_persistAttackerKillStats(attacker, attackerWasHeadshot == true, newStreak)
 
+	local round = _round
+	if not round then
+		return
+	end
 	local now = time()
-	local timestamps = _recentKillTimestamps[attackerUserId]
+	local timestamps = round.recentKillTimestampsByUserId[attackerUserId]
 	if not timestamps then
 		timestamps = {}
-		_recentKillTimestamps[attackerUserId] = timestamps
+		round.recentKillTimestampsByUserId[attackerUserId] = timestamps
 	end
 	table.insert(timestamps, now)
 	while #timestamps > 0 and (now - timestamps[1]) > MULTIKILL_WINDOW do
@@ -906,7 +968,8 @@ local function _collectAllCombatantData(excludePlayer: Player?): (
 			continue
 		end
 
-		local candidateSide = _teamByUserId[candidatePlayer.UserId]
+		local candidateSession = _sessions[candidatePlayer.UserId]
+		local candidateSide = if candidateSession then candidateSession.team else nil
 		if candidateSide ~= "A" and candidateSide ~= "B" then
 			continue
 		end
@@ -960,10 +1023,10 @@ local function _collectAllCombatantData(excludePlayer: Player?): (
 end
 
 local function _disconnectDeathConnection(userId: number)
-	local conn = _deathConnectionsByUserId[userId]
-	if conn then
-		conn:Disconnect()
-		_deathConnectionsByUserId[userId] = nil
+	local session = _sessions[userId]
+	if session and session.deathConn then
+		session.deathConn:Disconnect()
+		session.deathConn = nil
 	end
 end
 
@@ -996,6 +1059,11 @@ end
 local function _registerDeathListener(player: Player, character: Model)
 	_disconnectDeathConnection(player.UserId)
 
+	local session = _sessions[player.UserId]
+	if not session then
+		return
+	end
+
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	if not humanoid then
 		return
@@ -1003,42 +1071,42 @@ local function _registerDeathListener(player: Player, character: Model)
 
 	humanoid.BreakJointsOnDeath = false
 
-	_deathConnectionsByUserId[player.UserId] = humanoid.Died:Connect(function()
+	session.deathConn = humanoid.Died:Connect(function()
 		-- Muerte fuera de partida (lobby/menú): el motor no auto-respawnea
 		-- (CharacterAutoLoads off), así que devolvemos el cuerpo al LobbySpawn para
 		-- que no quede muerto/sin cuerpo. Con debounce: si el lobby resultara letal
 		-- o el spawn fallara, no encadenamos Died→respawn→Died sin freno.
-		if not _isRoundActive() or _isInMenuByUserId[player.UserId] then
+		if not _isRoundActive() or session.inMenu then
 			task.defer(function()
 				if player.Parent ~= Players then
 					return
 				end
-				if not (not _isRoundActive() or _isInMenuByUserId[player.UserId]) then
+				if not (not _isRoundActive() or session.inMenu) then
 					return
 				end
-				local last = _lobbyRespawnAtByUserId[player.UserId] or 0
-				if time() - last < LOBBY_RESPAWN_DEBOUNCE then
+				if time() - session.lobbyRespawnAt < LOBBY_RESPAWN_DEBOUNCE then
 					return
 				end
-				_lobbyRespawnAtByUserId[player.UserId] = time()
+				session.lobbyRespawnAt = time()
 				_spawnPlayerAtLobby(player)
 			end)
 			return
 		end
 
-		local deadSide = _teamByUserId[player.UserId]
-		if deadSide == nil then
+		local deadSide = session.team
+		local round = _round
+		if deadSide == nil or not round then
 			return
 		end
 
-		_deathAtByUserId[player.UserId] = time()
-		_respawnDebounceByUserId[player.UserId] = nil
+		session.deathAt = time()
+		session.respawnDebounce = false
 
 		local deathRoot = character:FindFirstChild("HumanoidRootPart")
 		if deathRoot and deathRoot:IsA("BasePart") then
 			local nearestSpawn = _findNearestSpawnToPosition(deathRoot.Position)
 			if nearestSpawn then
-				_recentDeathBySpawn[nearestSpawn] = time()
+				round.recentDeathBySpawn[nearestSpawn] = time()
 			end
 		end
 		local lastAttacker = LastAttackerStore.get(humanoid)
@@ -1050,7 +1118,7 @@ local function _registerDeathListener(player: Player, character: Model)
 			attackerUserId = nil
 		end
 		-- Atacante humano: descartar si no sigue in-match.
-		if attackerUserId and attackerUserId > 0 and _isInMenuByUserId[attackerUserId] then
+		if attackerUserId and attackerUserId > 0 and _isPlayerInMenu(attackerUserId) then
 			attackerUserId = nil
 		end
 		local attackerPlayer = if attackerUserId then Players:GetPlayerByUserId(attackerUserId) else nil
@@ -1068,23 +1136,24 @@ local function _registerDeathListener(player: Player, character: Model)
 		_applyKillEffect(attackerUserId, character)
 
 		if deadSide == "A" then
-			_roundScoreB += 1
+			round.scoreB += 1
 		else
-			_roundScoreA += 1
+			round.scoreA += 1
 		end
 
 		_publishScore()
 
-		if _roundScoreA >= GameConfig.WinScoreLimit then
+		if round.scoreA >= GameConfig.WinScoreLimit then
 			_enterResults("A")
 			return
-		elseif _roundScoreB >= GameConfig.WinScoreLimit then
+		elseif round.scoreB >= GameConfig.WinScoreLimit then
 			_enterResults("B")
 			return
 		end
 
 		if player.Parent == Players then
-			local killerKills = if attackerUserId then (_matchKillsByUserId[attackerUserId] or 0) else 0
+			local killerStats = if attackerUserId then round.statsByUserId[attackerUserId] else nil
+			local killerKills = if killerStats then killerStats.kills else 0
 			local killerLevel = 0
 			if attackerPlayer and _dataService and _dataService.GetProfile then
 				local killerProfile = _dataService:GetProfile(attackerPlayer)
@@ -1123,18 +1192,15 @@ local function _registerDeathListener(player: Player, character: Model)
 		-- Guardas: cancelar si ya respawneó (deathAt vuelve a 0), murió de nuevo
 		-- (deathAt cambia), hay un respawn al mapa en curso, se fue al menú, salió, o
 		-- la ronda terminó.
-		local deathStamp = _deathAtByUserId[player.UserId]
+		local deathStamp = session.deathAt
 		task.delay(DEATH_BODY_TO_LOBBY_DELAY, function()
 			if player.Parent ~= Players or not _isRoundActive() then
 				return
 			end
-			if _isInMenuByUserId[player.UserId] then
+			if session.inMenu or session.respawning then
 				return
 			end
-			if _respawningByUserId[player.UserId] then
-				return
-			end
-			if _deathAtByUserId[player.UserId] ~= deathStamp then
+			if session.deathAt ~= deathStamp then
 				return
 			end
 			_spawnPlayerAtLobby(player)
@@ -1261,7 +1327,8 @@ local function _spawnPlayerOnAssignedTeam(player: Player): boolean
 		return false
 	end
 
-	local side = _teamByUserId[player.UserId]
+	local session = _sessions[player.UserId]
+	local side = if session then session.team else nil
 	if not side then
 		return false
 	end
@@ -1289,11 +1356,12 @@ local function _spawnPlayerOnAssignedTeam(player: Player): boolean
 	local enemyPositions = positionsBySide[enemySide]
 	local enemyLookVectors = lookVectorsBySide[enemySide]
 	local allyPositions = positionsBySide[side]
+	local round = _round
 	local chosenSpawn = SpawnSelector.select(spawnPoints, {
 		enemyPositions = enemyPositions,
 		enemyLookVectors = enemyLookVectors,
 		allyPositions = allyPositions,
-		recentDeaths = _recentDeathBySpawn,
+		recentDeaths = if round then round.recentDeathBySpawn else {},
 		now = time(),
 	}, useIntelligentSpawning)
 	if not chosenSpawn then
@@ -1396,22 +1464,29 @@ local function _loadMapClone(mapName: string): (boolean, string)
 end
 
 local function _resolveScoreWinner(): string
-	if _roundScoreA > _roundScoreB then
+	local round = _round
+	if not round then
+		return "Tie"
+	end
+	if round.scoreA > round.scoreB then
 		return "A"
-	elseif _roundScoreB > _roundScoreA then
+	elseif round.scoreB > round.scoreA then
 		return "B"
 	end
 
 	return "Tie"
 end
 
-local function _captureRoundEndEligiblePlayers()
-	table.clear(_roundEndEligibleByUserId)
+-- Jugadores que estaban en la ronda al terminar (elegibles para recompensas y
+-- vuelta al lobby). Devuelve un set local — solo lo consume _enterResults.
+local function _captureRoundEndEligiblePlayers(): { [number]: true }
+	local eligible: { [number]: true } = {}
 	for _, player in Players:GetPlayers() do
-		if not _isInMenuByUserId[player.UserId] then
-			_roundEndEligibleByUserId[player.UserId] = true
+		if not _isPlayerInMenu(player.UserId) then
+			eligible[player.UserId] = true
 		end
 	end
+	return eligible
 end
 
 -- InRound → Results. Reparte recompensas, devuelve a los elegibles al lobby y
@@ -1422,11 +1497,15 @@ function _enterResults(winnerTeam: string)
 	if _phase ~= "InRound" then
 		return
 	end
+	local round = _round
+	if not round then
+		return
+	end
 	_phase = "Results"
 	_phaseGeneration += 1
 	local generation = _phaseGeneration
 
-	_captureRoundEndEligiblePlayers()
+	local eligibleByUserId = _captureRoundEndEligiblePlayers()
 	MatchSnapshot.set({
 		PhaseEndsAt = MatchSnapshot.now() + GameConfig.EndResultsDuration,
 		Phase = "Results",
@@ -1441,12 +1520,21 @@ function _enterResults(winnerTeam: string)
 
 	-- ── Recompensas de fin de partida ────────────────────────
 	-- MVP = jugador(es) con más kills de SU equipo (kills > 0). Solo players reales.
+	local function killsOf(userId: number): number
+		local stats = round.statsByUserId[userId]
+		return if stats then stats.kills else 0
+	end
+	local function teamOf(userId: number): ("A" | "B")?
+		local session = _sessions[userId]
+		return if session then session.team else nil
+	end
+
 	local teamMaxKills = { A = 0, B = 0 }
-	for userId in _roundEndEligibleByUserId do
+	for userId in eligibleByUserId do
 		if userId > 0 then
-			local side = _teamByUserId[userId]
-			if side == "A" or side == "B" then
-				local kills = _matchKillsByUserId[userId] or 0
+			local side = teamOf(userId)
+			if side then
+				local kills = killsOf(userId)
 				if kills > teamMaxKills[side] then
 					teamMaxKills[side] = kills
 				end
@@ -1459,18 +1547,18 @@ function _enterResults(winnerTeam: string)
 	-- (task.defer) — server-authoritative, independiente de que se vea o no.
 	local resultsByUserId: { [number]: any } = {}
 	local winnerIsTeam = winnerTeam == "A" or winnerTeam == "B"
-	for userId in _roundEndEligibleByUserId do
+	for userId in eligibleByUserId do
 		local player = Players:GetPlayerByUserId(userId)
 		if not player then
 			continue
 		end
-		local side = _teamByUserId[userId]
+		local side = teamOf(userId)
 		local won = winnerIsTeam and side == winnerTeam
-		local maxForSide = if side == "A" or side == "B" then teamMaxKills[side] else 0
+		local maxForSide = if side then teamMaxKills[side] else 0
 		local context = {
 			won = won,
 			lost = not won, -- perder o empatar cuentan como "Defeat"
-			isMVP = maxForSide > 0 and (_matchKillsByUserId[userId] or 0) == maxForSide,
+			isMVP = maxForSide > 0 and killsOf(userId) == maxForSide,
 			isVIP = MatchResultsService:IsVIPCached(player),
 		}
 		local results = MatchResultsService:BuildResults(player, context)
@@ -1487,8 +1575,8 @@ function _enterResults(winnerTeam: string)
 
 	Network.Match.RoundEnded.SendToAll({
 		winnerTeam = winnerTeam,
-		scoreA = _roundScoreA,
-		scoreB = _roundScoreB,
+		scoreA = round.scoreA,
+		scoreB = round.scoreB,
 	})
 
 	-- Daily task: WinMatches — solo jugadores elegibles (que jugaron la ronda)
@@ -1499,12 +1587,12 @@ function _enterResults(winnerTeam: string)
 	-- que el broadcast de RoundEnded; UX percibida más fluida en partidas
 	-- llenas (16 BatchUpdates secuenciales = ~16 SetValues).
 	local eligibleSnapshot: { number } = {}
-	for userId in _roundEndEligibleByUserId do
+	for userId in eligibleByUserId do
 		table.insert(eligibleSnapshot, userId)
 	end
 	local snapshotTeamByUserId: { [number]: string } = {}
 	for _, userId in eligibleSnapshot do
-		snapshotTeamByUserId[userId] = _teamByUserId[userId] or ""
+		snapshotTeamByUserId[userId] = teamOf(userId) or ""
 	end
 
 	task.defer(function()
@@ -1547,13 +1635,14 @@ function _enterResults(winnerTeam: string)
 	-- El cliente maneja la vuelta al menú al recibir RoundEnded.
 	local lobbySpawn = _findLobbySpawn()
 	for _, player in Players:GetPlayers() do
-		if not _roundEndEligibleByUserId[player.UserId] then
+		local session = _sessions[player.UserId]
+		if not session or not eligibleByUserId[player.UserId] then
 			continue
 		end
 
-		_isInMenuByUserId[player.UserId] = true
-		_respawnDebounceByUserId[player.UserId] = nil
-		_pendingSpawnByUserId[player.UserId] = nil
+		session.inMenu = true
+		session.respawnDebounce = false
+		session.pendingSpawn = false
 
 		if MatchService.OnPlayerMatchCompleted then
 			pcall(MatchService.OnPlayerMatchCompleted, player)
@@ -1570,12 +1659,22 @@ function _enterResults(winnerTeam: string)
 		end
 	end
 
-	-- Desmontar la ronda: mapa, listeners de muerte y estado match-scoped.
+	-- Desmontar la ronda: mapa, listeners de muerte, campos de scope ronda de
+	-- las sesiones y el objeto Round entero (no hay tablas que "limpiar": la
+	-- siguiente ronda nace en un objeto nuevo).
 	_clearActiveMap()
-	for userId in _deathConnectionsByUserId do
-		_disconnectDeathConnection(userId)
+	for _, session in _sessions do
+		if session.deathConn then
+			session.deathConn:Disconnect()
+			session.deathConn = nil
+		end
+		_resetSessionRoundState(session)
 	end
-	_resetMatchScopedState()
+	_round = nil
+	-- Streak state (counts + timeouts + dedupe keys) vive en KillAttributionService.
+	KillAttributionService:Clear()
+	-- Snapshots de inicio de partida (nivel/tier BP) para los items de Resultados.
+	MatchResultsService:ClearSnapshots()
 	_lastBotRosterJsonBroadcast = nil
 
 	-- La votación no arranca hasta que termina la pantalla de Resultados.
@@ -1594,7 +1693,8 @@ end
 -- cuando un bot muere — toca state interno de MatchService (scoreA/B, streaks,
 -- match kills/deaths) y dispara broadcasts.
 local function _handleBotDied(botTeam: string, _botName: string, botHumanoid: Humanoid, botFakeUserId: number)
-	if not _isRoundActive() then
+	local round = _round
+	if not _isRoundActive() or not round then
 		return
 	end
 
@@ -1607,7 +1707,7 @@ local function _handleBotDied(botTeam: string, _botName: string, botHumanoid: Hu
 	if attackerAt > 0 and time() - attackerAt > GameConfig.KillAttributionWindow then
 		attackerUserId = nil
 	end
-	-- H5 fix: NO descartamos por _isInMenuByUserId aquí. La ventana
+	-- H5 fix: NO descartamos al atacante por estar en el menú. La ventana
 	-- KillAttributionWindow (2s) ya filtra daño viejo de cuando el jugador
 	-- estaba in-match. Si el daño es reciente y el bot muere justo cuando
 	-- vuelve al menú, la kill es legítima — no robarla.
@@ -1622,7 +1722,10 @@ local function _handleBotDied(botTeam: string, _botName: string, botHumanoid: Hu
 	end)
 
 	if attackerUserId and attackerUserId ~= botFakeUserId then
-		_matchKillsByUserId[attackerUserId] = (_matchKillsByUserId[attackerUserId] or 0) + 1
+		local attackerStats = _roundStats(attackerUserId)
+		if attackerStats then
+			attackerStats.kills += 1
+		end
 		-- Solo los jugadores humanos acumulan streak/timer/stats.
 		if attackerUserId > 0 then
 			local attackerPlayer = Players:GetPlayerByUserId(attackerUserId)
@@ -1652,25 +1755,25 @@ local function _handleBotDied(botTeam: string, _botName: string, botHumanoid: Hu
 	end
 
 	-- Los bots no usan streak: solo contabilizar kills/deaths para HUD.
-	if _matchKillsByUserId[botFakeUserId] == nil then
-		_matchKillsByUserId[botFakeUserId] = 0
+	local botStats = _roundStats(botFakeUserId)
+	if botStats then
+		botStats.deaths += 1
 	end
-	_matchDeathsByUserId[botFakeUserId] = (_matchDeathsByUserId[botFakeUserId] or 0) + 1
 	_sendPlayerStreakToAll(botFakeUserId)
 
 	-- Sumar score al equipo contrario (igual que cuando muere un jugador)
 	if botTeam == "A" then
-		_roundScoreB += 1
+		round.scoreB += 1
 	else
-		_roundScoreA += 1
+		round.scoreA += 1
 	end
 
 	_publishScore()
 	_rebalanceBotsForCurrentRound("bot death")
 
-	if _roundScoreA >= GameConfig.WinScoreLimit then
+	if round.scoreA >= GameConfig.WinScoreLimit then
 		_enterResults("A")
-	elseif _roundScoreB >= GameConfig.WinScoreLimit then
+	elseif round.scoreB >= GameConfig.WinScoreLimit then
 		_enterResults("B")
 	end
 end
@@ -1679,21 +1782,18 @@ end
 -- La generación se bumpea ANTES de cualquier task.spawn que la capture: si un
 -- callback termina la ronda en el mismo frame, el guard del timer lo detecta.
 local function _enterInRound()
+	-- El Round nuevo nace ANTES de publicar la fase: phase == "InRound" implica
+	-- _round ~= nil para todo el código que corre debajo. Las sesiones ya están
+	-- limpias (reset en el desmontaje de Results; los joiners nacen limpios).
+	_round = _newRound()
 	_phase = "InRound"
 	_phaseGeneration += 1
 	local generation = _phaseGeneration
-	_roundScoreA = 0
-	_roundScoreB = 0
-	_resetMatchScopedState()
-	-- Tras el clear, re-inicializar kill/death/streak a 0 para los players
-	-- actuales y broadcastear (UI sync); marcar a todos como en-menú (el
-	-- siguiente RequestJoinMatch los moverá a in-round).
+	-- Streaks a 0 para los players actuales + broadcast (UI sync). Kills/deaths
+	-- arrancan en 0 implícitamente (stats lazy del Round nuevo).
 	for _, player in Players:GetPlayers() do
-		_matchKillsByUserId[player.UserId] = 0
 		KillAttributionService:InitStreak(player.UserId)
-		_matchDeathsByUserId[player.UserId] = 0
 		KillAttributionService:SendStreakBroadcast(player.UserId)
-		_isInMenuByUserId[player.UserId] = true
 	end
 	MatchSnapshot.set({
 		ScoreA = 0,
@@ -1704,7 +1804,6 @@ local function _enterInRound()
 
 	if _AIService then
 		local sharedSpawnPoints = _collectSharedSpawnPoints(_activeMapModel :: Instance)
-		-- _recentDeathBySpawn ya quedó limpio por `_resetMatchScopedState()` arriba.
 		local ok, err = pcall(function()
 			_AIService:OnRoundStart({
 				spawnPoints = sharedSpawnPoints,
@@ -1753,12 +1852,15 @@ end
 -- todos + roster de bots). El estado ambiental (fase/voto/score) viaja por
 -- MatchSnapshot y no necesita resync.
 local function _onRequestMatchSync(_: {}, player: Player)
-	local now = time()
-	local last = _matchSyncCooldownByUserId[player.UserId] or 0
-	if now - last < REMOTE_RATE_LIMIT_SECONDS then
+	local session = _sessions[player.UserId]
+	if not session then
 		return
 	end
-	_matchSyncCooldownByUserId[player.UserId] = now
+	local now = time()
+	if now - session.matchSyncCooldownAt < REMOTE_RATE_LIMIT_SECONDS then
+		return
+	end
+	session.matchSyncCooldownAt = now
 
 	_tryStartVoting()
 	_sendAllPlayerStreaksToPlayer(player)
@@ -1773,11 +1875,14 @@ local function _onCharacterAdded(player: Player, character: Model)
 	-- respawn / muerte / salida — el character viejo puede seguir parented por
 	-- ragdoll/kill effects hasta el GC, lo que acumularía listeners.
 	CollisionGroups.setGroupForCharacter(character, CollisionGroups.CHARACTERS)
-	local prev = _charDescendantConnectionsByUserId[player.UserId]
-	if prev then
-		prev:Disconnect()
+	local session = _sessions[player.UserId]
+	if not session then
+		return
 	end
-	_charDescendantConnectionsByUserId[player.UserId] = character.DescendantAdded:Connect(function(descendant)
+	if session.charDescendantConn then
+		session.charDescendantConn:Disconnect()
+	end
+	session.charDescendantConn = character.DescendantAdded:Connect(function(descendant)
 		if descendant:IsA("BasePart") then
 			-- Si el char ya ragdollizó cuando llega una part nueva (VFX del
 			-- kill effect, p.ej.), tomar el grupo coherente con su estado.
@@ -1788,13 +1893,14 @@ local function _onCharacterAdded(player: Player, character: Model)
 end
 
 local function _bindCharacterTracking(player: Player)
-	local old = _characterConnectionsByUserId[player.UserId]
-	if old then
-		old:Disconnect()
-		_characterConnectionsByUserId[player.UserId] = nil
+	local session = _sessions[player.UserId]
+	if not session then
+		return
 	end
-
-	_characterConnectionsByUserId[player.UserId] = player.CharacterAdded:Connect(function(character)
+	if session.characterConn then
+		session.characterConn:Disconnect()
+	end
+	session.characterConn = player.CharacterAdded:Connect(function(character)
 		_onCharacterAdded(player, character)
 	end)
 
@@ -1803,12 +1909,11 @@ local function _bindCharacterTracking(player: Player)
 	end
 end
 
--- Init de estado por-jugador al entrar (o al arrancar el servicio con jugadores ya
--- presentes). Centralizado para que ambos caminos dejen el mismo estado consistente.
+-- Crea la sesión del jugador al entrar (o al arrancar el servicio con jugadores
+-- ya presentes) y wirea su tracking de character. ÚNICO punto de creación de
+-- sesiones.
 local function _initJoinedPlayerState(player: Player)
-	_isInMenuByUserId[player.UserId] = true
-	_deathAtByUserId[player.UserId] = 0
-	_matchKillsByUserId[player.UserId] = 0
+	_sessions[player.UserId] = _newSession()
 	KillAttributionService:InitStreak(player.UserId)
 	KillAttributionService:SendStreakBroadcast(player.UserId)
 	_bindCharacterTracking(player)
@@ -1819,66 +1924,56 @@ local function _onRequestJoinMatch(_: {}, player: Player)
 		return
 	end
 
-	if _joinDebounceByUserId[player.UserId] then
+	local session = _sessions[player.UserId]
+	if not session or session.pendingSpawn then
 		return
 	end
 
 	local selectedSide = _pickBalancedTeam(player.UserId)
 	if not selectedSide then
-		_isInMenuByUserId[player.UserId] = true
-		_pendingSpawnByUserId[player.UserId] = nil
-		_joinDebounceByUserId[player.UserId] = nil
+		session.inMenu = true
 		return
 	end
 
-	_joinDebounceByUserId[player.UserId] = true
-	_pendingSpawnByUserId[player.UserId] = true
-	_isInMenuByUserId[player.UserId] = false
+	session.pendingSpawn = true
+	session.inMenu = false
 	_rebalanceBotsForCurrentRound("join request")
-	if _matchKillsByUserId[player.UserId] == nil then
-		_matchKillsByUserId[player.UserId] = 0
-	end
 	KillAttributionService:EnsureStreakInitialized(player.UserId)
 	KillAttributionService:SendStreakBroadcast(player.UserId)
 
 	task.defer(function()
 		if player.Parent ~= Players then
-			_pendingSpawnByUserId[player.UserId] = nil
-			_joinDebounceByUserId[player.UserId] = nil
+			session.pendingSpawn = false
 			return
 		end
 
 		-- Si la ronda terminó entre el RequestJoinMatch y este defer, abortamos
 		-- para no spawnear al jugador en una ronda terminada (causa desync de phase).
 		if not _isRoundActive() then
-			_isInMenuByUserId[player.UserId] = true
-			_pendingSpawnByUserId[player.UserId] = nil
-			_joinDebounceByUserId[player.UserId] = nil
+			session.inMenu = true
+			session.pendingSpawn = false
 			return
 		end
 
-		local team = if _teamByUserId[player.UserId] == "A" then _teamA else _teamB
+		local team = if session.team == "A" then _teamA else _teamB
 		if not team then
 			warn("[MatchService] Teams no inicializados.")
-			_isInMenuByUserId[player.UserId] = true
-			_pendingSpawnByUserId[player.UserId] = nil
-			_joinDebounceByUserId[player.UserId] = nil
+			session.inMenu = true
+			session.pendingSpawn = false
 			_rebalanceBotsForCurrentRound("join aborted missing team")
 			return
 		end
 
 		if not _spawnPlayerOnAssignedTeam(player) then
 			warn("[MatchService] No fue posible spawnear al jugador en su equipo.")
-			_isInMenuByUserId[player.UserId] = true
-			_pendingSpawnByUserId[player.UserId] = nil
-			_joinDebounceByUserId[player.UserId] = nil
+			session.inMenu = true
+			session.pendingSpawn = false
 			_rebalanceBotsForCurrentRound("join spawn failed")
 			return
 		end
 
-		_pendingSpawnByUserId[player.UserId] = nil
-		_joinDebounceByUserId[player.UserId] = nil
-		_deathAtByUserId[player.UserId] = 0
+		session.pendingSpawn = false
+		session.deathAt = 0
 		Network.Match.DeathScreenHide.SendTo({}, player)
 
 		-- Daily task: PlayMatches (cuenta una vez por entrada al match).
@@ -1891,7 +1986,7 @@ local function _onRequestJoinMatch(_: {}, player: Player)
 
 			-- Cosméticos de equipo para Resultados: el recién llegado recibe a sus
 			-- compañeros y los compañeros se actualizan para incluirlo a él.
-			_refreshTeamCosmetics(_teamByUserId[player.UserId])
+			_refreshTeamCosmetics(session.team)
 
 			-- Snapshot de nivel/tier de BP al entrar (set-if-absent) para computar
 			-- los items desbloqueados durante la partida en la pantalla de Resultados.
@@ -1905,15 +2000,16 @@ local function _onRequestJoinMatch(_: {}, player: Player)
 end
 
 local function _onRequestRespawn(_: {}, player: Player)
-	if not _isRoundActive() or _isInMenuByUserId[player.UserId] then
+	local session = _sessions[player.UserId]
+	if not session or not _isRoundActive() or session.inMenu then
 		return
 	end
 
-	if _respawnDebounceByUserId[player.UserId] then
+	if session.respawnDebounce then
 		return
 	end
 
-	local deathAt = _deathAtByUserId[player.UserId] or 0
+	local deathAt = session.deathAt
 	-- S5: enforce the full respawn cooldown server-side (was client-only via the
 	-- death screen bar — a modified client could respawn every 0.5s). Si conocemos
 	-- el momento de la muerte (deathAt > 0), exigimos GameConfig.RespawnCooldown
@@ -1927,13 +2023,13 @@ local function _onRequestRespawn(_: {}, player: Player)
 		return
 	end
 
-	_respawnDebounceByUserId[player.UserId] = true
+	session.respawnDebounce = true
 	-- Marcamos "respawn al mapa en curso" de forma SÍNCRONA (antes del defer), para
 	-- que la reubicación al lobby por inactividad lo vea en cuanto se pulsa spawn y
 	-- no mande al jugador al lobby en vez de a la partida (carrera #1).
-	_respawningByUserId[player.UserId] = true
+	session.respawning = true
 	task.defer(function()
-		_respawnDebounceByUserId[player.UserId] = nil
+		session.respawnDebounce = false
 
 		-- Reintento defensivo: al acabar la votación, jugadores y bots respawnean
 		-- a la vez y el body-swap puede fallar puntualmente (contención del lock,
@@ -1941,7 +2037,7 @@ local function _onRequestRespawn(_: {}, player: Player)
 		-- o cayendo al vacío. Reintentamos unas pocas veces con pausa corta.
 		local spawned = false
 		for _ = 1, 3 do
-			if player.Parent ~= Players or not _isRoundActive() or _isInMenuByUserId[player.UserId] then
+			if player.Parent ~= Players or not _isRoundActive() or session.inMenu then
 				break
 			end
 			if _spawnPlayerOnAssignedTeam(player) then
@@ -1951,10 +2047,10 @@ local function _onRequestRespawn(_: {}, player: Player)
 			task.wait(0.15)
 		end
 
-		_respawningByUserId[player.UserId] = nil
+		session.respawning = false
 
 		if spawned then
-			_deathAtByUserId[player.UserId] = 0
+			session.deathAt = 0
 			Network.Match.DeathScreenHide.SendTo({}, player)
 		end
 	end)
@@ -1964,23 +2060,23 @@ end
 -- Se inicia desde MatchService:Start con predicates inyectados — ver allá.
 
 local function _onRequestReturnToMenu(_: {}, player: Player)
+	local session = _sessions[player.UserId]
+	if not session then
+		return
+	end
 	-- Cooldown duro: ReturnToMenu llama LoadCharacter (expensive) + teleport +
 	-- rebalance de bots. Sin cap un cliente podría spamearlo entre frames.
 	local now = time()
-	local last = _returnToMenuCooldownByUserId[player.UserId] or 0
-	if now - last < REMOTE_RATE_LIMIT_SECONDS then
+	if now - session.returnToMenuCooldownAt < REMOTE_RATE_LIMIT_SECONDS then
 		return
 	end
-	_returnToMenuCooldownByUserId[player.UserId] = now
+	session.returnToMenuCooldownAt = now
 
-	_isInMenuByUserId[player.UserId] = true
-	_respawnDebounceByUserId[player.UserId] = nil
-	_pendingSpawnByUserId[player.UserId] = nil
+	session.inMenu = true
+	session.respawnDebounce = false
+	session.pendingSpawn = false
 	KillAttributionService:ResetStreak(player.UserId)
 	_rebalanceBotsForCurrentRound("return to menu")
-	if _matchKillsByUserId[player.UserId] == nil then
-		_matchKillsByUserId[player.UserId] = 0
-	end
 	KillAttributionService:SendStreakBroadcast(player.UserId)
 
 	local lobbySpawn = _findLobbySpawn()
@@ -2010,13 +2106,15 @@ function MatchService:GrantCombatReward(player: Player, actionKey: string, extra
 	local ok, xpGranted, cashGranted =
 		RewardService.Award(player, actionKey, extraUpdates, itemSku, { skipCash = skipCash, skipXP = skipXP })
 	if ok then
-		_matchCashEarnedByUserId[player.UserId] = (_matchCashEarnedByUserId[player.UserId] or 0) + cashGranted
-		_matchXPEarnedByUserId[player.UserId] = (_matchXPEarnedByUserId[player.UserId] or 0) + xpGranted
+		_trackRoundEarnings(player.UserId, cashGranted, xpGranted)
 
 		-- Asistencias de la partida: las difundimos vía streak para Resultados.
 		if actionKey == "Assist" then
-			_matchAssistsByUserId[player.UserId] = (_matchAssistsByUserId[player.UserId] or 0) + 1
-			KillAttributionService:SendStreakBroadcast(player.UserId)
+			local stats = _roundStats(player.UserId)
+			if stats then
+				stats.assists += 1
+				KillAttributionService:SendStreakBroadcast(player.UserId)
+			end
 		end
 	end
 	return ok, xpGranted, cashGranted
@@ -2077,9 +2175,12 @@ function MatchService:Start(dataService: DataService): ()
 	-- el código sigue funcionando con la pérdida silenciosa preexistente.
 	if _dataService and _dataService.ProfileLoaded then
 		_dataService.ProfileLoaded:Connect(function(player: Player)
-			local queue = _pendingProfileActionsByUserId[player.UserId]
-			if not queue then return end
-			_pendingProfileActionsByUserId[player.UserId] = nil
+			local session = _sessions[player.UserId]
+			if not session or #session.pendingProfileActions == 0 then
+				return
+			end
+			local queue = session.pendingProfileActions
+			session.pendingProfileActions = {}
 			for _, fn in queue do
 				local ok, err = pcall(fn)
 				if not ok then
@@ -2089,68 +2190,40 @@ function MatchService:Start(dataService: DataService): ()
 		end)
 	end
 
-	Players.PlayerAdded:Connect(function(player)
-		_initJoinedPlayerState(player)
-		-- Spawn inicial en el lobby por código (CharacterAutoLoads está desactivado,
-		-- el motor no spawnea solo). task.defer para no bloquear el flujo de join.
-		task.defer(function()
-			_spawnPlayerAtLobby(player)
-		end)
-		-- Intentar iniciar votación cuando un nuevo jugador llega (cubre el
-		-- caso de servidor vacío donde Start() se ejecutó con 0 players).
-		-- task.defer para que el jugador ya esté en Players:GetPlayers().
-		task.defer(_tryStartVoting)
-	end)
-
-	-- Jugadores ya presentes cuando arranca el servicio (Start tras un join):
-	-- misma init que PlayerAdded + su cuerpo de lobby, ya que el motor no lo hará.
-	for _, player in Players:GetPlayers() do
-		_initJoinedPlayerState(player)
-		task.defer(function()
-			_spawnPlayerAtLobby(player)
-		end)
-	end
-
 	Players.PlayerRemoving:Connect(function(player)
-		local wasActiveReal = _isInMenuByUserId[player.UserId] == false
-		local wasPendingSpawn = _pendingSpawnByUserId[player.UserId] == true
-		-- _voteCooldownsByUserId vive en VotingService:DisconnectPlayer (más abajo).
-		_matchSyncCooldownByUserId[player.UserId] = nil
-		_returnToMenuCooldownByUserId[player.UserId] = nil
-		_isInMenuByUserId[player.UserId] = nil
-		_deathAtByUserId[player.UserId] = nil
-		_respawnDebounceByUserId[player.UserId] = nil
-		_respawningByUserId[player.UserId] = nil
-		_lobbyRespawnAtByUserId[player.UserId] = nil
-		_matchKillsByUserId[player.UserId] = nil
-		_matchDeathsByUserId[player.UserId] = nil
-		_matchAssistsByUserId[player.UserId] = nil
-		_recentKillTimestamps[player.UserId] = nil
-		_pickupEligibilityByUserId[player.UserId] = nil
-		KillAttributionService:OnPlayerRemoving(player.UserId)
-		_pendingProfileActionsByUserId[player.UserId] = nil
-		_roundEndEligibleByUserId[player.UserId] = nil
-		VotingService:DisconnectPlayer(player.UserId)
-		_joinDebounceByUserId[player.UserId] = nil
-		_disconnectDeathConnection(player.UserId)
+		local userId = player.UserId
+		local session = _sessions[userId]
+		local wasActiveOrPending = session ~= nil
+			and (session.inMenu == false or session.pendingSpawn)
 
-		local charConn = _characterConnectionsByUserId[player.UserId]
-		if charConn then
-			charConn:Disconnect()
-			_characterConnectionsByUserId[player.UserId] = nil
+		-- Destrucción atómica de la sesión (connections incluidas).
+		if session then
+			if session.deathConn then
+				session.deathConn:Disconnect()
+			end
+			if session.characterConn then
+				session.characterConn:Disconnect()
+			end
+			if session.charDescendantConn then
+				session.charDescendantConn:Disconnect()
+			end
+		end
+		_sessions[userId] = nil
+
+		-- Entradas del jugador en la ronda activa (las de bots permanecen).
+		local round = _round
+		if round then
+			round.statsByUserId[userId] = nil
+			round.cashEarnedByUserId[userId] = nil
+			round.xpEarnedByUserId[userId] = nil
+			round.recentKillTimestampsByUserId[userId] = nil
+			round.pickupCreditsByUserId[userId] = nil
 		end
 
-		local charDescConn = _charDescendantConnectionsByUserId[player.UserId]
-		if charDescConn then
-			charDescConn:Disconnect()
-			_charDescendantConnectionsByUserId[player.UserId] = nil
-		end
+		KillAttributionService:OnPlayerRemoving(userId)
+		VotingService:DisconnectPlayer(userId)
 
-		_pendingSpawnByUserId[player.UserId] = nil
-
-		_teamByUserId[player.UserId] = nil
-
-		if _isRoundActive() and (wasActiveReal or wasPendingSpawn) then
+		if _isRoundActive() and wasActiveOrPending then
 			_rebalanceBotsForCurrentRound("player leaving")
 		end
 	end)
@@ -2160,12 +2233,29 @@ function MatchService:Start(dataService: DataService): ()
 	Network.Match.RequestRespawn.Listen(_onRequestRespawn)
 	Network.Match.RequestReturnToMenu.Listen(_onRequestReturnToMenu)
 
-	-- KillAttributionService: owns _killStreakByUserId, timeouts, broadcast keys.
-	-- Necesita refs a kills/deaths para componer el packet del broadcast.
+	-- KillAttributionService: owns streaks, timeouts y dedupe keys. Lee los
+	-- stats de combate de la ronda activa vía getters (0s entre rondas).
 	KillAttributionService:Start({
-		matchKillsByUserId = _matchKillsByUserId,
-		matchDeathsByUserId = _matchDeathsByUserId,
-		matchAssistsByUserId = _matchAssistsByUserId,
+		getCombatStats = function(userId: number): (number, number, number)
+			local round = _round
+			local stats = if round then round.statsByUserId[userId] else nil
+			if not stats then
+				return 0, 0, 0
+			end
+			return stats.kills, stats.deaths, stats.assists
+		end,
+		getActiveBotUserIds = function(): { number }
+			local ids: { number } = {}
+			local round = _round
+			if round then
+				for userId in round.statsByUserId do
+					if userId < 0 then
+						table.insert(ids, userId)
+					end
+				end
+			end
+			return ids
+		end,
 	})
 
 	-- MatchResultsService: VIP cache + snapshots de inicio + recompensas de
@@ -2187,9 +2277,7 @@ function MatchService:Start(dataService: DataService): ()
 	-- que el service no se acople a state interno de MatchService.
 	HealthPickupService:Start({
 		isRoundActive = _isRoundActive,
-		isPlayerInMenu = function(userId: number): boolean
-			return _isInMenuByUserId[userId] == true
-		end,
+		isPlayerInMenu = _isPlayerInMenu,
 		-- S2: el service consume un crédito de kill reciente por heal — ver
 		-- _consumePickupEligibility / _recordPickupEligibility.
 		consumePickupEligibility = function(userId: number): boolean
@@ -2197,23 +2285,42 @@ function MatchService:Start(dataService: DataService): ()
 		end,
 	})
 
-	-- TeamAssignment: pasamos tabla `_teamByUserId` por referencia (el service
-	-- escribe asignaciones ahí) y predicates de estado leído.
+	-- TeamAssignment: lee team/inMenu/pendingSpawn de las sesiones (y escribe
+	-- `team` al asignar — es el dueño de la asignación). El cast evita la
+	-- invarianza del diccionario: PlayerSession ⊃ SessionView estructuralmente.
 	TeamAssignmentService:Start({
-		teamByUserId = _teamByUserId,
-		isInMenuByUserId = _isInMenuByUserId,
-		pendingSpawnByUserId = _pendingSpawnByUserId,
-		getRoundScoreA = function() return _roundScoreA end,
-		getRoundScoreB = function() return _roundScoreB end,
+		sessions = _sessions :: any,
+		getRoundScoreA = function()
+			return if _round then _round.scoreA else 0
+		end,
+		getRoundScoreB = function()
+			return if _round then _round.scoreB else 0
+		end,
 		teamSizeTarget = GameConfig.TeamSizeTarget,
 	})
 
+	-- Wiring de jugadores DESPUÉS de los Start de services: la creación de
+	-- sesión hace broadcast de streaks, que necesita los deps ya inyectados.
+	Players.PlayerAdded:Connect(function(player)
+		_initJoinedPlayerState(player)
+		-- Spawn inicial en el lobby por código (CharacterAutoLoads está desactivado,
+		-- el motor no spawnea solo). task.defer para no bloquear el flujo de join.
+		task.defer(function()
+			_spawnPlayerAtLobby(player)
+		end)
+		-- Intentar iniciar votación cuando un nuevo jugador llega (cubre el
+		-- caso de servidor vacío donde Start() se ejecutó con 0 players).
+		-- task.defer para que el jugador ya esté en Players:GetPlayers().
+		task.defer(_tryStartVoting)
+	end)
+
+	-- Jugadores ya presentes cuando arranca el servicio (Start tras un join):
+	-- misma init que PlayerAdded + su cuerpo de lobby, ya que el motor no lo hará.
 	for _, player in Players:GetPlayers() do
-		_isInMenuByUserId[player.UserId] = true
-		_deathAtByUserId[player.UserId] = 0
-		_matchKillsByUserId[player.UserId] = 0
-		KillAttributionService:InitStreak(player.UserId)
-		_bindCharacterTracking(player)
+		_initJoinedPlayerState(player)
+		task.defer(function()
+			_spawnPlayerAtLobby(player)
+		end)
 	end
 
 	_tryStartVoting()

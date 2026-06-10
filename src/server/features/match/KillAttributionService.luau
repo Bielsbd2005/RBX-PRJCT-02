@@ -14,7 +14,7 @@
 
 	API:
 		KillAttributionService:Start({
-			matchKillsByUserId, matchDeathsByUserId,
+			getCombatStats, getActiveBotUserIds,
 		})
 		:RecordKill(attackerUserId) -> newStreak  -- ++streak, setupTimeout, broadcast
 		:ResetStreak(userId) -> ()  -- streak=0, cancel timeout
@@ -36,10 +36,12 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Network = require(Shared.networking.Network)
 
 type Deps = {
-	-- Shared tables — leemos kills/deaths/asistencias para componer el packet de streak.
-	matchKillsByUserId: { [number]: number },
-	matchDeathsByUserId: { [number]: number },
-	matchAssistsByUserId: { [number]: number },
+	-- Stats de combate de la ronda activa para componer el packet de streak:
+	-- (kills, deaths, assists). Devuelve 0s entre rondas o sin entrada.
+	getCombatStats: (userId: number) -> (number, number, number),
+	-- userIds (negativos) de bots con stats en la ronda activa — para el sync
+	-- de onboarding (SendAllStreaksTo).
+	getActiveBotUserIds: () -> { number },
 }
 
 local KillAttributionService = {}
@@ -96,13 +98,6 @@ function KillAttributionService:EnsureStreakInitialized(userId: number)
 	end
 end
 
--- Setea streak directamente (uso interno desde MatchService al asignar
--- nil al salir un player). Equivalente a borrar la entrada.
-function KillAttributionService:ClearStreakEntry(userId: number)
-	_killStreakByUserId[userId] = nil
-	_lastBroadcastStreakKeyByUserId[userId] = nil
-end
-
 -- Incrementa streak y programa timeout de decaimiento. Devuelve el nuevo valor.
 function KillAttributionService:RecordKill(attackerUserId: number): number
 	local newStreak = (_killStreakByUserId[attackerUserId] or 0) + 1
@@ -122,9 +117,7 @@ end
 -- Broadcast con dedupe interno (no envía si el packet sería idéntico al último).
 function KillAttributionService:SendStreakBroadcast(userId: number)
 	local streak = _killStreakByUserId[userId] or 0
-	local kills = _deps.matchKillsByUserId[userId] or 0
-	local deaths = _deps.matchDeathsByUserId[userId] or 0
-	local assists = _deps.matchAssistsByUserId[userId] or 0
+	local kills, deaths, assists = _deps.getCombatStats(userId)
 	local key = string.format("%d|%d|%d|%d", kills, streak, deaths, assists)
 	if _lastBroadcastStreakKeyByUserId[userId] == key then
 		return
@@ -140,13 +133,14 @@ function KillAttributionService:SendStreakBroadcast(userId: number)
 end
 
 function KillAttributionService:SendStreakSnapshotTo(player: Player, userId: number)
+	local kills, deaths, assists = _deps.getCombatStats(userId)
 	pcall(function()
 		Network.Match.PlayerStreakState.SendTo({
 			userId = tostring(userId),
-			kills = _deps.matchKillsByUserId[userId] or 0,
+			kills = kills,
 			streak = _killStreakByUserId[userId] or 0,
-			deaths = _deps.matchDeathsByUserId[userId] or 0,
-			assists = _deps.matchAssistsByUserId[userId] or 0,
+			deaths = deaths,
+			assists = assists,
 		}, player)
 	end)
 end
@@ -158,20 +152,16 @@ function KillAttributionService:SendAllStreaksTo(player: Player)
 		self:SendStreakSnapshotTo(player, otherPlayer.UserId)
 	end
 	-- Bots: solo si tienen actividad (kills/deaths/streak > 0).
-	for botUserId in _deps.matchKillsByUserId do
-		if botUserId < 0 then
-			local kills = _deps.matchKillsByUserId[botUserId] or 0
-			local deaths = _deps.matchDeathsByUserId[botUserId] or 0
-			local streak = _killStreakByUserId[botUserId] or 0
-			if kills > 0 or deaths > 0 or streak > 0 then
-				self:SendStreakSnapshotTo(player, botUserId)
-			end
+	for _, botUserId in _deps.getActiveBotUserIds() do
+		local kills, deaths = _deps.getCombatStats(botUserId)
+		local streak = _killStreakByUserId[botUserId] or 0
+		if kills > 0 or deaths > 0 or streak > 0 then
+			self:SendStreakSnapshotTo(player, botUserId)
 		end
 	end
 end
 
--- Limpia todo el state (used by _resetMatchScopedState de MatchService al
--- terminar/iniciar un round).
+-- Limpia todo el state (lo llama MatchService al desmontar la ronda).
 function KillAttributionService:Clear()
 	table.clear(_killStreakByUserId)
 	table.clear(_lastBroadcastStreakKeyByUserId)
