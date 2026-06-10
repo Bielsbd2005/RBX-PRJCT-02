@@ -211,6 +211,21 @@ function WeaponSecurity.validateHit(player: Player, weapon: any, hitInfo: any): 
 		end
 	end
 
+	-- S1: validar que el part reportado es real y que el punto de impacto
+	-- está físicamente cerca del part (bloquea hitInfo.part arbitrario /
+	-- guaranteed-headshot enviando un Head que no fue golpeado).
+	if typeof(hitInfo.part) ~= "Instance" or not hitInfo.part:IsA("BasePart") then
+		return false, "bad part"
+	end
+	if (hitInfo.part.Position - hitInfo.p).Magnitude > hitInfo.part.Size.Magnitude + 5 then
+		return false, "part/point mismatch"
+	end
+
+	-- S1: exponer el origin server-trusted del disparo registrado para que
+	-- applyDamage recompute la distancia de falloff en vez de confiar en
+	-- hitInfo.d (que el cliente puede falsear a 0 para max damage).
+	hitInfo.serverOrigin = data.origin
+
 	data.hitsRemaining -= 1
 	if data.hitsRemaining <= 0 then
 		bucket[sid] = nil

@@ -142,8 +142,11 @@ function SettingsFeature.start(menuController: any): any
 	end
 
 	-- Efectos inmediatos (onChange) ------------------------------------------
-	local lobbyMusic = SoundService:FindFirstChild("LobbyMusic")
+	-- L11: resolvemos LobbyMusic perezosamente en cada apply. Settings arranca
+	-- antes que el feature de música, así que cachear el Sound al inicio dejaba
+	-- el slider sin efecto si la música aún no se había creado.
 	local function applyMusicVolume(value: number)
+		local lobbyMusic = SoundService:FindFirstChild("LobbyMusic")
 		if lobbyMusic and lobbyMusic:IsA("Sound") then
 			lobbyMusic:SetAttribute("VolumeMultiplier", value)
 		end

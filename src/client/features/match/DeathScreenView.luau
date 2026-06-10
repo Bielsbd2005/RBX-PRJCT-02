@@ -310,7 +310,9 @@ function DeathScreenView:show(respawnCooldown: number, killer: KillerInfo?)
 	local token = self._countdownToken
 	_setPcHintsVisible(self._refs)
 	self._refs.root.Visible = true
-	self._refs.container.BackgroundTransparency = self._baseTransparency
+	-- L12: arrancamos totalmente transparente y hacemos fade hasta la base, en
+	-- lugar de tweenear a la transparencia actual (que era un no-op y cortaba duro).
+	self._refs.container.BackgroundTransparency = 1
 	TweenService:Create(self._refs.container, STYLE.showTween, {
 		BackgroundTransparency = self._baseTransparency,
 	}):Play()
@@ -405,8 +407,9 @@ function DeathScreenView:hide()
 		_clearViewport(self._refs.viewportFrame)
 	end
 
+	-- L12: fade out real hasta transparente (antes tweeneaba a la base = no-op).
 	local tween = TweenService:Create(self._refs.container, STYLE.hideTween, {
-		BackgroundTransparency = self._baseTransparency,
+		BackgroundTransparency = 1,
 	})
 	tween:Play()
 	-- Guardado con token: si llega un show() durante el fade, no ocultamos.

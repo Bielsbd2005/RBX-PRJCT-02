@@ -133,11 +133,22 @@ function DirectionalIndicatorGuiManager:ActivateDirectionalIndicator(DIName, oth
 
 	-- Show indicator for a bit, then fade out
 	coroutine.wrap(function()
-		wait(GetConfigValue(diInfo.config, "TimeBeforeFade", 1))
+		-- P8: task.wait en lugar del legacy wait() (era el único w() restante del repo).
+		task.wait(GetConfigValue(diInfo.config, "TimeBeforeFade", 1))
 		local tweenInfo = TweenInfo.new(GetConfigValue(diInfo.config, "FadeTime", 1))
 		local goal = {}
 		goal.ImageTransparency = 1
 		local tween = TweenService:Create(diInfo.image, tweenInfo, goal)
+		-- P8: destruir el clon en Tween.Completed en vez de depender solo del poll
+		-- de transparencia. Si el frame se ocultara antes de que el loop lo viera
+		-- (o el loop dejara de correr), el clon quedaría huérfano. dieOnFade marca
+		-- los clones; los DIs originales se mantienen y solo se ocultan.
+		tween.Completed:Connect(function()
+			diInfo.active = false
+			if diInfo.dieOnFade and diInfo.frame and diInfo.frame.Parent then
+				diInfo.frame:Destroy()
+			end
+		end)
 		tween:Play()
 	end)()
 end

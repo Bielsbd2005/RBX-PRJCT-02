@@ -101,6 +101,13 @@ function serverProcess.start()
 
 	Players.PlayerAdded:Connect(onPlayerAdded)
 
+	-- Free per-player channel tables on leave so departed players don't leak
+	-- their (possibly grown) buffers or pin the Player instance as a key.
+	Players.PlayerRemoving:Connect(function(player)
+		perPlayerReliable[player] = nil
+		perPlayerUnreliable[player] = nil
+	end)
+
 	RunService.PostSimulation:Connect(function()
 		-- Check if the channel has anything before trying to send it
 		if globalReliable.cursor > 0 then

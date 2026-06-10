@@ -20,9 +20,10 @@ if SKIP_IN_STUDIO and RunService:IsStudio() then
 	return
 end
 
-local MIN_LOAD_TIME = 6
+local MIN_LOAD_TIME = 2
 local DOTS_SPEED = 3
 local PROGRESS_TWEEN_THRESHOLD = 0.01
+local HARD_TIMEOUT = 20
 
 local loadingScreen = playerGui:WaitForChild("LoadingScreen", 15)
 if not loadingScreen then
@@ -38,21 +39,21 @@ local textFilled = maskFrame:WaitForChild("TextFilled")
 local filledStroke = textFilled:WaitForChild("UIStroke")
 local subtitle = background:WaitForChild("Subtitle")
 
--- Conexión en RenderStepped para forzar que textFilled tenga siempre la posición (0,0) y el ancho absoluto exacto de titleContainer
-local sizeConnection
-sizeConnection = RunService.RenderStepped:Connect(function()
+-- Actualización dirigida por evento: re-aplica la posición/ancho de textFilled sólo cuando cambia el AbsoluteSize del contenedor
+local function updateTextFilled()
 	if not titleContainer:IsDescendantOf(game) or not textFilled:IsDescendantOf(game) then
-		if sizeConnection then
-			sizeConnection:Disconnect()
-		end
 		return
 	end
 	textFilled.Position = UDim2.new(0, 0, 0, 0)
 	textFilled.Size = UDim2.new(0, titleContainer.AbsoluteSize.X, 1, 0)
-end)
+end
 
--- Esperar a que el motor de Roblox calcule el tamaño absoluto real en la pantalla
-while titleContainer.AbsoluteSize.X == 0 do
+local sizeConnection = titleContainer:GetPropertyChangedSignal("AbsoluteSize"):Connect(updateTextFilled)
+updateTextFilled()
+
+-- Esperar a que el motor de Roblox calcule el tamaño absoluto real en la pantalla (con timeout para no colgarse)
+local absoluteSizeDeadline = os.clock() + 5
+while titleContainer.AbsoluteSize.X == 0 and os.clock() < absoluteSizeDeadline do
 	RunService.Heartbeat:Wait()
 end
 
@@ -89,6 +90,18 @@ end
 local totalAssets = math.max(#assets, 1)
 local loadedAssets = 0
 
+-- Si no hay nada que precargar (p. ej. Lobby/Menu no replicaron), no dejar girar el loop para siempre
+if #assets == 0 then
+	loadedAssets = totalAssets
+end
+
+-- Timeout duro general: pase lo que pase, forzar la dismissal para no atrapar al jugador
+local hardTimeoutReached = false
+task.delay(HARD_TIMEOUT, function()
+	hardTimeoutReached = true
+	loadedAssets = totalAssets
+end)
+
 task.spawn(function()
 	for _, asset in ipairs(assets) do
 		local ok, err = pcall(function()
@@ -106,7 +119,7 @@ end)
 local progressTweenInfo = TweenInfo.new(0.3, Enum.EasingStyle.Quad)
 local lastTweenedProgress = 0
 
-while loadedAssets < totalAssets or (os.clock() - startTime) < MIN_LOAD_TIME do
+while not hardTimeoutReached and (loadedAssets < totalAssets or (os.clock() - startTime) < MIN_LOAD_TIME) do
 	local elapsed = os.clock() - startTime
 	local realProgress = loadedAssets / totalAssets
 	local timeProgress = math.min(elapsed / MIN_LOAD_TIME, 1)

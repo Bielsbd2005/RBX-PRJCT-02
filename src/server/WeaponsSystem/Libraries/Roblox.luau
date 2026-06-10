@@ -320,7 +320,8 @@ local function findInstanceImpl(root, path, getChildFunc)
 	while true do
 		local nextChildName
 		local nextSeparator = path:find("%.")
-		if not nextSeparator then
+		local isLastSegment = nextSeparator == nil
+		if isLastSegment then
 			nextChildName = path
 		else
 			nextChildName = path:sub(1, nextSeparator - 1)
@@ -332,6 +333,12 @@ local function findInstanceImpl(root, path, getChildFunc)
 			currentInstance = child
 		else
 			return nil
+		end
+
+		-- L10: en el último segmento (sin más separadores) ya consumimos el path
+		-- completo; retornar evita un bucle infinito en findFirstChild/waitForChild.
+		if isLastSegment then
+			return currentInstance
 		end
 	end
 end

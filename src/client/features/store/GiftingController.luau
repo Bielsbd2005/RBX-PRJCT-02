@@ -28,6 +28,9 @@ local Notify = require(Client.core.ui.NotificationController)
 
 local SEARCH_BTN_TEXT = "SHOP"
 local CONFIRMED_BTN_TEXT = "EXIT"
+-- Si el servidor no responde la validación en este tiempo, liberamos el botón
+-- para que una respuesta perdida no deje el SHOP bloqueado hasta cerrar el panel.
+local RESPONSE_TIMEOUT = 5
 local TITLE_FORMAT = "SHOPPING FOR %s"
 local AVATAR_THUMB_FORMAT = "rbxthumb://type=AvatarHeadShot&id=%d&w=150&h=150"
 
@@ -84,6 +87,7 @@ function GiftingController.new(config: GiftingConfig, janitor: any)
 	self._state = "search" :: "search" | "confirmed"
 	self._recipient = nil :: Recipient?
 	self._pending = false -- hay una validación en vuelo (debounce + filtra respuestas viejas)
+	self._pendingToken = 0 -- token incremental para que un timeout obsoleto no libere un pending nuevo
 
 	janitor:Add(self._actionBtn.Activated:Connect(function()
 		self:_onActionPressed()
@@ -94,6 +98,7 @@ function GiftingController.new(config: GiftingConfig, janitor: any)
 	janitor:Add(Network.Gifting.Response.Listen(function(data)
 		if not self._pending then return end
 		self._pending = false
+		self._pendingToken += 1 -- invalida el timeout en vuelo
 		if data.success then
 			local userId = tonumber(data.userId)
 			if userId then
@@ -124,6 +129,16 @@ function GiftingController:_onActionPressed()
 	end
 
 	self._pending = true
+	self._pendingToken += 1
+	local token = self._pendingToken
+	task.delay(RESPONSE_TIMEOUT, function()
+		-- Sólo libera si seguimos esperando ESTA validación (no una posterior ni
+		-- una ya respondida). Evita bloquear el botón si la respuesta se pierde.
+		if self._pending and self._pendingToken == token then
+			self._pending = false
+			Notify.warning("No response from the server. Try again.")
+		end
+	end)
 	Network.Gifting.ValidateUser.Send({ username = username })
 end
 
@@ -151,6 +166,7 @@ function GiftingController:reset()
 	self._state = "search"
 	self._recipient = nil
 	self._pending = false
+	self._pendingToken += 1 -- invalida cualquier timeout en vuelo
 
 	self._profile.Visible = false
 	self._title.Visible = false

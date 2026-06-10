@@ -96,6 +96,12 @@ function WeaponsGui.new(weaponsSystem: any)
 	self.weaponsSystem = weaponsSystem
 	self.libraries = Libraries
 	self.connections = {}
+	-- L7: las conexiones de "ciclo de vida" (AbsoluteSize / CurrentCamera /
+	-- GuiEnabled) se crean una sola vez en el constructor. Mantenerlas en una
+	-- tabla aparte para que setEnabled(false) NO las desconecte — si vivieran en
+	-- self.connections, un ciclo disable→enable las perdería y la GUI dejaría de
+	-- reescalarse ante cambios de resolución/cámara.
+	self.lifetimeConnections = {}
 	self.enabled = false
 	self.isZoomed = false
 	self.scopeEnabled = false
@@ -144,13 +150,15 @@ function WeaponsGui.new(weaponsSystem: any)
 		self.gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
 
 		-- Limpiar listeners antiguos de forma segura
-		if self.connections.absoluteSize then self.connections.absoluteSize:Disconnect() end
-		if self.connections.currentCamera then self.connections.currentCamera:Disconnect() end
-		if self.connections.guiEnabled then self.connections.guiEnabled:Disconnect() end
+		if self.lifetimeConnections.absoluteSize then self.lifetimeConnections.absoluteSize:Disconnect() end
+		if self.lifetimeConnections.currentCamera then self.lifetimeConnections.currentCamera:Disconnect() end
+		if self.lifetimeConnections.guiEnabled then self.lifetimeConnections.guiEnabled:Disconnect() end
 
-		self.connections.absoluteSize = self.gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function() self:onScreenSizeChanged() end)
-		self.connections.currentCamera = workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function() self:onScreenSizeChanged() end)
-		self.connections.guiEnabled = self.gui:GetPropertyChangedSignal("Enabled"):Connect(function()
+		-- L7: estos watchers viven en lifetimeConnections (no en connections) para
+		-- sobrevivir a los ciclos disable→enable.
+		self.lifetimeConnections.absoluteSize = self.gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function() self:onScreenSizeChanged() end)
+		self.lifetimeConnections.currentCamera = workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function() self:onScreenSizeChanged() end)
+		self.lifetimeConnections.guiEnabled = self.gui:GetPropertyChangedSignal("Enabled"):Connect(function()
 			if self.gui.Enabled then
 				self:onScreenSizeChanged()
 			end

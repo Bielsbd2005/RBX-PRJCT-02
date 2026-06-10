@@ -6,8 +6,14 @@
 -- (menú/locker → on, partida → off). Lo conduce MatchState vía setEnabled.
 
 local Lighting = game:GetService("Lighting")
+local UserInputService = game:GetService("UserInputService")
 
 local DepthOfFieldController = {}
+
+-- Audit P5: en móviles (táctil sin mouse) no encendemos DepthOfField; es un
+-- post-effect a pantalla completa que se apila con el blur de paneles justo
+-- donde los jugadores de móvil pasan idle en el lobby.
+local _isMobile = UserInputService.TouchEnabled and not UserInputService.MouseEnabled
 
 local _dof: DepthOfFieldEffect? = nil
 
@@ -23,7 +29,7 @@ end
 function DepthOfFieldController.setEnabled(enabled: boolean)
 	local dof = _getDof()
 	if dof then
-		dof.Enabled = enabled
+		dof.Enabled = enabled and not _isMobile
 	end
 end
 

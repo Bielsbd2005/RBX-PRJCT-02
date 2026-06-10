@@ -123,6 +123,62 @@ local _matchCashEarnedByUserId: { [number]: number } = {}
 local _matchXPEarnedByUserId: { [number]: number } = {}
 local _recentKillTimestamps: { [number]: { number } } = {}
 local MULTIKILL_WINDOW = 4
+
+-- S2: elegibilidad server-side para health pickups.
+-- Los health pickups son PURAMENTE client-visuales (PickupDropEffect.luau corre
+-- en el cliente: spawnea el orbe bajo la víctima cuando el cliente local hace una
+-- kill, lo imanta hacia su personaje y, al recogerlo, manda RequestPickup). No
+-- existe ninguna entidad de pickup en el servidor que validar. Para evitar el
+-- god-mode (cliente modificado spameando RequestPickup → +30 HP cada 0.2s),
+-- registramos por jugador una cola de timestamps de kills NO reclamadas: cada
+-- kill humana (PvP o vs bot) empuja un timestamp, y cada RequestPickup válida
+-- consume el más antiguo dentro de la ventana. Así un heal exige una kill
+-- reciente y distinta — un atacante no puede curarse más veces de las que mata.
+-- GAP RESIDUAL (documentado): sin entidad server-side no podemos verificar que
+-- el orbe existió ni la proximidad real al recogerlo; un cliente podría aún
+-- diferir un heal legítimo o, como mucho, curarse una vez por kill real. Esto
+-- recorta el exploit de "ilimitado" a "1 heal por kill", que es la mitigación
+-- más fuerte posible dada la arquitectura client-visual actual.
+local _pickupEligibilityByUserId: { [number]: { number } } = {}
+local PICKUP_ELIGIBILITY_WINDOW = 15
+local PICKUP_ELIGIBILITY_MAX_QUEUED = 8
+
+-- Empuja una kill como crédito de pickup consumible. Llamado en ambos paths de
+-- kill (PvP y vs bot) sólo para jugadores humanos in-match.
+local function _recordPickupEligibility(userId: number)
+	if userId <= 0 then
+		return
+	end
+	local queue = _pickupEligibilityByUserId[userId]
+	if not queue then
+		queue = {}
+		_pickupEligibilityByUserId[userId] = queue
+	end
+	table.insert(queue, time())
+	-- Cap defensivo: nunca acumular más de N créditos pendientes (evita que un
+	-- jugador que nunca se cura "ahorre" curaciones para más tarde).
+	while #queue > PICKUP_ELIGIBILITY_MAX_QUEUED do
+		table.remove(queue, 1)
+	end
+end
+
+-- Consume (de existir) un crédito de pickup reciente. Devuelve true si había uno
+-- dentro de la ventana. Poda timestamps caducados antes de decidir.
+local function _consumePickupEligibility(userId: number): boolean
+	local queue = _pickupEligibilityByUserId[userId]
+	if not queue then
+		return false
+	end
+	local now = time()
+	while #queue > 0 and (now - queue[1]) > PICKUP_ELIGIBILITY_WINDOW do
+		table.remove(queue, 1)
+	end
+	if #queue == 0 then
+		return false
+	end
+	table.remove(queue, 1)
+	return true
+end
 local _lastMapLoadStateBroadcastKey: string? = nil
 local _lastRoundStateBroadcastKey: string? = nil
 local _lastBotRosterJsonBroadcast: string? = nil
@@ -349,6 +405,8 @@ local function _resetMatchScopedState()
 	table.clear(_matchCashEarnedByUserId)
 	table.clear(_matchXPEarnedByUserId)
 	table.clear(_recentKillTimestamps)
+	-- S2: créditos de elegibilidad de health pickup (kills recientes no reclamadas).
+	table.clear(_pickupEligibilityByUserId)
 	-- Streak state (counts + timeouts + broadcast keys) vive en KillAttributionService.
 	KillAttributionService:Clear()
 	-- Recent deaths por spawn point (audit fix: antes solo se limpiaba en
@@ -422,9 +480,19 @@ end
 -- kill chain (línea ~519+) ya tenía `attacker` resuelto y la función hacía
 -- GetPlayerByUserId redundante por cada call (4 calls por kill: Kill +
 -- Headshot? + Streak3? + Streak5?). Ahora 1 lookup en el caller, 4 reuses.
-local function _isMatchCapReached(userId: number): boolean
+-- L14 fix: el cap de cash y el de XP son INDEPENDIENTES. Antes esto era un
+-- AND-gate (`_isMatchCapReached` exigía AMBOS capados para frenar cualquier
+-- grant), así que un jugador capado en una moneda seguía ganando la otra hasta
+-- llegar al tope de ambas — y además, una vez capada una, seguía sumando la
+-- otra sin límite por moneda. Ahora cada moneda se frena en cuanto ESA llega a
+-- su cap; usamos opts.skipCash/skipXP en RewardService.Award para suprimir sólo
+-- la moneda capada y dejar pasar la otra.
+local function _isCashCapReached(userId: number): boolean
 	return (_matchCashEarnedByUserId[userId] or 0) >= GameConfig.MatchCashCap
-		and (_matchXPEarnedByUserId[userId] or 0) >= GameConfig.MatchXPCap
+end
+
+local function _isXPCapReached(userId: number): boolean
+	return (_matchXPEarnedByUserId[userId] or 0) >= GameConfig.MatchXPCap
 end
 
 local function _grantActionRewardsToAttacker(attacker: Player?, action: string, weaponId: string?)
@@ -432,7 +500,10 @@ local function _grantActionRewardsToAttacker(attacker: Player?, action: string, 
 		return
 	end
 
-	if _isMatchCapReached(attacker.UserId) then
+	local skipCash = _isCashCapReached(attacker.UserId)
+	local skipXP = _isXPCapReached(attacker.UserId)
+	-- Si ambas monedas ya están capadas no hay nada que conceder.
+	if skipCash and skipXP then
 		return
 	end
 
@@ -443,7 +514,8 @@ local function _grantActionRewardsToAttacker(attacker: Player?, action: string, 
 		return
 	end
 
-	local ok, xpGranted, cashGranted = RewardService.Award(attacker, action, nil, weaponId)
+	local ok, xpGranted, cashGranted =
+		RewardService.Award(attacker, action, nil, weaponId, { skipCash = skipCash, skipXP = skipXP })
 	if ok then
 		_matchCashEarnedByUserId[attacker.UserId] = (_matchCashEarnedByUserId[attacker.UserId] or 0) + cashGranted
 		_matchXPEarnedByUserId[attacker.UserId] = (_matchXPEarnedByUserId[attacker.UserId] or 0) + xpGranted
@@ -661,6 +733,9 @@ local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?, a
 	local newStreak = KillAttributionService:RecordKill(attackerUserId)
 	KillAttributionService:SendStreakBroadcast(attackerUserId)
 	_registerWeaponKillForAttacker(attackerUserId, attackerWeaponId)
+	-- S2: una kill PvP dropea un health pickup client-side; registramos el crédito
+	-- para que el RequestPickup correspondiente pueda validarse server-side.
+	_recordPickupEligibility(attackerUserId)
 	_grantActionRewardsToAttacker(attacker, "Kill", attackerWeaponId)
 	if attackerWasHeadshot then
 		_grantActionRewardsToAttacker(attacker, "Headshot", attackerWeaponId)
@@ -1678,6 +1753,10 @@ local function _handleBotDied(botTeam: string, _botName: string, botHumanoid: Hu
 				elseif newStreak == 5 then
 					_grantActionRewardsToAttacker(attackerPlayer, "Streak5", attackerWeaponId)
 				end
+				-- S2: una kill vs bot también dropea un health pickup client-side;
+				-- registramos el crédito igual que en el path PvP para que el
+				-- RequestPickup correspondiente pueda validarse server-side.
+				_recordPickupEligibility(attackerUserId)
 				-- C1 fix: persistir Stats.Kills/Headshots/KillStreakBest lifetime
 				-- también para kills vs bots. Antes el path PvE solo
 				-- actualizaba contadores en memoria.
@@ -1959,8 +2038,16 @@ local function _onRequestRespawn(_: {}, player: Player)
 	end
 
 	local deathAt = _deathAtByUserId[player.UserId] or 0
-	-- Minimum anti-spam cooldown (0.5s); the full respawn cooldown is enforced client-side via the death screen bar.
-	if time() - deathAt < 0.5 then
+	-- S5: enforce the full respawn cooldown server-side (was client-only via the
+	-- death screen bar — a modified client could respawn every 0.5s). Si conocemos
+	-- el momento de la muerte (deathAt > 0), exigimos GameConfig.RespawnCooldown
+	-- completo. Si no lo conocemos (deathAt == 0: arranque, edge cases), caemos al
+	-- floor anti-spam de 0.5s como fallback.
+	if deathAt > 0 then
+		if time() - deathAt < GameConfig.RespawnCooldown then
+			return
+		end
+	elseif time() - deathAt < 0.5 then
 		return
 	end
 
@@ -2036,11 +2123,18 @@ local function _onRequestReturnToMenu(_: {}, player: Player)
 end
 
 function MatchService:GrantCombatReward(player: Player, actionKey: string, extraUpdates: any?, itemSku: string?)
-	if _isMatchCapReached(player.UserId) then
+	-- L14: cap por moneda independiente. Si ambas monedas están capadas pero NO
+	-- hay extraUpdates (que deben aplicarse igualmente, p. ej. Stats.Assists),
+	-- podemos cortar temprano. Si hay extraUpdates seguimos al Award con ambas
+	-- monedas suprimidas para persistirlos.
+	local skipCash = _isCashCapReached(player.UserId)
+	local skipXP = _isXPCapReached(player.UserId)
+	if skipCash and skipXP and extraUpdates == nil then
 		return false, 0, 0
 	end
 
-	local ok, xpGranted, cashGranted = RewardService.Award(player, actionKey, extraUpdates, itemSku)
+	local ok, xpGranted, cashGranted =
+		RewardService.Award(player, actionKey, extraUpdates, itemSku, { skipCash = skipCash, skipXP = skipXP })
 	if ok then
 		_matchCashEarnedByUserId[player.UserId] = (_matchCashEarnedByUserId[player.UserId] or 0) + cashGranted
 		_matchXPEarnedByUserId[player.UserId] = (_matchXPEarnedByUserId[player.UserId] or 0) + xpGranted
@@ -2176,6 +2270,7 @@ function MatchService:Start(dataService: DataService): ()
 		_matchDeathsByUserId[player.UserId] = nil
 		_matchAssistsByUserId[player.UserId] = nil
 		_recentKillTimestamps[player.UserId] = nil
+		_pickupEligibilityByUserId[player.UserId] = nil
 		KillAttributionService:OnPlayerRemoving(player.UserId)
 		_pendingProfileActionsByUserId[player.UserId] = nil
 		_roundEndEligibleByUserId[player.UserId] = nil
@@ -2245,6 +2340,11 @@ function MatchService:Start(dataService: DataService): ()
 		isRoundActive = function() return _isRoundActive end,
 		isPlayerInMenu = function(userId: number): boolean
 			return _isInMenuByUserId[userId] == true
+		end,
+		-- S2: el service consume un crédito de kill reciente por heal — ver
+		-- _consumePickupEligibility / _recordPickupEligibility.
+		consumePickupEligibility = function(userId: number): boolean
+			return _consumePickupEligibility(userId)
 		end,
 	})
 

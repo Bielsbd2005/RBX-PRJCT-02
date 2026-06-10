@@ -797,10 +797,17 @@ function DataService:Increment(player: Player, path: { string }, amount: number)
 		return false, 0
 	end
 
-	-- Navegar hasta el valor actual
+	-- Navegar hasta el valor actual con guards por hop (igual que BatchUpdate):
+	-- un path no mapeado devuelve (false, 0) en vez de lanzar al indexar nil.
 	local pointer: any = profile.Data
 	for i = 1, #path - 1 do
+		if type(pointer) ~= "table" then
+			return false, 0
+		end
 		pointer = pointer[path[i]]
+	end
+	if type(pointer) ~= "table" then
+		return false, 0
 	end
 	local current: number = pointer[path[#path]] or 0
 	if type(amount) ~= "number" or amount ~= amount then

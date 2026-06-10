@@ -210,7 +210,7 @@ local function _onDescendantAdded(instance: Instance)
 	-- 2. Es local player char (filtrado en _shouldTrack).
 	-- En cualquier otro caso quedan dos posibles deltas: Humanoid o team attr
 	-- llegando tarde por replicación. Conectamos ambos retries.
-	local hasHumanoid = model:FindFirstChildOfClass("Humanoid") ~= nil
+	-- (reutilizamos `hasHumanoid` calculado arriba en lugar de re-declararlo)
 	local hasTeamAttr = _hasAnyTeamAttribute(model)
 	if hasHumanoid and hasTeamAttr then
 		-- Tiene todo lo que necesita pero _shouldTrack lo descartó (e.g. owner ==

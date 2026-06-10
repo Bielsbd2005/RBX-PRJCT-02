@@ -12,7 +12,7 @@ ClearDataCommandService.__index = ClearDataCommandService
 local _dataService: DataService = nil :: any
 local _started = false
 
-local ENABLE_CLEAR_COMMAND = RunService:IsStudio() or RunService:IsServer()
+local ENABLE_CLEAR_COMMAND = RunService:IsStudio()
 local COMMAND = "/resetdata"
 
 -- Si OPEN_TO_ALL_IN_STUDIO=true, cualquier player en Studio (team test, team

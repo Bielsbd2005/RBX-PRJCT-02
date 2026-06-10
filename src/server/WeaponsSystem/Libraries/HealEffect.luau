@@ -100,11 +100,22 @@ local function getEdgePosition(): UDim2
 	return UDim2.new(x, 0, y, 0)
 end
 
+-- P8: cap duro de ImageLabels concurrentes. Sin esto, un heal genera ~45
+-- partículas y heals encadenados podían acumular cientos de instancias en mobile.
+local MAX_ACTIVE_HEAL_IMAGES = 20
+local activeHealImages = 0
+
 -- Una partícula de curación: aparece creciendo desde un borde, deriva hacia
 -- arriba girando levemente y se desvanece. Se auto-destruye al terminar.
 local function spawnHealImage()
 	local gui = screenGui
 	if not gui then
+		return
+	end
+
+	-- P8: no superar el cap concurrente; el efecto degrada en densidad, no en
+	-- duración (el loop sigue llamando y respawnea conforme se liberan slots).
+	if activeHealImages >= MAX_ACTIVE_HEAL_IMAGES then
 		return
 	end
 
@@ -137,6 +148,7 @@ local function spawnHealImage()
 	img.Rotation = math.random(-8, 8)
 	img.ZIndex = zIndex
 	img.Parent = gui
+	activeHealImages += 1
 
 	local startPos = img.Position
 	local driftPos = startPos + UDim2.new(math.random(-35, 35) / 1000, 0, -math.random(60, 100) / 1000, 0)
@@ -175,6 +187,7 @@ local function spawnHealImage()
 	end)
 	fade.Completed:Once(function()
 		img:Destroy()
+		activeHealImages -= 1
 	end)
 end
 

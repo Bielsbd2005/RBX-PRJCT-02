@@ -132,10 +132,8 @@ function NetworkingCallbacks.WeaponReloadRequest(player, instance)
 
 	local weapon = WeaponsSystem.getWeaponForInstance(instance)
 	local weaponType = getmetatable(weapon)
-	if weapon then
-		if weapon.instance == instance and weaponType.CanBeReloaded then
-			weapon:reload(player, true)
-		end
+	if weapon and weaponType and weapon.instance == instance and weaponType.CanBeReloaded and weapon.player == player then
+		weapon:reload(player, true)
 	end
 end
 
@@ -162,10 +160,8 @@ function NetworkingCallbacks.WeaponReloadCanceled(player, instance)
 
 	local weapon = WeaponsSystem.getWeaponForInstance(instance)
 	local weaponType = getmetatable(weapon)
-	if weapon then
-		if weapon.instance == instance and weaponType.CanBeReloaded and player ~= LocalPlayer then
-			weapon:cancelReload(player, true)
-		end
+	if weapon and weaponType and weapon.instance == instance and weaponType.CanBeReloaded and weapon.player == player then
+		weapon:cancelReload(player, true)
 	end
 end
 

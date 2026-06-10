@@ -296,6 +296,9 @@ function MapVoteView.new(votingFrame: GuiObject?): any
 	self._selectedKey = ""
 	self._duration = 1
 	self._onVote = nil :: ((string) -> ())?
+	-- Token de generación: un show()/hide()/showWinner() nuevo lo bumpea para que
+	-- un task.delay tardío de un showWinner viejo no oculte una votación fresca.
+	self._voteToken = 0
 	self._connections = {} :: { RBXScriptConnection }
 	self._janitor = Janitor.new()
 
@@ -335,6 +338,7 @@ end
 -- ── Poblar / reset ───────────────────────────────────────────
 
 function MapVoteView:show(options: { option1: OptionModel, option2: OptionModel, option3: OptionModel }, duration: number)
+	self._voteToken += 1
 	self._duration = math.max(1, duration)
 	self._selectedKey = ""
 
@@ -367,6 +371,7 @@ function MapVoteView:show(options: { option1: OptionModel, option2: OptionModel,
 end
 
 function MapVoteView:hide()
+	self._voteToken += 1
 	self._selectedKey = ""
 	if self._timerLabel then self._timerLabel.Visible = true end
 	for _, slot in self._slots do
@@ -435,6 +440,8 @@ end
 -- los perdedores se encogen escalonados en su celda (sin reflow) y el ganador
 -- se resalta y hace un pop con rebote.
 function MapVoteView:showWinner(winnerMapName: string, onDone: (() -> ())?)
+	self._voteToken += 1
+	local token = self._voteToken
 	if self._timerLabel then self._timerLabel.Visible = false end
 
 	local winnerSlot: SlotRefs? = nil
@@ -485,6 +492,9 @@ function MapVoteView:showWinner(winnerMapName: string, onDone: (() -> ())?)
 
 	local total = WINNER_POP_DELAY + WINNER_POP_INFO.Time + WINNER_SETTLE_INFO.Time + WINNER_HOLD_SECONDS
 	task.delay(total, function()
+		-- Si entró una votación nueva (show/hide/otro showWinner) durante el hold,
+		-- el token cambió y este callback obsoleto no debe disparar onDone.
+		if self._voteToken ~= token then return end
 		if onDone then onDone() end
 	end)
 end

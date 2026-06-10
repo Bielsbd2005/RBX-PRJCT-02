@@ -33,15 +33,24 @@ function values.access(name: string): replicatedValue.replicatedValueType
 	end
 
 	if runContext == "client" then
-		local potentialValueInstance = valueFolder:FindFirstChild(name)
-		if potentialValueInstance and potentialValueInstance:IsA("StringValue") then
-			-- set up the value and return it
-			local value = replicatedValue(potentialValueInstance)
-
-			valueDictionary[name] = value
-
-			return value
+		-- The server creates these StringValues; on the client they may not have
+		-- replicated yet when Network is first required. FindFirstChild (no wait)
+		-- would return nil here and kill all networking for the session, so wait.
+		local potentialValueInstance = valueFolder:WaitForChild(name, 10)
+		if not potentialValueInstance or not potentialValueInstance:IsA("StringValue") then
+			error(
+				`[ByteNet] namespace value "{name}" failed to replicate to the client `
+					.. `(not found or not a StringValue after 10s)`,
+				2
+			)
 		end
+
+		-- set up the value and return it
+		local value = replicatedValue(potentialValueInstance)
+
+		valueDictionary[name] = value
+
+		return value
 	elseif runContext == "server" then
 		-- create the value and return it
 		local newValueInstance = Instance.new("StringValue")
