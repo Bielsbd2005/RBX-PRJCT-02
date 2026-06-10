@@ -9,7 +9,7 @@
 		_lastVoteBroadcastKey
 
 	Dependencias inyectadas (via Start):
-		log, setPhase  -- logging y phase transitions del state machine
+		setPhase  -- phase transitions del state machine
 		getIsMapLoading, getIsPlayEnabled  -- gates externos para no arrancar voto
 		onVoteFinished  -- callback con winnerMapName, MatchService inicia mapload
 
@@ -43,7 +43,6 @@ type ActiveVoteState = {
 }
 
 type Deps = {
-	log: (msg: string) -> (),
 	setPhase: (phase: string, reason: string) -> (),
 	getIsMapLoading: () -> boolean,
 	getIsPlayEnabled: () -> boolean,
@@ -230,24 +229,20 @@ local function _onCastVote(data: { mapName: string }, player: Player)
 
 	local vote = _activeVote
 	if not vote then
-		_deps.log(string.format("Ignored vote from %s: no active vote.", player.Name))
 		return
 	end
 
 	if not _isVoteChangeAllowed(player) then
-		_deps.log(string.format("Rate-limited vote from %s.", player.Name))
 		return
 	end
 
 	local mapName = data.mapName
 	if mapName == "" or not _isValidOption(vote, mapName) then
-		_deps.log(string.format("Ignored invalid vote from %s for map '%s'.", player.Name, mapName))
 		return
 	end
 
 	local previous = vote.votesByUserId[player.UserId]
 	if previous == mapName then
-		_deps.log(string.format("Ignored duplicate vote from %s for map '%s'.", player.Name, mapName))
 		return
 	end
 
@@ -258,7 +253,6 @@ local function _onCastVote(data: { mapName: string }, player: Player)
 
 	vote.votesByUserId[player.UserId] = mapName
 	vote.voteCounts[mapName] = (vote.voteCounts[mapName] or 0) + 1
-	_deps.log(string.format("Vote updated: %s -> '%s' (previous: %s)", player.Name, mapName, previous or "none"))
 
 	-- Broadcast inmediato: sin esto el cambio solo se vería en el siguiente tick
 	-- del timer (hasta ~1s de latencia). El dedupe-key evita reenvíos redundantes.
@@ -287,7 +281,6 @@ local function _runVoteTimer(vote: ActiveVoteState)
 	_broadcastVoteState(vote)
 	local winner = _resolveWinner(vote)
 	_deps.setPhase("VoteEnded", "winner=" .. winner)
-	_deps.log(string.format("Vote finished. Winner map: '%s'.", winner))
 
 	local totalVoters = 0
 	for _ in vote.votesByUserId do
@@ -358,11 +351,10 @@ function VotingService:SendSnapshotTo(player: Player)
 	local option2Name = vote.optionNames[2]
 	local option3Name = vote.optionNames[3]
 	if not option1Name or not option2Name or not option3Name then
-		_deps.log("Skipped active vote snapshot: incomplete option names.")
 		return
 	end
 
-	local okStart, errStart = pcall(function()
+	local okStart = pcall(function()
 		Network.Match.StartVote.SendTo({
 			option1Name = option1Name,
 			option1Image = vote.optionImages[option1Name] or DEFAULT_PLACEHOLDER_IMAGE,
@@ -378,21 +370,13 @@ function VotingService:SendSnapshotTo(player: Player)
 	end)
 
 	if not okStart then
-		_deps.log(string.format("Failed StartVote snapshot to %s: %s", player.Name, tostring(errStart)))
 		return
 	end
 
 	local timeLeft = math.ceil(math.max(0, vote.endAt - time()))
-	local okState, errState = pcall(function()
+	pcall(function()
 		Network.Match.VoteState.SendTo(_buildVoteStatePacket(vote, timeLeft), player)
 	end)
-
-	if not okState then
-		_deps.log(string.format("Failed VoteState snapshot to %s: %s", player.Name, tostring(errState)))
-		return
-	end
-
-	_deps.log(string.format("Sent active vote snapshot to %s (timeLeft=%ds).", player.Name, timeLeft))
 end
 
 function VotingService:DisconnectPlayer(userId: number)
@@ -407,7 +391,6 @@ function VotingService:DisconnectPlayer(userId: number)
 		vote.votesByUserId[userId] = nil
 		local oldCount = vote.voteCounts[previous] or 0
 		vote.voteCounts[previous] = math.max(0, oldCount - 1)
-		_deps.log(string.format("Player %d left vote. Removed vote from map '%s'.", userId, previous))
 		_broadcastVoteState(vote)
 	end
 	_voteCooldownsByUserId[userId] = nil
@@ -417,40 +400,30 @@ function VotingService:StartVoteIfPossible(): boolean
 	-- Retención post-Results: la votación no arranca hasta que termina la pantalla
 	-- de Resultados (cualquier disparador —RequestVoteSync, etc.— respeta esto).
 	if time() < _voteHoldUntil then
-		_deps.log("Vote start held: Results window still active.")
 		return false
 	end
 
 	if _activeVote ~= nil or _hasCompletedInitialVote then
-		if _activeVote ~= nil then
-			_deps.log("Vote start skipped: already voting.")
-		else
-			_deps.log("Vote start skipped: initial vote already completed.")
-		end
 		return false
 	end
 
 	if _deps.getIsMapLoading() or _deps.getIsPlayEnabled() then
-		_deps.log("Vote start skipped: map flow already active.")
 		return false
 	end
 
 	local playerCount = #Players:GetPlayers()
 	if playerCount < GameConfig.MinPlayersToStart then
-		_deps.log(string.format("Vote start blocked: players=%d, required=%d.", playerCount, GameConfig.MinPlayersToStart))
 		return false
 	end
 
 	local pool = _collectCompatibleMaps("TeamDeathmatch")
 	if #pool < 3 then
-		_deps.log(string.format("Vote start blocked: compatible maps=%d, required=3.", #pool))
 		warn("[VotingService] Se requieren al menos 3 mapas compatibles para iniciar la votacion.")
 		return false
 	end
 
 	local options = _pickRandomMapOptions(pool, 3)
 	if #options < 3 then
-		_deps.log(string.format("Vote start blocked: random option selection returned %d maps.", #options))
 		return false
 	end
 
@@ -492,7 +465,6 @@ function VotingService:StartVoteIfPossible(): boolean
 	-- Limpiar cooldowns viejos del voto anterior para que el primer voto del
 	-- nuevo ciclo no quede bloqueado.
 	table.clear(_voteCooldownsByUserId)
-	_deps.log(string.format("Vote started with maps: '%s', '%s', '%s'.", optionNames[1], optionNames[2], optionNames[3]))
 
 	Network.Match.StartVote.SendToAll({
 		option1Name = optionNames[1],

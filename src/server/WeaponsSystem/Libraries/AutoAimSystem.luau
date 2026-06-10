@@ -107,10 +107,9 @@ function AutoAimSystem.findBestTarget(weaponsSystem)
 		local humanoid = character:FindFirstChildOfClass("Humanoid")
 		if not humanoid or humanoid.Health <= 0 then continue end
 
-		-- Target the center of mass first (UpperTorso/Torso) to avoid overpowered headshots
-		local targetPart = character:FindFirstChild("UpperTorso") or
-			character:FindFirstChild("Torso") or
-			character:FindFirstChild("HumanoidRootPart")
+		-- Target the center of mass first (UpperTorso) to avoid overpowered headshots
+		local targetPart = character:FindFirstChild("UpperTorso")
+			or character:FindFirstChild("HumanoidRootPart")
 		if not targetPart then continue end
 
 		local worldPos = targetPart.Position

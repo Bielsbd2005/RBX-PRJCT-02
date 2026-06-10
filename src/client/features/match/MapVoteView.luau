@@ -58,7 +58,6 @@ type SlotRefs = {
 	mapNameDefaultColor: Color3?,
 	percentageLabel: TextLabel?,
 	imageNode: (ImageLabel | ImageButton)?,
-	indicator: GuiObject?,
 	stroke: UIStroke?,
 	shadow: GuiObject?,
 	shadowDefaultTransparency: number?,
@@ -204,7 +203,6 @@ local function _resolveSlots(frame: GuiObject): { SlotRefs }
 		end
 
 		local clickable = _resolveClickable(container)
-		local indicatorNode = container:FindFirstChild("Indicator") or container:FindFirstChild("Selected")
 		-- "Shadow": overlay negro semitransparente que se muestra al perder.
 		local shadowNode = container:FindFirstChild("Shadow")
 		local shadow = if shadowNode and shadowNode:IsA("GuiObject") then shadowNode else nil
@@ -222,7 +220,6 @@ local function _resolveSlots(frame: GuiObject): { SlotRefs }
 			mapNameDefaultColor = if mapNameLabel then mapNameLabel.TextColor3 else nil,
 			percentageLabel = container:FindFirstChild("Percentage") :: TextLabel?,
 			imageNode = _resolveImageNode(container),
-			indicator = if indicatorNode and indicatorNode:IsA("GuiObject") then indicatorNode else nil,
 			stroke = _resolveStroke(container, clickable),
 			shadow = shadow,
 			shadowDefaultTransparency = if shadow then shadow.BackgroundTransparency else nil,
@@ -254,9 +251,6 @@ local function _applySlotSelection(slot: SlotRefs, selected: boolean)
 		slot.mapNameLabel.TextColor3 = if selected
 			then SELECTED_HIGHLIGHT
 			else (slot.mapNameDefaultColor or slot.mapNameLabel.TextColor3)
-	end
-	if slot.indicator then
-		slot.indicator.Visible = selected
 	end
 end
 

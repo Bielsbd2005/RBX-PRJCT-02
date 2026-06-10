@@ -196,7 +196,7 @@ local function _resolveSlot(pathFolder: Instance, index: number): SlotRefs?
 	local footerFrameNode = footerContainer and footerContainer:FindFirstChild("Frame")
 	local statusNode = footerFrameNode and footerFrameNode:FindFirstChild("Status")
 
-	local typeNode = container:FindFirstChild("Type") or frame:FindFirstChild("Type")
+	local typeNode = container:FindFirstChild("Type")
 
 	return {
 		frame = frame,

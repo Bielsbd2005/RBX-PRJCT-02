@@ -21,7 +21,7 @@ local function resolveFaceObject(model: Model): FaceObject?
 		return nil
 	end
 
-	local namedFace = head:FindFirstChild("face") or head:FindFirstChild("Face")
+	local namedFace = head:FindFirstChild("face")
 	if namedFace and (namedFace:IsA("Decal") or namedFace:IsA("Texture")) then
 		return namedFace
 	end

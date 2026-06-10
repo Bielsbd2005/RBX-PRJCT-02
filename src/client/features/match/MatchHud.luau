@@ -216,7 +216,7 @@ local function _collectHudPlayerRows(playersContainer: GuiObject?): { HudPlayerR
 		local totalKillsValueNode = if totalKillsNode and totalKillsNode:IsA("TextLabel")
 			then totalKillsNode
 			elseif totalKillsNode and totalKillsNode:IsA("GuiObject")
-				then (totalKillsNode:FindFirstChild("Value") or totalKillsNode:FindFirstChild("Kills"))
+				then totalKillsNode:FindFirstChild("Kills")
 				else nil
 		local totalKillsValue = if totalKillsValueNode and totalKillsValueNode:IsA("TextLabel") then totalKillsValueNode else nil
 

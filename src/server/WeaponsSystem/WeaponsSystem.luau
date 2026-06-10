@@ -519,11 +519,6 @@ function WeaponsSystem.setup()
 		WeaponsSystem.camera = ShoulderCamera.new(WeaponsSystem)
 		WeaponsSystem.gui = WeaponsGui.new(WeaponsSystem)
 
-		-- Sprint disabled
-		-- if ConfigurationValues.SprintEnabled.Value then
-		-- 	WeaponsSystem.camera:setSprintEnabled(ConfigurationValues.SprintEnabled.Value)
-		-- end
-
 		if ConfigurationValues.SlowZoomWalkEnabled.Value then
 			WeaponsSystem.camera:setSlowZoomWalkEnabled(ConfigurationValues.SlowZoomWalkEnabled.Value)
 		end
