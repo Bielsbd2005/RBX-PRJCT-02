@@ -209,8 +209,6 @@ end
 -- Forward declaration; body assigned after WeaponsSystem table exists
 local flushAssists: (target: Humanoid, killerPlayer: Player?) -> ()
 
-local REMOTE_FUNCTION_NAMES = {}
-
 --Set up WeaponTypes lookup table
 do
 	local function onNewWeaponType(weaponTypeModule)
@@ -510,23 +508,8 @@ function WeaponsSystem.setup()
 			end)
 			WeaponsSystem.remoteEvents[remoteEventName] = remoteEvent
 		end
-		for _, remoteFuncName in REMOTE_FUNCTION_NAMES do
-			local remoteFunc = Instance.new("RemoteEvent")
-			remoteFunc.Name = remoteFuncName
-			remoteFunc.Parent = networkFolder
-
-			local callback = NetworkingCallbacks[remoteFuncName]
-			if not callback then
-				--Connect a no-op function to ensure the queue doesn't pile up.
-				warn("There is no server callback implemented for the WeaponsSystem RemoteFunction \"%s\"!")
-				warn("A default no-op function will be implemented so that the queue cannot be abused.")
-				callback = function(...) end
-			end
-			remoteFunc.OnServerInvoke = function(...)
-				return callback(...)
-			end
-			WeaponsSystem.remoteFunctions[remoteFuncName] = remoteFunc
-		end
+		-- Q3: REMOTE_FUNCTION_NAMES está vacío (la WeaponsSystem no usa RemoteFunctions),
+		-- así que el bucle de setup era código muerto. Eliminado.
 
 		networkFolder.Parent = WeaponsSystemFolder
 		WeaponsSystem.networkFolder = networkFolder
@@ -559,18 +542,7 @@ function WeaponsSystem.setup()
 				WeaponsSystem.remoteEvents[remoteEventName] = remoteEvent
 			end)()
 		end
-		for _, remoteFuncName in REMOTE_FUNCTION_NAMES do
-			coroutine.wrap(function()
-				local remoteFunc = networkFolder:WaitForChild(remoteFuncName, math.huge)
-				local callback = NetworkingCallbacks[remoteFuncName]
-				if callback then
-					remoteFunc.OnClientInvoke = function(...)
-						return callback(...)
-					end
-				end
-				WeaponsSystem.remoteFunctions[remoteFuncName] = remoteFunc
-			end)()
-		end
+		-- Q3: REMOTE_FUNCTION_NAMES vacío → bucle de setup de RemoteFunctions muerto. Eliminado.
 
 		Players.LocalPlayer.CharacterAdded:Connect(WeaponsSystem.onCharacterAdded)
 		if Players.LocalPlayer.Character then
@@ -1046,7 +1018,7 @@ function WeaponsSystem.doDamage(target, amount, damageType, dealer, hitInfo, dam
 		return
 	end
 	if IsServer then
-		if target:IsA("Humanoid") and dealer:IsA("Player") and dealer.Character then
+		if target:IsA("Humanoid") and dealer and dealer:IsA("Player") and dealer.Character then
 			local dealerHumanoid = dealer.Character:FindFirstChildOfClass("Humanoid")
 			local targetPlayer = Players:GetPlayerFromCharacter(target.Parent)
 			local dealerHRP = dealer.Character:FindFirstChild("HumanoidRootPart")

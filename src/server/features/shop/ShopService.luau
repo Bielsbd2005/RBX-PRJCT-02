@@ -320,8 +320,8 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 	if success then
 		_markCooldown(player, "buy")
 
-		local profile = _dataService:GetProfile(player)
-		local balance = if profile and profile.Data then profile.Data.Stats.Cash else 0
+		local refreshedProfile = _dataService:GetProfile(player)
+		local balance = if refreshedProfile and refreshedProfile.Data then refreshedProfile.Data.Stats.Cash else 0
 		EconomyAnalytics.Sink(player, price, balance, "Shop::" .. data.category)
 		EconomyAnalytics.ItemSource(player, "ShopItem::" .. data.category, data.itemId)
 

@@ -45,21 +45,86 @@ NetGuards.MAX = table.freeze({
 })
 
 --[[
-	validate(data, schema) → boolean
-	Chequea que cada campo en `schema` sea un string ≤ max.
-	Devuelve false si `data` no es tabla, si falta un campo, o si excede el cap.
-
-	schema: { [fieldName] = maxBytes }
+	Regla numérica para campos Float32/Int32 que vienen del cliente.
+	Uso en un schema:
+		Network.Settings.UpdateSlider.Listen(function(data, player)
+			if not NetGuards.validate(data, {
+				key   = M.SettingKey,
+				value = { kind = "number", min = 0, max = 1 },
+			}) then return end
+		end)
 ]]
-function NetGuards.validate(data: any, schema: { [string]: number }): boolean
+export type NumberRule = {
+	kind: "number",
+	min: number?,
+	max: number?,
+	integer: boolean?,
+}
+
+-- Una entrada de schema es:
+--   * un number  → cap de bytes para un campo string (comportamiento original)
+--   * una tabla  → regla numérica { kind = "number", min?, max?, integer? }
+export type Rule = number | NumberRule
+
+--[[
+	validNumber(value, rule) → boolean
+	Rechaza no-números, NaN (v ~= v), ±inf, no-enteros (si rule.integer) y
+	valores fuera de [rule.min, rule.max].
+]]
+local function validNumber(value: any, rule: NumberRule): boolean
+	if type(value) ~= "number" then
+		return false
+	end
+	-- NaN: el único valor que no es igual a sí mismo.
+	if value ~= value then
+		return false
+	end
+	if value == math.huge or value == -math.huge then
+		return false
+	end
+	if rule.integer and value % 1 ~= 0 then
+		return false
+	end
+	if rule.min ~= nil and value < rule.min then
+		return false
+	end
+	if rule.max ~= nil and value > rule.max then
+		return false
+	end
+	return true
+end
+
+--[[
+	validate(data, schema) → boolean
+	Chequea cada campo en `schema`:
+		* regla number → string ≤ max bytes y UTF-8 válido (comportamiento original + UTF-8).
+		* regla tabla {kind="number", ...} → número finito dentro de rango (validNumber).
+	Devuelve false si `data` no es tabla, si falta un campo, o si alguna regla falla.
+
+	schema: { [fieldName] = Rule }
+]]
+function NetGuards.validate(data: any, schema: { [string]: Rule }): boolean
 	if type(data) ~= "table" then
 		return false
 	end
 
-	for field, max in schema do
+	for field, rule in schema do
 		local value = data[field]
-		if type(value) ~= "string" or #value > max then
-			return false
+		if type(rule) == "number" then
+			-- Cap de bytes para strings (comportamiento original).
+			if type(value) ~= "string" or #value > rule then
+				return false
+			end
+			-- Rechaza secuencias UTF-8 inválidas (strings que se reenvían a web APIs
+			-- de Roblox como username/code romperían/abusarían esos endpoints).
+			if utf8.len(value) == nil then
+				return false
+			end
+		else
+			-- Regla numérica.
+			if not validNumber(value, rule) then
+				return false
+			end
 		end
 	end
 

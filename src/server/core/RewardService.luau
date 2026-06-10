@@ -54,16 +54,30 @@ end
 	cashGranted=0 (acciones cuya tabla tenga 0 son legítimas — siempre que la
 	clave exista). Devuelve (false, 0, 0) si la clave no existe o el profile
 	no está cargado.
+
+	`opts.skipCash` / `opts.skipXP` permiten suprimir una de las dos monedas
+	(L14): el caller puede capar cash y xp de forma INDEPENDIENTE. Si se salta
+	una moneda, su monto concedido vuelve como 0 y no se persiste ni registra en
+	analytics. `extraUpdates` se aplican siempre (no dependen de las monedas).
 ]]
+type AwardOptions = {
+	skipCash: boolean?,
+	skipXP: boolean?,
+}
+
 function RewardService.Award(
 	player: Player,
 	actionKey: string,
 	extraUpdates: { BatchUpdateEntry }?,
-	itemSku: string?
+	itemSku: string?,
+	opts: AwardOptions?
 ): (boolean, number, number)
 	if not _dataService or not player then
 		return false, 0, 0
 	end
+
+	local skipCash = if opts then opts.skipCash == true else false
+	local skipXP = if opts then opts.skipXP == true else false
 
 	if not ActionRewards.Has(actionKey) then
 		warn(("[RewardService] Acción desconocida: %s — no se concede nada"):format(tostring(actionKey)))
@@ -77,8 +91,8 @@ function RewardService.Award(
 		return false, 0, 0
 	end
 
-	local xpAmount = ActionRewards.GetXP(actionKey)
-	local cashAmount = ActionRewards.GetCash(actionKey)
+	local xpAmount = if skipXP then 0 else ActionRewards.GetXP(actionKey)
+	local cashAmount = if skipCash then 0 else ActionRewards.GetCash(actionKey)
 
 	local updates: { BatchUpdateEntry } = {}
 	if cashAmount > 0 then

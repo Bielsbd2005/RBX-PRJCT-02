@@ -23,9 +23,13 @@
 ]]
 
 local Lighting = game:GetService("Lighting")
+local UserInputService = game:GetService("UserInputService")
 
 local BLUR_NAME = "Blur"
-local BLUR_SIZE = 18
+-- Audit P5: en móviles (táctil sin mouse) reducimos el tamaño del blur a la
+-- mitad para abaratar el post-effect a pantalla completa.
+local _isMobile = UserInputService.TouchEnabled and not UserInputService.MouseEnabled
+local BLUR_SIZE = if _isMobile then 9 else 18
 
 local BlurController = {}
 
@@ -35,6 +39,9 @@ local _activeCount = 0
 local function _ensureBlur(): BlurEffect
 	local existing = Lighting:FindFirstChild(BLUR_NAME)
 	if existing and existing:IsA("BlurEffect") then
+		if _isMobile and existing.Size > BLUR_SIZE then
+			existing.Size = BLUR_SIZE
+		end
 		return existing
 	end
 	local blur = Instance.new("BlurEffect")

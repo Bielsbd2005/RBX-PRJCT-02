@@ -936,7 +936,7 @@ function BaseWeapon:reload(player, fromNetwork)
 		not self.equipped or
 		self.reloading or
 		not self.canReload or
-		self:getAmmoInWeapon() == self:getConfigValue("AmmoCapacity", 30)
+		self:getAmmoInWeapon() >= self:getConfigValue("AmmoCapacity", 30)
 	then
 		return false
 	end
@@ -1013,7 +1013,10 @@ function BaseWeapon:onReloaded(player, fromNetwork)
 		self.instance:SetAttribute("CurrentAmmo", self:getConfigValue("AmmoCapacity", 30))
 		self.reloading = false
 		self.instance:SetAttribute("IsReloading", false)
-		self.canReload = false
+		-- L9: restaurar canReload tras una recarga completada normalmente. Antes
+		-- quedaba en false y solo useAmmo/cancelReload lo reponían, dejando una
+		-- weapon a tope (que nunca disparó) incapaz de volver a recargar.
+		self.canReload = true
 	end)
 end
 

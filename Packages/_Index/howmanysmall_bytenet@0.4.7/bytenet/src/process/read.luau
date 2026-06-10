@@ -37,10 +37,23 @@ local function read(incomingBuffer: buffer, references: {[number]: unknown}?, pl
 	readRefs.set(references)
 
 	while readCursor < length do
-		local packet = ref[buffer.readu8(incomingBuffer, readCursor)]
+		local id = buffer.readu8(incomingBuffer, readCursor)
 		readCursor += 1
 
-		local value, valueLength = packet.Reader(incomingBuffer, readCursor)
+		-- Unknown packet id: a malformed/forged buffer. We can't know the field
+		-- length to skip past it, so abort this buffer (the rest is unparseable).
+		local packet = ref[id]
+		if not packet then
+			return
+		end
+
+		-- packet.Reader throws on a truncated/garbage buffer. Guard it so one bad
+		-- packet doesn't abort the whole batch with an error; discard the rest of
+		-- this buffer on failure since the cursor position is no longer reliable.
+		local ok, value, valueLength = pcall(packet.Reader, incomingBuffer, readCursor)
+		if not ok then
+			return
+		end
 
 		readCursor += valueLength
 

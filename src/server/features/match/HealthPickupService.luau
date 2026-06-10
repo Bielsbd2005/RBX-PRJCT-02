@@ -35,6 +35,12 @@ local PICKUP_REQUEST_COOLDOWN = 0.2
 type Predicates = {
 	isRoundActive: () -> boolean,
 	isPlayerInMenu: (userId: number) -> boolean,
+	-- S2: consume un crédito de elegibilidad de pickup (una kill reciente no
+	-- reclamada). Devuelve true si había uno disponible dentro de la ventana.
+	-- Los health pickups son client-visuales (no hay entidad server-side que
+	-- validar), así que exigimos al menos una kill real reciente por heal —
+	-- esto recorta el exploit de "+30 HP cada 0.2s ilimitado" a "1 heal por kill".
+	consumePickupEligibility: (userId: number) -> boolean,
 }
 
 local _started = false
@@ -67,12 +73,23 @@ local function _onRequestPickup(data: { kind: string }, player: Player): ()
 	if now < cooldownAt then
 		return
 	end
-	_cooldowns[player.UserId] = now + PICKUP_REQUEST_COOLDOWN
 
 	local character = player.Character
 	if not character then
 		return
 	end
+
+	-- S2: validación server-authoritative. No existe entidad de pickup en el
+	-- servidor (PickupDropEffect corre client-side), así que exigimos que el
+	-- jugador tenga una kill reciente NO reclamada antes de curar. Si no hay
+	-- crédito, ignoramos sin tocar el cooldown (no penalizamos requests
+	-- legítimos que llegan sin crédito por desync de timing). Sólo consumimos
+	-- el cooldown cuando de verdad vamos a intentar curar.
+	if not _predicates.consumePickupEligibility(player.UserId) then
+		return
+	end
+
+	_cooldowns[player.UserId] = now + PICKUP_REQUEST_COOLDOWN
 
 	_applyHealthPickup(character)
 end

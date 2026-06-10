@@ -122,7 +122,8 @@ local CombatNamespace = ByteNet.DefineNamespace("Combat", function()
 				victimName = ByteNet.String,
 				weaponId   = ByteNet.String,
 			}),
-			ReliabilityType = "Unreliable",
+			-- One-shot kill feed events must not drop under packet loss.
+			ReliabilityType = "Reliable",
 		}),
 	}
 end)
@@ -460,12 +461,6 @@ local GiftingNamespace = ByteNet.DefineNamespace("Gifting", function()
 		}),
 	}
 end)
-
--- ────────────────────────────────────────────────────────────
--- NAMESPACE: Debug
--- Herramientas de depuracion (solo Studio/dev en servidor).
--- ────────────────────────────────────────────────────────────
-
 
 -- ────────────────────────────────────────────────────────────
 -- EXPORT

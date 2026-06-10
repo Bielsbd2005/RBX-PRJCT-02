@@ -329,7 +329,7 @@ function GlobalKillFeed:Destroy()
 	self._destroyed = true
 
 	if self._connection then
-		self._connection.Disconnect()
+		self._connection() -- ByteNet Listen returns a disconnect function
 		self._connection = nil
 	end
 

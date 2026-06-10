@@ -128,7 +128,10 @@ function Parabola:_penetrateCast(ray, ignoreList)
 	local tries = 0
 	local hitPart, hitPoint, hitNormal, hitMaterial =
 		nil, ray.Origin + ray.Direction, UP_VECTOR, Enum.Material.Air
-	while tries < 50 do
+	-- P3: cap de penetración bajado de 50 a 8 (paridad con ShoulderCamera).
+	-- 50 raycasts por sample por frame eran un frame-killer en GPUs de gama baja,
+	-- p.ej. una escopeta (NumProjectiles=8) en auto-fire.
+	while tries < 8 do
 		tries = tries + 1
 		local result = workspace:Raycast(ray.Origin, ray.Direction, params)
 		if not result then

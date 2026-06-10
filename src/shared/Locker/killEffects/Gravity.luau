@@ -17,90 +17,41 @@ local CONFIG = {
 
 local rng = Random.new()
 
-local R15_JOINTS = {
-	{ Part0 = "UpperTorso", Part1 = "RightUpperArm", Att0 = "RightShoulderRigAttachment", Att1 = "RightShoulderRigAttachment" },
-	{ Part0 = "UpperTorso", Part1 = "LeftUpperArm", Att0 = "LeftShoulderRigAttachment", Att1 = "LeftShoulderRigAttachment" },
-	{ Part0 = "LowerTorso", Part1 = "RightUpperLeg", Att0 = "RightHipRigAttachment", Att1 = "RightHipRigAttachment" },
-	{ Part0 = "LowerTorso", Part1 = "LeftUpperLeg", Att0 = "LeftHipRigAttachment", Att1 = "LeftHipRigAttachment" },
-	{ Part0 = "RightUpperArm", Part1 = "RightLowerArm", Att0 = "RightElbowRigAttachment", Att1 = "RightElbowRigAttachment" },
-	{ Part0 = "LeftUpperArm", Part1 = "LeftLowerArm", Att0 = "LeftElbowRigAttachment", Att1 = "LeftElbowRigAttachment" },
-	{ Part0 = "RightUpperLeg", Part1 = "RightLowerLeg", Att0 = "RightKneeRigAttachment", Att1 = "RightKneeRigAttachment" },
-	{ Part0 = "LeftUpperLeg", Part1 = "LeftLowerLeg", Att0 = "LeftKneeRigAttachment", Att1 = "LeftKneeRigAttachment" },
-}
-
-local R15_WELDS = {
-	{ Part0 = "LowerTorso", Part1 = "UpperTorso" },
-	{ Part0 = "RightLowerArm", Part1 = "RightHand" },
-	{ Part0 = "LeftLowerArm", Part1 = "LeftHand" },
-	{ Part0 = "RightLowerLeg", Part1 = "RightFoot" },
-	{ Part0 = "LeftLowerLeg", Part1 = "LeftFoot" },
-}
-
-local function buildPartLookup(char: Model): { [string]: BasePart }
-	local map: { [string]: BasePart } = {}
-	for _, child in char:GetChildren() do
-		if child:IsA("BasePart") then
-			map[child.Name] = child :: BasePart
-		end
-	end
-	return map
-end
+-- R15_JOINTS / R15_WELDS / buildPartLookup / buildRagdoll were copy-pasted between
+-- Default.luau and Gravity.luau; hoisted into Utils.luau to prevent drift.
 
 local function getImpulsePart(parts: { [string]: BasePart }): BasePart?
 	return parts.LowerTorso or parts.Torso or parts.HumanoidRootPart
 end
 
-local function buildRagdoll(parts: { [string]: BasePart })
-	local head = parts.Head
-	local upperTorso = parts.UpperTorso
-
-	if CONFIG.RAGDOLL_HEAD_AS_JOINT then
-		if head and upperTorso then
-			Utils.createBallJoint(
-				upperTorso:FindFirstChild("NeckRigAttachment"),
-				head:FindFirstChild("NeckRigAttachment"),
-				{ UpperAngle = CONFIG.JOINT_MAX_ANGLE }
-			)
-		end
-	else
-		Utils.createWeld(upperTorso, head)
-	end
-
-	for _, jointData in ipairs(R15_JOINTS) do
-		local part0 = parts[jointData.Part0]
-		local part1 = parts[jointData.Part1]
-
-		if part0 and part1 then
-			local att0 = part0:FindFirstChild(jointData.Att0)
-			local att1 = part1:FindFirstChild(jointData.Att1)
-
-			if att0 and att1 then
-				Utils.createBallJoint(att0, att1, { UpperAngle = CONFIG.JOINT_MAX_ANGLE })
-			end
-		end
-	end
-
-	for _, weldData in ipairs(R15_WELDS) do
-		Utils.createWeld(parts[weldData.Part0], parts[weldData.Part1])
-	end
-end
-
 local function applyRagdoll(char: Model, hum: Humanoid)
+	-- Only rebuild ragdoll joints for R15 rigs. Previously this destroyed ALL
+	-- Motor6Ds unconditionally, so a non-R15 rig lost every joint with no
+	-- replacement (drifted from Default, which early-returns for non-R15). Only
+	-- strip Motor6Ds when we're going to rebuild, so non-R15 rigs stay intact.
+	local isR15 = hum.RigType == Enum.HumanoidRigType.R15
+
 	local allBaseParts: { BasePart } = {}
 	for _, desc in char:GetDescendants() do
 		if desc:IsA("BasePart") then
 			desc.Anchored = true
 			table.insert(allBaseParts, desc)
-		elseif desc:IsA("Motor6D") then
+		elseif isR15 and desc:IsA("Motor6D") then
 			desc:Destroy()
 		end
 	end
 
-	local parts = buildPartLookup(char)
+	local parts = Utils.buildPartLookup(char)
 
 	local root = parts.HumanoidRootPart
 	if root then
-		root:ClearAllChildren()
+		-- Destroy only joint instances on the root (Motor6D RootJoint, Welds,
+		-- Constraints) — NOT ClearAllChildren, which also wipes death Sounds and
+		-- the root rig Attachments that other systems rely on. Skip on non-R15
+		-- rigs, where we don't rebuild joints and must keep the rig connected.
+		if isR15 then
+			Utils.destroyJoints(root)
+		end
 		root.CanCollide = false
 		root.Massless = true
 	end
@@ -108,8 +59,8 @@ local function applyRagdoll(char: Model, hum: Humanoid)
 	hum:ChangeState(Enum.HumanoidStateType.Dead)
 	hum:SetStateEnabled(Enum.HumanoidStateType.GettingUp, false)
 
-	if hum.RigType == Enum.HumanoidRigType.R15 then
-		buildRagdoll(parts)
+	if isR15 then
+		Utils.buildRagdoll(parts, CONFIG.JOINT_MAX_ANGLE, CONFIG.RAGDOLL_HEAD_AS_JOINT)
 	end
 
 	CollisionGroups.setGroupForParts(char, allBaseParts, CollisionGroups.RAGDOLL)

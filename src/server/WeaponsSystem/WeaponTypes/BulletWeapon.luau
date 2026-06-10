@@ -28,7 +28,7 @@ local NO_BULLET_DECALS = false
 --the datamodel anymore.
 local IGNORE_LIST_LIFETIME = 5
 
-local MAX_BULLET_TIME = 4
+local MAX_BULLET_TIME = 2
 -- Gravedad base aplicada al proyectil — multiplicada por gravityFactor del config.
 local PROJECTILE_GRAVITY_BASE = 35
 -- Umbrales de subdivisión de la trayectoria parabólica (más samples = más detección
@@ -783,7 +783,7 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 			local bulletVelocity = parabola:sampleVelocity(1)
 			bulletEffect.CFrame = CFrame.new(bulletPos, bulletPos + bulletVelocity)
 			if shouldMovePart then
-				bulletEffect.Velocity = bulletVelocity.Unit * bulletSpeed
+				bulletEffect.AssemblyLinearVelocity = bulletVelocity.Unit * bulletSpeed
 			end
 		end
 
@@ -847,7 +847,17 @@ function BulletWeapon:calculateDamage(travelDistance)
 end
 
 function BulletWeapon:applyDamage(hitInfo)
-	local damage = self:calculateDamage(hitInfo.d)
+	-- S1: no confiar en hitInfo.d (el cliente puede enviar 0 para forzar max
+	-- damage). Recomputar la distancia de falloff desde el origin server-trusted
+	-- del disparo registrado (WeaponSecurity.validateHit puebla serverOrigin).
+	-- Si no hay origin disponible, caer al hitInfo.d clampeado a >= 0.
+	local travelDistance
+	if typeof(hitInfo.serverOrigin) == "Vector3" and typeof(hitInfo.p) == "Vector3" then
+		travelDistance = (hitInfo.p - hitInfo.serverOrigin).Magnitude
+	else
+		travelDistance = math.max(hitInfo.d or 0, 0)
+	end
+	local damage = self:calculateDamage(travelDistance)
 
 	if damage <= 0 then
 		return
@@ -868,6 +878,14 @@ function BulletWeapon:onHit(hitInfo)
 		local humanoid, wasHeadshot = self.weaponsSystem.getHumanoid(hitPart)
 		hitInfo.h = humanoid or hitPart
 		hitInfo.wasHeadshot = wasHeadshot == true
+
+		-- S1: en el servidor, el multiplicador de headshot solo aplica si el
+		-- part directamente golpeado es el "Head" real (WeaponSecurity.validateHit
+		-- ya verificó la proximidad part/punto). Esto bloquea el guaranteed-headshot
+		-- que envía un Head como hitInfo.part sin haberlo golpeado realmente.
+		if IsServer then
+			hitInfo.wasHeadshot = hitPart.Name == "Head"
+		end
 
 		if IsServer and
 			(not hitInfo.h:IsA("Humanoid") or

@@ -174,19 +174,26 @@ Special = {
 
 	KillEffects = {
 		Default = { Name = "Default Kill",   Price = 0,    LevelRequired = 1,  Rarity = "Common", Image = "rbxassetid://130437553674754", CanPurchase = false },
-		Gravity = { Name = "Gravity Kill",   Price = 200, LevelRequired = 0, Rarity = "Rare",   Image = "rbxassetid://130437553674754", CanPurchase = true },
+		Gravity = { Name = "Gravity Kill",   Price = 200, LevelRequired = 0, Rarity = "Rare",   Image = "rbxassetid://130437553674754", CanPurchase = false, isBPExclusive = true },
 	},
 
 	Faces = {
+		-- "Default" = la cara base del rig (no es un decal de catálogo). Todo jugador
+		-- la posee y equipa por DataTemplate, así que DEBE existir en el catálogo o
+		-- el Locker no puede mostrar la cara equipada y applyFaceToHead no-opea.
+		-- Usamos la textura built-in del engine (rbxasset://, no un assetId de catálogo
+		-- desconocido) para que el catálogo renderice algo seguro y aplicarla restaure
+		-- la cara base del head. No comprable, precio 0.
+		Default = { Name = "Default",        Price = 0,  LevelRequired = 0, Rarity = "Common", Image = "rbxasset://textures/face.png", CanPurchase = false },
 		Face1   = { Name = "Default Face",   Price = 1,  LevelRequired = 0, Rarity = "Rare",   Image = "rbxassetid://79175047578893",  CanPurchase = true },
-		Face2   = { Name = "Face2",          Price = 2,  LevelRequired = 0, Rarity = "Rare",   Image = "rbxassetid://18571318923",    CanPurchase = true },
+		Face2   = { Name = "Face2",          Price = 2,  LevelRequired = 0, Rarity = "Rare",   Image = "rbxassetid://18571318923",    CanPurchase = false, isBPExclusive = true },
 		Face3   = { Name = "Face3",          Price = 3,  LevelRequired = 0, Rarity = "Rare",   Image = "rbxassetid://97580829209799", CanPurchase = true },
 		Face4   = { Name = "Face4",          Price = 4,  LevelRequired = 1, Rarity = "Rare",   Image = "rbxassetid://94789972115859", CanPurchase = true },
-		Face5   = { Name = "Face5",          Price = 5,  LevelRequired = 2, Rarity = "Rare",   Image = "rbxassetid://17285554126",    CanPurchase = true },
+		Face5   = { Name = "Face5",          Price = 5,  LevelRequired = 2, Rarity = "Rare",   Image = "rbxassetid://17285554126",    CanPurchase = false, isBPExclusive = true },
 		Face6   = { Name = "Face6",          Price = 6,  LevelRequired = 3, Rarity = "Rare",   Image = "rbxassetid://70391209868621", CanPurchase = true },
 		Face7   = { Name = "Face7",          Price = 8,  LevelRequired = 5, Rarity = "Rare",   Image = "rbxassetid://18626918162",    CanPurchase = true },
 		Face8   = { Name = "Face8",          Price = 8,  LevelRequired = 4, Rarity = "Common", Image = "rbxassetid://17373537487",    CanPurchase = true },
-		Face9   = { Name = "Face9",          Price = 9,  LevelRequired = 1, Rarity = "Rare",   Image = "rbxassetid://118980363558612", CanPurchase = true },
+		Face9   = { Name = "Face9",          Price = 9,  LevelRequired = 1, Rarity = "Rare",   Image = "rbxassetid://118980363558612", CanPurchase = false, isBPExclusive = true },
 		Face10  = { Name = "Face10",         Price = 10, LevelRequired = 1, Rarity = "Rare",   Image = "rbxassetid://18870092964",    CanPurchase = true },
 		Face11  = { Name = "Face11",         Price = 11, LevelRequired = 1, Rarity = "Rare",   Image = "rbxassetid://101878427779141", CanPurchase = true },
 		Face12  = { Name = "Face12",         Price = 12, LevelRequired = 1, Rarity = "Rare",   Image = "rbxassetid://112166980943980", CanPurchase = true },
@@ -195,8 +202,8 @@ Special = {
 
 	Hats = {
 		Hat1 = { Name = "Bunny",          Price = 12000,  LevelRequired = 0,  Rarity = "Common",    Image = "rbxassetid://117004939623250", CanPurchase = true },
-		Hat2 = { Name = "Cone",      Price = 1200, LevelRequired = 10, Rarity = "Rare",      Image = "rbxassetid://138341632720877", CanPurchase = true },
-		Hat3 = { Name = "Crown",        Price = 4000, LevelRequired = 20, Rarity = "Legendary", Image = "rbxassetid://119183410438332", CanPurchase = true },
+		Hat2 = { Name = "Cone",      Price = 1200, LevelRequired = 10, Rarity = "Rare",      Image = "rbxassetid://138341632720877", CanPurchase = false, isBPExclusive = true },
+		Hat3 = { Name = "Crown",        Price = 4000, LevelRequired = 20, Rarity = "Legendary", Image = "rbxassetid://119183410438332", CanPurchase = false, isBPExclusive = true },
 		Hat4 = { Name = "Squid",        Price = 4000, LevelRequired = 20, Rarity = "Legendary", Image = "rbxassetid://74317816532636", CanPurchase = true },
 		Hat5 = { Name = "Alaska",        Price = 4000, LevelRequired = 20, Rarity = "Legendary", Image = "rbxassetid://83643028468192", CanPurchase = true },
 		Hat6 = { Name = "Drink",        Price = 4000, LevelRequired = 20, Rarity = "Legendary", Image = "rbxassetid://130927276777389", CanPurchase = true },

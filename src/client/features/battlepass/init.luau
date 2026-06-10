@@ -801,6 +801,12 @@ function BattlePassFeature.start(menuController: any): any
 			isOpen = false
 			BlurController.release(BLUR_KEY)
 			fovEffect:restore()
+			-- Liberar los wraps animados para que sus texturas dejen de
+			-- actualizarse cada Heartbeat mientras el panel está cerrado.
+			for slotFrame in wrapBySlot do
+				clearWrap(slotFrame)
+			end
+			clearPreviewWrap()
 		end,
 	})
 	janitor:Add(panel, "Destroy")

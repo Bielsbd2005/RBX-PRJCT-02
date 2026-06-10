@@ -10,10 +10,13 @@ local TeamUtils = {}
 
 function TeamUtils.normalize(raw: string?): string?
 	if not raw or raw == "" then return nil end
+	-- Case-fold so "Red"/"red" compare equal. Teams are TeamA/TeamB (GameConfig);
+	-- unknown strings return nil (rather than original casing) so callers don't
+	-- treat an unrecognized team as a distinct, enemy-eligible side.
 	local low = string.lower(raw)
-	if low == "a" or low == "teama" or low == "green" then return "A" end
-	if low == "b" or low == "teamb" or low == "purple" then return "B" end
-	return raw
+	if low == "a" or low == "teama" then return "A" end
+	if low == "b" or low == "teamb" then return "B" end
+	return nil
 end
 
 function TeamUtils.getSide(character: Model?): string?
@@ -55,7 +58,12 @@ function TeamUtils.isSameTeam(charA: Model?, charB: Model?): boolean
 end
 
 function TeamUtils.areEnemies(charA: Model?, charB: Model?): boolean
-	return not TeamUtils.isSameTeam(charA, charB)
+	-- Require BOTH sides to resolve to a real team. A teamless/lobby/mid-teleport
+	-- character must NOT be treated as an enemy (which `not isSameTeam` would do,
+	-- since two nil sides are "not same team").
+	local sideA = TeamUtils.getSide(charA)
+	local sideB = TeamUtils.getSide(charB)
+	return sideA ~= nil and sideB ~= nil and sideA ~= sideB
 end
 
 return TeamUtils

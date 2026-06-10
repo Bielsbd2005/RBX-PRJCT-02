@@ -2,6 +2,7 @@ local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local Players = game:GetService("Players")
 local Debris = game:GetService("Debris")
+local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Network = require(Shared:WaitForChild("networking"):WaitForChild("Network"))
@@ -267,6 +268,13 @@ function BonusEffect.Play(victimPos, streak)
 	-- Determinar cantidad de items según la racha
 	local itemCount = getItemCountForStreak(streak)
 	if itemCount == 0 then return end -- No spawnear en rachas que no sean especiales
+
+	-- P8: en dispositivos táctiles reducir a la mitad el número de monedas físicas
+	-- (parts sin anclar y colisionables) para bajar el churn de física/instancias
+	-- en el momento más action-heavy. math.ceil garantiza al menos 1 si itemCount>0.
+	if UserInputService.TouchEnabled then
+		itemCount = math.ceil(itemCount / 2)
+	end
 
 	local player = Players.LocalPlayer
 	if not player then return end

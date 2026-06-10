@@ -154,8 +154,17 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 	-- El botón vive donde sea dentro del menú (antes estaba fijo en "Bottom", que
 	-- se eliminó). Es opcional: si no existe, el locker se inicializa igual pero
-	-- sin enganchar el click de apertura (ver más abajo).
-	local lockerBtn = menuGui:FindFirstChild("Locker", true) :: GuiButton?
+	-- sin enganchar el click de apertura (ver más abajo). Buscamos por nombre+clase
+	-- (como ClientBootstrap.findLockerButton): un FindFirstChild("Locker", true)
+	-- ciego podía devolver un nodo que NO es GuiButton y romper el feature al
+	-- enganchar MouseButton1Click.
+	local lockerBtn: GuiButton? = nil
+	for _, descendant in menuGui:GetDescendants() do
+		if descendant.Name == "Locker" and descendant:IsA("GuiButton") then
+			lockerBtn = descendant
+			break
+		end
+	end
 	local uiGui = playerGui:WaitForChild("UserInterface") :: ScreenGui
 	local lockerFrame = uiGui:WaitForChild("Locker") :: Frame
 
@@ -1633,6 +1642,9 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		hideActionFrame()
 		restoreLockerSceneState(true)
 		setWrapsMode(false)
+		-- Liberar las cards del grid (cards pooled, reabrir sigue siendo barato) para
+		-- que las texturas de wrap animadas dejen de actualizarse cada Heartbeat.
+		clearItemGrid()
 		destroyKillEffectDummy()
 		lockerFrame.Visible = false
 		LightingPresetController.apply("Lobby")

@@ -292,6 +292,53 @@ function ShoulderCamera.new(weaponsSystem)
 	return self
 end
 
+-- L8: setup dependiente de la cámara, extraído de setEnabled para poder
+-- ejecutarlo también desde onCurrentCameraChanged cuando la cámara aparece
+-- tarde. Idempotente (guard _cameraStateReady) para no duplicar el occlusion
+-- object ni reaplicar el yaw/pitch inicial en cada cambio de cámara.
+function ShoulderCamera:_setupCameraState()
+	if not self.enabled then
+		return
+	end
+	if not self.currentCamera then
+		return
+	end
+	if self._cameraStateReady then
+		return
+	end
+	self._cameraStateReady = true
+
+	-- Make transition to shouldercamera smooth by facing in same direction as previous camera
+	local cameraLook = self.currentCamera.CFrame.lookVector
+	self.yaw = math.atan2(-cameraLook.X, -cameraLook.Z)
+	self.pitch = math.asin(cameraLook.Y)
+	self.lastYaw = self.yaw
+	self.lastLookYaw = self.yaw
+	self.lastLookPitch = self.pitch
+
+	self.currentCamera.CameraType = Enum.CameraType.Scriptable
+
+	self:setZoomFactor(self.currentZoomFactor) -- this ensures that zoomedFOV reflecs currentZoomFactor
+
+	local camera = workspace.CurrentCamera
+	if camera then
+		camera.CameraSubject = self.currentRootPart
+	end
+
+	self.occlusionTweenObject = Instance.new("NumberValue")
+	self.occlusionTweenObject.Name = "OcclusionTweenObject"
+	self.occlusionTweenObject.Parent = script
+	self.occlusionTweenObject.Changed:Connect(function(value)
+		self.lastOcclusionDistance = value
+	end)
+
+	-- Sets up weapon system to use camera for raycast direction instead of gun look vector
+	self.weaponsSystem.aimRayCallback = function()
+		local cameraCFrame = self.aimCFrame or self.currentCFrame
+		return Ray.new(cameraCFrame.p, cameraCFrame.LookVector * 500)
+	end
+end
+
 function ShoulderCamera:setEnabled(enabled)
 	if self.enabled == enabled then
 		return
@@ -312,40 +359,17 @@ function ShoulderCamera:setEnabled(enabled)
 
 		self:onCurrentCharacterChanged(LocalPlayer.Character)
 		self:onCurrentCameraChanged(workspace.CurrentCamera)
-		if not self.currentCamera then
-			return
-		end
 
-		-- Make transition to shouldercamera smooth by facing in same direction as previous camera
-		local cameraLook = self.currentCamera.CFrame.lookVector
-		self.yaw = math.atan2(-cameraLook.X, -cameraLook.Z)
-		self.pitch = math.asin(cameraLook.Y)
-		self.lastYaw = self.yaw
-		self.lastLookYaw = self.yaw
-		self.lastLookPitch = self.pitch
-
-		self.currentCamera.CameraType = Enum.CameraType.Scriptable
-
-		self:setZoomFactor(self.currentZoomFactor) -- this ensures that zoomedFOV reflecs currentZoomFactor
-
-		local camera = workspace.CurrentCamera
-		if camera then
-			camera.CameraSubject = self.currentRootPart
-		end
-
-		self.occlusionTweenObject = Instance.new("NumberValue")
-		self.occlusionTweenObject.Name = "OcclusionTweenObject"
-		self.occlusionTweenObject.Parent = script
-		self.occlusionTweenObject.Changed:Connect(function(value)
-			self.lastOcclusionDistance = value
-		end)
-
-		-- Sets up weapon system to use camera for raycast direction instead of gun look vector
-		self.weaponsSystem.aimRayCallback = function()
-			local cameraCFrame = self.aimCFrame or self.currentCFrame
-			return Ray.new(cameraCFrame.p, cameraCFrame.LookVector * 500)
-		end
+		-- L8: el setup dependiente de la cámara (CameraType, aimRayCallback,
+		-- occlusion object) se hace en _setupCameraState. Si la cámara aún es nil
+		-- aquí, onCurrentCameraChanged lo completará cuando aparezca, en vez de
+		-- quedar a medias (antes el early-return dejaba aimRayCallback sin setear
+		-- y las balas usaban el ray del arma toda la sesión).
+		self:_setupCameraState()
 	else
+		-- L8: permitir que un futuro setEnabled(true) re-ejecute el setup de cámara.
+		self._cameraStateReady = false
+
 		RunService:UnbindFromRenderStep(CAMERA_RENDERSTEP_NAME)
 		ContextActionService:UnbindAction(ZOOM_ACTION_NAME)
 		ContextActionService:UnbindAction(SPRINT_ACTION_NAME)
@@ -905,6 +929,10 @@ function ShoulderCamera:onCurrentCameraChanged(camera)
 				self.currentCamera.CameraType = Enum.CameraType.Scriptable
 			end
 		end)
+
+		-- L8: si setEnabled(true) corrió con la cámara aún nil, completar aquí el
+		-- setup dependiente de la cámara (CameraType/aimRayCallback/occlusion).
+		self:_setupCameraState()
 	end
 end
 

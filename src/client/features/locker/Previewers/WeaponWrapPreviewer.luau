@@ -2,6 +2,7 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ItemDefaults = require(Shared:WaitForChild("constants"):WaitForChild("ItemDefaults"))
@@ -54,8 +55,18 @@ local WEAPON_WRAP_TEXTURE_ORDER = {
     "ScrollTexture_Top",
 } :: { string }
 
-local activeAnimatedWrapTextures = {} :: { [Texture]: boolean }
+-- Cacheamos StudsPerTileU/V por texture al registrar en lugar de leerlos por
+-- frame (se fijan una sola vez en applyWrapAppearanceToPrimaryPart).
+type AnimatedWrapEntry = { tileU: number, tileV: number }
+local activeAnimatedWrapTextures = {} :: { [Texture]: AnimatedWrapEntry }
 local activeAnimatedWrapConnection: RBXScriptConnection? = nil
+
+-- Audit mobile: en dispositivos táctiles acumulamos dt y sólo avanzamos el
+-- scroll a 30 Hz (mismo patrón que WeaponWrapAnimator) para no escribir
+-- OffsetStudsU/V cada frame en GPUs móviles.
+local _isMobile = UserInputService.TouchEnabled
+local _THROTTLE_INTERVAL = if _isMobile then 1 / 30 else 0
+local _throttleAccum = 0
 
 -- Audit mobile: cache de templates preprocesados (ya anclados). Antes cada
 -- Render iteraba GetDescendants() del clone para Anchored = true; con
@@ -101,14 +112,21 @@ local function ensureActiveAnimatedWrapLoop(): ()
     end
 
     activeAnimatedWrapConnection = RunService.Heartbeat:Connect(function(dt)
-        for texture in activeAnimatedWrapTextures do
+        if _THROTTLE_INTERVAL > 0 then
+            _throttleAccum += dt
+            if _throttleAccum < _THROTTLE_INTERVAL then
+                return
+            end
+            dt = _throttleAccum
+            _throttleAccum = 0
+        end
+
+        for texture, entry in activeAnimatedWrapTextures do
             if texture.Parent == nil then
                 activeAnimatedWrapTextures[texture] = nil
             else
-                local tileU = if texture.StudsPerTileU ~= 0 then texture.StudsPerTileU else 1
-                local tileV = if texture.StudsPerTileV ~= 0 then texture.StudsPerTileV else 1
-                texture.OffsetStudsU = (texture.OffsetStudsU + WRAP_TEXTURE_SCROLL_SPEED_U * dt) % tileU
-                texture.OffsetStudsV = (texture.OffsetStudsV + WRAP_TEXTURE_SCROLL_SPEED_V * dt) % tileV
+                texture.OffsetStudsU = (texture.OffsetStudsU + WRAP_TEXTURE_SCROLL_SPEED_U * dt) % entry.tileU
+                texture.OffsetStudsV = (texture.OffsetStudsV + WRAP_TEXTURE_SCROLL_SPEED_V * dt) % entry.tileV
             end
         end
 
@@ -116,13 +134,14 @@ local function ensureActiveAnimatedWrapLoop(): ()
     end)
 end
 
-local function registerAnimatedWrapTextures(previewJanitor: any, textures: { Texture }): ()
+local function registerAnimatedWrapTextures(previewJanitor: any, textures: { Texture }, studsPerTile: number): ()
     if #textures <= 0 then
         return
     end
 
+    local tile = if studsPerTile ~= 0 then math.abs(studsPerTile) else 1
     for _, texture in textures do
-        activeAnimatedWrapTextures[texture] = true
+        activeAnimatedWrapTextures[texture] = { tileU = tile, tileV = tile }
     end
 
     ensureActiveAnimatedWrapLoop()
@@ -233,7 +252,7 @@ local function applyWrapAppearanceToPrimaryPart(previewPrimaryPart: BasePart, it
     end
 
     if textureId and animated and #animatedTextures > 0 then
-        registerAnimatedWrapTextures(previewJanitor, animatedTextures)
+        registerAnimatedWrapTextures(previewJanitor, animatedTextures, studsPerTile)
     end
 end
 
