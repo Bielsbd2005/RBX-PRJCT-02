@@ -37,6 +37,11 @@ type RoundStartConfig = {
 	spawnPoints: { BasePart },
 	mapRoot: Instance?,
 	onBotDied: ((string, string, Humanoid, number) -> ())?,
+	-- Spawn-point selection routed through SpawnService/SpawnSelector (same
+	-- scoring + reservation map as players). Injected by MatchService so the
+	-- AI module doesn't depend on match modules. Optional: when absent or when
+	-- it returns nil, _spawnOneBot falls back to a random point.
+	selectSpawnPoint: ((team: "A" | "B") -> BasePart?)?,
 }
 
 type BotRecord = {
@@ -96,6 +101,7 @@ local _roundGeneration = 0
 local _mapRoot: Instance? = nil
 local _roamGraph: RoamGraph.RoamGraph? = nil
 local _spawnPoints: { BasePart } = {}
+local _selectSpawnPoint: ((team: "A" | "B") -> BasePart?)? = nil
 local _onBotDied: ((string, string, Humanoid, number) -> ())? = nil
 local _botsByName: { [string]: BotRecord } = {}
 local _activeBotCount = 0
@@ -333,12 +339,26 @@ local function _refreshAliveLists()
 	end
 end
 
+-- Fallback when the injected selector is absent or returns nil (no map,
+-- empty spawn list mid-teardown).
 local function _getRandomSpawnPoint(): BasePart?
 	if #_spawnPoints == 0 then
 		return nil
 	end
 
 	return _spawnPoints[math.random(1, #_spawnPoints)]
+end
+
+local function _getSpawnPoint(team: "A" | "B"): BasePart?
+	local selector = _selectSpawnPoint
+	if selector then
+		local point = selector(team)
+		if point then
+			return point
+		end
+	end
+
+	return _getRandomSpawnPoint()
 end
 
 local function _buildFallbackBotModel(botName: string): Model
@@ -585,7 +605,7 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 		return false
 	end
 
-	local spawnPoint = _getRandomSpawnPoint()
+	local spawnPoint = _getSpawnPoint(team)
 	if not spawnPoint then
 		return false
 	end
@@ -840,6 +860,7 @@ function AIService:OnRoundStart(config: RoundStartConfig)
 	_isRoundActive = true
 	_mapRoot = config.mapRoot
 	_spawnPoints = table.clone(config.spawnPoints or {})
+	_selectSpawnPoint = config.selectSpawnPoint
 	_onBotDied = config.onBotDied
 	_nextBotId = 1
 	_fakeUserIdCounter = 0
@@ -888,6 +909,7 @@ function AIService:OnRoundEnd()
 	table.clear(_botNamesByTeam.A)
 	table.clear(_botNamesByTeam.B)
 	_spawnPoints = {}
+	_selectSpawnPoint = nil
 	_mapRoot = nil
 	-- No destruir _roamGraph aquí: si la siguiente ronda usa el mismo mapRoot,
 	-- queremos reusar la caché. AncestryChanged limpia automáticamente cuando

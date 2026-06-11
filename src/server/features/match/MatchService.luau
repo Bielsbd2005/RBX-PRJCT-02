@@ -1434,6 +1434,7 @@ local function _enterInRound()
 				spawnPoints = sharedSpawnPoints,
 				mapRoot = _activeMapModel,
 				onBotDied = _handleBotDied,
+				selectSpawnPoint = SpawnService.SelectBotSpawnPoint,
 			})
 		end)
 		if not ok then

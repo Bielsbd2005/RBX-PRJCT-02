@@ -4,7 +4,7 @@
 **Focus:** performance, scalability, maintainability, code quality, architecture, gameplay logic.
 **Operating envelope:** bots fill teams to `TeamSizeTarget = 4` per side → max **8 bots**, ≤6 real players, 240-point rounds with sustained kill chains of 3–5/s (per in-code comments).
 
-Items marked **[FIXED]** (the five P0 correctness/race findings) are addressed on this branch. Everything else is a recommendation.
+Items marked **[FIXED]** (the five P0 correctness/race findings, plus D2) are addressed on this branch. Everything else is a recommendation.
 
 ---
 
@@ -101,9 +101,9 @@ Each bot shot allocates a `fireInfo` table and fires `WeaponFired:FireClient` pe
 `BotPersonalities` drives level, historical kills, cosmetic rarity, and hat probability — but **every bot shares identical combat skill** from the global `BotConfig.Combat` (Precision 40, ReactionDelay 0.15–0.35s, same strafe/pause/jump tuning). A "level 80 veteran" aims exactly like a level-2 rookie, which undercuts the identity system the game already pays for.
 **Recommend:** add an optional `combat` block per personality (precision, reaction delay range, strafe cadence, jump chance) that overrides the global profile; consider light rubber-banding (nudge precision down vs struggling players) as a second step. This is the highest gameplay value per line of code in this audit.
 
-#### D2. Bots ignore spawn-selection logic; dead config · Medium · *recommendation*
-Bots spawn at a **pure random** spawn point (`_getRandomSpawnPoint`) while players go through `SpawnSelector` scoring — bots can spawn on top of enemies or into crossfire. Additionally, `BotConfig.Navigation.SpawnMinDist`/`SpawnMaxDist` are defined and typed but **never read anywhere** (dead config implying behavior that doesn't exist).
-**Recommend:** route bot spawn-point choice through the existing `SpawnSelector` (`src/server/features/match/SpawnSelector.luau`), and either implement the two config keys as part of that or delete them.
+#### D2. Bots ignore spawn-selection logic; dead config — **[FIXED]** · Medium
+Bots spawned at a **pure random** spawn point (`_getRandomSpawnPoint`) while players went through `SpawnSelector` scoring — bots could spawn on top of enemies or into crossfire. Additionally, `BotConfig.Navigation.SpawnMinDist`/`SpawnMaxDist` were defined and typed but **never read anywhere** (dead config implying behavior that doesn't exist).
+**Fix applied:** bot spawn-point choice now routes through `SpawnService.SelectBotSpawnPoint` → `SpawnSelector` (same scoring, same combatant scan, same per-map `UseIntelligentSpawning` flag as players); MatchService injects the selector into `AIService:OnRoundStart` so the AI module stays decoupled from match modules, with the old random pick kept as fallback. The dead config keys were deleted. `SpawnSelector` also gained **spawn-uniqueness guards** shared by players and bots: a 2s reuse window stamped at *selection* time (the player body-swap yields, so round-start bursts pick points before any body lands) plus a 6-stud occupancy check against live combatants — no two players/bots receive the same point in a burst, and the occupancy check also stops the ally-proximity *bonus* from favoring points with a teammate standing on top. If every point is filtered out (tiny maps, heavy churn), selection degrades gracefully to the full list rather than failing the spawn.
 
 #### D3. No bot respawn delay · Low · *decision needed*
 Bot death → deferred rebalance → respawn on the next frame, vs players' 1s `RespawnCooldown`. Instant bot reappearance affects pacing and makes farming streaks off bots slightly faster. Trivial to add a configurable delay if the design wants parity — flagging for a deliberate choice rather than silently changing feel.
@@ -159,7 +159,8 @@ The repo has no test infrastructure. Several bot modules are pure or nearly-pure
 |---|---|---|
 | **P0** | A1 teamless targets, A2 round-generation guard, A3 per-Path serialization, A4 lazy WeaponData, A5 wiring dedupe | ✅ done |
 | **P1** | B1 amortized refill; B2 staggered spawns + Voting-phase pre-warm; B3 PATROL backoff + signal wait; B4 cached lookups; B5 humanoid states; B6 position-before-parent; C1 rig-pool cap | open |
-| **P2** | D1 per-personality combat profiles; D2 SpawnSelector routing + dead config; D3 respawn-delay decision; D4 corpse-LoS exclusion; D5 magic numbers → BotConfig | open |
+| **P2** | D2 SpawnSelector routing + spawn-uniqueness + dead config removal | ✅ done |
+| **P2** | D1 per-personality combat profiles; D3 respawn-delay decision; D4 corpse-LoS exclusion; D5 magic numbers → BotConfig | open |
 | **P3** | E1 split god module; E2 unify bot fire with WeaponsSystem; E3 BotManager tick (only when scaling >2× bot count); E4 test seams | open |
 
 ## 4. Verifying the applied fixes (Studio)
@@ -168,3 +169,4 @@ The repo has no test infrastructure. Several bot modules are pure or nearly-pure
 2. **A2:** force `AIService:OnRoundEnd()` from the Command Bar in the same frame a bot dies; start a new round and confirm `GetBotRoster()` has unique `fakeUserId`s.
 3. **A3:** teleport all bots repeatedly to force a repath storm; confirm no `ComputeAsync` pcall failures and `NavMetrics` shows no `queue_depth_high` spam.
 4. **A4/A5:** smoke test — getting shot by a bot still shows the hit-direction indicator; player respawns don't accumulate duplicate listeners (no behavioral change expected).
+5. **D2:** start a round with full bot teams and confirm every bot/player lands on a **distinct** spawn point (no stacked spawns at round start). Then farm a bot near a group of enemies and confirm it respawns away from them instead of inside the crossfire (all current maps have `UseIntelligentSpawning = true`).

@@ -65,8 +65,6 @@ export type BotConfigType = {
 	Navigation: {
 		RoamMinDist: number,
 		RoamMaxDist: number,
-		SpawnMinDist: number,
-		SpawnMaxDist: number,
 		StuckThresholds: StuckThresholds,
 		StuckMoveEpsilon: number,
 		QueueRequestsPerHeartbeat: number,
@@ -128,8 +126,8 @@ local BotConfig: BotConfigType = {
 	Navigation = {
 		RoamMinDist = 20,
 		RoamMaxDist = 80,
-		SpawnMinDist = 30,
-		SpawnMaxDist = 120,
+		-- SpawnMinDist/SpawnMaxDist removed: bot spawn placement is governed by
+		-- SpawnSelector scoring (same system as players), not a distance band.
 		StuckThresholds = { lateral = 1.0, repath = 2.0, jump = 4.0, teleport = 8.0 },
 		StuckMoveEpsilon = 0.5,        -- studs/seg debajo de los cuales contamos stuck
 		QueueRequestsPerHeartbeat = 2, -- ComputeAsync globales por Heartbeat
