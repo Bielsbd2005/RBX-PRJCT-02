@@ -448,10 +448,6 @@ local function _refillBotRigPoolAsync(poolKey: string)
 			local rig = _clonePreparedRig(poolKey)
 			if not rig then break end -- template missing → abandona refill
 			table.insert(pool, rig)
-			-- Yield between clones: without this the task.spawn body never
-			-- yields, so every clone still landed in a single frame — the
-			-- spike was moved, not amortized.
-			task.wait()
 		end
 		_botRigRefillingByKey[poolKey] = false
 	end)
@@ -648,27 +644,10 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 		botsFolder.Parent = mapRoot
 	end
 
-	-- Position BEFORE parenting: avoids one frame of physics/replication at
-	-- the template's stored position. Setting the root CFrame moves the whole
-	-- joined assembly, same as the old post-parent teleport.
-	root.CFrame = spawnPoint.CFrame + Vector3.new(0, 4, 0)
 	botModel.Parent = botsFolder
+	root.CFrame = spawnPoint.CFrame + Vector3.new(0, 4, 0)
 	humanoid.Health = humanoid.MaxHealth
 	humanoid.BreakJointsOnDeath = false
-
-	-- NPC humanoids never climb, swim, sit, or trip — disable the unused
-	-- state-machine branches (per-humanoid simulation cost + avoids accidental
-	-- transitions like FallingDown from collisions). Dead/Running/Jumping/
-	-- Freefall/Landed stay enabled: movement, animations and the Died signal
-	-- depend on them. Kill effects force ChangeState(Dead) themselves and do
-	-- not use the Ragdoll/FallingDown states.
-	humanoid:SetStateEnabled(Enum.HumanoidStateType.Climbing, false)
-	humanoid:SetStateEnabled(Enum.HumanoidStateType.Swimming, false)
-	humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
-	humanoid:SetStateEnabled(Enum.HumanoidStateType.PlatformStanding, false)
-	humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
-	humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
-	humanoid:SetStateEnabled(Enum.HumanoidStateType.GettingUp, false)
 
 	-- Mismo tratamiento que los jugadores: CHARACTERS group para que players
 	-- vivos no choquen con cadáveres. Al morir, el kill effect migra al grupo

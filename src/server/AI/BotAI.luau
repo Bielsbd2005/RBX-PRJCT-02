@@ -247,8 +247,6 @@ export type BotAIInstance = typeof(setmetatable({} :: {
 	_isCurrentTargetVisible: boolean,
 	_targetGraceUntil: number,
 	_forcedTarget: Model?,
-	_forcedTargetHum: Humanoid?,
-	_forcedTargetRoot: BasePart?,
 	_forcedUntil: number,
 	_fireReadyAt: number,
 	_combatCycleEndAt: number,
@@ -298,8 +296,6 @@ function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?, wrapId
 		_isCurrentTargetVisible = false,
 		_targetGraceUntil = 0,
 		_forcedTarget = nil,
-		_forcedTargetHum = nil,
-		_forcedTargetRoot = nil,
 		_forcedUntil = 0,
 		_fireReadyAt = 0,
 		_combatCycleEndAt = 0,
@@ -630,18 +626,8 @@ function BotAI:_getForcedTarget(): Model?
 		self._forcedTarget = nil
 		return nil
 	end
-	-- Reuse hum/root cached when the forced target was set (this runs at
-	-- 10Hz during retaliation); refresh lazily if the refs went stale.
-	local hum = self._forcedTargetHum
-	if not hum or not hum.Parent then
-		hum = target:FindFirstChildOfClass("Humanoid")
-		self._forcedTargetHum = hum
-	end
-	local root = self._forcedTargetRoot
-	if not root or not root.Parent then
-		root = target:FindFirstChild("HumanoidRootPart") :: BasePart?
-		self._forcedTargetRoot = root
-	end
+	local hum = target:FindFirstChildOfClass("Humanoid")
+	local root = target:FindFirstChild("HumanoidRootPart")
 	if not hum or (hum :: Humanoid).Health <= 0 or not root then
 		self._forcedTarget = nil
 		return nil
@@ -912,10 +898,6 @@ function BotAI:Start(
 		local attackerModel = _findAttackerModel(attackerUserId, self._aliveTargets, self._dummy, self._botModelByFakeUserId)
 		if attackerModel and attackerModel ~= self._dummy then
 			self._forcedTarget = attackerModel
-			-- Resolve once here so _getForcedTarget doesn't pay two child
-			-- lookups per evaluation while the retaliation window is open.
-			self._forcedTargetHum = attackerModel:FindFirstChildOfClass("Humanoid")
-			self._forcedTargetRoot = attackerModel:FindFirstChild("HumanoidRootPart") :: BasePart?
 			self._forcedUntil = os.clock() + 4
 		end
 	end)
@@ -1073,12 +1055,7 @@ function BotAI:Start(
 					end
 
 					if hit then
-						-- Reuse the hum cached by _evaluateTarget instead of a
-						-- FindFirstChildOfClass per landed shot.
-						local targetHum = self._currentTargetHum
-						if not targetHum or not targetHum.Parent then
-							targetHum = currentTarget:FindFirstChildOfClass("Humanoid")
-						end
+						local targetHum = currentTarget:FindFirstChildOfClass("Humanoid")
 						if targetHum and (targetHum :: Humanoid).Health > 0 then
 							local dmg = math.random(profile.DamageMin, profile.DamageMax)
 
@@ -1196,8 +1173,6 @@ function BotAI:Stop()
 	self._currentTargetHum = nil
 	self._currentTargetPlayer = nil
 	self._forcedTarget = nil
-	self._forcedTargetHum = nil
-	self._forcedTargetRoot = nil
 	table.clear(self._targetCandidates)
 
 	local humanoid = self._humanoid

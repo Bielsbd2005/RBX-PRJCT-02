@@ -4,7 +4,7 @@
 **Focus:** performance, scalability, maintainability, code quality, architecture, gameplay logic.
 **Operating envelope:** bots fill teams to `TeamSizeTarget = 4` per side → max **8 bots**, ≤6 real players, 240-point rounds with sustained kill chains of 3–5/s (per in-code comments).
 
-Items marked **[FIXED]** were addressed in the commit that introduces this document. Everything else is a recommendation.
+Items marked **[FIXED]** (the five P0 correctness/race findings) are addressed on this branch. Everything else is a recommendation.
 
 ---
 
@@ -55,9 +55,9 @@ Bots are server-owned Humanoid rigs with negative `FakeUserId`s. They **bypass t
 
 ### B. Performance
 
-#### B1. Rig-pool "async" refill wasn't amortized — **[FIXED]** · Medium
-`_refillBotRigPoolAsync` ran its clone loop inside `task.spawn` **with no yields**, so all clones (30+ parts each) still landed in a single frame — the spike was moved, not diluted. The module-load warm-up cloned 3 rigs × N outfits in one frame.
-**Fix applied:** `task.wait()` between clones.
+#### B1. Rig-pool "async" refill isn't amortized · Medium · *recommendation*
+`_refillBotRigPoolAsync` runs its clone loop inside `task.spawn` **with no yields**, so all clones (30+ parts each) still land in a single frame — the spike is moved, not diluted. The module-load warm-up clones 3 rigs × N outfits in one frame.
+**Recommend:** `task.wait()` between clones (one-line change).
 
 #### B2. Round-start spawns are fully synchronous · Medium · *recommendation*
 `SetBotTargets` → `_setTargetForTeam` spawns up to 8 bots in one frame (pool holds only 3 rigs/outfit, so the burst falls back to synchronous clones, plus appearance, `EquipTool`, and Navigator setup per bot). With 3–5 kills/s of respawn churn this path runs constantly.
@@ -67,17 +67,17 @@ Bots are server-owned Humanoid rigs with negative `FakeUserId`s. They **bypass t
 `_moveToLocation` polls `task.wait()` at ~60Hz per walking bot while waiting for the Navigator callback. Worse, when pathfinding fails repeatedly (e.g., a map without authored `AINav/RoamPoints`), the failure cooldown defers `onFailed` almost immediately and the PATROL loop respins every ~2 frames, doing an O(roam-points) pick each iteration.
 **Recommend:** condition/signal-based completion instead of polling, plus a 0.3–0.5s backoff in PATROL after `onFailed`.
 
-#### B4. Redundant Instance lookups in hot paths — **[FIXED]** · Low
-The fire path did `FindFirstChildOfClass("Humanoid")` per landed shot even though `_evaluateTarget` already caches `_currentTargetHum`; `_getForcedTarget` paid two child lookups per 10Hz evaluation during retaliation.
-**Fix applied:** cached refs reused with lazy re-resolution when stale (`_forcedTargetHum`/`_forcedTargetRoot` resolved once when the forced target is set).
+#### B4. Redundant Instance lookups in hot paths · Low · *recommendation*
+The fire path does `FindFirstChildOfClass("Humanoid")` per landed shot even though `_evaluateTarget` already caches `_currentTargetHum`; `_getForcedTarget` pays two child lookups per 10Hz evaluation during retaliation.
+**Recommend:** reuse the cached refs with lazy re-resolution when stale (resolve hum/root once when the forced target is set).
 
-#### B5. Humanoid state machines never trimmed — **[FIXED]** · Low–Medium
-No `SetStateEnabled` calls existed anywhere in the bot path; every bot Humanoid simulated Climbing, Swimming, Seated, PlatformStanding, FallingDown, Ragdoll, and GettingUp states it can never legitimately enter. (Verified the kill effects force `ChangeState(Dead)` and manage `GettingUp` themselves, so disabling these is safe.)
-**Fix applied:** the seven unused states are disabled per bot at spawn; Dead/Running/Jumping/Freefall/Landed remain enabled.
+#### B5. Humanoid state machines never trimmed · Low–Medium · *recommendation*
+No `SetStateEnabled` calls exist anywhere in the bot path; every bot Humanoid simulates Climbing, Swimming, Seated, PlatformStanding, FallingDown, Ragdoll, and GettingUp states it can never legitimately enter.
+**Recommend:** disable those seven states per bot at spawn; keep Dead/Running/Jumping/Freefall/Landed enabled (movement, animations and the Died signal depend on them). Verified safe: the kill effects (`Default`/`Gravity`) force `ChangeState(Dead)` and manage `GettingUp` themselves — they don't use the Ragdoll/FallingDown states.
 
-#### B6. Rig positioned after parenting — **[FIXED]** · Low
-`_spawnOneBot` parented the rig to Workspace and then set the root CFrame, allowing one frame of physics/replication at the template's stored position.
-**Fix applied:** root CFrame set before parenting (the joined assembly moves together, identical end state).
+#### B6. Rig positioned after parenting · Low · *recommendation*
+`_spawnOneBot` parents the rig to Workspace and then sets the root CFrame, allowing one frame of physics/replication at the template's stored position.
+**Recommend:** set the root CFrame before parenting (the joined assembly moves together — identical end state, two-line reorder).
 
 #### B7. Per-shot network fan-out · Informational · *acceptable today*
 Each bot shot allocates a `fireInfo` table and fires `WeaponFired:FireClient` per player within 200 studs. Theoretical worst case at the real cap (8 bots × 10 shots/s × 6 players) ≈ 480 packets/s; realistic numbers are far lower (mixed FSM states, range filter, pause cycles). **Acceptable at current scale.** If bot count or fire rate grows: batch bot shots per-Heartbeat per-player into one remote payload, or move bot tracer/audio replication to a lightweight unreliable remote.
@@ -101,9 +101,9 @@ Each bot shot allocates a `fireInfo` table and fires `WeaponFired:FireClient` pe
 `BotPersonalities` drives level, historical kills, cosmetic rarity, and hat probability — but **every bot shares identical combat skill** from the global `BotConfig.Combat` (Precision 40, ReactionDelay 0.15–0.35s, same strafe/pause/jump tuning). A "level 80 veteran" aims exactly like a level-2 rookie, which undercuts the identity system the game already pays for.
 **Recommend:** add an optional `combat` block per personality (precision, reaction delay range, strafe cadence, jump chance) that overrides the global profile; consider light rubber-banding (nudge precision down vs struggling players) as a second step. This is the highest gameplay value per line of code in this audit.
 
-#### D2. Bots ignore spawn-selection logic — *partially fixed* · Medium
-Bots spawn at a **pure random** spawn point (`_getRandomSpawnPoint`) while players go through `SpawnSelector` scoring — bots can spawn on top of enemies or into crossfire. Additionally, `BotConfig.Navigation.SpawnMinDist`/`SpawnMaxDist` were defined and typed but **never read anywhere** (dead config implying behavior that doesn't exist).
-**[FIXED]** the dead config keys are removed. **Recommend:** route bot spawn-point choice through the existing `SpawnSelector` (`src/server/features/match/SpawnSelector.luau`).
+#### D2. Bots ignore spawn-selection logic; dead config · Medium · *recommendation*
+Bots spawn at a **pure random** spawn point (`_getRandomSpawnPoint`) while players go through `SpawnSelector` scoring — bots can spawn on top of enemies or into crossfire. Additionally, `BotConfig.Navigation.SpawnMinDist`/`SpawnMaxDist` are defined and typed but **never read anywhere** (dead config implying behavior that doesn't exist).
+**Recommend:** route bot spawn-point choice through the existing `SpawnSelector` (`src/server/features/match/SpawnSelector.luau`), and either implement the two config keys as part of that or delete them.
 
 #### D3. No bot respawn delay · Low · *decision needed*
 Bot death → deferred rebalance → respawn on the next frame, vs players' 1s `RespawnCooldown`. Instant bot reappearance affects pacing and makes farming streaks off bots slightly faster. Trivial to add a configurable delay if the design wants parity — flagging for a deliberate choice rather than silently changing feel.
@@ -158,15 +158,13 @@ The repo has no test infrastructure. Several bot modules are pure or nearly-pure
 | Priority | Item | Status |
 |---|---|---|
 | **P0** | A1 teamless targets, A2 round-generation guard, A3 per-Path serialization, A4 lazy WeaponData, A5 wiring dedupe | ✅ done |
-| **P1** | B1 amortized refill, B4 cached lookups, B5 humanoid states, B6 position-before-parent, D2 dead config | ✅ done |
-| **P1** | B2 staggered spawns + Voting-phase pre-warm; B3 PATROL backoff + signal wait; C1 rig-pool cap | open |
-| **P2** | D1 per-personality combat profiles; D2 SpawnSelector routing; D3 respawn-delay decision; D4 corpse-LoS exclusion; D5 magic numbers → BotConfig | open |
+| **P1** | B1 amortized refill; B2 staggered spawns + Voting-phase pre-warm; B3 PATROL backoff + signal wait; B4 cached lookups; B5 humanoid states; B6 position-before-parent; C1 rig-pool cap | open |
+| **P2** | D1 per-personality combat profiles; D2 SpawnSelector routing + dead config; D3 respawn-delay decision; D4 corpse-LoS exclusion; D5 magic numbers → BotConfig | open |
 | **P3** | E1 split god module; E2 unify bot fire with WeaponsSystem; E3 BotManager tick (only when scaling >2× bot count); E4 test seams | open |
 
 ## 4. Verifying the applied fixes (Studio)
 
-1. **A1:** stand a teamless character (no team attr/Team) within 35 studs of a bot — it must be ignored; assign a team — it gets targeted.
+1. **A1:** stand a teamless character (no team attr/Team) within 35 studs of a bot — it must be ignored; assign a team — it gets targeted. Retaliation: damage a bot with a teamless character (Command Bar `TakeDamage`) — the bot must not lock onto it.
 2. **A2:** force `AIService:OnRoundEnd()` from the Command Bar in the same frame a bot dies; start a new round and confirm `GetBotRoster()` has unique `fakeUserId`s.
 3. **A3:** teleport all bots repeatedly to force a repath storm; confirm no `ComputeAsync` pcall failures and `NavMetrics` shows no `queue_depth_high` spam.
-4. **B1/B6:** MicroProfiler at round start — clone cost spread across frames; no bots flash at the rig-template position.
-5. **B5:** kill a bot — ragdoll kill effects (Default/Gravity) still play; bots still jump/land normally.
+4. **A4/A5:** smoke test — getting shot by a bot still shows the hit-direction indicator; player respawns don't accumulate duplicate listeners (no behavioral change expected).
