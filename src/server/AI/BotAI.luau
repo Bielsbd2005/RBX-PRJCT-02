@@ -36,14 +36,25 @@ local WEAPON_TAG = "WeaponsSystemWeapon"
 
 local _weaponDataRemote: RemoteEvent? = nil
 local _weaponFiredRemote: RemoteEvent? = nil
-do
-	local wsFolder = ReplicatedStorage:FindFirstChild("WeaponsSystem")
-	if wsFolder then
-		local remote = wsFolder:FindFirstChild("WeaponData")
-		if remote and remote:IsA("RemoteEvent") then
-			_weaponDataRemote = remote
-		end
+
+--[[
+@desc Resolves and caches the WeaponData RemoteEvent lazily, like
+@desc _getWeaponFiredRemote. Resolving it only once at module load meant that
+@desc if the remote didn't exist yet, victim hit-direction indicators were
+@desc silently lost for the whole server lifetime.
+@return RemoteEvent? WeaponData remote or nil if not available yet.
+]]
+local function _getWeaponDataRemote(): RemoteEvent?
+	if _weaponDataRemote and _weaponDataRemote.Parent then
+		return _weaponDataRemote
 	end
+	local wsFolder = ReplicatedStorage:FindFirstChild("WeaponsSystem")
+	local remote = wsFolder and wsFolder:FindFirstChild("WeaponData")
+	if remote and remote:IsA("RemoteEvent") then
+		_weaponDataRemote = remote
+		return remote
+	end
+	return nil
 end
 
 local _weaponTemplate: Tool? = nil
@@ -166,6 +177,12 @@ local function _updateCachedPlayerRoot(player: Player, char: Model)
 	end)
 end
 
+-- Dedupe guard: a player who joins between the PlayerAdded:Connect below and
+-- the initial GetPlayers() loop would otherwise be wired twice (duplicate
+-- CharacterAdded listeners per respawn, forever). Same race that
+-- AI/init.luau guards with its own _wiredPlayers table.
+local _rootCacheWiredPlayers: { [Player]: true } = {}
+
 --[[
 @desc Conecta señales de Character para mantener el cache Player->HRP vigente.
 @desc Esta decisión evita búsquedas costosas por disparo en loops de alta frecuencia.
@@ -173,6 +190,10 @@ end
 @return nil
 ]]
 local function _wirePlayerRootCache(player: Player)
+	if _rootCacheWiredPlayers[player] then
+		return
+	end
+	_rootCacheWiredPlayers[player] = true
 	if player.Character then
 		_updateCachedPlayerRoot(player, player.Character)
 	end
@@ -189,6 +210,7 @@ for _, _existingPlayer in Players:GetPlayers() do
 	_wirePlayerRootCache(_existingPlayer)
 end
 Players.PlayerRemoving:Connect(function(p)
+	_rootCacheWiredPlayers[p] = nil
 	_playerRootByPlayer[p] = nil
 end)
 
@@ -225,6 +247,8 @@ export type BotAIInstance = typeof(setmetatable({} :: {
 	_isCurrentTargetVisible: boolean,
 	_targetGraceUntil: number,
 	_forcedTarget: Model?,
+	_forcedTargetHum: Humanoid?,
+	_forcedTargetRoot: BasePart?,
 	_forcedUntil: number,
 	_fireReadyAt: number,
 	_combatCycleEndAt: number,
@@ -274,6 +298,8 @@ function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?, wrapId
 		_isCurrentTargetVisible = false,
 		_targetGraceUntil = 0,
 		_forcedTarget = nil,
+		_forcedTargetHum = nil,
+		_forcedTargetRoot = nil,
 		_forcedUntil = 0,
 		_fireReadyAt = 0,
 		_combatCycleEndAt = 0,
@@ -498,8 +524,11 @@ function BotAI:_getBestTarget(): (Model?, boolean, BasePart?)
 		end
 		if not hum or not root or hum.Health <= 0 then continue end
 
+		-- Teamless characters (lobby, mid-teleport, just-joined) are never
+		-- valid targets — same rule as TeamUtils.areEnemies. Skipping only
+		-- same-team here let bots shoot players who weren't in the match.
 		local charTeam = TeamUtils.getSide(char)
-		if charTeam and myTeam and charTeam == myTeam then continue end
+		if not charTeam or charTeam == myTeam then continue end
 
 		local protectedUntil = char:GetAttribute("SpawnProtectedUntil")
 		if type(protectedUntil) == "number" and protectedUntil > now then continue end
@@ -601,15 +630,27 @@ function BotAI:_getForcedTarget(): Model?
 		self._forcedTarget = nil
 		return nil
 	end
-	local hum = target:FindFirstChildOfClass("Humanoid")
-	local root = target:FindFirstChild("HumanoidRootPart")
+	-- Reuse hum/root cached when the forced target was set (this runs at
+	-- 10Hz during retaliation); refresh lazily if the refs went stale.
+	local hum = self._forcedTargetHum
+	if not hum or not hum.Parent then
+		hum = target:FindFirstChildOfClass("Humanoid")
+		self._forcedTargetHum = hum
+	end
+	local root = self._forcedTargetRoot
+	if not root or not root.Parent then
+		root = target:FindFirstChild("HumanoidRootPart") :: BasePart?
+		self._forcedTargetRoot = root
+	end
 	if not hum or (hum :: Humanoid).Health <= 0 or not root then
 		self._forcedTarget = nil
 		return nil
 	end
 	local myTeam = TeamUtils.normalize(self._team)
 	local theirTeam = TeamUtils.getSide(target)
-	if theirTeam and myTeam and theirTeam == myTeam then
+	-- Drop the forced target if it's a teammate OR teamless (left the match /
+	-- back to lobby mid-retaliation) — same rule as _getBestTarget.
+	if not theirTeam or theirTeam == myTeam then
 		self._forcedTarget = nil
 		return nil
 	end
@@ -871,6 +912,10 @@ function BotAI:Start(
 		local attackerModel = _findAttackerModel(attackerUserId, self._aliveTargets, self._dummy, self._botModelByFakeUserId)
 		if attackerModel and attackerModel ~= self._dummy then
 			self._forcedTarget = attackerModel
+			-- Resolve once here so _getForcedTarget doesn't pay two child
+			-- lookups per evaluation while the retaliation window is open.
+			self._forcedTargetHum = attackerModel:FindFirstChildOfClass("Humanoid")
+			self._forcedTargetRoot = attackerModel:FindFirstChild("HumanoidRootPart") :: BasePart?
 			self._forcedUntil = os.clock() + 4
 		end
 	end)
@@ -1028,7 +1073,12 @@ function BotAI:Start(
 					end
 
 					if hit then
-						local targetHum = currentTarget:FindFirstChildOfClass("Humanoid")
+						-- Reuse the hum cached by _evaluateTarget instead of a
+						-- FindFirstChildOfClass per landed shot.
+						local targetHum = self._currentTargetHum
+						if not targetHum or not targetHum.Parent then
+							targetHum = currentTarget:FindFirstChildOfClass("Humanoid")
+						end
 						if targetHum and (targetHum :: Humanoid).Health > 0 then
 							local dmg = math.random(profile.DamageMin, profile.DamageMax)
 
@@ -1036,10 +1086,11 @@ function BotAI:Start(
 
 							;(targetHum :: Humanoid):TakeDamage(dmg)
 
-							if isPlayer and _weaponDataRemote then
+							if isPlayer then
 								local victimPlayer = self._currentTargetPlayer
-								if victimPlayer then
-									_weaponDataRemote:FireClient(victimPlayer, "HitByOtherPlayer", rootPart.Position)
+								local dataRemote = _getWeaponDataRemote()
+								if victimPlayer and dataRemote then
+									dataRemote:FireClient(victimPlayer, "HitByOtherPlayer", rootPart.Position)
 								end
 							end
 						end
@@ -1145,6 +1196,8 @@ function BotAI:Stop()
 	self._currentTargetHum = nil
 	self._currentTargetPlayer = nil
 	self._forcedTarget = nil
+	self._forcedTargetHum = nil
+	self._forcedTargetRoot = nil
 	table.clear(self._targetCandidates)
 
 	local humanoid = self._humanoid

@@ -87,6 +87,12 @@ end
 local AIService = {}
 
 local _isRoundActive = false
+-- Bumped on every OnRoundEnd. Each bot captures the generation it was spawned
+-- in; the death handler compares before touching round-scoped bookkeeping.
+-- Without this, the deferred death fallback (_refreshAliveLists) can run AFTER
+-- OnRoundEnd cleared the pools and re-insert a stale identity whose fakeUserId
+-- collides once _fakeUserIdCounter resets for the next round.
+local _roundGeneration = 0
 local _mapRoot: Instance? = nil
 local _roamGraph: RoamGraph.RoamGraph? = nil
 local _spawnPoints: { BasePart } = {}
@@ -442,6 +448,10 @@ local function _refillBotRigPoolAsync(poolKey: string)
 			local rig = _clonePreparedRig(poolKey)
 			if not rig then break end -- template missing → abandona refill
 			table.insert(pool, rig)
+			-- Yield between clones: without this the task.spawn body never
+			-- yields, so every clone still landed in a single frame — the
+			-- spike was moved, not amortized.
+			task.wait()
 		end
 		_botRigRefillingByKey[poolKey] = false
 	end)
@@ -586,6 +596,9 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 
 	local botName = string.format("Bot_%s_%d", team, _nextBotId)
 	_nextBotId += 1
+	-- Captured by handleBotDeath: round-scoped bookkeeping (identity recycle,
+	-- counters, _onBotDied) only runs if this round is still the active one.
+	local spawnGeneration = _roundGeneration
 
 	local identity: BotIdentity
 	local fakeUserId: number
@@ -635,10 +648,27 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 		botsFolder.Parent = mapRoot
 	end
 
-	botModel.Parent = botsFolder
+	-- Position BEFORE parenting: avoids one frame of physics/replication at
+	-- the template's stored position. Setting the root CFrame moves the whole
+	-- joined assembly, same as the old post-parent teleport.
 	root.CFrame = spawnPoint.CFrame + Vector3.new(0, 4, 0)
+	botModel.Parent = botsFolder
 	humanoid.Health = humanoid.MaxHealth
 	humanoid.BreakJointsOnDeath = false
+
+	-- NPC humanoids never climb, swim, sit, or trip — disable the unused
+	-- state-machine branches (per-humanoid simulation cost + avoids accidental
+	-- transitions like FallingDown from collisions). Dead/Running/Jumping/
+	-- Freefall/Landed stay enabled: movement, animations and the Died signal
+	-- depend on them. Kill effects force ChangeState(Dead) themselves and do
+	-- not use the Ragdoll/FallingDown states.
+	humanoid:SetStateEnabled(Enum.HumanoidStateType.Climbing, false)
+	humanoid:SetStateEnabled(Enum.HumanoidStateType.Swimming, false)
+	humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
+	humanoid:SetStateEnabled(Enum.HumanoidStateType.PlatformStanding, false)
+	humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+	humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+	humanoid:SetStateEnabled(Enum.HumanoidStateType.GettingUp, false)
 
 	-- Mismo tratamiento que los jugadores: CHARACTERS group para que players
 	-- vivos no choquen con cadáveres. Al morir, el kill effect migra al grupo
@@ -737,6 +767,17 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 		if record.deathConnection then
 			record.deathConnection:Disconnect()
 			record.deathConnection = nil
+		end
+
+		-- Round-generation guard: if this handler runs late (deferred death
+		-- fallback after OnRoundEnd, or after the next round already started),
+		-- skip ALL round-scoped bookkeeping. Recycling into the cleared pools
+		-- would leak a stale identity whose fakeUserId collides after the
+		-- counter resets; decrementing _activeBotCount would corrupt the new
+		-- round's count; _onBotDied would credit a kill in the wrong round.
+		-- Visual cleanup above already ran regardless.
+		if _roundGeneration ~= spawnGeneration then
+			return
 		end
 
 		-- 1. Lógica de juego: recycle identity, refresh lists, notify. Cualquier
@@ -853,6 +894,7 @@ end
 
 function AIService:OnRoundEnd()
 	_isRoundActive = false
+	_roundGeneration += 1
 
 	local namesToRemove = {} :: { string }
 	for botName in _botsByName do
