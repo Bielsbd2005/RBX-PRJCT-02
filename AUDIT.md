@@ -129,17 +129,17 @@ Target-memory grace `now + 3`, retaliation window `+ 4`, range extensions `Detec
 Bots bypass the WeaponsSystem entirely — own fire loop, own hit model, own damage numbers, own replication call. Every weapon-feel change must be hand-ported to bots; any new weapon type needs a bot-specific reimplementation.
 **Recommend:** a server-side fire driver on `BaseWeapon` so a bot can own a *real* weapon instance and share ballistics, damage, falloff, and effects with players (keep the bot-only precision/reaction layer on top as the "aim error" input). This is the biggest long-term maintainability win in the system; medium-large effort, best done after E1.
 
-#### E3. 3 coroutines × N bots scheduling · *only when scaling* 
-Each bot runs three `task.wait` loops (FSM, target eval, stuck tick). At 8 bots this is fine — do not refactor for today's scale. The prerequisite for 20+ bots is a centralized `BotManager` Heartbeat tick with per-bot accumulators, staggered evaluation, and a per-frame budget; it also gives one profiling point instead of 24 anonymous coroutines.
+#### E3. 3 coroutines × N bots scheduling — **[CLOSED — won't do]**
+Each bot runs three `task.wait` loops (FSM, target eval, stuck tick). At 8 bots this is fine — the centralized `BotManager` Heartbeat tick was only the prerequisite for 20+ bots. **Project owner confirmed the bot count will not grow beyond the current envelope**, so this refactor has no payoff and is closed. If that decision ever changes, the original recommendation stands: per-bot accumulators, staggered evaluation, per-frame budget, one profiling point.
 
 #### E4. No automated tests · Medium
 The repo has no test infrastructure. Several bot modules are pure or nearly-pure logic and unit-testable with light seams: Navigator throttle/generation rules, StuckDetector escalation, RoamGraph ring-pick, identity pooling/recycling. These are exactly the spots where the audit found races; tests would have caught A2/A3 cheaply.
 
-#### E5. Minor quality items · Low
-- `BotRecord.ai: typeof(BotAI.new(({} :: any), "A"))` (init.luau) — use the exported `BotAI.BotAIInstance` type.
-- Mixed `time()` / `os.clock()` across modules. Currently consistent within each comparison domain, but it's one refactor away from a subtle bug; document the convention (attributes use `time()`, intra-module timers use `os.clock()`) or standardize.
-- Mixed Spanish/English comments — pick one (new comments from this audit are English per project owner's choice).
-- `RaycastViz.isEnabled()` reads a workspace attribute per raycast; cache a bool behind `GetAttributeChangedSignal` like `DetectRangeViz` does with `_IS_STUDIO`.
+#### E5. Minor quality items — **[FIXED]** (code items) · Low
+- ~~`BotRecord.ai: typeof(BotAI.new(({} :: any), "A"))`~~ — **fixed**: uses the exported `BotAI.BotAIInstance` type.
+- ~~`RaycastViz.isEnabled()` reads a workspace attribute per raycast~~ — **fixed**: cached bool behind `GetAttributeChangedSignal`, same pattern as `DetectRangeViz`.
+- Mixed `time()` / `os.clock()` — kept as a documented convention rather than refactored: **attributes and cross-system timestamps use `time()`; intra-module timers use `os.clock()`**. Each comparison domain is internally consistent; don't mix them in one comparison.
+- Mixed Spanish/English comments — ongoing style note (new comments from this audit are English per project owner's choice).
 
 ---
 
@@ -156,6 +156,17 @@ The repo has no test infrastructure. Several bot modules are pure or nearly-pure
 
 ---
 
+### G. Post-audit feature work (this branch)
+
+#### G1. Per-identity bot weapons
+Bots previously all carried one hardcoded NPC tool (`ReplicatedStorage.AR-NPC`). Now each bot identity rolls a `weaponId` from the **same** weapon catalog players use (`ItemsConfig.Main` ∩ Tools present in `ServerStorage.WeaponTools.Main`), filtered by the personality's allowed rarities — Noobs carry the Common starter AK, Veterans/Whales pull from the full catalog. The weapon is part of the identity's appearance, so it stays stable across deaths within a round (recycle pool), and the existing wrap roll applies to it (the wrap system targets any tool's `WeaponModel`).
+
+Because the bot clones the **real player Tool** (tagged `WeaponsSystemWeapon`, `WeaponType` attribute intact), the client WeaponsSystem builds the proper weapon wrapper and the existing `WeaponFired:FireClient(..., weapon, fireInfo)` replication renders the correct per-weapon tracers, sounds and muzzle effects with zero new client code. Bot fire **cadence** follows the weapon's `Configuration.ShotCooldown` (clamped 0.08–1.5s) so a Sniper bot doesn't hose at AR cadence; per-shot **damage** intentionally stays on the bot RNG profile (`VsPlayer`/`VsBot`) — unchanged UX balance. Kill attribution now records the real weapon name. `AR-NPC` remains only as the fallback when an identity has no weaponId (empty WeaponTools catalog).
+
+This is also a meaningful step toward **E2** (the two-weapon-systems problem): visuals, audio, wraps and cadence are now single-sourced from the player weapon templates; only the hit/damage model remains bot-specific — by design.
+
+---
+
 ## 3. Roadmap
 
 | Priority | Item | Status |
@@ -163,7 +174,9 @@ The repo has no test infrastructure. Several bot modules are pure or nearly-pure
 | **P0** | A1 teamless targets, A2 round-generation guard, A3 per-Path serialization, A4 lazy WeaponData, A5 wiring dedupe | ✅ done |
 | **P1** | B1 amortized refill; B2 staggered spawns + Voting-phase pre-warm; B3 PATROL 10Hz wait + failure backoff; B4 cached lookups; B5 humanoid states; B6 position-before-parent; C1 rig-pool cap + round-end trim | ✅ done |
 | **P2** | D1 per-personality combat profiles; D2 SpawnSelector routing + spawn-uniqueness + dead config removal; D3 respawn-delay knob (default 0 = unchanged feel); D4 corpse-LoS exclusion; D5 magic numbers → BotConfig | ✅ done |
-| **P3** | E1 split god module; E2 unify bot fire with WeaponsSystem; E3 BotManager tick (only when scaling >2× bot count); E4 test seams | open |
+| **P3** | E5 quality items (type hack, RaycastViz cache); G1 per-identity bot weapons (steps toward E2) | ✅ done |
+| **P3** | E1 split god module; E2 full fire-path unification (less pressing after G1); E4 test seams | open |
+| **P3** | E3 BotManager tick | ❌ closed — bot count won't grow (owner decision) |
 
 ## 4. Verifying the applied fixes (Studio)
 
@@ -178,3 +191,4 @@ The repo has no test infrastructure. Several bot modules are pure or nearly-pure
 9. **D1:** check the roster for a Noob and a Whale (`GetBotRoster` levels / career card). The Noob should feel sluggish (slow first shot, more standing still, ~25% hit rate); the Whale should snap-react, strafe constantly and hit ~60%. Confirm via Command Bar: `require(game.ServerScriptService.Server.AI)` roster → personality tiers map to visibly different fight feel.
 10. **D3:** with `RespawnDelay = 0` (default), bot respawn timing is unchanged. Set it to 1 in Studio: a killed bot's replacement must appear ~1s later, while round-start spawns stay immediate.
 11. **D4:** kill a bot so its ragdoll falls between another bot and a visible enemy — the surviving bot must keep firing through the falling corpse instead of holding fire for ~3s.
+12. **G1:** with Tools present under `ServerStorage.WeaponTools.Main`, bots should spawn with varied weapons (Noobs always AK; higher tiers varied), keep the same weapon after respawning, show their wrap on it, and fire with that weapon's sound/tracer at its own cadence (a Sniper bot shoots visibly slower than an AK bot). Empty the WeaponTools folder → all bots fall back to AR-NPC with no errors.

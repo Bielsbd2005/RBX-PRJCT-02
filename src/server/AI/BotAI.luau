@@ -62,8 +62,10 @@ end
 local _weaponTemplate: Tool? = nil
 
 --[[
-@desc Obtiene y cachea el template AR-NPC utilizado por los bots.
-@desc Se centraliza aquí para que los spawns reutilicen la misma referencia.
+@desc Obtiene y cachea el template AR-NPC legacy.
+@desc Hoy es solo el FALLBACK: los bots clonan el arma real de su identity
+@desc (BotAppearance.findWeaponTemplate); esto cubre identities sin weaponId
+@desc (catálogo de WeaponTools vacío) y mantiene el comportamiento histórico.
 @return Tool? Tool base de NPC o nil si no existe/no es Tool.
 ]]
 local function _getWeaponTemplate(): Tool?
@@ -259,6 +261,8 @@ export type BotAIInstance = typeof(setmetatable({} :: {
 	_tool: Tool?,
 	_tipAttachment: Attachment?,
 	_wrapId: string?,
+	_weaponId: string?,
+	_fireRate: number,
 	_lastAimPos: Vector3,
 	_navigator: Navigator.Navigator?,
 	_stuckDetector: StuckDetector.StuckDetector?,
@@ -307,9 +311,10 @@ end
 @param fakeUserId number? Identificador de bot para kill attribution.
 @param wrapId string? Id de wrap visual aplicado al arma del bot.
 @param combatOverrides CombatOverrides? Skill de la personality (D1); nil = perfil global.
+@param weaponId string? Arma del catálogo Main rolleada en la identity; nil = AR-NPC legacy.
 @return BotAIInstance Instancia lista para Start.
 ]]
-function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?, wrapId: string?, combatOverrides: BotPersonalities.CombatOverrides?): BotAIInstance
+function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?, wrapId: string?, combatOverrides: BotPersonalities.CombatOverrides?, weaponId: string?): BotAIInstance
 	local humanoid = botModel:FindFirstChildOfClass("Humanoid") :: Humanoid
 	local rootPart = botModel:FindFirstChild("HumanoidRootPart") :: BasePart
 
@@ -344,6 +349,8 @@ function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?, wrapId
 		_tool = nil,
 		_tipAttachment = nil,
 		_wrapId = wrapId,
+		_weaponId = weaponId,
+		_fireRate = BotConfig.Combat.FireRate,
 		_lastAimPos = Vector3.zero,
 		_navigator = nil,
 		_stuckDetector = nil,
@@ -371,15 +378,19 @@ end
 
 --[[
 @desc Clona, equipa y registra el arma del bot.
+@desc Prefiere la Tool REAL del weaponId de la identity (mismos templates que
+@desc los jugadores → tracers/sonidos/wrap correctos por arma vía el
+@desc WeaponsSystem del cliente) con fallback al AR-NPC legacy.
 @desc También aplica wrap visual y cachea TipAttachment para el cálculo de origen.
 @return nil
 ]]
 function BotAI:_setupTool()
-	local toolTemplate = _getWeaponTemplate()
+	local toolTemplate = BotAppearance.findWeaponTemplate(self._weaponId) or _getWeaponTemplate()
 	if not toolTemplate then
 		warn(string.format(
-			"[BotAI] %s sin arma: ReplicatedStorage.AR-NPC no encontrado o no es Tool. El bot no disparará.",
-			self._dummy.Name
+			"[BotAI] %s sin arma: ni WeaponTools.Main.%s ni ReplicatedStorage.AR-NPC disponibles. El bot no disparará.",
+			self._dummy.Name,
+			tostring(self._weaponId)
 		))
 		return
 	end
@@ -395,6 +406,17 @@ function BotAI:_setupTool()
 	local tipAttach = tool:FindFirstChild("TipAttachment", true)
 	if tipAttach and tipAttach:IsA("Attachment") then
 		self._tipAttachment = tipAttach
+	end
+
+	-- Cadencia del arma real: sin esto, un bot con Sniper dispararía a la
+	-- cadencia del AR (10/s) y se vería/escucharía mal. El daño NO escala con
+	-- el arma — sigue siendo el perfil RNG del bot (VsPlayer/VsBot), así que
+	-- la cadencia solo cambia el ritmo, no rompe el balance de UX. Clamp
+	-- defensivo por si una config trae valores extremos.
+	local config = tool:FindFirstChildOfClass("Configuration")
+	local cooldownNode = if config then config:FindFirstChild("ShotCooldown") else nil
+	if cooldownNode and cooldownNode:IsA("NumberValue") and cooldownNode.Value > 0 then
+		self._fireRate = math.clamp(cooldownNode.Value, 0.08, 1.5)
 	end
 end
 
@@ -1073,8 +1095,9 @@ function BotAI:Start(
 					lastJumpTime = os.clock()
 				end
 
-				local fireRate = BotConfig.Combat.FireRate
-				-- D1: precision per personality (Noob 25 … Whale 60).
+				-- Cadencia del arma equipada (resuelta en _setupTool); precision
+				-- per personality (D1: Noob 25 … Whale 60).
+				local fireRate = self._fireRate
 				local precision = self._combat.Precision
 
 				if os.clock() - lastShotTime > fireRate
