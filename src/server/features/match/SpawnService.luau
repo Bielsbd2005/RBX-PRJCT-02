@@ -8,6 +8,9 @@
 	  • SpawnOnAssignedTeam(player) — spawn/respawn en el mapa de la ronda:
 	                                  selección inteligente de punto, body
 	                                  swap, protección de spawn y loadout.
+	  • SelectBotSpawnPoint(side)   — selección de punto para bots (AIService):
+	                                  mismo scoring y mapa de reservas que los
+	                                  jugadores, inyectado vía MatchService.
 
 	Los workarounds anti-carrera del body-swap (anclar el root mientras se
 	reposiciona, WaitForChild del HumanoidRootPart) viven aquí UNA sola vez.
@@ -52,6 +55,13 @@ local _started = false
 local _cachedSpawnPoints: { BasePart }? = nil
 local _cachedBotsFolder: Instance? = nil
 
+-- time() at which each spawn point was last handed out. Shared by players AND
+-- bots so a burst (round start) never gives the same point twice within
+-- SpawnSelector's reuse window. Stamped at SELECTION time, not landing time:
+-- the player body-swap yields, so two selections can run before either body
+-- exists in the map. Cleared with the map (keys are map parts).
+local _spawnUsedAt: { [BasePart]: number } = {}
+
 function SpawnService.Start(deps: Deps)
 	if _started then
 		return
@@ -63,6 +73,7 @@ end
 function SpawnService.InvalidateMapCache()
 	_cachedSpawnPoints = nil
 	_cachedBotsFolder = nil
+	table.clear(_spawnUsedAt)
 end
 
 -- ── Spawn points del mapa activo ─────────────────────────────
@@ -208,6 +219,36 @@ local function _collectAllCombatantData(excludePlayer: Player?): (
 	return positionsBySide, lookVectorsBySide
 end
 
+-- Single selection path for players and bots: same scoring, same availability
+-- rules, same reservation map. `excludePlayer` omits the respawning player
+-- from the combatant scan (their soon-to-be-replaced body shouldn't count).
+local function _selectSpawnPoint(side: TeamSide, excludePlayer: Player?): BasePart?
+	local spawnPoints = SpawnService.GetSpawnPoints()
+	if #spawnPoints == 0 then
+		return nil
+	end
+
+	local mapDefinition = _getMapDefinitionByName(_deps.getActiveMapName())
+	local useIntelligentSpawning = mapDefinition ~= nil and mapDefinition.UseIntelligentSpawning == true
+	local enemySide: TeamSide = if side == "A" then "B" else "A"
+	-- Single-pass sobre Players + bots, devuelve datos de ambos lados.
+	local positionsBySide, lookVectorsBySide = _collectAllCombatantData(excludePlayer)
+	local chosenSpawn = SpawnSelector.select(spawnPoints, {
+		enemyPositions = positionsBySide[enemySide],
+		enemyLookVectors = lookVectorsBySide[enemySide],
+		allyPositions = positionsBySide[side],
+		recentDeaths = _deps.getRecentDeathBySpawn(),
+		recentSpawnUses = _spawnUsedAt,
+		now = time(),
+	}, useIntelligentSpawning)
+
+	if chosenSpawn then
+		_spawnUsedAt[chosenSpawn] = time()
+	end
+
+	return chosenSpawn
+end
+
 -- Carga el cuerpo del jugador y lo reposiciona sobre `spawnPoint`.
 --
 -- player:LoadCharacter() coloca el cuerpo en el spawn por defecto y NOSOTROS
@@ -339,24 +380,7 @@ function SpawnService.SpawnOnAssignedTeam(player: Player): boolean
 		player.Team = team
 	end
 
-	local spawnPoints = SpawnService.GetSpawnPoints()
-	if #spawnPoints == 0 then
-		return false
-	end
-
-	local mapDefinition = _getMapDefinitionByName(_deps.getActiveMapName())
-	local useIntelligentSpawning = mapDefinition ~= nil and mapDefinition.UseIntelligentSpawning == true
-	local enemySide: TeamSide = if side == "A" then "B" else "A"
-	-- Single-pass sobre Players + bots, devuelve datos de ambos lados.
-	-- excludePlayer omite al jugador respawnando de su propio lado (allies).
-	local positionsBySide, lookVectorsBySide = _collectAllCombatantData(player)
-	local chosenSpawn = SpawnSelector.select(spawnPoints, {
-		enemyPositions = positionsBySide[enemySide],
-		enemyLookVectors = lookVectorsBySide[enemySide],
-		allyPositions = positionsBySide[side],
-		recentDeaths = _deps.getRecentDeathBySpawn(),
-		now = time(),
-	}, useIntelligentSpawning)
+	local chosenSpawn = _selectSpawnPoint(side, player)
 	if not chosenSpawn then
 		return false
 	end
@@ -385,6 +409,15 @@ function SpawnService.SpawnOnAssignedTeam(player: Player): boolean
 		LoadoutService.grantWeaponsWithRetry(player, _deps.dataService, 8)
 	end)
 	return true
+end
+
+-- Spawn-point selection for bots (AIService). Same SpawnSelector scoring and
+-- reservation map as players — bots no longer pick a pure-random point, can't
+-- spawn into enemy crossfire, and can't share a point with a player or bot
+-- spawning in the same burst. Injected into AIService via MatchService
+-- (AI must not require match modules directly).
+function SpawnService.SelectBotSpawnPoint(side: TeamSide): BasePart?
+	return _selectSpawnPoint(side, nil)
 end
 
 return SpawnService

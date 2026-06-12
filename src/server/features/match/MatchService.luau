@@ -295,6 +295,15 @@ local function _enterVoting()
 		PhaseEndsAt = MatchSnapshot.now() + GameConfig.VoteDuration,
 		Phase = "Voting",
 	})
+
+	-- B2: pre-warm bot rig pools during the vote (amortized, ~1 clone/frame)
+	-- so the round-start spawn burst takes warm rigs instead of paying
+	-- synchronous clones.
+	if _AIService and _AIService.PrewarmRigPools then
+		pcall(function()
+			_AIService:PrewarmRigPools()
+		end)
+	end
 end
 
 -- Idle → Voting. Único punto de arranque de la votación; cualquier disparador
@@ -1434,6 +1443,11 @@ local function _enterInRound()
 				spawnPoints = sharedSpawnPoints,
 				mapRoot = _activeMapModel,
 				onBotDied = _handleBotDied,
+				selectSpawnPoint = SpawnService.SelectBotSpawnPoint,
+				-- B2: spawns are staggered across frames, so the roster
+				-- broadcast made right after SetBotTargets misses the pending
+				-- bots — the pump re-broadcasts when it finishes.
+				onRosterChanged = _broadcastBotRoster,
 			})
 		end)
 		if not ok then

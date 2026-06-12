@@ -50,6 +50,10 @@ export type BotConfigType = {
 		CombatStepMin: number,
 		CombatStepMax: number,
 		MaxLosChecksPerEval: number,
+		TargetMemoryGrace: number,
+		RetaliationWindow: number,
+		ForcedTargetRangeBonus: number,
+		GraceRangeBonus: number,
 		VsPlayer: CombatTargetProfile,
 		VsBot: CombatTargetProfile,
 	},
@@ -65,8 +69,6 @@ export type BotConfigType = {
 	Navigation: {
 		RoamMinDist: number,
 		RoamMaxDist: number,
-		SpawnMinDist: number,
-		SpawnMaxDist: number,
 		StuckThresholds: StuckThresholds,
 		StuckMoveEpsilon: number,
 		QueueRequestsPerHeartbeat: number,
@@ -74,6 +76,7 @@ export type BotConfigType = {
 	},
 	Lifecycle: {
 		RagdollCleanupDelay: number,
+		RespawnDelay: number,
 	},
 }
 
@@ -103,6 +106,12 @@ local BotConfig: BotConfigType = {
 		CombatStepMax = 1.4,
 		MaxLosChecksPerEval = 3,   -- cap de raycasts por _getBestTarget. Candidates ya sorted por distancia → los 3 más cercanos cubren el 99% de casos reales. Worst case antes: 5+ raycasts × 16 bots × 10Hz = 800/seg.
 
+		-- D5: tuning que antes vivía inline en BotAI.luau.
+		TargetMemoryGrace = 3,       -- seg que un target perdido sigue "recordado" (CHASE sin LoS)
+		RetaliationWindow = 4,       -- seg que un bot dañado fuerza targeting a su atacante
+		ForcedTargetRangeBonus = 20, -- studs extra sobre DetectRange para mantener el forced target
+		GraceRangeBonus = 15,        -- studs extra sobre DetectRange para mantener el target en memoria
+
 		VsPlayer = {
 			DamageMin = 2,
 			DamageMax = 5,
@@ -128,8 +137,8 @@ local BotConfig: BotConfigType = {
 	Navigation = {
 		RoamMinDist = 20,
 		RoamMaxDist = 80,
-		SpawnMinDist = 30,
-		SpawnMaxDist = 120,
+		-- SpawnMinDist/SpawnMaxDist removed: bot spawn placement is governed by
+		-- SpawnSelector scoring (same system as players), not a distance band.
 		StuckThresholds = { lateral = 1.0, repath = 2.0, jump = 4.0, teleport = 8.0 },
 		StuckMoveEpsilon = 0.5,        -- studs/seg debajo de los cuales contamos stuck
 		QueueRequestsPerHeartbeat = 2, -- ComputeAsync globales por Heartbeat
@@ -138,6 +147,7 @@ local BotConfig: BotConfigType = {
 
 	Lifecycle = {
 		RagdollCleanupDelay = 3,  -- 5→3s: mitigación móvil. Con 3-5 kills/seg sostenido, 5s mantenía ~15-25 cadáveres rendereados en cualquier momento (replicado a todos los clientes). 3s halvea la población media manteniendo el feel del ragdoll.
+		RespawnDelay = 0,         -- D3: seg entre la muerte de un bot y su respawn. 0 = instantáneo (comportamiento histórico). Los players esperan RespawnCooldown=1s; sube esto a 1 si el diseño quiere paridad de pacing.
 	},
 }
 

@@ -40,6 +40,14 @@ local _onEnqueue: ((depth: number) -> ())? = nil
 -- tope concurrente, un repath storm spawnea N coroutines paralelas que ceden
 -- mid-ComputeAsync y el spike se acumula en lugar de diluirse.
 local _inFlight = 0
+-- Per-Path serialization: ComputeAsync is not reentrant on the same Path
+-- object. A Navigator can have two queued entries for its single shared Path
+-- (e.g., recomputeLast while the first entry is still queued during a
+-- backlog); running both concurrently makes the first pcall fail spuriously.
+-- Entries whose Path is mid-compute are requeued instead of spawned.
+-- Self-cleaning: each compute clears its own flag on completion, so paths of
+-- dead Navigators never linger here.
+local _busyPaths: { [Path]: boolean } = {}
 
 function PathfindingQueue.enqueue(path: Path, origin: Vector3, dest: Vector3, callback: (ok: boolean) -> ())
 	_tail += 1
@@ -77,22 +85,35 @@ RunService.Heartbeat:Connect(function()
 	local budget = BotConfig.Navigation.QueueRequestsPerHeartbeat
 	local maxInFlight = BotConfig.Navigation.MaxInFlightCompute
 	local processed = 0
-	while processed < budget and _head <= _tail and _inFlight < maxInFlight do
+	-- Cap scans to the entries present at the start of this Heartbeat so the
+	-- busy-path requeue below can't cycle the same entry forever in one frame.
+	local scans = _tail - _head + 1
+	while processed < budget and scans > 0 and _head <= _tail and _inFlight < maxInFlight do
+		scans -= 1
 		local entry = _queue[_head]
 		_queue[_head] = nil
 		_head += 1
 		if not entry then
 			break
 		end
-		processed += 1
-		_inFlight += 1
-		task.spawn(function()
-			local ok = pcall(function()
-				entry.path:ComputeAsync(entry.origin, entry.dest)
+		if _busyPaths[entry.path] then
+			-- This Path is mid-compute. Push to the back; retried once the
+			-- in-flight compute clears the flag (usually next Heartbeat).
+			_tail += 1
+			_queue[_tail] = entry
+		else
+			processed += 1
+			_inFlight += 1
+			_busyPaths[entry.path] = true
+			task.spawn(function()
+				local ok = pcall(function()
+					entry.path:ComputeAsync(entry.origin, entry.dest)
+				end)
+				_busyPaths[entry.path] = nil
+				_inFlight -= 1
+				entry.callback(ok)
 			end)
-			_inFlight -= 1
-			entry.callback(ok)
-		end)
+		end
 	end
 	-- Compact: si la cola se drenó completa, reseteamos punteros para evitar
 	-- crecimiento monotónico de los índices (irrelevante en práctica con

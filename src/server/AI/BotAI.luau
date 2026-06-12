@@ -16,6 +16,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local TeamUtils = require(Shared.utils.TeamUtils)
 local BotConfig = require(Shared.constants.BotConfig)
+local BotPersonalities = require(Shared.constants.BotPersonalities)
+local CollisionGroups = require(Shared:WaitForChild("CollisionGroups"))
 local LastAttackerStore = require(ReplicatedStorage:WaitForChild("WeaponsSystem"):WaitForChild("Libraries"):WaitForChild("LastAttackerStore"))
 
 local Navigator = require(script.Parent:WaitForChild("nav"):WaitForChild("Navigator"))
@@ -36,14 +38,25 @@ local WEAPON_TAG = "WeaponsSystemWeapon"
 
 local _weaponDataRemote: RemoteEvent? = nil
 local _weaponFiredRemote: RemoteEvent? = nil
-do
-	local wsFolder = ReplicatedStorage:FindFirstChild("WeaponsSystem")
-	if wsFolder then
-		local remote = wsFolder:FindFirstChild("WeaponData")
-		if remote and remote:IsA("RemoteEvent") then
-			_weaponDataRemote = remote
-		end
+
+--[[
+@desc Resolves and caches the WeaponData RemoteEvent lazily, like
+@desc _getWeaponFiredRemote. Resolving it only once at module load meant that
+@desc if the remote didn't exist yet, victim hit-direction indicators were
+@desc silently lost for the whole server lifetime.
+@return RemoteEvent? WeaponData remote or nil if not available yet.
+]]
+local function _getWeaponDataRemote(): RemoteEvent?
+	if _weaponDataRemote and _weaponDataRemote.Parent then
+		return _weaponDataRemote
 	end
+	local wsFolder = ReplicatedStorage:FindFirstChild("WeaponsSystem")
+	local remote = wsFolder and wsFolder:FindFirstChild("WeaponData")
+	if remote and remote:IsA("RemoteEvent") then
+		_weaponDataRemote = remote
+		return remote
+	end
+	return nil
 end
 
 local _weaponTemplate: Tool? = nil
@@ -166,6 +179,12 @@ local function _updateCachedPlayerRoot(player: Player, char: Model)
 	end)
 end
 
+-- Dedupe guard: a player who joins between the PlayerAdded:Connect below and
+-- the initial GetPlayers() loop would otherwise be wired twice (duplicate
+-- CharacterAdded listeners per respawn, forever). Same race that
+-- AI/init.luau guards with its own _wiredPlayers table.
+local _rootCacheWiredPlayers: { [Player]: true } = {}
+
 --[[
 @desc Conecta señales de Character para mantener el cache Player->HRP vigente.
 @desc Esta decisión evita búsquedas costosas por disparo en loops de alta frecuencia.
@@ -173,6 +192,10 @@ end
 @return nil
 ]]
 local function _wirePlayerRootCache(player: Player)
+	if _rootCacheWiredPlayers[player] then
+		return
+	end
+	_rootCacheWiredPlayers[player] = true
 	if player.Character then
 		_updateCachedPlayerRoot(player, player.Character)
 	end
@@ -189,6 +212,7 @@ for _, _existingPlayer in Players:GetPlayers() do
 	_wirePlayerRootCache(_existingPlayer)
 end
 Players.PlayerRemoving:Connect(function(p)
+	_rootCacheWiredPlayers[p] = nil
 	_playerRootByPlayer[p] = nil
 end)
 
@@ -225,6 +249,8 @@ export type BotAIInstance = typeof(setmetatable({} :: {
 	_isCurrentTargetVisible: boolean,
 	_targetGraceUntil: number,
 	_forcedTarget: Model?,
+	_forcedTargetHum: Humanoid?,
+	_forcedTargetRoot: BasePart?,
 	_forcedUntil: number,
 	_fireReadyAt: number,
 	_combatCycleEndAt: number,
@@ -238,7 +264,40 @@ export type BotAIInstance = typeof(setmetatable({} :: {
 	_stuckDetector: StuckDetector.StuckDetector?,
 	_roamGraph: RoamGraph.RoamGraph?,
 	_animTracks: { [string]: AnimationTrack }?,
+	_combat: ResolvedCombatProfile,
 }, BotAI))
+
+-- D1: per-bot combat skill, resolved ONCE at construction (personality
+-- overrides over the global BotConfig.Combat baseline) so the 10–20Hz combat
+-- loops read a flat table instead of paying an `override or global` chain
+-- per field per tick.
+export type ResolvedCombatProfile = {
+	Precision: number,
+	ReactionDelayMin: number,
+	ReactionDelayMax: number,
+	CombatPauseChance: number,
+	CombatPauseMin: number,
+	CombatPauseMax: number,
+	CombatStepMin: number,
+	CombatStepMax: number,
+	JumpChanceMult: number,
+}
+
+local function _resolveCombatProfile(overrides: BotPersonalities.CombatOverrides?): ResolvedCombatProfile
+	local base = BotConfig.Combat
+	local o: BotPersonalities.CombatOverrides = overrides or {}
+	return {
+		Precision = o.Precision or base.Precision,
+		ReactionDelayMin = o.ReactionDelayMin or base.ReactionDelayMin,
+		ReactionDelayMax = o.ReactionDelayMax or base.ReactionDelayMax,
+		CombatPauseChance = o.CombatPauseChance or base.CombatPauseChance,
+		CombatPauseMin = o.CombatPauseMin or base.CombatPauseMin,
+		CombatPauseMax = o.CombatPauseMax or base.CombatPauseMax,
+		CombatStepMin = o.CombatStepMin or base.CombatStepMin,
+		CombatStepMax = o.CombatStepMax or base.CombatStepMax,
+		JumpChanceMult = o.JumpChanceMult or 1,
+	}
+end
 
 --[[
 @desc Construye una instancia BotAI para un rig de bot existente.
@@ -247,9 +306,10 @@ export type BotAIInstance = typeof(setmetatable({} :: {
 @param team "A" | "B" Equipo lógico usado en filtros de combate.
 @param fakeUserId number? Identificador de bot para kill attribution.
 @param wrapId string? Id de wrap visual aplicado al arma del bot.
+@param combatOverrides CombatOverrides? Skill de la personality (D1); nil = perfil global.
 @return BotAIInstance Instancia lista para Start.
 ]]
-function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?, wrapId: string?): BotAIInstance
+function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?, wrapId: string?, combatOverrides: BotPersonalities.CombatOverrides?): BotAIInstance
 	local humanoid = botModel:FindFirstChildOfClass("Humanoid") :: Humanoid
 	local rootPart = botModel:FindFirstChild("HumanoidRootPart") :: BasePart
 
@@ -274,6 +334,8 @@ function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?, wrapId
 		_isCurrentTargetVisible = false,
 		_targetGraceUntil = 0,
 		_forcedTarget = nil,
+		_forcedTargetHum = nil,
+		_forcedTargetRoot = nil,
 		_forcedUntil = 0,
 		_fireReadyAt = 0,
 		_combatCycleEndAt = 0,
@@ -287,6 +349,7 @@ function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?, wrapId
 		_stuckDetector = nil,
 		_roamGraph = nil,
 		_animTracks = nil,
+		_combat = _resolveCombatProfile(combatOverrides),
 	}, BotAI) :: BotAIInstance
 
 	return self
@@ -498,8 +561,11 @@ function BotAI:_getBestTarget(): (Model?, boolean, BasePart?)
 		end
 		if not hum or not root or hum.Health <= 0 then continue end
 
+		-- Teamless characters (lobby, mid-teleport, just-joined) are never
+		-- valid targets — same rule as TeamUtils.areEnemies. Skipping only
+		-- same-team here let bots shoot players who weren't in the match.
 		local charTeam = TeamUtils.getSide(char)
-		if charTeam and myTeam and charTeam == myTeam then continue end
+		if not charTeam or charTeam == myTeam then continue end
 
 		local protectedUntil = char:GetAttribute("SpawnProtectedUntil")
 		if type(protectedUntil) == "number" and protectedUntil > now then continue end
@@ -601,19 +667,31 @@ function BotAI:_getForcedTarget(): Model?
 		self._forcedTarget = nil
 		return nil
 	end
-	local hum = target:FindFirstChildOfClass("Humanoid")
-	local root = target:FindFirstChild("HumanoidRootPart")
+	-- Reuse hum/root cached when the forced target was set (this runs at
+	-- 10Hz during retaliation); refresh lazily if the refs went stale.
+	local hum = self._forcedTargetHum
+	if not hum or not hum.Parent then
+		hum = target:FindFirstChildOfClass("Humanoid")
+		self._forcedTargetHum = hum
+	end
+	local root = self._forcedTargetRoot
+	if not root or not root.Parent then
+		root = target:FindFirstChild("HumanoidRootPart") :: BasePart?
+		self._forcedTargetRoot = root
+	end
 	if not hum or (hum :: Humanoid).Health <= 0 or not root then
 		self._forcedTarget = nil
 		return nil
 	end
 	local myTeam = TeamUtils.normalize(self._team)
 	local theirTeam = TeamUtils.getSide(target)
-	if theirTeam and myTeam and theirTeam == myTeam then
+	-- Drop the forced target if it's a teammate OR teamless (left the match /
+	-- back to lobby mid-retaliation) — same rule as _getBestTarget.
+	if not theirTeam or theirTeam == myTeam then
 		self._forcedTarget = nil
 		return nil
 	end
-	local rangeExt = BotConfig.Combat.DetectRange + 20
+	local rangeExt = BotConfig.Combat.DetectRange + BotConfig.Combat.ForcedTargetRangeBonus
 	local fd = self._rootPart.Position - (root :: BasePart).Position
 	if fd:Dot(fd) > rangeExt * rangeExt then
 		self._forcedTarget = nil
@@ -673,7 +751,7 @@ function BotAI:_evaluateTarget(now: number)
 	end
 
 	if potentialTarget and isVisible then
-		self._targetGraceUntil = now + 3
+		self._targetGraceUntil = now + BotConfig.Combat.TargetMemoryGrace
 	elseif not potentialTarget and self._currentTarget and now < self._targetGraceUntil then
 		local prev = self._currentTarget
 		-- Perf: reusar cache; si expiró, fallback a lookup directo
@@ -688,7 +766,7 @@ function BotAI:_evaluateTarget(now: number)
 		if prev.Parent
 			and prevHum and (prevHum :: Humanoid).Health > 0
 			and prevRoot then
-			local graceRange = BotConfig.Combat.DetectRange + 15
+			local graceRange = BotConfig.Combat.DetectRange + BotConfig.Combat.GraceRangeBonus
 			local gd = self._rootPart.Position - (prevRoot :: BasePart).Position
 			if gd:Dot(gd) <= graceRange * graceRange then
 				potentialTarget = prev
@@ -701,8 +779,9 @@ function BotAI:_evaluateTarget(now: number)
 
 	local prevVisible = self._isCurrentTargetVisible
 	if isVisible and not prevVisible then
-		local lo = BotConfig.Combat.ReactionDelayMin
-		local hi = BotConfig.Combat.ReactionDelayMax
+		-- D1: reaction delay per personality (Noob 0.3–0.55s … Whale 0.08–0.18s).
+		local lo = self._combat.ReactionDelayMin
+		local hi = self._combat.ReactionDelayMax
 		self._fireReadyAt = now + lo + math.random() * (hi - lo)
 	end
 
@@ -743,31 +822,39 @@ end
 @desc Se mantiene bloqueante para coordinar el estado PATROL sin carreras de ruta.
 @param location Vector3 Punto destino en mundo.
 @param stopCondition () -> boolean Condición de cancelación temprana.
-@return nil
+@return boolean true si la navegación falló (onFailed) — PATROL usa esto para backoff.
 ]]
-function BotAI:_moveToLocation(location: Vector3, stopCondition: () -> boolean)
+function BotAI:_moveToLocation(location: Vector3, stopCondition: () -> boolean): boolean
 	local navigator = self._navigator
 	if not navigator then
-		return
+		return false
 	end
 
 	local done = false
+	local failed = false
 	navigator:goTo(location, {
 		onArrived = function()
 			done = true
 		end,
 		onFailed = function()
 			done = true
+			failed = true
 		end,
 	})
 
+	-- B3: 10Hz wait instead of every-frame polling. The stop condition's
+	-- inputs (target acquisition, death) are produced by the 10Hz eval loop,
+	-- so waking faster than the source gains no latency — it only multiplied
+	-- scheduler wakeups per walking bot (60/s → 10/s).
 	while not done and not stopCondition() do
-		task.wait()
+		task.wait(0.1)
 	end
 
 	if stopCondition() and navigator:isMoving() then
 		navigator:cancel()
 	end
+
+	return failed
 end
 
 --[[
@@ -798,6 +885,11 @@ function BotAI:Start(
 	local raycastParams = RaycastParams.new()
 	raycastParams.FilterDescendantsInstances = { self._dummy }
 	raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+	-- D4: LoS rays behave as a CHARACTERS member, so they ignore RAGDOLL
+	-- parts (the groups don't collide) — fresh corpses (3s ragdolls) no
+	-- longer block line of sight, which made bots "stare" at targets behind
+	-- falling bodies. Walls (Default) and live characters still block.
+	raycastParams.CollisionGroup = CollisionGroups.CHARACTERS
 	self._raycastParams = raycastParams
 
 	self._navigator = Navigator.new(humanoid, rootPart, AGENT_PARAMS)
@@ -871,7 +963,11 @@ function BotAI:Start(
 		local attackerModel = _findAttackerModel(attackerUserId, self._aliveTargets, self._dummy, self._botModelByFakeUserId)
 		if attackerModel and attackerModel ~= self._dummy then
 			self._forcedTarget = attackerModel
-			self._forcedUntil = os.clock() + 4
+			-- Resolve once here so _getForcedTarget doesn't pay two child
+			-- lookups per evaluation while the retaliation window is open.
+			self._forcedTargetHum = attackerModel:FindFirstChildOfClass("Humanoid")
+			self._forcedTargetRoot = attackerModel:FindFirstChild("HumanoidRootPart") :: BasePart?
+			self._forcedUntil = os.clock() + BotConfig.Combat.RetaliationWindow
 		end
 	end)
 	table.insert(self._connections, connDamage)
@@ -931,10 +1027,12 @@ function BotAI:Start(
 
 				local now = os.clock()
 				if now >= self._combatCycleEndAt then
-					if math.random() < BotConfig.Combat.CombatPauseChance then
+					-- D1: strafe cadence per personality (Noob pauses more,
+					-- Whale strafes more).
+					if math.random() < self._combat.CombatPauseChance then
 						self._combatMoveDir = Vector3.zero
-						local lo = BotConfig.Combat.CombatPauseMin
-						local hi = BotConfig.Combat.CombatPauseMax
+						local lo = self._combat.CombatPauseMin
+						local hi = self._combat.CombatPauseMax
 						self._combatCycleEndAt = now + lo + math.random() * (hi - lo)
 					else
 						local toTarget = targetPos - rootPart.Position
@@ -957,8 +1055,8 @@ function BotAI:Start(
 						else
 							self._combatMoveDir = Vector3.zero
 						end
-						local lo = BotConfig.Combat.CombatStepMin
-						local hi = BotConfig.Combat.CombatStepMax
+						local lo = self._combat.CombatStepMin
+						local hi = self._combat.CombatStepMax
 						self._combatCycleEndAt = now + lo + math.random() * (hi - lo)
 					end
 				end
@@ -969,14 +1067,15 @@ function BotAI:Start(
 				end
 
 				if os.clock() - lastJumpTime > math.random(20, 50) / 10 then
-					if math.random() < profile.JumpChance then
+					if math.random() < profile.JumpChance * self._combat.JumpChanceMult then
 						humanoid.Jump = true
 					end
 					lastJumpTime = os.clock()
 				end
 
 				local fireRate = BotConfig.Combat.FireRate
-				local precision = BotConfig.Combat.Precision
+				-- D1: precision per personality (Noob 25 … Whale 60).
+				local precision = self._combat.Precision
 
 				if os.clock() - lastShotTime > fireRate
 					and isVisible
@@ -1028,7 +1127,12 @@ function BotAI:Start(
 					end
 
 					if hit then
-						local targetHum = currentTarget:FindFirstChildOfClass("Humanoid")
+						-- Reuse the hum cached by _evaluateTarget instead of a
+						-- FindFirstChildOfClass per landed shot.
+						local targetHum = self._currentTargetHum
+						if not targetHum or not targetHum.Parent then
+							targetHum = currentTarget:FindFirstChildOfClass("Humanoid")
+						end
 						if targetHum and (targetHum :: Humanoid).Health > 0 then
 							local dmg = math.random(profile.DamageMin, profile.DamageMax)
 
@@ -1036,10 +1140,11 @@ function BotAI:Start(
 
 							;(targetHum :: Humanoid):TakeDamage(dmg)
 
-							if isPlayer and _weaponDataRemote then
+							if isPlayer then
 								local victimPlayer = self._currentTargetPlayer
-								if victimPlayer then
-									_weaponDataRemote:FireClient(victimPlayer, "HitByOtherPlayer", rootPart.Position)
+								local dataRemote = _getWeaponDataRemote()
+								if victimPlayer and dataRemote then
+									dataRemote:FireClient(victimPlayer, "HitByOtherPlayer", rootPart.Position)
 								end
 							end
 						end
@@ -1066,7 +1171,7 @@ function BotAI:Start(
 						lastChaseMoveDir = chaseDir
 					end
 					if os.clock() - lastJumpTime > math.random(20, 50) / 10 then
-						if math.random() < profile.JumpChance then
+						if math.random() < profile.JumpChance * self._combat.JumpChanceMult then
 							humanoid.Jump = true
 						end
 						lastJumpTime = os.clock()
@@ -1106,10 +1211,18 @@ function BotAI:Start(
 					NavMetrics.record("roam_pick_count", { bot = self._dummy.Name })
 				end
 
-				self:_moveToLocation(dest :: Vector3, function()
+				local moveFailed = self:_moveToLocation(dest :: Vector3, function()
 					return self._currentTarget ~= nil or not self._isAlive
 				end)
 
+				-- B3: backoff after a pathfinding failure. The Navigator's
+				-- failure cooldown defers onFailed almost immediately, so
+				-- without this the PATROL loop respins every ~2 frames paying
+				-- an O(roam-points) pick per iteration on maps where the
+				-- chosen destinations keep failing.
+				if moveFailed and self._isAlive and self._currentTarget == nil then
+					task.wait(0.3 + math.random() * 0.2)
+				end
 
 				task.wait()
 			end
@@ -1145,6 +1258,8 @@ function BotAI:Stop()
 	self._currentTargetHum = nil
 	self._currentTargetPlayer = nil
 	self._forcedTarget = nil
+	self._forcedTargetHum = nil
+	self._forcedTargetRoot = nil
 	table.clear(self._targetCandidates)
 
 	local humanoid = self._humanoid
