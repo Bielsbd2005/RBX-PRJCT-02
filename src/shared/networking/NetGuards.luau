@@ -37,7 +37,6 @@ NetGuards.MAX = table.freeze({
 	Code          = 24,   -- códigos canjeables (típicamente <12 chars)
 	ClaimType     = 16,   -- "LikeJoin" | "Notifications" | "Code"
 	MapName       = 32,
-	Mode          = 24,   -- "TeamDeathmatch", etc.
 	Kind          = 16,   -- "Bullet" | "Health"
 	UserIdString  = 16,   -- numeric UserId codificado como string
 	AssetUri      = 96,   -- "rbxassetid://<digits>"

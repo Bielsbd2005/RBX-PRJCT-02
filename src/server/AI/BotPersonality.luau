@@ -72,6 +72,12 @@ function BotPersonality.rollPersonality(): (string, Personality)
 	return last.id, last.personality
 end
 
+-- Lookup directo por id (D1: AIService lo usa para recuperar el bloque
+-- `combat` de la personality de una identity al spawnear su BotAI).
+function BotPersonality.getById(id: string): Personality?
+	return BotPersonalities[id]
+end
+
 function BotPersonality.rollStats(personality: Personality): (number, number)
 	local lvl = personality.levelRange
 	local kills = personality.historicalKillsRange
