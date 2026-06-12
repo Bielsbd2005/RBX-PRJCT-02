@@ -148,30 +148,14 @@ function MatchNotificationsQueue.new(matchHudGui: ScreenGui?): any
 	return self
 end
 
-function MatchNotificationsQueue:_resolveSlideContext(): { container: GuiObject?, hiddenFrames: { GuiObject } }
+-- Los popups in-match (level up, BattlePass level up, challenge completado) se
+-- muestran encima del HUD sin ocultar nada de Match: solo necesitan el Container.
+function MatchNotificationsQueue:_resolveContainer(): GuiObject?
 	local matchHudGui = self._gui
 	if not matchHudGui then
-		return { container = nil, hiddenFrames = {} }
+		return nil
 	end
-
-	local container = _findChildGuiObject(matchHudGui, "Container")
-	if not container then
-		return { container = nil, hiddenFrames = {} }
-	end
-
-	-- El timer cuelga directo de Match (antes Match.Status.Timer) y las filas de
-	-- jugadores son los propios nodos TeamA/TeamB (ya no hay PlayersA/PlayersB).
-	local matchNode = _findChildGuiObject(container, "Match")
-	local timerNode = _findChildGuiObject(matchNode, "Timer")
-	local teamANode = _findChildGuiObject(matchNode, "TeamA")
-	local teamBNode = _findChildGuiObject(matchNode, "TeamB")
-
-	local hiddenFrames: { GuiObject } = {}
-	if timerNode then table.insert(hiddenFrames, timerNode) end
-	if teamANode then table.insert(hiddenFrames, teamANode) end
-	if teamBNode then table.insert(hiddenFrames, teamBNode) end
-
-	return { container = container, hiddenFrames = hiddenFrames }
+	return _findChildGuiObject(matchHudGui, "Container")
 end
 
 function MatchNotificationsQueue:_processQueue()
@@ -210,16 +194,11 @@ function MatchNotificationsQueue:playLevelUpAnimation(newLevel: number, unlock: 
 		local matchHudGui = self._gui
 		if not matchHudGui then onDone() return end
 
-		local ctx = self:_resolveSlideContext()
-		local container = ctx.container
+		local container = self:_resolveContainer()
 		if not container then onDone() return end
 
 		local levelUpFrame = _findChildGuiObject(container, "LevelUp")
 		if not levelUpFrame then onDone() return end
-
-		-- El LevelUp no oculta ningún elemento del MatchHud: se muestra encima sin
-		-- esconder timer ni filas de equipos.
-		local hiddenFrames = {} :: { GuiObject }
 
 		local originalPosition = self._levelUpOriginalPosition
 		if not originalPosition then
@@ -270,10 +249,6 @@ function MatchNotificationsQueue:playLevelUpAnimation(newLevel: number, unlock: 
 			end
 		end
 
-		for _, frame in hiddenFrames do
-			frame.Visible = false
-		end
-
 		levelUpFrame.Position = aboveScreenPosition
 		levelUpFrame.Visible = true
 
@@ -298,10 +273,6 @@ function MatchNotificationsQueue:playLevelUpAnimation(newLevel: number, unlock: 
 		levelUpFrame.Visible = false
 		levelUpFrame.Position = originalPosition
 
-		for _, frame in hiddenFrames do
-			frame.Visible = true
-		end
-
 		onDone()
 	end)
 end
@@ -311,14 +282,11 @@ function MatchNotificationsQueue:playBattlePassLevelUpAnimation(newLevel: number
 		local matchHudGui = self._gui
 		if not matchHudGui then onDone() return end
 
-		local ctx = self:_resolveSlideContext()
-		local container = ctx.container
+		local container = self:_resolveContainer()
 		if not container then onDone() return end
 
 		local frame = _findChildGuiObject(container, "BattlePassLevelUp")
 		if not frame then onDone() return end
-
-		local hiddenFrames = ctx.hiddenFrames
 
 		local originalPosition = self._battlePassLevelUpOriginalPosition
 		if not originalPosition then
@@ -338,10 +306,6 @@ function MatchNotificationsQueue:playBattlePassLevelUpAnimation(newLevel: number
 		local levelLabel = _findDescendantTextLabel(frame, { "Level" })
 		if levelLabel then
 			levelLabel.Text = tostring(resolvedLevel)
-		end
-
-		for _, hidden in hiddenFrames do
-			hidden.Visible = false
 		end
 
 		frame.Position = aboveScreenPosition
@@ -368,10 +332,6 @@ function MatchNotificationsQueue:playBattlePassLevelUpAnimation(newLevel: number
 		frame.Visible = false
 		frame.Position = originalPosition
 
-		for _, hidden in hiddenFrames do
-			hidden.Visible = true
-		end
-
 		onDone()
 	end)
 end
@@ -381,14 +341,11 @@ function MatchNotificationsQueue:playChallengeCompletedAnimation(reward: Challen
 		local matchHudGui = self._gui
 		if not matchHudGui then onDone() return end
 
-		local ctx = self:_resolveSlideContext()
-		local container = ctx.container
+		local container = self:_resolveContainer()
 		if not container then onDone() return end
 
 		local completedFrame = _findChildGuiObject(container, "Completed")
 		if not completedFrame then onDone() return end
-
-		local hiddenFrames = ctx.hiddenFrames
 
 		local rewardNode = _findChildGuiObject(completedFrame, "Reward")
 			or _findChildGuiObject(container, "Reward")
@@ -474,10 +431,6 @@ function MatchNotificationsQueue:playChallengeCompletedAnimation(reward: Challen
 			end
 		end
 
-		for _, frame in hiddenFrames do
-			frame.Visible = false
-		end
-
 		completedFrame.Position = aboveScreenPosition
 		completedFrame.Visible = true
 
@@ -513,10 +466,6 @@ function MatchNotificationsQueue:playChallengeCompletedAnimation(reward: Challen
 		-- contaminar la próxima notificación que use este mismo frame.
 		if showedRewardValue and rewardValueLabel and rewardValueLabel:IsA("TextLabel") then
 			rewardValueLabel.Visible = false
-		end
-
-		for _, frame in hiddenFrames do
-			frame.Visible = true
 		end
 
 		onDone()
