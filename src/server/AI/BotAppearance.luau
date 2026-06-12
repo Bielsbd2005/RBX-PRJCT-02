@@ -1,7 +1,7 @@
 --!strict
 --[[
 	BotAppearance.luau
-	Genera y aplica apariencia (hat + face + weapon wrap) a un bot.
+	Genera y aplica apariencia (hat + face + weapon + weapon wrap) a un bot.
 
 	Diseño:
 	- `roll()` se llama una vez por identidad (en _assignIdentity de AIService).
@@ -16,6 +16,9 @@
 	      en Shared.Locker.Hats. Evita warns de templates ausentes.
 	    * Faces: todas las entradas de ItemsConfig.Faces (decals, sin templates).
 	    * Wraps: todas las entradas de ItemsConfig.WeaponWraps.
+	    * Weapons: intersección de ItemsConfig.Main con las Tools reales en
+	      ServerStorage.WeaponTools (las MISMAS que clonan los jugadores —
+	      visuales/sonidos/wraps por arma llegan gratis vía WeaponsSystem).
 	- Coste: una clonación de Accessory + un set de Decal.Texture + un set de
 	  Texture sobre WeaponModel.PrimaryPart por spawn. Aplicado una vez, nunca
 	  per-frame.
@@ -36,6 +39,7 @@ export type BotAppearance = {
 	hatId: string?,
 	faceId: string?,
 	wrapId: string?,
+	weaponId: string?,
 }
 
 local BODIES_ROOT_NAME = "Bodies"
@@ -119,10 +123,45 @@ local function _buildOutfitPool(): { string }
 	return pool
 end
 
+local WEAPON_TOOLS_ROOT_NAME = "WeaponTools"
+local WEAPON_MAIN_CATEGORY = "Main"
+
+-- Misma resolución que LoadoutService._findLoadoutToolTemplate: ruta canónica
+-- ServerStorage.WeaponTools.Main.<weaponId>, con fallback legacy a
+-- WeaponTools.<weaponId> directo.
+local function _findWeaponToolTemplate(weaponId: string): Tool?
+	local root = ServerStorage:FindFirstChild(WEAPON_TOOLS_ROOT_NAME)
+	if not root then
+		return nil
+	end
+	local byCategory = root:FindFirstChild(WEAPON_MAIN_CATEGORY)
+	local node = (if byCategory then byCategory:FindFirstChild(weaponId) else nil)
+		or root:FindFirstChild(weaponId)
+	if node and node:IsA("Tool") then
+		return node :: Tool
+	end
+	return nil
+end
+
+local function _buildWeaponPool(): { string }
+	local pool: { string } = {}
+	local mainConfig = (ItemsConfig :: any).Main
+	if type(mainConfig) ~= "table" then
+		return pool
+	end
+	for weaponId in mainConfig do
+		if _findWeaponToolTemplate(weaponId) ~= nil then
+			table.insert(pool, weaponId)
+		end
+	end
+	return pool
+end
+
 local _hatPool = _buildHatPool()
 local _facePool = _buildFacePool()
 local _wrapPool = _buildWrapPool()
 local _outfitPool = _buildOutfitPool()
+local _weaponPool = _buildWeaponPool()
 
 local function _pickRandom(pool: { string }): string?
 	local n = #pool
@@ -143,6 +182,9 @@ function BotAppearance.roll(personality: BotPersonality.Personality): BotAppeara
 	local facePool   = BotPersonality.filterByRarity(_facePool,   "Faces",       personality)
 	local wrapPool   = BotPersonality.filterByRarity(_wrapPool,   "WeaponWraps", personality)
 	local outfitPool = BotPersonality.filterByRarity(_outfitPool, "Outfits",     personality)
+	-- Armas filtradas por rareza igual que el resto de cosméticos: un Noob
+	-- (Common) carga el AK de inicio; tiers altos sacan el catálogo entero.
+	local weaponPool = BotPersonality.filterByRarity(_weaponPool, "Main", personality)
 
 	local hatId: string? = nil
 	if #hatPool > 0 and math.random() < personality.hatProbability then
@@ -154,7 +196,17 @@ function BotAppearance.roll(personality: BotPersonality.Personality): BotAppeara
 		hatId = hatId,
 		faceId = _pickRandom(facePool),
 		wrapId = _pickRandom(wrapPool),
+		weaponId = _pickRandom(weaponPool),
 	}
+end
+
+--- Tool template real del arma (la misma que clonan los jugadores) por id.
+--- nil/ausente → BotAI cae al template legacy AR-NPC.
+function BotAppearance.findWeaponTemplate(weaponId: string?): Tool?
+	if not weaponId or weaponId == "" then
+		return nil
+	end
+	return _findWeaponToolTemplate(weaponId)
 end
 
 --- Devuelve el Model del body por outfitId, o nil si no existe.

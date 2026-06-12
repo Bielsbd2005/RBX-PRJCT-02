@@ -48,8 +48,17 @@ local COLOR_VOID = Color3.fromRGB(255, 220, 80)   -- amarillo — no hit
 
 export type RayResult = "hit" | "blocked" | "void"
 
+-- Bool cacheado tras GetAttributeChangedSignal (mismo patrón que
+-- DetectRangeViz con _IS_STUDIO): isEnabled() se consulta por cada raycast
+-- de LoS (10Hz × N bots), y leer el attribute del Workspace cada vez era el
+-- único coste de producción de este módulo de debug.
+local _enabled = Workspace:GetAttribute("DebugBotRaycasts") == true
+Workspace:GetAttributeChangedSignal("DebugBotRaycasts"):Connect(function()
+	_enabled = Workspace:GetAttribute("DebugBotRaycasts") == true
+end)
+
 function RaycastViz.isEnabled(): boolean
-	return Workspace:GetAttribute("DebugBotRaycasts") == true
+	return _enabled
 end
 
 function RaycastViz.draw(origin: Vector3, endPos: Vector3, result: RayResult)
