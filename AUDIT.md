@@ -4,7 +4,7 @@
 **Focus:** performance, scalability, maintainability, code quality, architecture, gameplay logic.
 **Operating envelope:** bots fill teams to `TeamSizeTarget = 4` per side → max **8 bots**, ≤6 real players, 240-point rounds with sustained kill chains of 3–5/s (per in-code comments).
 
-Items marked **[FIXED]** (the five P0 correctness/race findings, plus D2) are addressed on this branch. Everything else is a recommendation.
+Items marked **[FIXED]** (the five P0 correctness/race findings, the P1 performance batch B1–B6/C1, and D2) are addressed on this branch. Everything else is a recommendation.
 
 ---
 
@@ -55,29 +55,29 @@ Bots are server-owned Humanoid rigs with negative `FakeUserId`s. They **bypass t
 
 ### B. Performance
 
-#### B1. Rig-pool "async" refill isn't amortized · Medium · *recommendation*
-`_refillBotRigPoolAsync` runs its clone loop inside `task.spawn` **with no yields**, so all clones (30+ parts each) still land in a single frame — the spike is moved, not diluted. The module-load warm-up clones 3 rigs × N outfits in one frame.
-**Recommend:** `task.wait()` between clones (one-line change).
+#### B1. Rig-pool "async" refill isn't amortized — **[FIXED]** · Medium
+`_refillBotRigPoolAsync` ran its clone loop inside `task.spawn` **with no yields**, so all clones (30+ parts each) still landed in a single frame — the spike was moved, not diluted.
+**Fix applied:** `task.wait()` between clones; one rig per frame.
 
-#### B2. Round-start spawns are fully synchronous · Medium · *recommendation*
-`SetBotTargets` → `_setTargetForTeam` spawns up to 8 bots in one frame (pool holds only 3 rigs/outfit, so the burst falls back to synchronous clones, plus appearance, `EquipTool`, and Navigator setup per bot). With 3–5 kills/s of respawn churn this path runs constantly.
-**Recommend:** stagger spawns 1–2 per Heartbeat (needs a small pending-target reconciliation so overlapping rebalances don't double-spawn), and pre-warm pools to the expected round size during the Voting phase.
+#### B2. Round-start spawns are fully synchronous — **[FIXED]** · Medium
+`SetBotTargets` → `_setTargetForTeam` spawned up to 8 bots in one frame (pool holds only 3 rigs/outfit, so the burst fell back to synchronous clones, plus appearance, `EquipTool`, and Navigator setup per bot). With 3–5 kills/s of respawn churn this path runs constantly.
+**Fix applied:** spawn pump — `SetBotTargets` now records desired team sizes and wakes a single pump coroutine that spawns ≤2 bots per step, re-reading desired targets and live counts each iteration so overlapping rebalances reconcile instead of double-spawning (removals stay synchronous; the pump's first step runs synchronously inside `SetBotTargets`, so the common 1-respawn case is unchanged). Because `SetBotTargets` now returns before the roster is complete, AIService fires an `onRosterChanged` callback when the pump finishes, wired to MatchService's roster broadcast. Pools are also pre-warmed during the Voting phase via `AIService:PrewarmRigPools()` — serialized (~1 clone/frame), rebuilding what the round-end trim (C1) released.
 
-#### B3. PATROL busy-polling · Medium · *recommendation*
-`_moveToLocation` polls `task.wait()` at ~60Hz per walking bot while waiting for the Navigator callback. Worse, when pathfinding fails repeatedly (e.g., a map without authored `AINav/RoamPoints`), the failure cooldown defers `onFailed` almost immediately and the PATROL loop respins every ~2 frames, doing an O(roam-points) pick each iteration.
-**Recommend:** condition/signal-based completion instead of polling, plus a 0.3–0.5s backoff in PATROL after `onFailed`.
+#### B3. PATROL busy-polling — **[FIXED]** · Medium
+`_moveToLocation` polled `task.wait()` at ~60Hz per walking bot while waiting for the Navigator callback. Worse, when pathfinding failed repeatedly (e.g., a map without authored `AINav/RoamPoints`), the failure cooldown deferred `onFailed` almost immediately and the PATROL loop respun every ~2 frames, doing an O(roam-points) pick each iteration.
+**Fix applied:** the wait now runs at 10Hz — the stop condition's inputs (target acquisition, death) are produced by the 10Hz eval loop, so waking faster than the source gained no latency (60→10 wakeups/s per walking bot). `_moveToLocation` returns whether navigation failed, and PATROL backs off 0.3–0.5s (jittered) after a failure before picking the next roam destination.
 
-#### B4. Redundant Instance lookups in hot paths · Low · *recommendation*
-The fire path does `FindFirstChildOfClass("Humanoid")` per landed shot even though `_evaluateTarget` already caches `_currentTargetHum`; `_getForcedTarget` pays two child lookups per 10Hz evaluation during retaliation.
-**Recommend:** reuse the cached refs with lazy re-resolution when stale (resolve hum/root once when the forced target is set).
+#### B4. Redundant Instance lookups in hot paths — **[FIXED]** · Low
+The fire path did `FindFirstChildOfClass("Humanoid")` per landed shot even though `_evaluateTarget` already caches `_currentTargetHum`; `_getForcedTarget` paid two child lookups per 10Hz evaluation during retaliation.
+**Fix applied:** fire path reuses `_currentTargetHum` (lazy re-resolve if stale); forced-target hum/root resolved once when the retaliation target is set and cached (`_forcedTargetHum`/`_forcedTargetRoot`), refreshed lazily, cleared in `Stop`.
 
-#### B5. Humanoid state machines never trimmed · Low–Medium · *recommendation*
-No `SetStateEnabled` calls exist anywhere in the bot path; every bot Humanoid simulates Climbing, Swimming, Seated, PlatformStanding, FallingDown, Ragdoll, and GettingUp states it can never legitimately enter.
-**Recommend:** disable those seven states per bot at spawn; keep Dead/Running/Jumping/Freefall/Landed enabled (movement, animations and the Died signal depend on them). Verified safe: the kill effects (`Default`/`Gravity`) force `ChangeState(Dead)` and manage `GettingUp` themselves — they don't use the Ragdoll/FallingDown states.
+#### B5. Humanoid state machines never trimmed — **[FIXED]** · Low–Medium
+No `SetStateEnabled` calls existed anywhere in the bot path; every bot Humanoid simulated Climbing, Swimming, Seated, PlatformStanding, FallingDown, Ragdoll, and GettingUp states it can never legitimately enter.
+**Fix applied:** those seven states are disabled per bot at spawn; Dead/Running/Jumping/Freefall/Landed stay enabled (movement, animations and the Died signal depend on them). Verified safe: the kill effects (`Default`/`Gravity`) force `ChangeState(Dead)` and manage `GettingUp` themselves — they don't use the Ragdoll/FallingDown states.
 
-#### B6. Rig positioned after parenting · Low · *recommendation*
-`_spawnOneBot` parents the rig to Workspace and then sets the root CFrame, allowing one frame of physics/replication at the template's stored position.
-**Recommend:** set the root CFrame before parenting (the joined assembly moves together — identical end state, two-line reorder).
+#### B6. Rig positioned after parenting — **[FIXED]** · Low
+`_spawnOneBot` parented the rig to Workspace and then set the root CFrame, allowing one frame of physics/replication at the template's stored position.
+**Fix applied:** root CFrame set before parenting (the joined assembly moves together — identical end state).
 
 #### B7. Per-shot network fan-out · Informational · *acceptable today*
 Each bot shot allocates a `fireInfo` table and fires `WeaponFired:FireClient` per player within 200 studs. Theoretical worst case at the real cap (8 bots × 10 shots/s × 6 players) ≈ 480 packets/s; realistic numbers are far lower (mixed FSM states, range filter, pause cycles). **Acceptable at current scale.** If bot count or fire rate grows: batch bot shots per-Heartbeat per-player into one remote payload, or move bot tracer/audio replication to a lightweight unreliable remote.
@@ -86,9 +86,9 @@ Each bot shot allocates a `fireInfo` table and fires `WeaponFired:FireClient` pe
 
 ### C. Memory
 
-#### C1. Rig pool grows with the outfit catalog · Low · *recommendation*
-`_botRigPoolByKey` parks up to 3 rigs **per outfit** in ServerStorage forever. Memory grows linearly as outfits are added to `ItemsConfig.Outfits`.
-**Recommend:** cap total parked rigs and/or trim pools for outfits not used by the current roster at `OnRoundEnd`.
+#### C1. Rig pool grows with the outfit catalog — **[FIXED]** · Low
+`_botRigPoolByKey` parked up to 3 rigs **per outfit** in ServerStorage forever. Memory grew linearly as outfits are added to `ItemsConfig.Outfits`.
+**Fix applied:** global cap of `TeamSizeTarget × 4` (16) total parked rigs — refills stop at the cap and a cold take pays one sync clone (rare). At real round end (not the defensive `OnRoundEnd` call inside `OnRoundStart`), every pool is trimmed to 1 parked rig; the Voting-phase prewarm (B2) rebuilds them off the critical path. Identities re-roll every round, so hot pools had no cross-round hit-rate benefit anyway.
 
 #### C2. No leaks found in the per-bot path · Positive
 `BotAI:Stop` disconnects and clears all per-instance state; `LastAttackerStore` is weak-keyed; character-bound connections die with their instances; `_playerRootByPlayer` is cleaned on `PlayerRemoving`; `PathfindingQueue.clear()` at round end deliberately releases closures. The death pipeline is defensively staged (visual cleanup first, each step pcall-isolated, guarded one-shot execution with a deferred fallback). This is solid work.
@@ -158,7 +158,7 @@ The repo has no test infrastructure. Several bot modules are pure or nearly-pure
 | Priority | Item | Status |
 |---|---|---|
 | **P0** | A1 teamless targets, A2 round-generation guard, A3 per-Path serialization, A4 lazy WeaponData, A5 wiring dedupe | ✅ done |
-| **P1** | B1 amortized refill; B2 staggered spawns + Voting-phase pre-warm; B3 PATROL backoff + signal wait; B4 cached lookups; B5 humanoid states; B6 position-before-parent; C1 rig-pool cap | open |
+| **P1** | B1 amortized refill; B2 staggered spawns + Voting-phase pre-warm; B3 PATROL 10Hz wait + failure backoff; B4 cached lookups; B5 humanoid states; B6 position-before-parent; C1 rig-pool cap + round-end trim | ✅ done |
 | **P2** | D2 SpawnSelector routing + spawn-uniqueness + dead config removal | ✅ done |
 | **P2** | D1 per-personality combat profiles; D3 respawn-delay decision; D4 corpse-LoS exclusion; D5 magic numbers → BotConfig | open |
 | **P3** | E1 split god module; E2 unify bot fire with WeaponsSystem; E3 BotManager tick (only when scaling >2× bot count); E4 test seams | open |
@@ -170,3 +170,6 @@ The repo has no test infrastructure. Several bot modules are pure or nearly-pure
 3. **A3:** teleport all bots repeatedly to force a repath storm; confirm no `ComputeAsync` pcall failures and `NavMetrics` shows no `queue_depth_high` spam.
 4. **A4/A5:** smoke test — getting shot by a bot still shows the hit-direction indicator; player respawns don't accumulate duplicate listeners (no behavioral change expected).
 5. **D2:** start a round with full bot teams and confirm every bot/player lands on a **distinct** spawn point (no stacked spawns at round start). Then farm a bot near a group of enemies and confirm it respawns away from them instead of inside the crossfire (all current maps have `UseIntelligentSpawning = true`).
+6. **B2:** at round start, MicroProfiler should show the 8-bot burst spread over ~4 frames (2 spawns/frame) instead of one spike; the scoreboard must still show all 8 bots within a few frames (the pump re-broadcasts the roster when it finishes). Kill chains: bots keep respawning 1:1 with no duplicates or missing bots after heavy churn.
+7. **B3:** on a map without authored `AINav` roam points, NavMetrics' `roam_pick_count` should grow at a bounded rate (~2–3/s per idle bot) instead of respinning every other frame.
+8. **C1:** after a round ends, `ServerStorage._BotRigPool` should shrink to ≤1 rig per outfit, then refill during the next Voting phase; total parked rigs never exceed 16.

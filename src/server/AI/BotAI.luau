@@ -247,6 +247,8 @@ export type BotAIInstance = typeof(setmetatable({} :: {
 	_isCurrentTargetVisible: boolean,
 	_targetGraceUntil: number,
 	_forcedTarget: Model?,
+	_forcedTargetHum: Humanoid?,
+	_forcedTargetRoot: BasePart?,
 	_forcedUntil: number,
 	_fireReadyAt: number,
 	_combatCycleEndAt: number,
@@ -296,6 +298,8 @@ function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?, wrapId
 		_isCurrentTargetVisible = false,
 		_targetGraceUntil = 0,
 		_forcedTarget = nil,
+		_forcedTargetHum = nil,
+		_forcedTargetRoot = nil,
 		_forcedUntil = 0,
 		_fireReadyAt = 0,
 		_combatCycleEndAt = 0,
@@ -626,8 +630,18 @@ function BotAI:_getForcedTarget(): Model?
 		self._forcedTarget = nil
 		return nil
 	end
-	local hum = target:FindFirstChildOfClass("Humanoid")
-	local root = target:FindFirstChild("HumanoidRootPart")
+	-- Reuse hum/root cached when the forced target was set (this runs at
+	-- 10Hz during retaliation); refresh lazily if the refs went stale.
+	local hum = self._forcedTargetHum
+	if not hum or not hum.Parent then
+		hum = target:FindFirstChildOfClass("Humanoid")
+		self._forcedTargetHum = hum
+	end
+	local root = self._forcedTargetRoot
+	if not root or not root.Parent then
+		root = target:FindFirstChild("HumanoidRootPart") :: BasePart?
+		self._forcedTargetRoot = root
+	end
 	if not hum or (hum :: Humanoid).Health <= 0 or not root then
 		self._forcedTarget = nil
 		return nil
@@ -770,31 +784,39 @@ end
 @desc Se mantiene bloqueante para coordinar el estado PATROL sin carreras de ruta.
 @param location Vector3 Punto destino en mundo.
 @param stopCondition () -> boolean Condición de cancelación temprana.
-@return nil
+@return boolean true si la navegación falló (onFailed) — PATROL usa esto para backoff.
 ]]
-function BotAI:_moveToLocation(location: Vector3, stopCondition: () -> boolean)
+function BotAI:_moveToLocation(location: Vector3, stopCondition: () -> boolean): boolean
 	local navigator = self._navigator
 	if not navigator then
-		return
+		return false
 	end
 
 	local done = false
+	local failed = false
 	navigator:goTo(location, {
 		onArrived = function()
 			done = true
 		end,
 		onFailed = function()
 			done = true
+			failed = true
 		end,
 	})
 
+	-- B3: 10Hz wait instead of every-frame polling. The stop condition's
+	-- inputs (target acquisition, death) are produced by the 10Hz eval loop,
+	-- so waking faster than the source gains no latency — it only multiplied
+	-- scheduler wakeups per walking bot (60/s → 10/s).
 	while not done and not stopCondition() do
-		task.wait()
+		task.wait(0.1)
 	end
 
 	if stopCondition() and navigator:isMoving() then
 		navigator:cancel()
 	end
+
+	return failed
 end
 
 --[[
@@ -898,6 +920,10 @@ function BotAI:Start(
 		local attackerModel = _findAttackerModel(attackerUserId, self._aliveTargets, self._dummy, self._botModelByFakeUserId)
 		if attackerModel and attackerModel ~= self._dummy then
 			self._forcedTarget = attackerModel
+			-- Resolve once here so _getForcedTarget doesn't pay two child
+			-- lookups per evaluation while the retaliation window is open.
+			self._forcedTargetHum = attackerModel:FindFirstChildOfClass("Humanoid")
+			self._forcedTargetRoot = attackerModel:FindFirstChild("HumanoidRootPart") :: BasePart?
 			self._forcedUntil = os.clock() + 4
 		end
 	end)
@@ -1055,7 +1081,12 @@ function BotAI:Start(
 					end
 
 					if hit then
-						local targetHum = currentTarget:FindFirstChildOfClass("Humanoid")
+						-- Reuse the hum cached by _evaluateTarget instead of a
+						-- FindFirstChildOfClass per landed shot.
+						local targetHum = self._currentTargetHum
+						if not targetHum or not targetHum.Parent then
+							targetHum = currentTarget:FindFirstChildOfClass("Humanoid")
+						end
 						if targetHum and (targetHum :: Humanoid).Health > 0 then
 							local dmg = math.random(profile.DamageMin, profile.DamageMax)
 
@@ -1134,10 +1165,18 @@ function BotAI:Start(
 					NavMetrics.record("roam_pick_count", { bot = self._dummy.Name })
 				end
 
-				self:_moveToLocation(dest :: Vector3, function()
+				local moveFailed = self:_moveToLocation(dest :: Vector3, function()
 					return self._currentTarget ~= nil or not self._isAlive
 				end)
 
+				-- B3: backoff after a pathfinding failure. The Navigator's
+				-- failure cooldown defers onFailed almost immediately, so
+				-- without this the PATROL loop respins every ~2 frames paying
+				-- an O(roam-points) pick per iteration on maps where the
+				-- chosen destinations keep failing.
+				if moveFailed and self._isAlive and self._currentTarget == nil then
+					task.wait(0.3 + math.random() * 0.2)
+				end
 
 				task.wait()
 			end
@@ -1173,6 +1212,8 @@ function BotAI:Stop()
 	self._currentTargetHum = nil
 	self._currentTargetPlayer = nil
 	self._forcedTarget = nil
+	self._forcedTargetHum = nil
+	self._forcedTargetRoot = nil
 	table.clear(self._targetCandidates)
 
 	local humanoid = self._humanoid
