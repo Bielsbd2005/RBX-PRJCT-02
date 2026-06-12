@@ -112,6 +112,11 @@ local _onBotDied: ((string, string, Humanoid, number) -> ())? = nil
 local _onRosterChanged: (() -> ())? = nil
 local _botsByName: { [string]: BotRecord } = {}
 local _activeBotCount = 0
+-- D3: earliest os.clock() at which each team may spawn a REPLACEMENT for a
+-- dead bot. Armed by the death handler when Lifecycle.RespawnDelay > 0
+-- (default 0 = instant, historical behavior); the spawn pump skips a held
+-- team without exiting. Round-start fills are never held (no death armed it).
+local _spawnHoldUntil = { A = 0, B = 0 }
 -- B6: index O(1) por FakeUserId para _findAttackerModel. Antes scan lineal
 -- sobre aliveTargets por cada damage event (peor caso 16 events/100ms × 16
 -- candidatos = 2560 comparaciones/seg).
@@ -715,7 +720,10 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 	BotAppearance.apply(botModel, identity.appearance)
 
 	local wrapId = if identity.appearance then identity.appearance.wrapId else nil
-	local botAIInstance = BotAI.new(botModel, team, fakeUserId, wrapId)
+	-- D1: combat skill from the identity's personality tier; nil combat block
+	-- (or unknown id) falls back to the global BotConfig.Combat profile.
+	local personality = BotPersonality.getById(identity.personalityId)
+	local botAIInstance = BotAI.new(botModel, team, fakeUserId, wrapId, if personality then personality.combat else nil)
 
 	local botsFolder = mapRoot:FindFirstChild("Bots")
 	if not botsFolder then
@@ -860,6 +868,12 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 		-- error aquí ya no afecta la limpieza visual de arriba. En pcall
 		-- envolvente para no romper el bucle de spawn de otros bots.
 		pcall(function()
+			-- D3: hold this team's next replacement spawn for the configured
+			-- delay (0 = no-op). Players pay RespawnCooldown; this is the knob
+			-- for pacing parity.
+			if BotConfig.Lifecycle.RespawnDelay > 0 then
+				_spawnHoldUntil[team] = os.clock() + BotConfig.Lifecycle.RespawnDelay
+			end
 			table.insert(_recycledByTeam[team], { identity = identity, fakeUserId = fakeUserId })
 			-- B6: clear el index — el nuevo bot se asignará en _spawnOneBot.
 			_botModelByFakeUserId[fakeUserId] = nil
@@ -952,8 +966,13 @@ local function _ensureSpawnPump()
 		while _isRoundActive do
 			local budget = MAX_SPAWNS_PER_STEP
 			while budget > 0 do
-				local deficitA = _spawnDeficit("A")
-				local deficitB = _spawnDeficit("B")
+				-- D3: a held team (recent bot death + RespawnDelay) reports no
+				-- spawnable deficit this step, but the OUTER exit check below
+				-- uses the raw deficit, so the pump stays alive until the hold
+				-- expires and then spawns.
+				local now = os.clock()
+				local deficitA = if now >= _spawnHoldUntil.A then _spawnDeficit("A") else 0
+				local deficitB = if now >= _spawnHoldUntil.B then _spawnDeficit("B") else 0
 				if deficitA <= 0 and deficitB <= 0 then
 					break
 				end
@@ -1048,6 +1067,8 @@ function AIService:OnRoundEnd()
 	_roundGeneration += 1
 	_desiredBotTargets.A = 0
 	_desiredBotTargets.B = 0
+	_spawnHoldUntil.A = 0
+	_spawnHoldUntil.B = 0
 
 	local namesToRemove = {} :: { string }
 	for botName in _botsByName do

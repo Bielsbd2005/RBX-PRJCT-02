@@ -16,6 +16,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local TeamUtils = require(Shared.utils.TeamUtils)
 local BotConfig = require(Shared.constants.BotConfig)
+local BotPersonalities = require(Shared.constants.BotPersonalities)
+local CollisionGroups = require(Shared:WaitForChild("CollisionGroups"))
 local LastAttackerStore = require(ReplicatedStorage:WaitForChild("WeaponsSystem"):WaitForChild("Libraries"):WaitForChild("LastAttackerStore"))
 
 local Navigator = require(script.Parent:WaitForChild("nav"):WaitForChild("Navigator"))
@@ -262,7 +264,40 @@ export type BotAIInstance = typeof(setmetatable({} :: {
 	_stuckDetector: StuckDetector.StuckDetector?,
 	_roamGraph: RoamGraph.RoamGraph?,
 	_animTracks: { [string]: AnimationTrack }?,
+	_combat: ResolvedCombatProfile,
 }, BotAI))
+
+-- D1: per-bot combat skill, resolved ONCE at construction (personality
+-- overrides over the global BotConfig.Combat baseline) so the 10–20Hz combat
+-- loops read a flat table instead of paying an `override or global` chain
+-- per field per tick.
+export type ResolvedCombatProfile = {
+	Precision: number,
+	ReactionDelayMin: number,
+	ReactionDelayMax: number,
+	CombatPauseChance: number,
+	CombatPauseMin: number,
+	CombatPauseMax: number,
+	CombatStepMin: number,
+	CombatStepMax: number,
+	JumpChanceMult: number,
+}
+
+local function _resolveCombatProfile(overrides: BotPersonalities.CombatOverrides?): ResolvedCombatProfile
+	local base = BotConfig.Combat
+	local o: BotPersonalities.CombatOverrides = overrides or {}
+	return {
+		Precision = o.Precision or base.Precision,
+		ReactionDelayMin = o.ReactionDelayMin or base.ReactionDelayMin,
+		ReactionDelayMax = o.ReactionDelayMax or base.ReactionDelayMax,
+		CombatPauseChance = o.CombatPauseChance or base.CombatPauseChance,
+		CombatPauseMin = o.CombatPauseMin or base.CombatPauseMin,
+		CombatPauseMax = o.CombatPauseMax or base.CombatPauseMax,
+		CombatStepMin = o.CombatStepMin or base.CombatStepMin,
+		CombatStepMax = o.CombatStepMax or base.CombatStepMax,
+		JumpChanceMult = o.JumpChanceMult or 1,
+	}
+end
 
 --[[
 @desc Construye una instancia BotAI para un rig de bot existente.
@@ -271,9 +306,10 @@ export type BotAIInstance = typeof(setmetatable({} :: {
 @param team "A" | "B" Equipo lógico usado en filtros de combate.
 @param fakeUserId number? Identificador de bot para kill attribution.
 @param wrapId string? Id de wrap visual aplicado al arma del bot.
+@param combatOverrides CombatOverrides? Skill de la personality (D1); nil = perfil global.
 @return BotAIInstance Instancia lista para Start.
 ]]
-function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?, wrapId: string?): BotAIInstance
+function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?, wrapId: string?, combatOverrides: BotPersonalities.CombatOverrides?): BotAIInstance
 	local humanoid = botModel:FindFirstChildOfClass("Humanoid") :: Humanoid
 	local rootPart = botModel:FindFirstChild("HumanoidRootPart") :: BasePart
 
@@ -313,6 +349,7 @@ function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?, wrapId
 		_stuckDetector = nil,
 		_roamGraph = nil,
 		_animTracks = nil,
+		_combat = _resolveCombatProfile(combatOverrides),
 	}, BotAI) :: BotAIInstance
 
 	return self
@@ -654,7 +691,7 @@ function BotAI:_getForcedTarget(): Model?
 		self._forcedTarget = nil
 		return nil
 	end
-	local rangeExt = BotConfig.Combat.DetectRange + 20
+	local rangeExt = BotConfig.Combat.DetectRange + BotConfig.Combat.ForcedTargetRangeBonus
 	local fd = self._rootPart.Position - (root :: BasePart).Position
 	if fd:Dot(fd) > rangeExt * rangeExt then
 		self._forcedTarget = nil
@@ -714,7 +751,7 @@ function BotAI:_evaluateTarget(now: number)
 	end
 
 	if potentialTarget and isVisible then
-		self._targetGraceUntil = now + 3
+		self._targetGraceUntil = now + BotConfig.Combat.TargetMemoryGrace
 	elseif not potentialTarget and self._currentTarget and now < self._targetGraceUntil then
 		local prev = self._currentTarget
 		-- Perf: reusar cache; si expiró, fallback a lookup directo
@@ -729,7 +766,7 @@ function BotAI:_evaluateTarget(now: number)
 		if prev.Parent
 			and prevHum and (prevHum :: Humanoid).Health > 0
 			and prevRoot then
-			local graceRange = BotConfig.Combat.DetectRange + 15
+			local graceRange = BotConfig.Combat.DetectRange + BotConfig.Combat.GraceRangeBonus
 			local gd = self._rootPart.Position - (prevRoot :: BasePart).Position
 			if gd:Dot(gd) <= graceRange * graceRange then
 				potentialTarget = prev
@@ -742,8 +779,9 @@ function BotAI:_evaluateTarget(now: number)
 
 	local prevVisible = self._isCurrentTargetVisible
 	if isVisible and not prevVisible then
-		local lo = BotConfig.Combat.ReactionDelayMin
-		local hi = BotConfig.Combat.ReactionDelayMax
+		-- D1: reaction delay per personality (Noob 0.3–0.55s … Whale 0.08–0.18s).
+		local lo = self._combat.ReactionDelayMin
+		local hi = self._combat.ReactionDelayMax
 		self._fireReadyAt = now + lo + math.random() * (hi - lo)
 	end
 
@@ -847,6 +885,11 @@ function BotAI:Start(
 	local raycastParams = RaycastParams.new()
 	raycastParams.FilterDescendantsInstances = { self._dummy }
 	raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+	-- D4: LoS rays behave as a CHARACTERS member, so they ignore RAGDOLL
+	-- parts (the groups don't collide) — fresh corpses (3s ragdolls) no
+	-- longer block line of sight, which made bots "stare" at targets behind
+	-- falling bodies. Walls (Default) and live characters still block.
+	raycastParams.CollisionGroup = CollisionGroups.CHARACTERS
 	self._raycastParams = raycastParams
 
 	self._navigator = Navigator.new(humanoid, rootPart, AGENT_PARAMS)
@@ -924,7 +967,7 @@ function BotAI:Start(
 			-- lookups per evaluation while the retaliation window is open.
 			self._forcedTargetHum = attackerModel:FindFirstChildOfClass("Humanoid")
 			self._forcedTargetRoot = attackerModel:FindFirstChild("HumanoidRootPart") :: BasePart?
-			self._forcedUntil = os.clock() + 4
+			self._forcedUntil = os.clock() + BotConfig.Combat.RetaliationWindow
 		end
 	end)
 	table.insert(self._connections, connDamage)
@@ -984,10 +1027,12 @@ function BotAI:Start(
 
 				local now = os.clock()
 				if now >= self._combatCycleEndAt then
-					if math.random() < BotConfig.Combat.CombatPauseChance then
+					-- D1: strafe cadence per personality (Noob pauses more,
+					-- Whale strafes more).
+					if math.random() < self._combat.CombatPauseChance then
 						self._combatMoveDir = Vector3.zero
-						local lo = BotConfig.Combat.CombatPauseMin
-						local hi = BotConfig.Combat.CombatPauseMax
+						local lo = self._combat.CombatPauseMin
+						local hi = self._combat.CombatPauseMax
 						self._combatCycleEndAt = now + lo + math.random() * (hi - lo)
 					else
 						local toTarget = targetPos - rootPart.Position
@@ -1010,8 +1055,8 @@ function BotAI:Start(
 						else
 							self._combatMoveDir = Vector3.zero
 						end
-						local lo = BotConfig.Combat.CombatStepMin
-						local hi = BotConfig.Combat.CombatStepMax
+						local lo = self._combat.CombatStepMin
+						local hi = self._combat.CombatStepMax
 						self._combatCycleEndAt = now + lo + math.random() * (hi - lo)
 					end
 				end
@@ -1022,14 +1067,15 @@ function BotAI:Start(
 				end
 
 				if os.clock() - lastJumpTime > math.random(20, 50) / 10 then
-					if math.random() < profile.JumpChance then
+					if math.random() < profile.JumpChance * self._combat.JumpChanceMult then
 						humanoid.Jump = true
 					end
 					lastJumpTime = os.clock()
 				end
 
 				local fireRate = BotConfig.Combat.FireRate
-				local precision = BotConfig.Combat.Precision
+				-- D1: precision per personality (Noob 25 … Whale 60).
+				local precision = self._combat.Precision
 
 				if os.clock() - lastShotTime > fireRate
 					and isVisible
@@ -1125,7 +1171,7 @@ function BotAI:Start(
 						lastChaseMoveDir = chaseDir
 					end
 					if os.clock() - lastJumpTime > math.random(20, 50) / 10 then
-						if math.random() < profile.JumpChance then
+						if math.random() < profile.JumpChance * self._combat.JumpChanceMult then
 							humanoid.Jump = true
 						end
 						lastJumpTime = os.clock()

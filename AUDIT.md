@@ -4,7 +4,7 @@
 **Focus:** performance, scalability, maintainability, code quality, architecture, gameplay logic.
 **Operating envelope:** bots fill teams to `TeamSizeTarget = 4` per side → max **8 bots**, ≤6 real players, 240-point rounds with sustained kill chains of 3–5/s (per in-code comments).
 
-Items marked **[FIXED]** (the five P0 correctness/race findings, the P1 performance batch B1–B6/C1, and D2) are addressed on this branch. Everything else is a recommendation.
+Items marked **[FIXED]** are addressed on this branch (the five P0 correctness/race findings, the P1 performance batch B1–B6/C1, and the P2 gameplay batch D1–D5). Everything else is a recommendation.
 
 ---
 
@@ -97,22 +97,25 @@ Each bot shot allocates a `fireInfo` table and fires `WeaponFired:FireClient` pe
 
 ### D. Gameplay logic
 
-#### D1. Personalities are cosmetic-only · High value / low effort · *recommendation*
-`BotPersonalities` drives level, historical kills, cosmetic rarity, and hat probability — but **every bot shares identical combat skill** from the global `BotConfig.Combat` (Precision 40, ReactionDelay 0.15–0.35s, same strafe/pause/jump tuning). A "level 80 veteran" aims exactly like a level-2 rookie, which undercuts the identity system the game already pays for.
-**Recommend:** add an optional `combat` block per personality (precision, reaction delay range, strafe cadence, jump chance) that overrides the global profile; consider light rubber-banding (nudge precision down vs struggling players) as a second step. This is the highest gameplay value per line of code in this audit.
+#### D1. Personalities are cosmetic-only — **[FIXED]** · High value / low effort
+`BotPersonalities` drove level, historical kills, cosmetic rarity, and hat probability — but **every bot shared identical combat skill** from the global `BotConfig.Combat` (Precision 40, ReactionDelay 0.15–0.35s, same strafe/pause/jump tuning). A "level 80 veteran" aimed exactly like a level-2 rookie.
+**Fix applied:** each personality tier now carries an optional `combat` block (precision, reaction delay range, strafe/pause cadence, jump-chance multiplier) that overrides the global profile field-by-field: Noob aims at 25 with 0.3–0.55s reaction and pauses more; Whale aims at 60 with 0.08–0.18s reaction and strafes/jumps more. The profile is resolved **once per bot at construction** into a flat table (`BotAI._combat`), so the 10–20Hz combat loops pay zero override-chain cost. Jump chance is a *multiplier* because the base is intentionally asymmetric per target type (VsPlayer 0.03 vs VsBot 0.4). Rubber-banding vs struggling players remains a possible second step.
 
 #### D2. Bots ignore spawn-selection logic; dead config — **[FIXED]** · Medium
 Bots spawned at a **pure random** spawn point (`_getRandomSpawnPoint`) while players went through `SpawnSelector` scoring — bots could spawn on top of enemies or into crossfire. Additionally, `BotConfig.Navigation.SpawnMinDist`/`SpawnMaxDist` were defined and typed but **never read anywhere** (dead config implying behavior that doesn't exist).
 **Fix applied:** bot spawn-point choice now routes through `SpawnService.SelectBotSpawnPoint` → `SpawnSelector` (same scoring, same combatant scan, same per-map `UseIntelligentSpawning` flag as players); MatchService injects the selector into `AIService:OnRoundStart` so the AI module stays decoupled from match modules, with the old random pick kept as fallback. The dead config keys were deleted. `SpawnSelector` also gained **spawn-uniqueness guards** shared by players and bots: a 2s reuse window stamped at *selection* time (the player body-swap yields, so round-start bursts pick points before any body lands) plus a 6-stud occupancy check against live combatants — no two players/bots receive the same point in a burst, and the occupancy check also stops the ally-proximity *bonus* from favoring points with a teammate standing on top. If every point is filtered out (tiny maps, heavy churn), selection degrades gracefully to the full list rather than failing the spawn.
 
-#### D3. No bot respawn delay · Low · *decision needed*
-Bot death → deferred rebalance → respawn on the next frame, vs players' 1s `RespawnCooldown`. Instant bot reappearance affects pacing and makes farming streaks off bots slightly faster. Trivial to add a configurable delay if the design wants parity — flagging for a deliberate choice rather than silently changing feel.
+#### D3. No bot respawn delay — **[FIXED]** (knob, default keeps current feel) · Low
+Bot death → deferred rebalance → respawn on the next frame, vs players' 1s `RespawnCooldown`. Instant bot reappearance affects pacing and makes farming streaks off bots slightly faster.
+**Fix applied:** `BotConfig.Lifecycle.RespawnDelay` — the bot death handler arms a per-team spawn hold and the spawn pump skips a held team (without exiting) until it expires. **Default is 0**, which preserves the historical instant-respawn feel exactly; set it to 1 for parity with players. Round-start fills are never held. The decision itself is now a one-line config change instead of a code change.
 
-#### D4. Hit model is RNG decoupled from ballistics · Informational / design trade-off
-Bot hits are a dice roll (`Precision`) taken before any trajectory exists; damage is instant hitscan based on a ≤100ms-stale LoS check, while clients see a cosmetic projectile. No falloff, no headshots, damage tuned separately (`VsPlayer` 2–5 vs `VsBot` 10–25 — intentional UX asymmetry). This *works* and is cheap, but it is a second weapons implementation to keep in tune with the real one (see E2). One concrete quirk: fresh corpses (3s ragdolls) block LoS raycasts, so bots briefly "stare" at targets behind falling bodies — excluding the RAGDOLL collision group in the bot `RaycastParams` would remove it.
+#### D4. Hit model is RNG decoupled from ballistics · Informational / design trade-off — corpse-LoS quirk **[FIXED]**
+Bot hits are a dice roll (`Precision`) taken before any trajectory exists; damage is instant hitscan based on a ≤100ms-stale LoS check, while clients see a cosmetic projectile. No falloff, no headshots, damage tuned separately (`VsPlayer` 2–5 vs `VsBot` 10–25 — intentional UX asymmetry). This *works* and is cheap, but it is a second weapons implementation to keep in tune with the real one (see E2).
+**Quirk fixed:** fresh corpses (3s ragdolls) blocked LoS raycasts, so bots briefly "stared" at targets behind falling bodies. The bot `RaycastParams` now sets `CollisionGroup = CHARACTERS` — RAGDOLL parts don't collide with CHARACTERS, so the rays ignore corpses while walls and live characters still block. The broader hit-model design remains as documented (see E2 for the unification path).
 
-#### D5. Inline tuning magic numbers · Low · *recommendation*
-Target-memory grace `now + 3`, retaliation window `+ 4`, range extensions `DetectRange + 20` / `+ 15` live inline in `BotAI.luau` while everything else is centralized in `BotConfig`. Move them next to their siblings so tuning passes don't require code archaeology.
+#### D5. Inline tuning magic numbers — **[FIXED]** · Low
+Target-memory grace `now + 3`, retaliation window `+ 4`, range extensions `DetectRange + 20` / `+ 15` lived inline in `BotAI.luau` while everything else is centralized in `BotConfig`.
+**Fix applied:** moved to `BotConfig.Combat` as `TargetMemoryGrace`, `RetaliationWindow`, `ForcedTargetRangeBonus`, `GraceRangeBonus` (same values — no behavior change).
 
 ---
 
@@ -159,8 +162,7 @@ The repo has no test infrastructure. Several bot modules are pure or nearly-pure
 |---|---|---|
 | **P0** | A1 teamless targets, A2 round-generation guard, A3 per-Path serialization, A4 lazy WeaponData, A5 wiring dedupe | ✅ done |
 | **P1** | B1 amortized refill; B2 staggered spawns + Voting-phase pre-warm; B3 PATROL 10Hz wait + failure backoff; B4 cached lookups; B5 humanoid states; B6 position-before-parent; C1 rig-pool cap + round-end trim | ✅ done |
-| **P2** | D2 SpawnSelector routing + spawn-uniqueness + dead config removal | ✅ done |
-| **P2** | D1 per-personality combat profiles; D3 respawn-delay decision; D4 corpse-LoS exclusion; D5 magic numbers → BotConfig | open |
+| **P2** | D1 per-personality combat profiles; D2 SpawnSelector routing + spawn-uniqueness + dead config removal; D3 respawn-delay knob (default 0 = unchanged feel); D4 corpse-LoS exclusion; D5 magic numbers → BotConfig | ✅ done |
 | **P3** | E1 split god module; E2 unify bot fire with WeaponsSystem; E3 BotManager tick (only when scaling >2× bot count); E4 test seams | open |
 
 ## 4. Verifying the applied fixes (Studio)
@@ -173,3 +175,6 @@ The repo has no test infrastructure. Several bot modules are pure or nearly-pure
 6. **B2:** at round start, MicroProfiler should show the 8-bot burst spread over ~4 frames (2 spawns/frame) instead of one spike; the scoreboard must still show all 8 bots within a few frames (the pump re-broadcasts the roster when it finishes). Kill chains: bots keep respawning 1:1 with no duplicates or missing bots after heavy churn.
 7. **B3:** on a map without authored `AINav` roam points, NavMetrics' `roam_pick_count` should grow at a bounded rate (~2–3/s per idle bot) instead of respinning every other frame.
 8. **C1:** after a round ends, `ServerStorage._BotRigPool` should shrink to ≤1 rig per outfit, then refill during the next Voting phase; total parked rigs never exceed 16.
+9. **D1:** check the roster for a Noob and a Whale (`GetBotRoster` levels / career card). The Noob should feel sluggish (slow first shot, more standing still, ~25% hit rate); the Whale should snap-react, strafe constantly and hit ~60%. Confirm via Command Bar: `require(game.ServerScriptService.Server.AI)` roster → personality tiers map to visibly different fight feel.
+10. **D3:** with `RespawnDelay = 0` (default), bot respawn timing is unchanged. Set it to 1 in Studio: a killed bot's replacement must appear ~1s later, while round-start spawns stay immediate.
+11. **D4:** kill a bot so its ragdoll falls between another bot and a visible enemy — the surviving bot must keep firing through the falling corpse instead of holding fire for ~3s.
