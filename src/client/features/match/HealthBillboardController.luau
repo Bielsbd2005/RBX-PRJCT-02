@@ -4,6 +4,7 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local TeamUtils = require(Shared.utils.TeamUtils)
@@ -19,6 +20,25 @@ local ENEMY_GRADIENT = ColorSequence.new({
 	ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 41, 37)),
 	ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 95, 95)),
 })
+
+-- ── Animación de daño (chips blancos + indicador) ───────────────
+-- El trozo de vida perdido se cubre con frames blancos contiguos que se elevan
+-- y desvanecen de derecha a izquierda formando una escalera. Nº de segmentos
+-- proporcional al daño (1 por cada CHIP_HEALTH_PER_SEGMENT de vida perdida).
+local CHIP_HEALTH_PER_SEGMENT = 0.12 -- ~12% de vida por segmento → pocos y grandes
+local CHIP_MAX_SEGMENTS = 3 -- tope de segmentos (2-3 escalones)
+local CHIP_MIN_DAMAGE = 0.01 -- ignorar bajadas < 1% (ruido / MaxHealth changes)
+local CHIP_HEIGHT = 1.6 -- alto del chip relativo a la barra (sobresale arriba/abajo)
+local CHIP_RISE = 1.6 -- sube 1.6× la altura de la barra (en scale)
+local CHIP_STEP_DELAY = 0.08 -- delay entre escalones (derecha→izquierda)
+local CHIP_TWEEN = TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local CHIP_COLOR = Color3.new(1, 1, 1)
+-- Gate móvil: no animar daño de billboards más lejos que esto (≈ MaxDistance del
+-- BillboardGui). MaxDistance solo culla el render; sin este gate, los frames y
+-- tweens se crearían igual para enemigos lejanos/fuera de cámara que el jugador
+-- no ve — desperdicio en peleas con muchos bots.
+local CHIP_MAX_DISTANCE = 200
+local CHIP_MAX_DISTANCE_SQ = CHIP_MAX_DISTANCE * CHIP_MAX_DISTANCE
 
 -- ── Template (cacheado una sola vez) ────────────────────────────
 local healthBillboardTemplate: BillboardGui? = nil
@@ -60,6 +80,9 @@ type TrackState = {
 	conns: { RBXScriptConnection },
 	baseFillSize: UDim2,
 	lastIsAlly: boolean?,
+	damage: ImageLabel?,
+	lastRatio: number?,
+	damageToken: number,
 }
 
 local tracked: { [Model]: TrackState } = {}
@@ -94,6 +117,103 @@ local function ensureFillGradient(fill: GuiObject): UIGradient
 		grad.Parent = fill
 	end
 	return grad
+end
+
+-- Indicador "Damage": aparece INSTANTÁNEO (sin tween) en el borde del Fill (es
+-- hijo suyo, así que sigue el punto de vida actual) y NO se oculta hasta que los
+-- chips blancos han terminado de desaparecer (holdTime = duración de la escalera).
+-- El token invalida el ocultado programado por golpes anteriores cuando llega uno
+-- nuevo (mantiene el Damage visible mientras quede cualquier chip animándose).
+local function showDamageIndicator(state: TrackState, holdTime: number)
+	local dmg = state.damage
+	if not dmg then
+		return
+	end
+	dmg.Visible = true
+	dmg.ImageTransparency = 0
+	state.damageToken += 1
+	local token = state.damageToken
+	task.delay(holdTime, function()
+		if state.damageToken == token and dmg.Parent then
+			dmg.Visible = false
+		end
+	end)
+end
+
+-- Cubre el trozo perdido [newRatio, oldRatio] con N frames blancos contiguos
+-- (N proporcional al daño) y los hace desaparecer de derecha a izquierda: cada
+-- uno se eleva (CHIP_RISE) y se desvanece (BackgroundTransparency→1), con un
+-- delay escalonado entre ellos → escalera. Cada chip se autodestruye al acabar.
+-- Devuelve la duración total de la escalera (último chip en terminar), para que
+-- el indicador "Damage" sepa cuándo ocultarse.
+local function spawnDamageChips(state: TrackState, newRatio: number, oldRatio: number): number
+	local healthBG = state.healthBG
+	local fill = state.fill
+	if not healthBG or not fill then
+		return 0
+	end
+
+	local lostWidth = oldRatio - newRatio
+	if lostWidth < CHIP_MIN_DAMAGE then
+		return 0
+	end
+
+	-- Mapear fracciones de vida a la geometría real del Fill (full = baseFillSize.X).
+	local fullScale = state.baseFillSize.X.Scale
+	local n = math.clamp(math.ceil(lostWidth / CHIP_HEALTH_PER_SEGMENT), 1, CHIP_MAX_SEGMENTS)
+	local segW = lostWidth / n
+	local baseZ = fill.ZIndex + 2
+
+	for i = 0, n - 1 do
+		local xScale = (newRatio + i * segW) * fullScale
+		local chip = Instance.new("Frame")
+		chip.Name = "DamageChip"
+		chip.BackgroundColor3 = CHIP_COLOR
+		chip.BorderSizePixel = 0
+		chip.BackgroundTransparency = 0
+		chip.ZIndex = baseZ
+		chip.AnchorPoint = Vector2.new(0, 0.5)
+		chip.Position = UDim2.fromScale(xScale, 0.5)
+		chip.Size = UDim2.fromScale(segW * fullScale, CHIP_HEIGHT)
+		chip.Parent = healthBG
+
+		-- El de más a la derecha (i = n-1) sale primero; el de la izquierda al final.
+		local stagger = (n - 1 - i) * CHIP_STEP_DELAY
+		task.delay(stagger, function()
+			if not chip.Parent then
+				return
+			end
+			local tween = TweenService:Create(chip, CHIP_TWEEN, {
+				Position = UDim2.fromScale(xScale, 0.5 - CHIP_RISE),
+				BackgroundTransparency = 1,
+			})
+			tween:Play()
+			tween.Completed:Once(function()
+				chip:Destroy()
+			end)
+		end)
+	end
+
+	-- El último en terminar es el de la izquierda (i=0): mayor stagger + el tween.
+	return (n - 1) * CHIP_STEP_DELAY + CHIP_TWEEN.Time
+end
+
+-- Distancia cámara→enemigo (al cuadrado, sin sqrt) para el gate móvil del efecto.
+local function isWithinAnimDistance(state: TrackState): boolean
+	local cam = workspace.CurrentCamera
+	if not cam then
+		return false
+	end
+	local ref: BasePart? = state.humanoid.RootPart
+	if not ref then
+		local head = state.model:FindFirstChild("Head")
+		ref = if head and head:IsA("BasePart") then head else nil
+	end
+	if not ref then
+		return true -- sin referencia de posición, no bloquear
+	end
+	local delta = cam.CFrame.Position - ref.Position
+	return delta:Dot(delta) <= CHIP_MAX_DISTANCE_SQ
 end
 
 -- ── Actualizar un billboard ─────────────────────────────────────
@@ -141,9 +261,32 @@ local function updateState(state: TrackState)
 			gradient.Color = if isAlly then ALLY_GRADIENT else ENEMY_GRADIENT
 		end
 
+		-- Resolver el indicador "Damage" (hijo del Fill) una vez; oculto hasta el
+		-- primer golpe.
+		if not state.damage then
+			local d = state.fill:FindFirstChild("Damage")
+			if d and d:IsA("ImageLabel") then
+				state.damage = d
+				d.Visible = false
+			end
+		end
+
 		state.fill.Visible = true
 		local maxHp = math.max(1, humanoid.MaxHealth)
 		local ratio = math.clamp(humanoid.Health / maxHp, 0, 1)
+
+		-- Daño: la vida bajó respecto al último valor mostrado → escalera de chips
+		-- blancos sobre el trozo perdido + flash del indicador. El Fill baja
+		-- instantáneo (abajo), sin tween.
+		local last = state.lastRatio
+		-- Solo animar daño si el billboard está dentro de la distancia de render:
+		-- evita crear frames/tweens para enemigos que el jugador no ve.
+		if last ~= nil and ratio < last - CHIP_MIN_DAMAGE and isWithinAnimDistance(state) then
+			local chipsDuration = spawnDamageChips(state, ratio, last)
+			showDamageIndicator(state, chipsDuration)
+		end
+		state.lastRatio = ratio
+
 		local base = state.baseFillSize
 		-- Escalar eje X (horizontal) con el ratio de vida
 		state.fill.Size = UDim2.new(
@@ -235,6 +378,7 @@ local function trackModel(model: Model)
 		model = model,
 		conns = conns,
 		baseFillSize = baseFillSize,
+		damageToken = 0,
 	}
 	tracked[model] = state
 

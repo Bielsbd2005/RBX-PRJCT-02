@@ -6,6 +6,7 @@ local UserInputService = game:GetService("UserInputService")
 local CollectionService = game:GetService("CollectionService")
 local ContentProvider = game:GetService("ContentProvider")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
 
 local IsServer = RunService:IsServer()
 
@@ -333,6 +334,30 @@ end
 -- y lo destruye automáticamente tras HIT_MARK_LIFETIME segundos.
 local HIT_MARK_LIFETIME = 5
 
+-- Efecto "caliente": el impacto arranca incandescente (rojo) y se enfría a blanco
+-- neutro. En un Decal/Texture, Color3 = blanco no tinta la imagen, así que el
+-- estado final es el aspecto normal del agujero; el rojo inicial simula el calor.
+local HIT_MARK_HEAT_START = Color3.fromRGB(255, 120, 30) -- naranja incandescente
+local HIT_MARK_HEAT_END = Color3.fromRGB(255, 255, 255) -- blanco (sin tinte)
+local HIT_MARK_HEAT_DURATION = 1.5
+local HIT_MARK_HEAT_TWEEN = TweenInfo.new(HIT_MARK_HEAT_DURATION, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+-- Aplica el gradiente de enfriamiento rojo→blanco al hitMark recién spawneado.
+-- Tinta tanto la parte (Color) como cualquier Decal/Texture (Color3) para no
+-- depender de la estructura interna del template.
+function BulletWeapon:_applyHitMarkHeat(hitMark: Instance)
+	if hitMark:IsA("BasePart") then
+		hitMark.Color = HIT_MARK_HEAT_START
+		TweenService:Create(hitMark, HIT_MARK_HEAT_TWEEN, { Color = HIT_MARK_HEAT_END }):Play()
+	end
+	for _, descendant in hitMark:GetDescendants() do
+		if descendant:IsA("Decal") or descendant:IsA("Texture") then
+			descendant.Color3 = HIT_MARK_HEAT_START
+			TweenService:Create(descendant, HIT_MARK_HEAT_TWEEN, { Color3 = HIT_MARK_HEAT_END }):Play()
+		end
+	end
+end
+
 function BulletWeapon:_spawnHitMark(hitPart: BasePart, hitPoint: Vector3, hitNormal: Vector3, parabola: any)
 	if NO_BULLET_DECALS or not hitPart or not hitPart.Parent or not self.hitMarkTemplate then
 		return
@@ -367,6 +392,10 @@ function BulletWeapon:_spawnHitMark(hitPart: BasePart, hitPoint: Vector3, hitNor
 	weld.Part0 = hitMark
 	weld.Part1 = hitPart
 	weld.Parent = hitMark
+
+	if self:getConfigValue("HitMarkHeatEffect", true) then
+		self:_applyHitMarkHeat(hitMark)
+	end
 
 	Debris:AddItem(hitMark, HIT_MARK_LIFETIME)
 end
