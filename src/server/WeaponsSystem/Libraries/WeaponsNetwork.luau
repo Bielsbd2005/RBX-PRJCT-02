@@ -40,7 +40,18 @@ end
 -- ── Server → All Clients ──────────────────────────────────────
 
 function WeaponsNetwork.broadcastWeaponFired(player: Player?, weaponInst: Instance, fireInfo: any)
-	local origin = if typeof(fireInfo) == "table" then fireInfo.origin else nil
+	-- Culling con la posición server-side del tirador, no con fireInfo.origin
+	-- (dato del cliente: permitía manipular qué clientes reciben el broadcast).
+	-- Fallback a fireInfo.origin solo para armas sin Player (montadas/NPC),
+	-- donde el payload lo generó el propio server.
+	local origin = nil
+	local shooterChar = player and player.Character
+	local shooterRoot = shooterChar and shooterChar:FindFirstChild("HumanoidRootPart")
+	if shooterRoot then
+		origin = (shooterRoot :: BasePart).Position
+	elseif not player and typeof(fireInfo) == "table" and typeof(fireInfo.origin) == "Vector3" then
+		origin = fireInfo.origin
+	end
 	if typeof(origin) ~= "Vector3" then
 		getEvent("WeaponFired"):FireAllClients(player, weaponInst, fireInfo)
 		return

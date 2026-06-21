@@ -32,6 +32,7 @@ local HealthBillboardController = require(script.HealthBillboardController)
 local MapVoteView = require(script.MapVoteView)
 local PanelController = require(Client.core.ui.PanelController)
 local BlurController = require(Client.core.ui.BlurController)
+local TouchControlsController = require(Client.core.ui.TouchControlsController)
 local LightingPresetController = require(Client.core.lighting.LightingPresetController)
 local DepthOfFieldController = require(Client.core.lighting.DepthOfFieldController)
 
@@ -68,6 +69,8 @@ local function _resolveResultsFrame(playerGui: PlayerGui): GuiObject?
 	if node and node:IsA("GuiObject") then
 		return node
 	end
+	-- Sin este frame, ResultsView queda no-op: ni frames de jugador ni rewards.
+	warn("[MatchFeature] No se encontró PlayerGui.UserInterface.Results — la pantalla de Resultados (frames + rewards) no se mostrará.")
 	return nil
 end
 
@@ -171,6 +174,9 @@ function MatchFeature.start(menuController: any): any
 	-- DOF de fondo del menú: encendido al arrancar (estamos en Lobby) y alternado
 	-- por fase abajo. El locker lo suprime mientras usa su propio ShowcaseDOF.
 	DepthOfFieldController.setEnabled(true)
+	-- Controles táctiles por defecto (joystick): ocultos al arrancar (Lobby) y solo
+	-- visibles en partida activa. Se alternan junto al resto del estado de fase.
+	TouchControlsController.setEnabled(false)
 	MatchState.setOnPhaseChanged(function(_prev, nextPhase)
 		local inMenu = nextPhase == "Lobby" or nextPhase == "ReturningToMenu"
 		DepthOfFieldController.setEnabled(inMenu)
@@ -181,10 +187,16 @@ function MatchFeature.start(menuController: any): any
 			local presetName = MAP_TO_LIGHTING_PRESET[activeMapName] or "Match"
 			LightingPresetController.apply(presetName)
 		end
+
+		-- El joystick solo en gameplay controlable (InMatch/Dying); en
+		-- Joining/ShowingResults/ReturningToMenu/Lobby no hay personaje que mover.
+		TouchControlsController.setEnabled(nextPhase == "InMatch" or nextPhase == "Dying")
 	end)
 	janitor:Add(function()
 		MatchState.setOnPhaseChanged(nil)
 		DepthOfFieldController.setEnabled(false)
+		-- Restaurar el comportamiento por defecto de Roblox al desmontar el feature.
+		TouchControlsController.setEnabled(true)
 	end, true)
 
 	local matchMenu = MatchMenu.new(menuController, playerGui, menuGui, MatchState.shouldKeepMenuHidden)
@@ -318,6 +330,14 @@ function MatchFeature.start(menuController: any): any
 			return
 		end
 
+		-- No unirse mientras la pantalla de votación sigue abierta (incluida la
+		-- animación del ganador tras acabar la votación): el jugador debe estar 100%
+		-- de vuelta en el menú. Sin esto, pulsar espacio justo al terminar la
+		-- votación lo metía en partida con la GUI de votación sobrepuesta.
+		if votingPanelOpen then
+			return
+		end
+
 		MatchState.setPhase("Joining")
 		matchMenu:enforceHidden()
 		iris:close(function()
@@ -406,6 +426,12 @@ function MatchFeature.start(menuController: any): any
 	-- Play tiene doble función: durante la votación abre la pantalla de votación;
 	-- en lobby normal intenta unirse a la partida.
 	local function onPlayPressed()
+		-- El espacio (y Play) solo funciona en el menú limpio: si hay cualquier
+		-- pestaña abierta (Settings, Locker, BattlePass, Store, Rewards, Voting…),
+		-- no hace nada — ni se une a partida ni abre la votación.
+		if menuController:hasOpenPanel() then
+			return
+		end
 		if isVoting then
 			if votingPanel then
 				votingPanel:open()
@@ -684,21 +710,18 @@ function MatchFeature.start(menuController: any): any
 		iris:open()
 	end), true)
 
-	-- ── Network: PlayerStreakState ────────────────────────────
+	-- ── Network: PlayerStreakState (stats de combate para el marcador) ──
 	janitor:Add(Network.Match.PlayerStreakState.Listen(function(data: {
 		userId: string,
 		kills: number,
 		deaths: number,
-		streak: number,
 		assists: number,
 	})
 		local userId = tonumber(data.userId)
 		if not userId then
 			return
 		end
-		hud:applyPlayerState(userId, data.kills, data.deaths, data.streak, data.assists)
-
-		-- Si es el jugador local, sincroniza el StreakController con el streak del servidor
+		hud:applyPlayerState(userId, data.kills, data.deaths, data.assists)
 	end), true)
 
 	-- ── Network: BotRoster ───────────────────────────────────

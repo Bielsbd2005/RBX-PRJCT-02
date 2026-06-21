@@ -139,6 +139,11 @@ function HatApplier:Apply(itemData: any)
 
 	if headAttachment and headAttachment:IsA("Attachment") then
 		handle.CFrame = headAttachment.WorldCFrame * (if hatAttachment then hatAttachment.CFrame:Inverse() else CFrame.new())
+	else
+		-- Asset mal formado (sin HatAttachment ni el attachment esperado): sin esto
+		-- el WeldConstraint congela la CFrame por defecto del clone (cerca del
+		-- origen del mundo). Posicionar el Handle sobre la cabeza como fallback.
+		handle.CFrame = head.CFrame * CFrame.new(0, head.Size.Y * 0.5, 0)
 	end
 
 	local weld = Instance.new("WeldConstraint")

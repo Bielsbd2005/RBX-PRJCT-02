@@ -979,7 +979,9 @@ function BaseWeapon:onReloaded(player, fromNetwork)
 
 		self.curReloadSound = self:tryPlaySound("Reload", nil)
 		if self.curReloadSound then
-			self.curReloadSound.Ended:Connect(function()
+			-- :Once — con :Connect cada recarga acumulaba una conexión viva sobre
+			-- los clones del soundPool, que persisten toda la vida del arma.
+			self.curReloadSound.Ended:Once(function()
 				self.curReloadSound = nil
 			end)
 		end
@@ -1042,8 +1044,11 @@ function BaseWeapon:cancelReload(player, fromNetwork)
 	end
 
 	if self.curReloadSound then
+		-- Stop SIN Destroy: el sonido viene del soundPool round-robin (5 clones
+		-- que viven toda la vida del arma). Destruirlo dejaba un clon muerto en
+		-- pool.items — tras 5 reloads cancelados el arma se quedaba sin sonido
+		-- de recarga para siempre.
 		self.curReloadSound:Stop()
-		self.curReloadSound:Destroy()
 		self.curReloadSound = nil
 	end
 

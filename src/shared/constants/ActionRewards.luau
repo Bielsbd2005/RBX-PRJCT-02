@@ -8,8 +8,7 @@
 	BattlePassService) debe pasar por `server/core/RewardService.Award(player,
 	actionKey, extras?)` en lugar de leer/aplicar XP o Cash directamente.
 
-	Acciones combate (aditivas — kill+headshot suma ambos; streak alcanzado
-	suma Kill + StreakN ese turno).
+	Acciones combate (aditivas — kill+headshot suma ambos).
 	Acciones no-combate: XP=0 por ahora (cash only); estructura preparada para
 	añadir XP cambiando solo el número aquí.
 ]]
@@ -26,8 +25,6 @@ ActionRewards.Amounts = {
 	Kill = { XP = 25, Cash = 10 },
 	Headshot = { XP = 15, Cash = 5 },
 	Assist = { XP = 10, Cash = 5 },
-	Streak3 = { XP = 30, Cash = 15 },
-	Streak5 = { XP = 60, Cash = 30 },
 
 	-- Daily tasks (server/features/dailyTasks). Convención: clave = "Daily" .. Id
 	-- (Task1 -> DailyTask1). El cliente y el server resuelven el cash leyendo

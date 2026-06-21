@@ -84,7 +84,7 @@ end
 
 -- Timeout duro general: pase lo que pase, forzar la dismissal para no atrapar al jugador
 local hardTimeoutReached = false
-task.delay(HARD_TIMEOUT, function()
+local hardTimeoutThread = task.delay(HARD_TIMEOUT, function()
 	hardTimeoutReached = true
 	loadedAssets = totalAssets
 end)
@@ -127,6 +127,13 @@ while not hardTimeoutReached and (loadedAssets < totalAssets or (os.clock() - st
 	subtitle.Text = string.rep(".", dotsCount)
 
 	RunService.Heartbeat:Wait()
+end
+
+-- El loop terminó (carga completa): cancelar el hard-timeout pendiente para no
+-- dejar un thread vivo ~20s escribiendo sobre upvalues huérfanos. Si ya disparó,
+-- el thread está muerto y no es cancelable (de ahí el guard).
+if not hardTimeoutReached then
+	task.cancel(hardTimeoutThread)
 end
 
 TweenService:Create(

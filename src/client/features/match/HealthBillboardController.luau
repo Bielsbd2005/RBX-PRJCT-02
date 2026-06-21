@@ -297,7 +297,10 @@ local HealthBillboardController = {}
 -- listeners se duplicaban en cada Start() (re-entrar al menú de match) y
 -- nunca se limpiaban en Stop().
 local _moduleConns: { RBXScriptConnection } = {}
-local _pendingWatchers: { () -> () } = {}
+-- Set por función (no array) para que cada cleanup pueda auto-removerse en O(1).
+-- Antes era un array al que solo se insertaba: cleanup() desconectaba las conns
+-- pero no quitaba su entrada, así que la tabla crecía toda la partida.
+local _pendingWatchers: { [() -> ()]: boolean } = {}
 local _started = false
 
 local function _wireCharacterAddedFor(player: Player)
@@ -372,11 +375,13 @@ function HealthBillboardController:Start(prescannedModels: { Model }?)
 		local resolved = false
 		local ancestryConn: RBXScriptConnection? = nil
 		local childConn: RBXScriptConnection? = nil
-		local function cleanup()
+		local cleanup
+		cleanup = function()
 			if ancestryConn then ancestryConn:Disconnect() ancestryConn = nil end
 			if childConn then childConn:Disconnect() childConn = nil end
+			_pendingWatchers[cleanup] = nil
 		end
-		table.insert(_pendingWatchers, cleanup)
+		_pendingWatchers[cleanup] = true
 		ancestryConn = instance.AncestryChanged:Connect(function()
 			if not instance:IsDescendantOf(game) then cleanup() end
 		end)
@@ -428,7 +433,7 @@ function HealthBillboardController:Stop()
 	end
 	table.clear(_moduleConns)
 
-	for _, cleanup in _pendingWatchers do
+	for cleanup in _pendingWatchers do
 		pcall(cleanup)
 	end
 	table.clear(_pendingWatchers)

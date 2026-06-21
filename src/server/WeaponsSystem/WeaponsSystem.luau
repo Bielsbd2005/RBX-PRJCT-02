@@ -122,8 +122,20 @@ local REMOTE_EVENT_NAMES = {
 	"WeaponActivated",
 	"PlayerEliminated",
 	"PlayerAssist",
-	"SyncStreakState",
 	"PlayExplosionVFX",
+}
+
+-- Solo estos eventos aceptan tráfico cliente→servidor. El resto son broadcasts
+-- servidor→cliente: conectar su OnServerEvent permitía a un exploiter dispararlos
+-- como input (p. ej. "WeaponReloaded" ejecutaba onReloaded server-side sobre
+-- cualquier arma, sin ownership ni los guards de reload(), y tras ReloadTime
+-- ponía CurrentAmmo = AmmoCapacity → munición infinita).
+local CLIENT_TO_SERVER_EVENTS = {
+	WeaponFired = true,
+	WeaponHit = true,
+	WeaponReloadRequest = true,
+	WeaponReloadCanceled = true,
+	WeaponActivated = true,
 }
 
 -- Damage contributors per humanoid for assist tracking.
@@ -254,16 +266,15 @@ WeaponsSystem.CurrentWeaponChanged = Instance.new("BindableEvent")
 --
 -- killHook (sincronía):
 --   Bootstrap registra una función que recibe (killer, victimHumanoid,
---   weaponName, wasHeadshot) y devuelve { coinAmount, streakAfterKill,
---   xpGained } para el payload del PlayerEliminated remote (UI del killer
---   los necesita en el mismo frame). Si nadie registra el hook, valores
---   default resueltos vía ActionRewards (Kill + Headshot si aplica).
+--   weaponName, wasHeadshot) y devuelve { xpGained } para el payload del
+--   PlayerEliminated remote (UI del killer lo necesita en el mismo frame). Si
+--   nadie registra el hook, valor default resuelto vía ActionRewards.
 --
 -- Killed.Event (asíncrono):
 --   Se Fire después de aplicar damage + flush assists. Bootstrap conecta
 --   listeners para DailyTasks/BattlePass/etc. WeaponsSystem solo notifica.
 WeaponsSystem.Killed = Instance.new("BindableEvent")
-WeaponsSystem.killHook = (nil :: any) :: ((killer: Player, victimHum: Humanoid, weaponName: string, wasHeadshot: boolean) -> { coinAmount: number?, streakAfterKill: number?, xpGained: number? })?
+WeaponsSystem.killHook = (nil :: any) :: ((killer: Player, victimHum: Humanoid, weaponName: string, wasHeadshot: boolean) -> { xpGained: number? })?
 
 function WeaponsSystem.getLastAttacker(humanoid: Humanoid)
 	return LastAttackerStore.get(humanoid)
@@ -496,16 +507,18 @@ function WeaponsSystem.setup()
 			remoteEvent.Name = remoteEventName
 			remoteEvent.Parent = networkFolder
 
-			local callback = NetworkingCallbacks[remoteEventName]
-			if not callback then
-				--Connect a no-op function to ensure the queue doesn't pile up.
-				warn("There is no server callback implemented for the WeaponsSystem RemoteEvent \"%s\"!")
-				warn("A default no-op function will be implemented so that the queue cannot be abused.")
-				callback = function(...) end
+			if CLIENT_TO_SERVER_EVENTS[remoteEventName] then
+				local callback = NetworkingCallbacks[remoteEventName]
+				if not callback then
+					--Connect a no-op function to ensure the queue doesn't pile up.
+					warn("There is no server callback implemented for the WeaponsSystem RemoteEvent \"%s\"!")
+					warn("A default no-op function will be implemented so that the queue cannot be abused.")
+					callback = function(...) end
+				end
+				WeaponsSystem.connections[remoteEventName .. "Remote"] = remoteEvent.OnServerEvent:Connect(function(...)
+					callback(...)
+				end)
 			end
-			WeaponsSystem.connections[remoteEventName .. "Remote"] = remoteEvent.OnServerEvent:Connect(function(...)
-				callback(...)
-			end)
 			WeaponsSystem.remoteEvents[remoteEventName] = remoteEvent
 		end
 		-- Q3: REMOTE_FUNCTION_NAMES está vacío (la WeaponsSystem no usa RemoteFunctions),
@@ -971,9 +984,9 @@ local function _defaultDamageCallback(system, target, amount, damageType, dealer
 					local targetHrp = targetCharacter:FindFirstChild("HumanoidRootPart")
 					local victimPos = targetHrp and targetHrp.Position or targetCharacter:GetPivot().Position
 
-					-- Hook sincrono — el bootstrap puede registrarlo para
-					-- computar streak/cash/xp. Si nadie registra, defaults.
-					local rewards: { coinAmount: number?, streakAfterKill: number?, xpGained: number? }? = nil
+					-- Hook sincrono — el bootstrap puede registrarlo para computar el
+					-- xp a mostrar. Si nadie registra, defaults.
+					local rewards: { xpGained: number? }? = nil
 					local hook = WeaponsSystem.killHook
 					if hook then
 						local ok, result = pcall(hook, dealerPlayer, target, weaponName, wasHeadshot)
@@ -989,10 +1002,8 @@ local function _defaultDamageCallback(system, target, amount, damageType, dealer
 					-- y devuelve los valores reales de ActionRewards.
 					local fallbackXp = ActionRewards.GetXP("Kill") + (wasHeadshot and ActionRewards.GetXP("Headshot") or 0)
 					local xpGained = (rewards and rewards.xpGained) or fallbackXp
-					local streakAfterKill = (rewards and rewards.streakAfterKill) or 1
-					local coinAmount = rewards and rewards.coinAmount
 
-					eliminatedEvent:FireClient(dealerPlayer, victimName, xpGained, wasHeadshot, victimPos, coinAmount, streakAfterKill)
+					eliminatedEvent:FireClient(dealerPlayer, victimName, xpGained, wasHeadshot, victimPos)
 				end
 			end
 

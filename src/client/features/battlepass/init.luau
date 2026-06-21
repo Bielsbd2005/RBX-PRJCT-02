@@ -458,6 +458,7 @@ function BattlePassFeature.start(menuController: any): any
 			local ok = WeaponWrapPreviewer.Render(viewportPreview, {
 				TextureID = wrapDef.TextureID,
 				BaseColor = wrapDef.BaseColor,
+				Material = wrapDef.Material,
 				isAnimated = wrapDef.isAnimated,
 				StudsPerTile = wrapDef.StudsPerTile,
 			}, previewJanitor)
@@ -532,8 +533,9 @@ function BattlePassFeature.start(menuController: any): any
 		return if remaining > TIMER_POLL_SLOW then TIMER_POLL_SLOW else TIMER_POLL_FAST
 	end
 	updateTimer()
+	local timerThread
 	if timerLabel and season.EndsAt > 0 then
-		task.spawn(function()
+		timerThread = task.spawn(function()
 			while timerRunning do
 				task.wait(updateTimer())
 			end
@@ -541,6 +543,13 @@ function BattlePassFeature.start(menuController: any): any
 	end
 	janitor:Add(function()
 		timerRunning = false
+		-- Cancelar el thread: si la temporada termina a >1h vista, updateTimer
+		-- devuelve TIMER_POLL_SLOW=3600 y el thread dormiría hasta 1h tras el
+		-- cleanup (reteniendo upvalues) antes de releer timerRunning y salir.
+		if timerThread then
+			pcall(task.cancel, timerThread)
+			timerThread = nil
+		end
 	end, true)
 
 	-- ── Claim helpers ────────────────────────────────────────
@@ -624,6 +633,7 @@ function BattlePassFeature.start(menuController: any): any
 					local ok = WeaponWrapPreviewer.Render(refs.viewport, {
 						TextureID = wrapDef.TextureID,
 						BaseColor = wrapDef.BaseColor,
+						Material = wrapDef.Material,
 						isAnimated = wrapDef.isAnimated,
 						StudsPerTile = wrapDef.StudsPerTile,
 					}, previewJanitor)

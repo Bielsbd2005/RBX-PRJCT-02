@@ -233,8 +233,8 @@ function Crosshair:updateShotgunRangeState()
 	local result = workspace:Raycast(cameraOrigin, cameraDir * maxRay, rayParams)
 	if result and result.Instance then
 		local hitChar = result.Instance:FindFirstAncestorOfClass("Model")
-		if hitChar and hitChar:FindFirstChildOfClass("Humanoid") then
-			local hum = hitChar:FindFirstChildOfClass("Humanoid")
+		local hum = hitChar and hitChar:FindFirstChildOfClass("Humanoid")
+		if hum then
 			local localChar = localPlayer and localPlayer.Character
 			local sameTeam = localChar and TeamUtils.isSameTeam(localChar, hitChar) or false
 			if hum and hum.Health > 0 and not sameTeam and hitChar ~= localChar then

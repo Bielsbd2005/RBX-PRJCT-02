@@ -145,6 +145,13 @@ function LobbyMusicFeature.start(menuController: any): any
 		local hasPanel = menuController:hasOpenPanel()
 		local isHidden = menuController:isHidden()
 		if isHidden and not hasPanel then return end
+		-- Cancelar cualquier tween de volumen en vuelo (p. ej. STATE_TWEEN_INFO de
+		-- 1s tras abrir Settings) antes de fijar el valor: si no, el tween seguía
+		-- sobrescribiendo frame a frame y el slider parecía no responder.
+		for _, tween in activeTweens do
+			tween:Cancel()
+		end
+		table.clear(activeTweens)
 		sound.Volume = (if hasPanel then MUFFLE_VOLUME else BASE_VOLUME) * mult
 	end), "Disconnect")
 	applyState()

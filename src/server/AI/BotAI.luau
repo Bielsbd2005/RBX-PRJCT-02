@@ -1011,12 +1011,18 @@ function BotAI:Start(
 
 			if alignOrientation then
 				if potentialTarget and targetRoot then
-					local aimDelta = targetPos - self._lastAimPos
-					if aimDelta:Dot(aimDelta) > 0.25 then
-						local lookPos = Vector3.new(targetPos.X, rootPart.Position.Y, targetPos.Z)
+					-- Mirar SIEMPRE al objetivo desde la posición ACTUAL del bot,
+					-- recalculado cada iteración. Antes solo se actualizaba cuando el
+					-- objetivo se movía (gate aimDelta), así que al hacer strafe con el
+					-- objetivo quieto el bot quedaba mirando una dirección vieja y
+					-- disparaba "de lado" (la bala salía del cañón girado hacia el
+					-- objetivo y hacía un arco raro).
+					local lookPos = Vector3.new(targetPos.X, rootPart.Position.Y, targetPos.Z)
+					-- Evita un lookAt degenerado (NaN) si el bot está justo encima.
+					if (lookPos - rootPart.Position).Magnitude > 0.05 then
 						alignOrientation.CFrame = CFrame.lookAt(rootPart.Position, lookPos)
-						self._lastAimPos = targetPos
 					end
+					self._lastAimPos = targetPos
 					alignOrientation.Enabled = true
 					humanoid.AutoRotate = false
 				else

@@ -136,8 +136,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local player = Players.LocalPlayer
 	local playerGui = player:WaitForChild("PlayerGui")
 	local menuGui = menuController:getGui()
-	local lockerBodiesFolder = Shared:WaitForChild("LockerBodies") :: Folder
-	local killEffectDummyTemplate = lockerBodiesFolder:WaitForChild("KillEffectDummy") :: Model
+	local bodiesFolder = Shared:WaitForChild("Bodies") :: Folder
+	local killEffectDummyTemplate = bodiesFolder:WaitForChild("KillEffectDummy") :: Model
 
 	-- El preview del personaje (outfit/cara/hat) ya no usa un maniquí propio en
 	-- Workspace.Locker.CharacterSpawn: se previsualiza sobre el personaje del lobby
@@ -1441,11 +1441,17 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 				item = item,
 			}
 			pendingShopAction = buyAction
+			-- Snapshot de la categoría/nav al momento de comprar: si el usuario
+			-- navega a otra vista durante el timeout, repoblar la vista ACTUAL
+			-- forzando un qualifiedId que probablemente no existe allí es incorrecto.
+			local buyMainCategory = selectedMainCategory
+			local buyNavKey = selectedNavKey
 			task.delay(SHOP_REQUEST_TIMEOUT, function()
 				if pendingShopAction == buyAction then
 					pendingShopAction = nil
-					if selectedMainCategory and selectedNavKey then
-						populateMainContentForNavItem(selectedMainCategory, selectedNavKey, buyAction.item.qualifiedId)
+					if buyMainCategory and buyNavKey
+						and selectedMainCategory == buyMainCategory and selectedNavKey == buyNavKey then
+						populateMainContentForNavItem(buyMainCategory, buyNavKey, buyAction.item.qualifiedId)
 					end
 				end
 			end)

@@ -3,6 +3,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local StarterGui = game:GetService("StarterGui")
 local Workspace = game:GetService("Workspace")
+local Players = game:GetService("Players")
 
 local Packages = ReplicatedStorage:WaitForChild("Packages")
 
@@ -66,6 +67,13 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 	-- Evita recreacion de ScreenGuis en respawn (rompe bindings de botones si cambia la instancia).
 	StarterGui.ResetPlayerGuiOnSpawn = false
 	disableDefaultCoreGui()
+
+	-- Forzar orientación horizontal en móvil. LandscapeSensor bloquea el juego a
+	-- horizontal pero permite girar el teléfono a izquierda o derecha. En PC/consola
+	-- la propiedad se ignora. Se aplica sobre el PlayerGui vivo (StarterGui solo
+	-- siembra el valor al unirse, así que esto es lo que manda en runtime).
+	local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui")
+	playerGui.ScreenOrientation = Enum.ScreenOrientation.LandscapeSensor
 
 	local DataController = require(clientRoot.core.data.DataController)
 	local MenuController = require(clientRoot.core.ui.MenuController)

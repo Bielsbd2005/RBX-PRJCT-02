@@ -65,16 +65,28 @@ local function asFrame(inst: Instance?): Frame?
 	return if inst and inst:IsA("Frame") then inst else nil
 end
 
--- Estructura del HUD (Menu plano):
---   Menu.Cash.Value          → efectivo
---   Menu.Level.Value         → nivel
---   Menu.Level.Bar.Fill      → progreso de XP hacia el siguiente nivel
---   Menu.Level.Bar.Value     → texto XP "actual/necesaria" (opcional)
+-- Level/Cash/Rewards/Settings viven bajo Menu.TopFrame. Resolvemos prefiriendo
+-- TopFrame y cayendo al hijo directo de Menu, así la GUI funciona con la nueva
+-- disposición (agrupada) o con la antigua (plana) sin tocar el código.
+local function findMenuChild(menuGui: ScreenGui, name: string): Instance?
+	local topFrame = menuGui:FindFirstChild("TopFrame")
+	local underTop = topFrame and topFrame:FindFirstChild(name)
+	if underTop then
+		return underTop
+	end
+	return menuGui:FindFirstChild(name)
+end
+
+-- Estructura del HUD (bajo Menu.TopFrame):
+--   TopFrame.Cash.Value       → efectivo
+--   TopFrame.Level.Value      → nivel
+--   TopFrame.Level.Bar.Fill   → progreso de XP hacia el siguiente nivel
+--   TopFrame.Level.Bar.Value  → texto XP "actual/necesaria" (opcional)
 local function resolveHudRefs(menuGui: ScreenGui): HudRefs
-	local cashNode = menuGui:FindFirstChild("Cash")
+	local cashNode = findMenuChild(menuGui, "Cash")
 	local cashValue = asTextLabel(cashNode and cashNode:FindFirstChild("Value"))
 
-	local levelNode = menuGui:FindFirstChild("Level")
+	local levelNode = findMenuChild(menuGui, "Level")
 	local level = asTextLabel(levelNode and levelNode:FindFirstChild("Value"))
 
 	local barNode = levelNode and levelNode:FindFirstChild("Bar")
@@ -112,7 +124,7 @@ end
 -- suben además de crecer; el resto solo escala. Botones no listados conservan
 -- su comportamiento por defecto (solo el stroke tween de MenuHover).
 local MENU_BUTTON_HOVER_BINDINGS: { { path: { string }, lift: number } } = {
-	{ path = { "settings" }, lift = 0 },
+	{ path = { "Settings" }, lift = 0 },
 	{ path = { "Rewards" }, lift = 0 },
 	{ path = { "PlayBtn" }, lift = 0 },
 	{ path = { "Nav", "BattlePass" }, lift = 0 },
@@ -120,18 +132,21 @@ local MENU_BUTTON_HOVER_BINDINGS: { { path: { string }, lift: number } } = {
 	{ path = { "Nav", "Locker" }, lift = 8 },
 }
 
-local function resolveDescendant(root: Instance, path: { string }): Instance?
-	local node: Instance? = root
-	for _, name in path do
+-- El primer segmento del path se resuelve con findMenuChild (TopFrame-aware, con
+-- fallback al hijo directo de Menu); el resto desciende normal. Así Settings/Rewards
+-- (ahora bajo TopFrame) y PlayBtn/Nav (directos bajo Menu) se resuelven igual.
+local function resolveMenuButton(menuGui: ScreenGui, path: { string }): Instance?
+	local node: Instance? = findMenuChild(menuGui, path[1])
+	for i = 2, #path do
 		if not node then return nil end
-		node = node:FindFirstChild(name)
+		node = node:FindFirstChild(path[i])
 	end
 	return node
 end
 
 local function bindMenuButtonHovers(menuGui: ScreenGui, janitor: any): ()
 	for _, binding in MENU_BUTTON_HOVER_BINDINGS do
-		local node = resolveDescendant(menuGui, binding.path)
+		local node = resolveMenuButton(menuGui, binding.path)
 		if node and node:IsA("GuiButton") then
 			InteractiveScaleTween.bindButton(node, janitor, {
 				hoverScale = UITheme.ButtonHoverScale,

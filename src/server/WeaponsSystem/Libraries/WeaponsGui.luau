@@ -571,7 +571,7 @@ function WeaponsGui:playReloadProgressAnimation(reloadTime: number)
 	self._reloadProgressTween:Play()
 
 	local activeTween = self._reloadProgressTween
-	activeTween.Completed:Connect(function()
+	activeTween.Completed:Once(function()
 		if runId ~= self._reloadProgressRunId then return end
 
 		if self._reloadProgressConnection then

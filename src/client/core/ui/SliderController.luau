@@ -41,6 +41,11 @@ export type SliderConfig = {
 local SliderController = {}
 SliderController.__index = SliderController
 
+-- Lock global compartido entre TODAS las instancias: solo un slider puede estar
+-- en arrastre a la vez. Evita que, mientras mueves uno, un segundo dedo que toca
+-- otro slider cercano lo arrastre también (multi-touch en móvil).
+local _activeSlider: any = nil
+
 local function resolve(parent: Instance, name: string): Instance?
 	local child = parent:WaitForChild(name, RESOLVE_TIMEOUT)
 	if not child then
@@ -54,11 +59,6 @@ local function isDragInput(input: InputObject): boolean
 		or input.UserInputType == Enum.UserInputType.Touch
 end
 
-local function isMoveInput(input: InputObject): boolean
-	return input.UserInputType == Enum.UserInputType.MouseMovement
-		or input.UserInputType == Enum.UserInputType.Touch
-end
-
 function SliderController.new(config: SliderConfig)
 	local self = setmetatable({}, SliderController)
 
@@ -68,6 +68,9 @@ function SliderController.new(config: SliderConfig)
 	self._value = 0
 	self._dragging = false
 	self._inert = false
+	-- Puntero (InputObject) que inició el arrastre activo. En táctil identifica el
+	-- dedo concreto; en ratón es el MouseButton1 que lo comenzó.
+	self._activeInput = nil :: InputObject?
 
 	-- Resolución tolerante: si la estructura no coincide, avisa y queda inerte
 	-- en vez de colgar el feature entero con un WaitForChild infinito.
@@ -88,10 +91,24 @@ function SliderController.new(config: SliderConfig)
 	self._track.Active = true
 
 	local function beginDrag(input: InputObject)
-		if isDragInput(input) then
-			self._dragging = true
-			self:_updateFromX(input.Position.X, true)
+		if not isDragInput(input) then
+			return
 		end
+		-- Si otro slider ya posee el arrastre, no reaccionar. Si el dueño quedó
+		-- obsoleto (no soltó limpio), liberar el lock y continuar.
+		if _activeSlider ~= nil and _activeSlider ~= self then
+			if _activeSlider._dragging then
+				return
+			end
+			_activeSlider = nil
+		end
+		if self._dragging then
+			return
+		end
+		_activeSlider = self
+		self._dragging = true
+		self._activeInput = input
+		self:_updateFromX(input.Position.X, true)
 	end
 
 	-- Escuchamos en pista y knob: tocar cualquier punto de la pista salta ahí, y
@@ -100,14 +117,18 @@ function SliderController.new(config: SliderConfig)
 	self._janitor:Add(self._handle.InputBegan:Connect(beginDrag), "Disconnect")
 
 	self._janitor:Add(UserInputService.InputChanged:Connect(function(input: InputObject)
-		if self._dragging and isMoveInput(input) then
+		if self._dragging and self:_isActiveMove(input) then
 			self:_updateFromX(input.Position.X, true)
 		end
 	end), "Disconnect")
 
 	self._janitor:Add(UserInputService.InputEnded:Connect(function(input: InputObject)
-		if self._dragging and isDragInput(input) then
+		if self._dragging and self:_isActiveEnd(input) then
 			self._dragging = false
+			self._activeInput = nil
+			if _activeSlider == self then
+				_activeSlider = nil
+			end
 			if self._onCommit then
 				self._onCommit(self._value)
 			end
@@ -121,6 +142,34 @@ function SliderController.new(config: SliderConfig)
 	end), "Disconnect")
 
 	return self
+end
+
+-- ¿El input que cambió corresponde al puntero que inició ESTE arrastre? Táctil:
+-- debe ser el mismo InputObject (mismo dedo) — así un segundo dedo no lo mueve.
+-- Ratón: el arrastre lo inicia el botón pero el movimiento llega como
+-- MouseMovement (otro objeto), así que se acepta por tipo.
+function SliderController:_isActiveMove(input: InputObject): boolean
+	local active = self._activeInput
+	if not active then
+		return false
+	end
+	if active.UserInputType == Enum.UserInputType.Touch then
+		return input == active
+	end
+	return input.UserInputType == Enum.UserInputType.MouseMovement
+end
+
+-- ¿El input que terminó cierra ESTE arrastre? Táctil: el mismo dedo. Ratón: el
+-- MouseButton1 que lo inició.
+function SliderController:_isActiveEnd(input: InputObject): boolean
+	local active = self._activeInput
+	if not active then
+		return false
+	end
+	if active.UserInputType == Enum.UserInputType.Touch then
+		return input == active
+	end
+	return input.UserInputType == Enum.UserInputType.MouseButton1
 end
 
 -- Coloca el knob para un valor [0,1] (su centro a lo largo de la banda de viaje).
@@ -179,6 +228,10 @@ function SliderController:get(): number
 end
 
 function SliderController:Destroy()
+	-- Si este slider tenía el lock global, liberarlo para no bloquear a los demás.
+	if _activeSlider == self then
+		_activeSlider = nil
+	end
 	self._janitor:Destroy()
 end
 

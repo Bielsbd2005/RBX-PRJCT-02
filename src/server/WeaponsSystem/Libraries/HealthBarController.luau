@@ -6,12 +6,15 @@ local HealEffect = require(script.Parent:WaitForChild("HealEffect"))
 
 local HealthBarController = {}
 
--- El Vignette muestra dos efectos de salud, cada uno con su propio NumberValue
+-- El Vignette muestra efectos de salud, cada uno con su propio NumberValue
 -- driver (hijo del Vignette) que lee Scope.luau vía .Changed:
 --
 --  * HealthAlphaDriver (rojo): vignette continuo de PELIGRO. Se intensifica de
 --    forma proporcional cuando la vida cae por debajo del umbral. Persiste
 --    mientras la vida siga baja; vuelve a 0 al recuperarse.
+--  * DamageAlphaDriver (rojo): flash puntual al RECIBIR DAÑO (hit indicator).
+--    Sube rápido al pico y vuelve a 0. Driver propio para no pisar el de peligro;
+--    el renderer compone ambos rojos por max.
 --  * HealAlphaDriver (verde): flash puntual de CURACIÓN. Se dispara cuando el
 --    jugador gana salud no trivial (pickup, ability, etc.) y se desvanece solo.
 --
@@ -43,6 +46,18 @@ local HEAL_FADE_IN_INFO = TweenInfo.new(HEAL_EFFECT_DURATION * 0.18, Enum.Easing
 local HEAL_FADE_OUT_INFO = TweenInfo.new(HEAL_EFFECT_DURATION * 0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 local HEAL_HOLD_SECONDS = HEAL_EFFECT_DURATION * 0.57
 local HEALTH_GAIN_THRESHOLD = 5
+-- Al curarse, el Fill sube animado (no instantáneo) mientras se muestra el efecto
+-- de curación. Duración atada a HEAL_EFFECT_DURATION para que ambos coincidan.
+local HEAL_FILL_INFO = TweenInfo.new(HEAL_EFFECT_DURATION * 0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+-- Flash ROJO de viñeta al recibir daño (hit indicator). Sube rápido al pico y
+-- vuelve a 0. Usa un driver propio (DamageAlphaDriver) para no pisar el rojo de
+-- peligro de vida baja (HealthAlphaDriver); el renderer compone ambos por max.
+local DAMAGE_FLASH_THRESHOLD = 1 -- HP mínimos perdidos para disparar el flash
+local VIGNETTE_DAMAGE_PEAK_TRANSPARENCY = 0.5 -- 0 = opaco, 1 = invisible (en el pico)
+local VIGNETTE_DAMAGE_PEAK_ALPHA = 1 - VIGNETTE_DAMAGE_PEAK_TRANSPARENCY
+local DAMAGE_FLASH_IN_INFO = TweenInfo.new(0.06, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local DAMAGE_FLASH_OUT_INFO = TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 
 -- Damage trail ("ghost bar" estilo AAA): una barra roja detrás del Fill que
 -- muestra el chunk de vida recién perdido y se drena despacio hasta el valor
@@ -55,13 +70,20 @@ local fillBar: Frame? = nil
 local valueLabel: TextLabel? = nil
 local damageTrail: Frame? = nil
 local damageTrailTween: Tween? = nil
+local fillTween: Tween? = nil -- subida animada del Fill al curarse
 local vignette: GuiObject? = nil
 local healthAlphaDriver: NumberValue? = nil -- rojo, vida baja
 local healAlphaDriver: NumberValue? = nil -- verde, curación
+local damageAlphaDriver: NumberValue? = nil -- rojo, flash al recibir daño
 local healVignetteTween: Tween? = nil
+local damageVignetteTween: Tween? = nil
 local healthConn: RBXScriptConnection? = nil
 local lastSeenHealth: number? = nil
 local healVignetteGeneration = 0
+local damageVignetteGeneration = 0
+-- true mientras el flash verde de curación está en pantalla: durante ese tiempo
+-- los disparos NO ponen la viñeta roja (el verde manda).
+local healVignetteActive = false
 
 local function getHealthBarNodes(): (Frame?, TextLabel?)
 	if fillBar and valueLabel then
@@ -139,7 +161,7 @@ local function ensureDriver(parent: GuiObject, name: string): NumberValue
 end
 
 local function getVignetteNodes(): (GuiObject?, NumberValue?, NumberValue?)
-	if vignette and healthAlphaDriver and healAlphaDriver then
+	if vignette and healthAlphaDriver and healAlphaDriver and damageAlphaDriver then
 		return vignette, healthAlphaDriver, healAlphaDriver
 	end
 
@@ -160,6 +182,7 @@ local function getVignetteNodes(): (GuiObject?, NumberValue?, NumberValue?)
 	vignette = vignetteNode
 	healthAlphaDriver = ensureDriver(vignette, "HealthAlphaDriver")
 	healAlphaDriver = ensureDriver(vignette, "HealAlphaDriver")
+	damageAlphaDriver = ensureDriver(vignette, "DamageAlphaDriver")
 
 	return vignette, healthAlphaDriver, healAlphaDriver
 end
@@ -174,6 +197,18 @@ local function showHealVignette()
 
 	healVignetteGeneration += 1
 	local myGen = healVignetteGeneration
+	healVignetteActive = true
+
+	-- Mientras dura el heal, la viñeta es verde y los disparos no la ponen roja:
+	-- cancelamos cualquier flash de daño en curso y lo apagamos.
+	damageVignetteGeneration += 1
+	if damageVignetteTween then
+		damageVignetteTween:Cancel()
+		damageVignetteTween = nil
+	end
+	if damageAlphaDriver and damageAlphaDriver.Parent then
+		damageAlphaDriver.Value = 0
+	end
 
 	if healVignetteTween then
 		healVignetteTween:Cancel()
@@ -203,34 +238,99 @@ local function showHealVignette()
 		fadeOut.Completed:Wait()
 		if healVignetteGeneration ~= myGen then return end
 		healVignetteTween = nil
+		healVignetteActive = false
 	end)
 end
 
-local function updateHealthBar(humanoid: Humanoid)
+-- Flash rojo de daño: sube rápido al pico y baja a 0 (sin hold). Driver propio,
+-- así no interfiere con el rojo de peligro de vida baja. Misma lógica de
+-- generación que el heal para reiniciar limpio si llegan varios golpes seguidos.
+local function showDamageVignette()
+	getVignetteNodes()
+	local driver = damageAlphaDriver
+	if not driver then return end
+
+	damageVignetteGeneration += 1
+	local myGen = damageVignetteGeneration
+
+	if damageVignetteTween then
+		damageVignetteTween:Cancel()
+		damageVignetteTween = nil
+	end
+
+	driver.Value = 0
+	local fadeIn = TweenService:Create(driver, DAMAGE_FLASH_IN_INFO, {
+		Value = VIGNETTE_DAMAGE_PEAK_ALPHA,
+	})
+	damageVignetteTween = fadeIn
+	fadeIn:Play()
+
+	task.spawn(function()
+		fadeIn.Completed:Wait()
+		if damageVignetteGeneration ~= myGen then return end
+		if not driver.Parent then return end
+
+		local fadeOut = TweenService:Create(driver, DAMAGE_FLASH_OUT_INFO, {
+			Value = 0,
+		})
+		damageVignetteTween = fadeOut
+		fadeOut:Play()
+		fadeOut.Completed:Wait()
+		if damageVignetteGeneration ~= myGen then return end
+		damageVignetteTween = nil
+	end)
+end
+
+local function updateHealthBar(humanoid: Humanoid, animateUp: boolean?)
 	local bar, value = getHealthBarNodes()
 
 	local maxHealth = math.max(humanoid.MaxHealth, 1)
 	local ratio = math.clamp(humanoid.Health / maxHealth, 0, 1)
-	if bar then
-		bar.Size = UDim2.new(ratio, 0, 1, 0)
 
-		-- Damage trail: si la barra baja (daño), el trail se queda en el valor
-		-- previo y se drena despacio hasta el actual. Si sube (heal), salta al
-		-- instante. Leemos el ancho actual del trail (interpolado mid-tween) para
-		-- continuar suave si llegan varios golpes seguidos.
+	-- Una nueva actualización (daño, respawn, otro heal) cancela la subida en curso.
+	if fillTween then
+		fillTween:Cancel()
+		fillTween = nil
+	end
+
+	if bar then
+		local targetSize = UDim2.new(ratio, 0, 1, 0)
 		local trail = getDamageTrail(bar)
-		if trail then
+
+		if animateUp then
+			-- Curación: el Fill sube animado mientras dura el efecto de curación. El
+			-- trail sube en sync para no mostrar rojo por encima del Fill ascendente.
 			if damageTrailTween then
 				damageTrailTween:Cancel()
 				damageTrailTween = nil
 			end
-			if ratio >= trail.Size.X.Scale then
-				trail.Size = UDim2.new(ratio, 0, 1, 0)
-			else
-				damageTrailTween = TweenService:Create(trail, DAMAGE_TRAIL_INFO, {
-					Size = UDim2.new(ratio, 0, 1, 0),
-				})
+			fillTween = TweenService:Create(bar, HEAL_FILL_INFO, { Size = targetSize })
+			fillTween:Play()
+			if trail then
+				damageTrailTween = TweenService:Create(trail, HEAL_FILL_INFO, { Size = targetSize })
 				damageTrailTween:Play()
+			end
+		else
+			bar.Size = targetSize
+
+			-- Damage trail: si la barra baja (daño), el trail se queda en el valor
+			-- previo y se drena despacio hasta el actual. Si sube sin animar (p. ej.
+			-- regen bajo el umbral), salta al instante. Leemos el ancho actual del
+			-- trail (interpolado mid-tween) para continuar suave si llegan varios
+			-- golpes seguidos.
+			if trail then
+				if damageTrailTween then
+					damageTrailTween:Cancel()
+					damageTrailTween = nil
+				end
+				if ratio >= trail.Size.X.Scale then
+					trail.Size = targetSize
+				else
+					damageTrailTween = TweenService:Create(trail, DAMAGE_TRAIL_INFO, {
+						Size = targetSize,
+					})
+					damageTrailTween:Play()
+				end
 			end
 		end
 	end
@@ -264,20 +364,33 @@ function HealthBarController.onCharacterAdded(character: Model)
 	-- antes de limpiar el cache para que no quede pintado en la GUI persistente.
 	lastSeenHealth = nil
 	healVignetteGeneration += 1
+	damageVignetteGeneration += 1
+	healVignetteActive = false
 	if healVignetteTween then
 		healVignetteTween:Cancel()
 		healVignetteTween = nil
+	end
+	if damageVignetteTween then
+		damageVignetteTween:Cancel()
+		damageVignetteTween = nil
 	end
 	HealEffect.reset()
 	if damageTrailTween then
 		damageTrailTween:Cancel()
 		damageTrailTween = nil
 	end
+	if fillTween then
+		fillTween:Cancel()
+		fillTween = nil
+	end
 	if healthAlphaDriver and healthAlphaDriver.Parent then
 		healthAlphaDriver.Value = 0
 	end
 	if healAlphaDriver and healAlphaDriver.Parent then
 		healAlphaDriver.Value = 0
+	end
+	if damageAlphaDriver and damageAlphaDriver.Parent then
+		damageAlphaDriver.Value = 0
 	end
 
 	-- Clear cached nodes so they are re-fetched for the new character's GUI
@@ -287,6 +400,7 @@ function HealthBarController.onCharacterAdded(character: Model)
 	vignette = nil
 	healthAlphaDriver = nil
 	healAlphaDriver = nil
+	damageAlphaDriver = nil
 
 	local humanoid = character:WaitForChild("Humanoid", 5) :: Humanoid?
 	if not humanoid then return end
@@ -300,12 +414,20 @@ function HealthBarController.onCharacterAdded(character: Model)
 		-- Detecta heal "discreto" (pickup, ability, etc.) excluyendo regen
 		-- default de 1 HP/s. lastSeenHealth puede ser nil tras spawn antes del
 		-- primer fire — se compara solo cuando ya hay baseline.
-		if lastSeenHealth ~= nil and newHealth - lastSeenHealth >= HEALTH_GAIN_THRESHOLD then
+		local isHeal = lastSeenHealth ~= nil and newHealth - lastSeenHealth >= HEALTH_GAIN_THRESHOLD
+		local isDamage = lastSeenHealth ~= nil and lastSeenHealth - newHealth >= DAMAGE_FLASH_THRESHOLD
+		if isHeal then
 			showHealVignette()
 			HealEffect.play(HEAL_EFFECT_DURATION)
+		elseif isDamage and not healVignetteActive then
+			-- Al recibir daño, flash rojo de viñeta (hit indicator). Suprimido
+			-- mientras la viñeta verde de curación está activa: el verde manda.
+			showDamageVignette()
 		end
 		lastSeenHealth = newHealth
-		updateHealthBar(humanoid)
+		-- En un heal discreto la barra sube animada (mientras dura el efecto); el
+		-- resto (daño, regen, respawn) se aplica al instante.
+		updateHealthBar(humanoid, isHeal)
 	end)
 end
 

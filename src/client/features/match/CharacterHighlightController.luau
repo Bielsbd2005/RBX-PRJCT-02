@@ -168,14 +168,27 @@ end
 -- Pending retries para Models que entraron al workspace sin Humanoid aún.
 -- Mantenemos las conns para limpiarlas cuando el model sale o se attacha.
 local _pendingRetryConns: { [Model]: { RBXScriptConnection } } = {}
+-- Threads de los task.delay de retry: sin cancelarlos mantenían viva la
+-- referencia al model hasta 2s tras salir del workspace (retraso de GC).
+local _pendingRetryThreads: { [Model]: { thread } } = {}
 
 local function _cleanupRetry(model: Model)
 	local conns = _pendingRetryConns[model]
-	if not conns then return end
-	for _, c in conns do
-		c:Disconnect()
+	if conns then
+		for _, c in conns do
+			c:Disconnect()
+		end
+		_pendingRetryConns[model] = nil
 	end
-	_pendingRetryConns[model] = nil
+	local threads = _pendingRetryThreads[model]
+	if threads then
+		for _, t in threads do
+			-- pcall: el thread que ejecuta este cleanup (o uno ya terminado) no
+			-- es cancelable; los pendientes sí, liberando la referencia al model.
+			pcall(task.cancel, t)
+		end
+		_pendingRetryThreads[model] = nil
+	end
 end
 
 local function _onDescendantAdded(instance: Instance)
@@ -253,9 +266,11 @@ local function _onDescendantAdded(instance: Instance)
 	-- atributo se "establece" por replicación inicial (vs cuando muta en runtime).
 	-- Reintentamos a 100ms, 500ms y 2s para cubrir replicación lenta sin polling
 	-- continuo. Si ya se attachó, los retries son no-ops.
-	task.delay(0.1, tryRetry)
-	task.delay(0.5, tryRetry)
-	task.delay(2.0, tryRetry)
+	_pendingRetryThreads[model] = {
+		task.delay(0.1, tryRetry),
+		task.delay(0.5, tryRetry),
+		task.delay(2.0, tryRetry),
+	}
 end
 
 local function _wirePlayer(player: Player)

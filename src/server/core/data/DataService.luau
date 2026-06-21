@@ -70,6 +70,7 @@ export type DataServiceModule = {
 	GrantItem: (self: DataServiceModule, player: Player, category: string, itemId: string, source: string) -> boolean,
 	MarkItemSeen: (self: DataServiceModule, player: Player, category: string, itemId: string) -> boolean,
 	ResetProfile: (self: DataServiceModule, player: Player) -> boolean,
+	ForceSave: (self: DataServiceModule, player: Player) -> boolean,
 	Destroy: (self: DataServiceModule) -> (),
 	ProfileLoaded: RBXScriptSignal,
 	ProfileUnloading: RBXScriptSignal,
@@ -983,17 +984,49 @@ function DataService:BatchUpdate(
 		accumulated[section] = _immutableUpdate(base, path, 2, newValue)
 	end
 
-	-- Aplicar: un SetValue por sección modificada. Devolver false si alguno
-	-- falla para que el caller pueda reaccionar (responder error al cliente,
-	-- compensar, etc.) en vez de creer que la transacción tuvo éxito.
+	-- Aplicar: un SetValue por sección modificada. Atomicidad best-effort:
+	-- snapshot de las referencias de sección actuales ANTES de aplicar, abortar
+	-- al primer fallo, y hacer rollback de las secciones ya escritas. Sin esto,
+	-- un fallo a mitad (p.ej. compra que toca Stats + Inventory) podía dejar el
+	-- perfil mixto — descontar Cash sin entregar el ítem (o al revés).
+	--
+	-- Por qué es "best-effort" y no atomicidad perfecta: el SetValue de rollback
+	-- también podría lanzar. Pero como BatchUpdate NO yielda entre escrituras y
+	-- el replica se valida arriba, un fallo parcial es de por sí muy improbable;
+	-- el rollback cubre el caso raro de que ReplicaService lance por un valor.
+	local prevSections: { [string]: any } = {}
+	for section in accumulated do
+		prevSections[section] = profile.Data[section]
+	end
+
+	local applied: { string } = {}
 	local allOk = true
+	local failedSection: string? = nil
+	local failedErr: any = nil
 	for section, newSection in accumulated do
 		local ok, err = pcall(replica.SetValue, replica, { section }, newSection)
-		if not ok then
+		if ok then
+			table.insert(applied, section)
+		else
 			allOk = false
-			warn(("[DataService] BatchUpdate SetValue failed for user %d, section %s: %s"):format(player.UserId, tostring(section), tostring(err)))
+			failedSection = section
+			failedErr = err
+			break
 		end
 	end
+
+	if not allOk then
+		warn(("[DataService] BatchUpdate SetValue failed for user %d, section %s: %s — rollback de %d sección(es)"):format(
+			player.UserId, tostring(failedSection), tostring(failedErr), #applied))
+		for _, section in applied do
+			local rbOk, rbErr = pcall(replica.SetValue, replica, { section }, prevSections[section])
+			if not rbOk then
+				warn(("[DataService] BatchUpdate rollback falló para user %d, section %s: %s (perfil posiblemente mixto)"):format(
+					player.UserId, tostring(section), tostring(rbErr)))
+			end
+		end
+	end
+
 	_markDirty(player.UserId)
 
 	return allOk
@@ -1145,6 +1178,47 @@ function DataService:ResetProfile(player: Player): boolean
 	_markDirty(player.UserId)
 
 	return allOk
+end
+
+--[[
+	Fuerza un guardado durable del perfil al DataStore y devuelve si el write
+	corrió sin error. A diferencia de SetValue/BatchUpdate (que sólo marcan
+	dirty y dejan que el autosave persista hasta 30s después), esto bloquea
+	hasta que ProfileStore termina el Save.
+
+	Caso de uso: MarketplaceService.ProcessReceipt. Roblox da por CONSUMIDO el
+	receipt en cuanto el handler devuelve PurchaseGranted — NO espera a tu write
+	al DataStore. Si concedes la recompensa con sólo un dirty flag y el servidor
+	crashea dentro de la ventana de autosave, el receipt desaparece (no se
+	reentrega) y el jugador pierde una compra pagada con Robux. Patrón correcto:
+	concede → ForceSave → sólo devuelve PurchaseGranted si esto retornó true;
+	si no, devuelve NotProcessedYet para que Roblox reentregue (la idempotencia
+	vía ProcessedReceipts evita el doble-grant en el reintento).
+
+	Limitación heredada (ver nota en ResetProfile): ProfileStore's :Save() no
+	expone el éxito/fallo del backend write — el pcall sólo captura errores Lua.
+	Aun así, forzar el Save ahora (vs. esperar al autosave) cierra casi por
+	completo la ventana de crash, que es el objetivo.
+
+	Devuelve false si el perfil no está cargado/activo o si :Save() lanzó.
+]]
+function DataService:ForceSave(player: Player): boolean
+	local profile = _profiles[player.UserId]
+	if not profile or not profile:IsActive() then
+		return false
+	end
+
+	local ok, err = pcall(function()
+		profile:Save()
+	end)
+	if not ok then
+		warn(("[DataService] ForceSave falló para user %d: %s"):format(player.UserId, tostring(err)))
+		return false
+	end
+
+	-- No limpiamos el dirty flag a propósito: dejar que el autosave persista
+	-- de nuevo es una segunda red de seguridad barata y deseable aquí.
+	return true
 end
 
 return DataService

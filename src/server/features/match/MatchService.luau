@@ -329,9 +329,9 @@ local function _publishScore()
 	MatchSnapshot.set({ ScoreA = round.scoreA, ScoreB = round.scoreB })
 end
 
--- Wrappers que delegan al KillAttributionService. Mantienen los call sites
--- existentes inmutables — el service owns _killStreakByUserId, los timeouts y
--- el dedupe del broadcast.
+-- Wrappers que delegan al KillAttributionService (broadcast de stats de combate
+-- al marcador, con dedupe interno). Nombres "Streak" heredados; la lógica de
+-- rachas se eliminó.
 local function _sendPlayerStreakToAll(userId: number)
 	KillAttributionService:SendStreakBroadcast(userId)
 end
@@ -481,8 +481,8 @@ end
 
 -- Audit mobile: signature acepta Player directo en lugar de userId. Antes el
 -- kill chain (línea ~519+) ya tenía `attacker` resuelto y la función hacía
--- GetPlayerByUserId redundante por cada call (4 calls por kill: Kill +
--- Headshot? + Streak3? + Streak5?). Ahora 1 lookup en el caller, 4 reuses.
+-- GetPlayerByUserId redundante por cada call (Kill + Headshot?). Ahora 1 lookup
+-- en el caller, reusado.
 -- L14 fix: el cap de cash y el de XP son INDEPENDIENTES. Antes esto era un
 -- AND-gate (`_isMatchCapReached` exigía AMBOS capados para frenar cualquier
 -- grant), así que un jugador capado en una moneda seguía ganando la otra hasta
@@ -628,12 +628,14 @@ end
 	Persiste Stats lifetime del atacante en UN BatchUpdate atómico:
 	  • Stats.Kills += 1
 	  • Stats.Headshots += 1 si headshot
-	  • Stats.KillStreakBest = newStreak si mejora
+
+	(Stats.KillStreakBest ya no se escribe: la lógica de rachas se eliminó. El
+	campo se conserva en el guardado de datos para el sistema nuevo.)
 
 	Llamado desde el path PvP (_registerKillEvent) y PvE (onBotDied) para que
 	las kills lifetime se acumulen igual sea la víctima jugador o bot.
 ]]
-local function _persistAttackerKillStats(attacker: Player, wasHeadshot: boolean, newStreak: number)
+local function _persistAttackerKillStats(attacker: Player, wasHeadshot: boolean)
 	if not _dataService then
 		return
 	end
@@ -641,7 +643,7 @@ local function _persistAttackerKillStats(attacker: Player, wasHeadshot: boolean,
 	-- C2: si el profile aún no cargó, encolar y reintentar tras ProfileLoaded.
 	if not _hasProfile(attacker) then
 		_deferUntilProfile(attacker, function()
-			_persistAttackerKillStats(attacker, wasHeadshot, newStreak)
+			_persistAttackerKillStats(attacker, wasHeadshot)
 		end)
 		return
 	end
@@ -651,18 +653,6 @@ local function _persistAttackerKillStats(attacker: Player, wasHeadshot: boolean,
 	}
 	if wasHeadshot then
 		table.insert(updates, { path = { "Stats", "Headshots" }, delta = 1 })
-	end
-
-	local profile = _dataService:GetProfile(attacker)
-	local lifetimeBest = if profile and profile.Data.Stats
-		then (profile.Data.Stats.KillStreakBest or 0)
-		else 0
-	if newStreak > lifetimeBest then
-		-- Solo añadimos el update si mejora — evita writes redundantes.
-		-- La race residual entre kills concurrentes se mitiga porque newStreak
-		-- refleja _killStreakByUserId, que se incrementa síncronamente; la kill
-		-- posterior siempre tendrá newStreak > la anterior.
-		table.insert(updates, { path = { "Stats", "KillStreakBest" }, value = newStreak })
 	end
 
 	pcall(function()
@@ -685,10 +675,10 @@ end
 --[[
 	Camino ÚNICO de acreditación de una kill al atacante — lo comparten el
 	path PvP (víctima jugador) y PvE (víctima bot):
-	  • bots atacantes: SOLO contador de HUD (sin streak/rewards/persistencia)
-	  • humanos: stats de ronda, streak, weapon kill (mastery), crédito de
-	    health pickup, rewards (Kill/Headshot/Streak3/5), Stats lifetime,
-	    multikills y onboarding de primera kill.
+	  • bots atacantes: SOLO contador de HUD (sin rewards/persistencia)
+	  • humanos: stats de ronda, weapon kill (mastery), crédito de health
+	    pickup, rewards (Kill/Headshot), Stats lifetime, multikills y onboarding
+	    de primera kill.
 	No toca a la víctima ni resuelve la atribución — eso es del caller.
 ]]
 local function _creditKillToAttacker(attackerUserId: number, weaponId: string?, wasHeadshot: boolean)
@@ -716,7 +706,6 @@ local function _creditKillToAttacker(attackerUserId: number, weaponId: string?, 
 		pcall(MatchService.OnPlayerFirstKill, attacker)
 	end
 
-	local newStreak = KillAttributionService:RecordKill(attackerUserId)
 	KillAttributionService:SendStreakBroadcast(attackerUserId)
 	_registerWeaponKillForAttacker(attackerUserId, weaponId)
 	-- S2: una kill humana dropea un health pickup client-side; registramos el
@@ -726,13 +715,8 @@ local function _creditKillToAttacker(attackerUserId: number, weaponId: string?, 
 	if wasHeadshot then
 		_grantActionRewardsToAttacker(attacker, "Headshot", weaponId)
 	end
-	if newStreak == 3 then
-		_grantActionRewardsToAttacker(attacker, "Streak3", weaponId)
-	elseif newStreak == 5 then
-		_grantActionRewardsToAttacker(attacker, "Streak5", weaponId)
-	end
 
-	_persistAttackerKillStats(attacker, wasHeadshot, newStreak)
+	_persistAttackerKillStats(attacker, wasHeadshot)
 
 	-- Multikills: ventana corta de kills consecutivas → Stats lifetime.
 	local round = _round
@@ -769,7 +753,6 @@ local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?, a
 		})
 	end)
 
-	KillAttributionService:ResetStreak(deadPlayer.UserId)
 	local deadStats = _roundStats(deadPlayer.UserId)
 	if deadStats then
 		deadStats.deaths += 1
@@ -1334,7 +1317,7 @@ function _enterResults(winnerTeam: string)
 		_resetSessionRoundState(session)
 	end
 	_round = nil
-	-- Streak state (counts + timeouts + dedupe keys) vive en KillAttributionService.
+	-- Dedupe del broadcast de stats vive en KillAttributionService.
 	KillAttributionService:Clear()
 	-- Snapshots de inicio de partida (nivel/tier BP) para los items de Resultados.
 	MatchResultsService:ClearSnapshots()
@@ -1376,10 +1359,16 @@ local function _handleBotDied(botTeam: string, _botName: string, botHumanoid: Hu
 	-- vuelve al menú, la kill es legítima — no robarla.
 
 	local killerName = _resolveKillerName(attackerUserId)
+	-- Nombre ficticio del bot víctima (no su nombre crudo "Bot_B_08"). Fallback al
+	-- nombre crudo si la identidad ya no estuviera disponible.
+	local victimName = _botName
+	if _AIService and _AIService.GetBotDisplayName then
+		victimName = _AIService:GetBotDisplayName(botFakeUserId) or _botName
+	end
 	pcall(function()
 		Network.Combat.KillFeed.SendToAll({
 			killerName = killerName,
-			victimName = _botName,
+			victimName = victimName,
 			weaponId = attackerWeaponId or "",
 		})
 	end)
@@ -1423,10 +1412,9 @@ local function _enterInRound()
 	_phase = "InRound"
 	_phaseGeneration += 1
 	local generation = _phaseGeneration
-	-- Streaks a 0 para los players actuales + broadcast (UI sync). Kills/deaths
+	-- Broadcast inicial de stats para los players actuales (UI sync). Kills/deaths
 	-- arrancan en 0 implícitamente (stats lazy del Round nuevo).
 	for _, player in Players:GetPlayers() do
-		KillAttributionService:InitStreak(player.UserId)
 		KillAttributionService:SendStreakBroadcast(player.UserId)
 	end
 	MatchSnapshot.set({
@@ -1553,7 +1541,6 @@ end
 -- sesiones.
 local function _initJoinedPlayerState(player: Player)
 	_sessions[player.UserId] = _newSession()
-	KillAttributionService:InitStreak(player.UserId)
 	KillAttributionService:SendStreakBroadcast(player.UserId)
 	_bindCharacterTracking(player)
 end
@@ -1577,7 +1564,6 @@ local function _onRequestJoinMatch(_: {}, player: Player)
 	session.pendingSpawn = true
 	session.inMenu = false
 	_rebalanceBotsForCurrentRound("join request")
-	KillAttributionService:EnsureStreakInitialized(player.UserId)
 	KillAttributionService:SendStreakBroadcast(player.UserId)
 
 	task.defer(function()
@@ -1644,7 +1630,11 @@ local function _onRequestRespawn(_: {}, player: Player)
 		return
 	end
 
-	if session.respawnDebounce then
+	-- session.respawning cubre la ventana en la que respawnDebounce ya se limpió
+	-- (al inicio del defer) pero el bucle de spawn sigue corriendo (~0.45s de
+	-- yields). Sin este guard, un segundo RequestRespawn en esa ventana arranca un
+	-- segundo LoadCharacter/loadout concurrente (doble spawn explotable).
+	if session.respawnDebounce or session.respawning then
 		return
 	end
 
@@ -1714,7 +1704,6 @@ local function _onRequestReturnToMenu(_: {}, player: Player)
 	session.inMenu = true
 	session.respawnDebounce = false
 	session.pendingSpawn = false
-	KillAttributionService:ResetStreak(player.UserId)
 	_rebalanceBotsForCurrentRound("return to menu")
 	KillAttributionService:SendStreakBroadcast(player.UserId)
 
@@ -1752,11 +1741,6 @@ function MatchService:GrantCombatReward(player: Player, actionKey: string, extra
 		end
 	end
 	return ok, xpGranted, cashGranted
-end
-
-function MatchService:GetPlayerKillStreak(playerOrUserId: Player | number): number
-	local userId = if typeof(playerOrUserId) == "number" then playerOrUserId else playerOrUserId.UserId
-	return KillAttributionService:GetStreak(userId)
 end
 
 function MatchService:Start(dataService: DataService): ()

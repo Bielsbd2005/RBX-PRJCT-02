@@ -2,6 +2,7 @@ local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
 local Debris = game:GetService("Debris")
 local ContextActionService = game:GetService("ContextActionService")
+local UserInputService = game:GetService("UserInputService")
 local CollectionService = game:GetService("CollectionService")
 local ContentProvider = game:GetService("ContentProvider")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -260,6 +261,18 @@ function BulletWeapon:onEquippedChanged()
 		end
 
 		self.triggerDisconnected = false
+
+		-- Re-sincroniza el gatillo con el botón físico al equipar. Si el jugador
+		-- cambia de arma SIN soltar el disparo (p. ej. mientras apunta y dispara a
+		-- la vez), Roblox no vuelve a emitir Tool.Activated para el botón que ya
+		-- estaba mantenido, así que el arma recién equipada nunca se entera de que
+		-- el gatillo sigue presionado y no dispara hasta soltar y volver a pulsar.
+		-- Solo cliente y solo para el arma del jugador local.
+		if self.equipped and self.player == Players.LocalPlayer then
+			if UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then
+				self:setActivated(true)
+			end
+		end
 	end
 end
 
@@ -417,6 +430,7 @@ function BulletWeapon:getIgnoreList(includeLocalPlayer)
 			end
 		end
 		self.ignoreList = ignoreList
+		self.ignoreListRefreshTime = now
 	end
 	return ignoreList
 end
@@ -603,6 +617,12 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 		d = 1e9,
 	}
 
+	-- Ignore list para los raycasts del proyectil. Construirla vía getIgnoreList
+	-- (igual que el path hitscan) garantiza ignorar al tirador/cámara incluso en
+	-- armas sin TipAttachment, donde self.ignoreList nunca se puebla (queda {})
+	-- y la bala colisionaría contra el propio tirador en el primer frame.
+	local projectileIgnoreList = self:getIgnoreList(localPlayerInitiatedShot)
+
 	local steppedCallback = function(dt)
 		local now = os.clock()
 		timeSinceStart = now - startTime
@@ -621,7 +641,7 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 			-- Check if bullet hit since last frame
 			local castProjBack, castProjFront = projFront, projFront + travelDist
 			parabola:setDomain(castProjBack, castProjFront)
-			local hitPart, hitPoint, hitNormal, hitMaterial, hitT = parabola:findPart(self.ignoreList)
+			local hitPart, hitPoint, hitNormal, hitMaterial, hitT = parabola:findPart(projectileIgnoreList)
 
 			if hitPart then
 				didHit = true

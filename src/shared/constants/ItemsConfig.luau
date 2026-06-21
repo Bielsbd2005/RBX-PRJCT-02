@@ -25,6 +25,7 @@ export type ItemConfig = {
 	isBPExclusive: boolean?,  -- Si true, sólo se obtiene vía Battle Pass; oculto en Locker hasta poseerse y rechazado por Shop.
 	TextureID: string?,
 	BaseColor: Color3?,
+	Material: Enum.Material?,  -- Material de la parte principal del arma (Neon, Metal, etc.). Si es nil se conserva el original.
 	isAnimated: boolean?,
 	StudsPerTile: number?,
 	ScrollSpeedU: number?,
@@ -105,6 +106,20 @@ Special = {
 			StudsPerTile = 3,
 			ScrollSpeedU = 1,
 			ScrollSpeedV = 0,
+		},
+		-- Skin de prueba para el soporte de Material: color verde brillante +
+		-- Material.Neon (debe verse "encendida"/glow). Gratis y comprable para
+		-- poder probarla rápido desde la tienda.
+		Wrap_Neon_Test = {
+			Name = "Neon Test",
+			Price = 0,
+			LevelRequired = 0,
+			Rarity = "Legendary",
+			CanPurchase = true,
+			BaseColor = Color3.fromRGB(0, 255, 170),
+			Material = Enum.Material.Neon,
+			isAnimated = false,
+			StudsPerTile = 3,
 		},
 		Wrap_Blue = {
 			Name = "Blue Wrap",
@@ -220,8 +235,13 @@ Special = {
 	},
 
 	Outfits = {
-		Default = { Name = "Default Outfit", Price = 0,    LevelRequired = 1,  Rarity = "Common",   CanPurchase = false },
-		Outfit1 = { Name = "Battle Suit",    Price = 800,  LevelRequired = 8,  Rarity = "Uncommon", CanPurchase = true },
+		-- Las claves coinciden con los .rbxm en Shared.Bodies (outfitId = clave = nombre del modelo).
+		-- Image = thumbnail 2D de la tarjeta del locker. Placeholder rbxassetid://0 → reemplazar por el ID real.
+		Default = { Name = "Default Outfit", Price = 0,    LevelRequired = 1,  Rarity = "Common",   Image = "rbxassetid://107928751959121", CanPurchase = false },
+		Tourist = { Name = "Tourist",        Price = 800,  LevelRequired = 5,  Rarity = "Uncommon", Image = "rbxassetid://119849081428861", CanPurchase = true },
+		Ducky   = { Name = "Ducky",          Price = 1500, LevelRequired = 10, Rarity = "Rare",     Image = "rbxassetid://137997678899031", CanPurchase = true },
+		Inmate  = { Name = "Inmate",         Price = 1500, LevelRequired = 12, Rarity = "Rare",     Image = "rbxassetid://75053707941889", CanPurchase = true },
+		Jungle  = { Name = "Jungle",         Price = 2500, LevelRequired = 18, Rarity = "Epic",     Image = "rbxassetid://109406925958012", CanPurchase = true },
 	},
 }
 

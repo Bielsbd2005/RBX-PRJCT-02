@@ -299,7 +299,10 @@ function MatchResultsService:Start(deps: { dataService: DataService })
 		_startSnapshotByUserId[player.UserId] = nil
 	end)
 	MarketplaceService.PromptGamePassPurchaseFinished:Connect(function(player, gamePassId, wasPurchased)
-		if wasPurchased and gamePassId == GameConfig.VIPGamePassId then
+		-- Si la compra se confirma DESPUÉS de que PlayerRemoving limpió la entrada,
+		-- repoblarla la dejaría huérfana para siempre (fuga por userId). Solo
+		-- escribir si el jugador sigue conectado; un re-join repuebla vía prefetch.
+		if wasPurchased and gamePassId == GameConfig.VIPGamePassId and player:IsDescendantOf(Players) then
 			_vipByUserId[player.UserId] = true
 		end
 	end)

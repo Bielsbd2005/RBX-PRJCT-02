@@ -143,7 +143,7 @@ function DirectionalIndicatorGuiManager:ActivateDirectionalIndicator(DIName, oth
 		-- de transparencia. Si el frame se ocultara antes de que el loop lo viera
 		-- (o el loop dejara de correr), el clon quedaría huérfano. dieOnFade marca
 		-- los clones; los DIs originales se mantienen y solo se ocultan.
-		tween.Completed:Connect(function()
+		tween.Completed:Once(function()
 			diInfo.active = false
 			if diInfo.dieOnFade and diInfo.frame and diInfo.frame.Parent then
 				diInfo.frame:Destroy()

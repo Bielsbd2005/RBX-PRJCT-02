@@ -73,10 +73,12 @@ function Scope.new(weaponsGui: any)
 	self.scopeEnabled = false
 
 	self._vignetteNodes = nil
-	self.vignetteHealthAlphaDriver = nil -- rojo, vida baja
+	self.vignetteHealthAlphaDriver = nil -- rojo, vida baja (peligro continuo)
 	self.vignetteHealAlphaDriver = nil -- verde, curación
+	self.vignetteDamageAlphaDriver = nil -- rojo, flash al recibir daño
 	self.vignetteHealthConn = nil
 	self.vignetteHealConn = nil
+	self.vignetteDamageConn = nil
 
 	return self
 end
@@ -111,6 +113,16 @@ function Scope:setup(gui: ScreenGui)
 		end
 		self.vignetteHealAlphaDriver.Value = self.vignetteHealAlphaDriver.Value or 0
 
+		self.vignetteDamageAlphaDriver = self.vignette:FindFirstChild("DamageAlphaDriver") :: NumberValue?
+		if not self.vignetteDamageAlphaDriver then
+			local val = Instance.new("NumberValue")
+			val.Name = "DamageAlphaDriver"
+			val.Value = 0
+			val.Parent = self.vignette
+			self.vignetteDamageAlphaDriver = val
+		end
+		self.vignetteDamageAlphaDriver.Value = self.vignetteDamageAlphaDriver.Value or 0
+
 		self._vignetteNodes = buildVignetteNodeList(self.vignette)
 
 		-- Combina los dos efectos: gana el de mayor alpha y su color tiñe el
@@ -119,16 +131,19 @@ function Scope:setup(gui: ScreenGui)
 			if not self.vignette or not self._vignetteNodes then
 				return
 			end
+			-- Rojo = max(peligro vida baja, flash de daño); verde = curación.
 			local healthAlpha = if self.vignetteHealthAlphaDriver then self.vignetteHealthAlphaDriver.Value else 0
+			local damageAlpha = if self.vignetteDamageAlphaDriver then self.vignetteDamageAlphaDriver.Value else 0
+			local redAlpha = math.max(healthAlpha, damageAlpha)
 			local healAlpha = if self.vignetteHealAlphaDriver then self.vignetteHealAlphaDriver.Value else 0
-			local visibleAlpha = math.max(healthAlpha, healAlpha)
+			local visibleAlpha = math.max(redAlpha, healAlpha)
 			if visibleAlpha <= 0 then
 				applyVignetteAlpha(self._vignetteNodes, 1)
 				self.vignette.Visible = false
 				return
 			end
 
-			local color = if healthAlpha >= healAlpha then VIGNETTE_DAMAGE_COLOR else VIGNETTE_HEAL_COLOR
+			local color = if redAlpha >= healAlpha then VIGNETTE_DAMAGE_COLOR else VIGNETTE_HEAL_COLOR
 			applyVignetteColor(self._vignetteNodes, color)
 			applyVignetteAlpha(self._vignetteNodes, 1 - math.clamp(visibleAlpha, 0, 1))
 			self.vignette.Visible = true
@@ -136,6 +151,7 @@ function Scope:setup(gui: ScreenGui)
 
 		self.vignetteHealthConn = self.vignetteHealthAlphaDriver.Changed:Connect(refreshVignette)
 		self.vignetteHealConn = self.vignetteHealAlphaDriver.Changed:Connect(refreshVignette)
+		self.vignetteDamageConn = self.vignetteDamageAlphaDriver.Changed:Connect(refreshVignette)
 		refreshVignette()
 	end
 end
@@ -155,6 +171,10 @@ function Scope:Destroy()
 	if self.vignetteHealConn then
 		self.vignetteHealConn:Disconnect()
 		self.vignetteHealConn = nil
+	end
+	if self.vignetteDamageConn then
+		self.vignetteDamageConn:Disconnect()
+		self.vignetteDamageConn = nil
 	end
 end
 

@@ -2,15 +2,17 @@
 --[[
 	MatchProgressionObserver.luau
 	Observers de DataController para disparar las animaciones in-match de level up,
-	BattlePass tier-up, wrap challenge unlock, y daily task claim. Extraído de
-	`features/match/init.luau` para no acumular orquestación de progresión ahí.
+	BattlePass tier-up, maestría de armas (completar un tier + hitos 25/50/75% de
+	progreso), y daily task claim. Extraído de `features/match/init.luau` para no
+	acumular orquestación de progresión ahí.
 
 	API:
 		MatchProgressionObserver.attach({
 			hud, matchHudGui, fusionScope, janitor
 		})
 
-	Internamente espera DataController:WhenReady() y wirea los 4 observers.
+	Internamente espera DataController:WhenReady() y wirea los observers (Stats,
+	BattlePass, Inventory→maestría completada, WeaponKills→hitos, DailyTasks).
 	Cada uno usa el janitor pasado para registrar su cleanup.
 ]]
 
@@ -29,7 +31,81 @@ local DataController = require(script.Parent.Parent.Parent.core.data.DataControl
 
 local DAILY_TASK_COMPLETED_ICON = "rbxassetid://113694528712529"
 
+-- Solo se muestran hitos intermedios (25/50/75%) para tiers con objetivo grande;
+-- los tiers pequeños (p. ej. Bronze=4) solo notifican al completarse, sin spamear.
+local MASTERY_MILESTONE_MIN_TARGET = 50
+
 local MatchProgressionObserver = {}
+
+-- Tiers de maestría = wraps con KillChallenge, ordenadas por kills ascendente.
+local function _buildMasteryTiers(): { { kills: number, wrapKey: string, def: any } }
+	local tiers = {}
+	local weaponWraps = ItemsConfig.WeaponWraps
+	if type(weaponWraps) == "table" then
+		for wrapKey, def in weaponWraps do
+			if type(def) == "table" and type(def.KillChallenge) == "table" then
+				local kills = tonumber(def.KillChallenge.Kills)
+				if kills and kills > 0 then
+					table.insert(tiers, { kills = kills, wrapKey = wrapKey, def = def })
+				end
+			end
+		end
+	end
+	table.sort(tiers, function(a, b)
+		return a.kills < b.kills
+	end)
+	return tiers
+end
+
+-- Para `n` kills, el siguiente tier (el menor con kills > n) o nil si ya superó el máximo.
+local function _nextMasteryTier(tiers: { { kills: number, wrapKey: string, def: any } }, n: number)
+	for _, tier in tiers do
+		if tier.kills > n then
+			return tier
+		end
+	end
+	return nil
+end
+
+-- Cuarto alcanzado (0..3) del ratio n/target; el 100% no cuenta (eso es completar).
+local function _milestoneQuarter(n: number, target: number): number
+	if target <= 0 then
+		return 0
+	end
+	return math.clamp(math.floor((n / target) / 0.25), 0, 3)
+end
+
+local function _eachWeaponKill(weaponKills: any, fn: (category: string, weaponId: string, kills: number) -> ())
+	if type(weaponKills) ~= "table" then
+		return
+	end
+	for _, category in { "Main", "Special" } do
+		local catMap = weaponKills[category]
+		if type(catMap) == "table" then
+			for weaponId, kills in catMap do
+				if type(kills) == "number" then
+					fn(category, weaponId, kills)
+				end
+			end
+		end
+	end
+end
+
+-- Campos de preview/maestría para playMasteryAnimation desde un wrap def.
+local function _masteryRewardFields(category: string, weaponId: string, wrapKey: string, def: any): any
+	return {
+		name = if type(def.Name) == "string" and def.Name ~= "" then def.Name else wrapKey,
+		previewWeaponCategory = category,
+		previewWeaponId = weaponId,
+		itemId = wrapKey,
+		category = LockerCategory.WEAPON_WRAPS,
+		textureID = if type(def.TextureID) == "string" then def.TextureID else nil,
+		baseColor = if typeof(def.BaseColor) == "Color3" then def.BaseColor else nil,
+		material = if typeof(def.Material) == "EnumItem" and def.Material.EnumType == Enum.Material then def.Material else nil,
+		animated = def.isAnimated == true,
+		studsPerTile = tonumber(def.StudsPerTile),
+	}
+end
 
 type AttachDeps = {
 	hud: any,
@@ -164,18 +240,13 @@ function MatchProgressionObserver.attach(deps: AttachDeps)
 							if not prevWraps[wrapKey] then
 								local isChallenge, def = _isKillChallengeWrap(wrapKey)
 								if isChallenge then
-									hud:playChallengeCompletedAnimation({
-										name = if type(def.Name) == "string" and def.Name ~= "" then def.Name else wrapKey,
-										image = if type(def.Image) == "string" and def.Image ~= "" then def.Image else nil,
-										previewWeaponCategory = category,
-										previewWeaponId = weaponId,
-										itemId = wrapKey,
-										category = LockerCategory.WEAPON_WRAPS,
-										textureID = if type(def.TextureID) == "string" then def.TextureID else nil,
-										baseColor = if typeof(def.BaseColor) == "Color3" then def.BaseColor else nil,
-										animated = def.isAnimated == true,
-										studsPerTile = tonumber(def.StudsPerTile),
-									})
+									-- Wrap de maestría recién ganado = tier completado (100%).
+									local threshold = math.max(1, tonumber(def.KillChallenge.Kills) or 0)
+									local fields = _masteryRewardFields(category, weaponId, wrapKey, def)
+									fields.current = threshold
+									fields.target = threshold
+									fields.isComplete = true
+									hud:playMasteryAnimation(fields)
 								end
 							end
 						end
@@ -189,6 +260,52 @@ function MatchProgressionObserver.attach(deps: AttachDeps)
 
 		local inventoryObserver = fusionScope:Observer(DataController.Inventory)
 		janitor:Add(inventoryObserver:onBind(updateWrapsAndDetectUnlocks), true)
+
+		-- ── Maestría: hitos de progreso 25/50/75% ───────────────
+		-- El kill-count por arma vive en DataController.WeaponKills (replicado, con
+		-- ListenToChange). En cada incremento calculamos el % hacia el siguiente tier
+		-- y, al cruzar un cuarto nuevo, mostramos el popup de Maestry. El 100%
+		-- (completar) lo dispara la detección de wrap de arriba. Al entrar en una
+		-- banda nueva sembramos el cuarto actual sin notificar (no spamear progreso
+		-- ya hecho), y solo notificamos con el HUD de partida activo.
+		local masteryTiers = _buildMasteryTiers()
+		local lastMilestoneByWeapon: { [string]: { target: number, quarter: number } } = {}
+		local milestoneSeeded = false
+		local function onWeaponKillsChanged()
+			local weaponKills = Fusion.peek(DataController.WeaponKills)
+			_eachWeaponKill(weaponKills, function(category, weaponId, kills)
+				local key = category .. "|" .. weaponId
+				local tier = _nextMasteryTier(masteryTiers, kills)
+				if not tier then
+					lastMilestoneByWeapon[key] = nil
+					return
+				end
+				local quarter = _milestoneQuarter(kills, tier.kills)
+				local prev = lastMilestoneByWeapon[key]
+				-- Banda nueva (o primer seed): registrar sin disparar.
+				if not prev or prev.target ~= tier.kills then
+					lastMilestoneByWeapon[key] = { target = tier.kills, quarter = quarter }
+					return
+				end
+				if milestoneSeeded
+					and quarter > prev.quarter
+					and quarter >= 1
+					and tier.kills >= MASTERY_MILESTONE_MIN_TARGET
+					and matchHudGui and matchHudGui.Enabled
+				then
+					local fields = _masteryRewardFields(category, weaponId, tier.wrapKey, tier.def)
+					fields.current = kills
+					fields.target = tier.kills
+					fields.isComplete = false
+					hud:playMasteryAnimation(fields)
+				end
+				prev.quarter = math.max(prev.quarter, quarter)
+			end)
+			milestoneSeeded = true
+		end
+		local weaponKillsObserver = fusionScope:Observer(DataController.WeaponKills)
+		janitor:Add(weaponKillsObserver:onBind(onWeaponKillsChanged), true)
+		onWeaponKillsChanged()
 
 		-- ── Daily tasks: detectar transición Claimed false→true ─
 		-- Solo dispara la animación de "Completed" cuando el HUD de partida
@@ -205,10 +322,10 @@ function MatchProgressionObserver.attach(deps: AttachDeps)
 					local now = (claimed :: any)[def.Id] == true
 					local before = prevClaimed[def.Id] == true
 					if now and not before then
-						-- Description leerá "You earned Cash"; Reward.Value
+						-- Description leerá "You earned Cash"; Reward.Amount
 						-- mostrará el monto otorgado por la tarea. Cash vive en
 						-- ActionRewards (clave "Daily"..Id), no en DailyTasks.luau.
-						hud:playChallengeCompletedAnimation({
+						hud:playTaskCompletedAnimation({
 							name = "Cash",
 							image = DAILY_TASK_COMPLETED_ICON,
 							cashAmount = ActionRewards.GetCash("Daily" .. def.Id),

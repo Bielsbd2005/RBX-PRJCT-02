@@ -52,9 +52,12 @@ function RewardsFeature.start(menuController: any): any
 	local player = Players.LocalPlayer
 	local playerGui = player:WaitForChild("PlayerGui")
 
-	-- Botón de apertura opcional (Menu.Rewards).
+	-- Botón de apertura opcional (Menu.TopFrame.Rewards). Resolvemos prefiriendo
+	-- TopFrame y cayendo al hijo directo de Menu (compat. con disposición antigua).
 	local menuGui = menuController:getGui()
-	local menuBtnInstance = menuGui:FindFirstChild("Rewards")
+	local topFrame = menuGui:FindFirstChild("TopFrame")
+	local menuBtnInstance = (topFrame and topFrame:FindFirstChild("Rewards"))
+		or menuGui:FindFirstChild("Rewards")
 	local menuBtn: GuiButton? = if menuBtnInstance and menuBtnInstance:IsA("GuiButton")
 		then menuBtnInstance
 		else nil

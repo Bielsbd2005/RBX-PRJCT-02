@@ -8,15 +8,12 @@ local LocalPlayer = (not IsServer) and Players.LocalPlayer or nil
 -- =====================================================================
 --  CLIENT-ONLY CONTROLLERS — reset / init on respawn
 -- =====================================================================
-local StreakController = nil
 local HealthBarController = nil
 
 if not IsServer then
-	StreakController = require(script.Parent:WaitForChild("Libraries"):WaitForChild("StreakController"))
 	HealthBarController = require(script.Parent:WaitForChild("Libraries"):WaitForChild("HealthBarController"))
 
 	LocalPlayer.CharacterAdded:Connect(function(character)
-		StreakController.reset()
 		HealthBarController.onCharacterAdded(character)
 	end)
 
@@ -62,7 +59,6 @@ end
 
 -- Lazy-init caches for client libraries (avoid require/WaitForChild per kill)
 local _personalKillFeed = nil
-local _bonusEffect = nil
 local _pickupDropEffect = nil
 
 local function _getPersonalKillFeed()
@@ -72,15 +68,6 @@ local function _getPersonalKillFeed()
 		if mod then _personalKillFeed = require(mod) end
 	end
 	return _personalKillFeed
-end
-
-local function _getBonusEffect()
-	if not _bonusEffect then
-		local lib = script.Parent:FindFirstChild("Libraries")
-		local mod = lib and lib:FindFirstChild("BonusEffect")
-		if mod then _bonusEffect = require(mod) end
-	end
-	return _bonusEffect
 end
 
 local function _getPickupDropEffect()
@@ -138,6 +125,13 @@ function NetworkingCallbacks.WeaponReloadRequest(player, instance)
 end
 
 function NetworkingCallbacks.WeaponReloaded(player, instance)
+	-- Broadcast servidor→cliente. Nunca debe ejecutarse como input en el server:
+	-- onReloaded directo saltaría los guards de reload() y refillaría CurrentAmmo.
+	-- (Defensa en profundidad: setup() ya no conecta OnServerEvent para este evento.)
+	if IsServer then
+		return
+	end
+
 	local WeaponsSystem = NetworkingCallbacks.WeaponsSystem
 	if not WeaponsSystem then
 		return
@@ -211,7 +205,7 @@ function NetworkingCallbacks.WeaponActivated(player, instance, activated)
 end
 
 -- Client-side: plays the elimination sound and shows kill feed for the killer
-function NetworkingCallbacks.PlayerEliminated(victimName, xpGained, wasHeadshot, victimPos, coinAmount, streak)
+function NetworkingCallbacks.PlayerEliminated(victimName, xpGained, wasHeadshot, victimPos)
 	if IsServer then return end
 
 	local WeaponsSystem = NetworkingCallbacks.WeaponsSystem
@@ -229,16 +223,7 @@ function NetworkingCallbacks.PlayerEliminated(victimName, xpGained, wasHeadshot,
 		end
 	end
 
-	if StreakController then
-		StreakController.onKill()
-	end
-
 	if victimPos then
-		local BonusEffect = _getBonusEffect()
-		if BonusEffect then
-			BonusEffect.Play(victimPos, streak or 1)
-		end
-
 		local PickupDropEffect = _getPickupDropEffect()
 		if PickupDropEffect then
 			PickupDropEffect.Play(victimPos)
@@ -255,15 +240,6 @@ function NetworkingCallbacks.PlayerAssist()
 	local PersonalKillFeed = _getPersonalKillFeed()
 	if PersonalKillFeed then
 		PersonalKillFeed.showAssist()
-	end
-end
-
--- Client-side: sincroniza el StreakController con el estado del servidor
-function NetworkingCallbacks.SyncStreakState(newStreak: number)
-	if IsServer then return end
-
-	if StreakController then
-		StreakController.setServerStreak(newStreak)
 	end
 end
 

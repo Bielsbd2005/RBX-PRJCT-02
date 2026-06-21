@@ -12,6 +12,7 @@ local TweenService = game:GetService("TweenService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local TeamUtils = require(Shared.utils.TeamUtils)
+local GameConfig = require(Shared.GameConfig)
 local UIUtils = require(script.Parent.Parent.Parent.core.ui.UIUtils)
 local Janitor = require(ReplicatedStorage:WaitForChild("Packages").janitor) :: any
 local MatchNotificationsQueue = require(script.Parent.MatchNotificationsQueue)
@@ -54,10 +55,15 @@ type HudRefs = {
 	scoreA: TextLabel?,
 	scoreB: TextLabel?,
 	timer: TextLabel?,
+	objectiveScoreValue: TextLabel?,
+	teamABarFill: GuiObject?,
+	teamBBarFill: GuiObject?,
 	cashValue: TextLabel?,
 	levelValue: TextLabel?,
 	levelBarFill: GuiObject?,
 	version: TextLabel?,
+	teamAPlayersFrame: GuiObject?,
+	teamBPlayersFrame: GuiObject?,
 	teamAPlayerRows: { HudPlayerRowRefs },
 	teamBPlayerRows: { HudPlayerRowRefs },
 }
@@ -210,9 +216,28 @@ local function _collectHudPlayerRows(playersContainer: GuiObject?): { HudPlayerR
 			continue
 		end
 
-		local profileNode = child:FindFirstChild("Profile")
-		local strokeNode = child:FindFirstChildWhichIsA("UIStroke")
-		local totalKillsNode = child:FindFirstChild("Kills")
+		-- Estructura actual: la fila tiene un contenedor `Frame` con la miniatura
+		-- (`Image`), el `UIStroke` (color de equipo) y `Kills` (TextLabel) dentro.
+		-- Toleramos variantes anteriores: contenedor = `Frame` o la fila misma;
+		-- miniatura = `Image` o `Profile`; stroke/Kills sueltos o anidados.
+		local card = child:FindFirstChild("Frame")
+		if not (card and card:IsA("GuiObject")) then
+			card = child
+		end
+
+		local profileNode = card:FindFirstChild("Image")
+			or card:FindFirstChild("Profile")
+			or child:FindFirstChild("Image")
+			or child:FindFirstChild("Profile")
+		local profile = if profileNode and profileNode:IsA("ImageLabel") then profileNode else nil
+
+		local strokeNode = card:FindFirstChildWhichIsA("UIStroke")
+			or (profileNode and profileNode:FindFirstChildWhichIsA("UIStroke"))
+			or child:FindFirstChildWhichIsA("UIStroke")
+
+		local totalKillsNode = card:FindFirstChild("Kills")
+			or (profileNode and profileNode:FindFirstChild("Kills"))
+			or child:FindFirstChild("Kills")
 		local totalKillsValueNode = if totalKillsNode and totalKillsNode:IsA("TextLabel")
 			then totalKillsNode
 			elseif totalKillsNode and totalKillsNode:IsA("GuiObject")
@@ -225,7 +250,7 @@ local function _collectHudPlayerRows(playersContainer: GuiObject?): { HudPlayerR
 			row = {
 				root = child,
 				stroke = strokeNode,
-				profile = if profileNode and profileNode:IsA("ImageLabel") then profileNode else nil,
+				profile = profile,
 				totalKillsValue = totalKillsValue,
 			},
 		})
@@ -248,20 +273,25 @@ local function _resolveHudRefs(matchHudGui: ScreenGui?): HudRefs
 	if not matchHudGui then
 		return {
 			scoreA = nil, scoreB = nil, timer = nil,
+			objectiveScoreValue = nil, teamABarFill = nil, teamBBarFill = nil,
 			cashValue = nil, levelValue = nil, levelBarFill = nil,
 			version = nil,
+			teamAPlayersFrame = nil, teamBPlayersFrame = nil,
 			teamAPlayerRows = {}, teamBPlayerRows = {},
 		}
 	end
 
 	local containerNode = _findChildGuiObject(matchHudGui, "Container")
-	local matchNode = _findChildGuiObject(containerNode, "Match")
+	-- El marcador vive ahora en Container.MainFrame (antes Container.Match).
+	local matchNode = _findChildGuiObject(containerNode, "MainFrame")
+		or _findChildGuiObject(containerNode, "Match")
 	local cashNode = _findChildGuiObject(containerNode, "Cash")
 	local levelNode = _findChildGuiObject(containerNode, "Level")
-	-- Las filas de jugadores cuelgan directamente de TeamA/TeamB (los nodos
-	-- intermedios PlayersA/PlayersB ya no existen).
-	local teamAPlayersNode = _findDescendantGuiObject(matchNode, { "TeamA" })
-	local teamBPlayersNode = _findDescendantGuiObject(matchNode, { "TeamB" })
+	-- Filas de jugadores: ATeamPlayers/BTeamPlayers (antes TeamA/TeamB).
+	local teamAPlayersNode = _findDescendantGuiObject(matchNode, { "ATeamPlayers" })
+		or _findDescendantGuiObject(matchNode, { "TeamA" })
+	local teamBPlayersNode = _findDescendantGuiObject(matchNode, { "BTeamPlayers" })
+		or _findDescendantGuiObject(matchNode, { "TeamB" })
 
 	-- Container.Version puede ser un TextLabel directo (caso simple) o un
 	-- contenedor con un hijo `Value` que muestra el número (patrón usado por
@@ -270,19 +300,27 @@ local function _resolveHudRefs(matchHudGui: ScreenGui?): HudRefs
 		or _findDescendantTextLabel(containerNode, { "Version", "Value" })
 
 	return {
-		-- El marcador ahora son labels directos bajo Match (sin barras). Aceptamos
-		-- ScoreA como TextLabel directo o como contenedor con un hijo `Value`.
-		scoreA = _findDescendantTextLabel(matchNode, { "ScoreA" })
-			or _findDescendantTextLabel(matchNode, { "ScoreA", "Value" }),
-		scoreB = _findDescendantTextLabel(matchNode, { "ScoreB" })
-			or _findDescendantTextLabel(matchNode, { "ScoreB", "Value" }),
-		-- El timer ahora vive en Match.Timer.Value (antes Status.Timer).
+		-- Score como contenedor con hijo `Value` (ScoreA.Value); fallback a label directo.
+		scoreA = _findDescendantTextLabel(matchNode, { "ScoreA", "Value" })
+			or _findDescendantTextLabel(matchNode, { "ScoreA" }),
+		scoreB = _findDescendantTextLabel(matchNode, { "ScoreB", "Value" })
+			or _findDescendantTextLabel(matchNode, { "ScoreB" }),
+		-- El timer vive en MainFrame.Timer.Value.
 		timer = _findDescendantTextLabel(matchNode, { "Timer", "Value" })
 			or _findDescendantTextLabel(matchNode, { "Timer" }),
+		-- Objetivo (puntuación para ganar) + barras de progreso por equipo.
+		objectiveScoreValue = _findDescendantTextLabel(matchNode, { "ObjectiveScore", "Value" })
+			or _findDescendantTextLabel(matchNode, { "ObjectiveScore" }),
+		teamABarFill = _findDescendantGuiObject(matchNode, { "ATeamBar", "Fill" }),
+		teamBBarFill = _findDescendantGuiObject(matchNode, { "BTeamBar", "Fill" }),
 		cashValue = _findDescendantTextLabel(cashNode, { "Value" }),
 		levelValue = _findDescendantTextLabel(levelNode, { "Value" }),
-		levelBarFill = _findDescendantGuiObject(levelNode, { "Fill" }),
+		-- Barra de nivel ahora en Level.Bar.Fill (antes Level.Fill).
+		levelBarFill = _findDescendantGuiObject(levelNode, { "Bar", "Fill" })
+			or _findDescendantGuiObject(levelNode, { "Fill" }),
 		version = versionLabel,
+		teamAPlayersFrame = teamAPlayersNode,
+		teamBPlayersFrame = teamBPlayersNode,
 		teamAPlayerRows = _collectHudPlayerRows(teamAPlayersNode),
 		teamBPlayerRows = _collectHudPlayerRows(teamBPlayersNode),
 	}
@@ -297,6 +335,15 @@ function MatchHud.new(matchHudGui: ScreenGui?): any
 	local self = setmetatable({}, MatchHud)
 	self._gui = matchHudGui
 	self._hudRefs = _resolveHudRefs(matchHudGui)
+	-- Diagnóstico: si una barra de equipo resuelve y la otra no, casi seguro hay
+	-- un nombre desalineado (MainFrame.ATeamBar.Fill vs BTeamBar.Fill — sensible a
+	-- mayúsculas/espacios). Avisamos para no depurar a ciegas.
+	if matchHudGui then
+		local a, b = self._hudRefs.teamABarFill, self._hudRefs.teamBBarFill
+		if (a ~= nil) ~= (b ~= nil) then
+			warn(`[MatchHud] Barras de equipo asimétricas: ATeamBar.Fill={a ~= nil}, BTeamBar.Fill={b ~= nil}. Revisa los nombres exactos (MainFrame.BTeamBar.Fill, sensible a mayúsculas).`)
+		end
+	end
 	self._localUserId = Players.LocalPlayer.UserId
 	self._destroyed = false
 	self._janitor = Janitor.new()
@@ -304,6 +351,11 @@ function MatchHud.new(matchHudGui: ScreenGui?): any
 	-- Extraído a su propio módulo para que MatchHud no orqueste tweens y
 	-- confetti; los callers siguen usando `hud:playXxxAnimation(...)`.
 	self._notificationsQueue = MatchNotificationsQueue.new(matchHudGui)
+	-- Mientras hay una notificación in-match en pantalla, ocultamos las filas de
+	-- jugadores (ATeamPlayers/BTeamPlayers); reaparecen al vaciarse la cola.
+	self._notificationsQueue:setOnNotifyingChanged(function(notifying)
+		self:_setTeamPlayersHidden(notifying)
+	end)
 
 	if matchHudGui then
 		self._globalKillFeed = GlobalKillFeed.new(matchHudGui, self)
@@ -354,8 +406,11 @@ function MatchHud.new(matchHudGui: ScreenGui?): any
 	self._killsByUserId = {} :: { [number]: number }
 	self._deathsByUserId = {} :: { [number]: number }
 	self._assistsByUserId = {} :: { [number]: number }
-	self._streakByUserId = {} :: { [number]: number }
 	self._botRoster = {} :: { [number]: BotRosterEntry }
+	-- Último equipo ("A"/"B") conocido del jugador local, cacheado durante la
+	-- partida. Al acabar la ronda su Character puede desaparecer/quedar sin Team,
+	-- así que esto es el fallback fiable para los Resultados.
+	self._lastKnownLocalSide = nil :: string?
 	-- Cosméticos de compañeros reales (outfit/face/hat) para sus réplicas en
 	-- Resultados. Lo llena el packet TeamCosmetics.
 	self._playerCosmeticsByUserId = {} :: { [number]: PlayerCosmetics }
@@ -505,12 +560,26 @@ end
 function MatchHud:setScores(scoreA: number, scoreB: number, timeLeft: number)
 	local refs = self._hudRefs
 
+	local clampedA = math.max(0, scoreA)
+	local clampedB = math.max(0, scoreB)
+
 	if refs.scoreA then
-		refs.scoreA.Text = tostring(math.max(0, scoreA))
+		refs.scoreA.Text = tostring(clampedA)
 	end
 	if refs.scoreB then
-		refs.scoreB.Text = tostring(math.max(0, scoreB))
+		refs.scoreB.Text = tostring(clampedB)
 	end
+
+	-- Objetivo (puntuación para acabar la partida) y barras de progreso por equipo,
+	-- rellenadas con el score de cada equipo respecto al objetivo (WinScoreLimit).
+	local objectiveScore = GameConfig.WinScoreLimit or 0
+	if refs.objectiveScoreValue then
+		refs.objectiveScoreValue.Text = tostring(objectiveScore)
+	end
+	local objectiveDenominator = math.max(1, objectiveScore)
+	_setHorizontalFill(refs.teamABarFill, clampedA / objectiveDenominator)
+	_setHorizontalFill(refs.teamBBarFill, clampedB / objectiveDenominator)
+
 	if refs.timer then
 		local text, totalSeconds = _formatMatchTime(timeLeft)
 		refs.timer.Text = text
@@ -522,6 +591,7 @@ end
 -- aquí para mantener la API estable de MatchHud (callers usan estos tipos).
 export type LevelUpUnlock = MatchNotificationsQueue.LevelUpUnlock
 export type ChallengeCompletedReward = MatchNotificationsQueue.ChallengeCompletedReward
+export type MasteryProgress = MatchNotificationsQueue.MasteryProgress
 
 -- Las animaciones de notificación (LevelUp / BPLevelUp / Completed + confetti
 -- + slide context) viven en MatchNotificationsQueue. Mantenemos delegadores
@@ -539,9 +609,15 @@ function MatchHud:playBattlePassLevelUpAnimation(newLevel: number)
 	end
 end
 
-function MatchHud:playChallengeCompletedAnimation(reward: ChallengeCompletedReward)
+function MatchHud:playTaskCompletedAnimation(reward: ChallengeCompletedReward)
 	if self._notificationsQueue then
-		self._notificationsQueue:playChallengeCompletedAnimation(reward)
+		self._notificationsQueue:playTaskCompletedAnimation(reward)
+	end
+end
+
+function MatchHud:playMasteryAnimation(progress: MasteryProgress)
+	if self._notificationsQueue then
+		self._notificationsQueue:playMasteryAnimation(progress)
 	end
 end
 
@@ -570,7 +646,6 @@ function MatchHud:resetMatchState()
 	table.clear(self._killsByUserId)
 	table.clear(self._deathsByUserId)
 	table.clear(self._assistsByUserId)
-	table.clear(self._streakByUserId)
 	table.clear(self._playerCosmeticsByUserId)
 	-- NOTE: _botRoster no se limpia aquí porque el servidor lo envía
 	-- de forma asíncrona vía Network.Match.BotRoster y puede llegar
@@ -583,17 +658,19 @@ function MatchHud:resetMatchState()
 	self:queuePlayerRowsUpdate()
 end
 
-function MatchHud:applyPlayerState(userId: number, kills: number, deaths: number?, streak: number?, assists: number?)
+function MatchHud:applyPlayerState(userId: number, kills: number, deaths: number?, assists: number?)
 	local oldKills = self._killsByUserId[userId] or 0
 	local newKills = math.max(0, kills)
 	self._killsByUserId[userId] = newKills
 	if deaths ~= nil then
-		if userId < 0 then
+		-- El servidor envía deaths para TODOS los userIds. Antes la guarda
+		-- `userId < 0` solo guardaba bots, así que los demás jugadores reales
+		-- aparecían con 0 deaths en el marcador/Resultados. Guardamos a todos
+		-- EXCEPTO el jugador local, cuyas deaths las lleva incrementLocalDeaths
+		-- (inmediato en DeathScreenShow) — evita doble conteo y latencia.
+		if userId ~= self._localUserId then
 			self._deathsByUserId[userId] = math.max(0, deaths)
 		end
-	end
-	if streak ~= nil then
-		self._streakByUserId[userId] = math.max(0, streak)
 	end
 	if assists ~= nil then
 		self._assistsByUserId[userId] = math.max(0, assists)
@@ -601,7 +678,7 @@ function MatchHud:applyPlayerState(userId: number, kills: number, deaths: number
 
 	-- Fast paths para evitar reconstruir + ordenar las 12 filas en cada kill:
 	-- 1) Si los kills no cambiaron, no hay nada que refrescar en la fila (el
-	--    row sólo muestra totalKills; deaths/streak no aparecen ahí).
+	--    row sólo muestra totalKills; deaths no aparecen ahí).
 	-- 2) Si los kills cambiaron pero el cambio no cruza el kill-count de ningún
 	--    teammate (no hay reorder), actualizamos solo la fila del userId
 	--    afectado y evitamos el rebuild + sort completo.
@@ -635,11 +712,32 @@ end
 --- Captura datos (kills/assists/deaths/level/equipo) para la pantalla de
 --- Resultados antes de resetear el roster.
 function MatchHud:captureEndResultsData(): (string, { EndResultsPlayerEntry })
-	local localTeam = TeamUtils.getSide(Players.LocalPlayer.Character) or ""
+	-- Resolución robusta del equipo: al acabar la ronda el Character del jugador
+	-- local puede haber desaparecido o quedado sin Team, dejando localTeam="" (→
+	-- Resultados filtraba a un equipo vacío: ni frames ni réplicas). Caemos a
+	-- Player.Team, al atributo TeamName, y por último al equipo cacheado en partida.
+	local function resolveSide(player: Player): string?
+		local side = TeamUtils.getSide(player.Character)
+		if not side and player.Team then
+			side = TeamUtils.normalize(player.Team.Name)
+		end
+		if not side then
+			local attr = player:GetAttribute("TeamName")
+			if typeof(attr) == "string" then
+				side = TeamUtils.normalize(attr)
+			end
+		end
+		if not side and player == Players.LocalPlayer then
+			side = self._lastKnownLocalSide
+		end
+		return side
+	end
+
+	local localTeam = resolveSide(Players.LocalPlayer) or ""
 	local entries = {} :: { EndResultsPlayerEntry }
 
 	for _, player in Players:GetPlayers() do
-		local side = TeamUtils.getSide(player.Character) or ""
+		local side = resolveSide(player) or ""
 		if side == "" then
 			continue
 		end
@@ -845,6 +943,19 @@ function MatchHud:_tryIncrementalKillUpdate(userId: number, oldKills: number, ne
 	return true
 end
 
+-- Oculta/muestra los contenedores de filas de jugadores (no toca las filas
+-- individuales, así conservan su estado al reaparecer). Lo dispara la cola de
+-- notificaciones para que un popup no se solape con el roster.
+function MatchHud:_setTeamPlayersHidden(hidden: boolean)
+	local refs = self._hudRefs
+	if refs.teamAPlayersFrame then
+		refs.teamAPlayersFrame.Visible = not hidden
+	end
+	if refs.teamBPlayersFrame then
+		refs.teamBPlayersFrame.Visible = not hidden
+	end
+end
+
 function MatchHud:_updatePlayerRows()
 	type RowEntry = { userId: number, name: string, image: string?, isBot: boolean, team: string? }
 	local entriesByTeam = {
@@ -858,6 +969,10 @@ function MatchHud:_updatePlayerRows()
 			side = TeamUtils.normalize(p.Team.Name)
 		end
 		if side == "A" or side == "B" then
+			if p == Players.LocalPlayer then
+				-- Cache para Resultados (ver captureEndResultsData).
+				self._lastKnownLocalSide = side
+			end
 			table.insert(entriesByTeam[side], { userId = p.UserId, name = p.Name, image = nil, isBot = false, team = side })
 		end
 	end
