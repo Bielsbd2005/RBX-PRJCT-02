@@ -36,6 +36,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	local GiftingService = require(serverRoot.features.gifting.GiftingService)
 	local LockerService = require(serverRoot.features.locker.LockerService)
 	local ClearDataCommandService = require(serverRoot.features.testing.ClearDataCommandService)
+	local TrainingDummyService = require(serverRoot.features.testing.TrainingDummyService)
 
 	DataService:Start()
 	-- RewardService arranca justo después de DataService: cualquier service
@@ -172,6 +173,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	MatchService:Start(DataService)
 	LockerService:Start(DataService)
 	ClearDataCommandService:Start(DataService)
+	TrainingDummyService:Start()
 
 	-- ── Onboarding Funnel ──────────────────────────────────────
 	-- Track first-session players through: Joined → FirstMatch → FirstKill →
