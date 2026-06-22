@@ -17,6 +17,7 @@ local BaseWeapon = require(Libraries:WaitForChild("BaseWeapon"))
 local Parabola = require(Libraries:WaitForChild("Parabola"))
 local Roblox = require(Libraries:WaitForChild("Roblox"))
 local WeaponsNetwork = require(Libraries:WaitForChild("WeaponsNetwork"))
+local HitVFX = require(Libraries:WaitForChild("HitVFX"))
 local TeamUtils = require(Shared.utils.TeamUtils)
 
 local Effects = WeaponsSystemFolder:WaitForChild("Assets"):WaitForChild("Effects")
@@ -599,7 +600,13 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 				WeaponsNetwork.fireWeaponHit(weaponInst, hitPayload)
 			end)
 
-			if hitSound then hitSound:Play() end
+			-- VFX de impacto: sistema modular por superficie (HitVFX) por
+			-- defecto; fallback al hitSound heredado si ModularHitVFX = false.
+			if self:getConfigValue("ModularHitVFX", true) then
+				HitVFX.play(hitInfo, localPlayerInitiatedShot)
+			elseif hitSound then
+				hitSound:Play()
+			end
 			self:_spawnHitMark(hitPart, hitPoint, hitNormal, parabola)
 		end
 
@@ -756,41 +763,49 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 					hitAttach.CFrame = beam0.Attachment1.CFrame * CFrame.Angles(0, math.rad(90), 0)
 				end
 
-				-- Show hit particle effect
-				local hitPartColor = hitPart and hitPart.Color or Color3.fromRGB(255, 255, 255)
-				if hitPart and hitPart:IsA("Terrain") then
-					hitPartColor = workspace.Terrain:GetMaterialColor(hitMaterial or Enum.Material.Sand)
-				end
-				if hitInfo.h and hitInfo.h:IsA("Humanoid") and hitParticles and numHitParticles > 0 and hitPart and isEnemyHumanoidForPlayer(hitInfo.h, self.player) then
-					-- Show particle effect for hitting a player/humanoid
-					hitParticles.Color = ColorSequence.new(Color3.fromRGB(255, 255, 255))
-					hitParticles:Emit(numHitParticles)
-					visualEffectsLingerTime = math.max(visualEffectsLingerTime, hitParticles.Lifetime.Max)
-				elseif (not hitInfo.h or not hitInfo.h:IsA("Humanoid")) and hitParticles and numHitParticles > 0 then
-					-- Show particle effect for hitting anything else
-					if hitPart and self:getConfigValue("HitParticlesUsePartColor", true) then
-						local existingSeq = hitParticles.Color
-						local newKeypoints = {}
+				-- Efectos de impacto: sistema modular por superficie (HitVFX) por
+				-- defecto. Resuelve dirt/metal/body/headshot/... y reproduce sus
+				-- partículas + sonido propios. El VFX heredado por-arma queda como
+				-- fallback cuando ModularHitVFX = false.
+				if self:getConfigValue("ModularHitVFX", true) then
+					HitVFX.play(hitInfo, localPlayerInitiatedShot)
+				else
+					-- Show hit particle effect
+					local hitPartColor = hitPart and hitPart.Color or Color3.fromRGB(255, 255, 255)
+					if hitPart and hitPart:IsA("Terrain") then
+						hitPartColor = workspace.Terrain:GetMaterialColor(hitMaterial or Enum.Material.Sand)
+					end
+					if hitInfo.h and hitInfo.h:IsA("Humanoid") and hitParticles and numHitParticles > 0 and hitPart and isEnemyHumanoidForPlayer(hitInfo.h, self.player) then
+						-- Show particle effect for hitting a player/humanoid
+						hitParticles.Color = ColorSequence.new(Color3.fromRGB(255, 255, 255))
+						hitParticles:Emit(numHitParticles)
+						visualEffectsLingerTime = math.max(visualEffectsLingerTime, hitParticles.Lifetime.Max)
+					elseif (not hitInfo.h or not hitInfo.h:IsA("Humanoid")) and hitParticles and numHitParticles > 0 then
+						-- Show particle effect for hitting anything else
+						if hitPart and self:getConfigValue("HitParticlesUsePartColor", true) then
+							local existingSeq = hitParticles.Color
+							local newKeypoints = {}
 
-						for i, keypoint in pairs(existingSeq.Keypoints) do
-							local newColor = keypoint.Value
-							if newColor == Color3.fromRGB(255, 0, 255) then
-								newColor = hitPartColor
+							for i, keypoint in pairs(existingSeq.Keypoints) do
+								local newColor = keypoint.Value
+								if newColor == Color3.fromRGB(255, 0, 255) then
+									newColor = hitPartColor
+								end
+								newKeypoints[i] = ColorSequenceKeypoint.new(keypoint.Time, newColor)
 							end
-							newKeypoints[i] = ColorSequenceKeypoint.new(keypoint.Time, newColor)
+
+							hitParticles.Color = ColorSequence.new(newKeypoints)
 						end
 
-						hitParticles.Color = ColorSequence.new(newKeypoints)
+						hitParticles:Emit(numHitParticles)
+						visualEffectsLingerTime = math.max(visualEffectsLingerTime, hitParticles.Lifetime.Max)
 					end
 
-					hitParticles:Emit(numHitParticles)
-					visualEffectsLingerTime = math.max(visualEffectsLingerTime, hitParticles.Lifetime.Max)
-				end
-
-				-- Play hit sound
-				if hitSound then
-					hitSound:Play()
-					visualEffectsLingerTime = math.max(visualEffectsLingerTime, hitSound.TimeLength)
+					-- Play hit sound
+					if hitSound then
+						hitSound:Play()
+						visualEffectsLingerTime = math.max(visualEffectsLingerTime, hitSound.TimeLength)
+					end
 				end
 
 				-- Manage/show decals, billboards, and models (such as an arrow) that appear where the projectile hit
