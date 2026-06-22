@@ -33,6 +33,7 @@ local OUTLINE_ALPHA = 0.1
 local HEAL_FLASH_COLOR = Color3.fromRGB(60, 255, 120)
 local HEAL_FLASH_FILL_ALPHA = 0.4
 local HEAL_FLASH_THRESHOLD = 5
+local HEAL_FLASH_HOLD = 0.45 -- segundos que el verde se mantiene antes de desvanecerse
 local TI_HEAL_FLASH_IN  = TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local TI_HEAL_FLASH_OUT = TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
@@ -139,15 +140,22 @@ local function _flashLocalHeal()
 		if state ~= Enum.PlaybackState.Completed or _healFlashToken ~= token then
 			return
 		end
-		-- Vuelta al estado base del self (contorno negro, sin fill).
-		local tweenOut = TweenService:Create(highlight, TI_HEAL_FLASH_OUT, {
-			FillColor = COLOR_LOCAL,
-			OutlineColor = COLOR_LOCAL,
-			FillTransparency = 1,
-			OutlineTransparency = OUTLINE_ALPHA,
-		})
-		_healFlashTweens[#_healFlashTweens + 1] = tweenOut
-		tweenOut:Play()
+		-- Mantener el verde un instante (HEAL_FLASH_HOLD) antes de desvanecer, para
+		-- que dure un poco más. El token invalida el hold si llega otro heal.
+		task.delay(HEAL_FLASH_HOLD, function()
+			if _healFlashToken ~= token then
+				return
+			end
+			-- Vuelta al estado base del self (contorno negro, sin fill).
+			local tweenOut = TweenService:Create(highlight, TI_HEAL_FLASH_OUT, {
+				FillColor = COLOR_LOCAL,
+				OutlineColor = COLOR_LOCAL,
+				FillTransparency = 1,
+				OutlineTransparency = OUTLINE_ALPHA,
+			})
+			_healFlashTweens[#_healFlashTweens + 1] = tweenOut
+			tweenOut:Play()
+		end)
 	end)
 	tweenIn:Play()
 end

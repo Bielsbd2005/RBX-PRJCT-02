@@ -1027,6 +1027,18 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			return selectedQualifiedId
 		end
 
+		-- El nav del body se llama "Body" pero su categoría es "Outfits" (única
+		-- traducción no-identidad nav→categoría, ver LockerConfig.ItemsConfigByNav).
+		-- Hay que comparar contra el NAV key "Body", no contra LockerCategory.OUTFITS
+		-- ("Outfits") — por eso antes nunca preseleccionaba el body equipado y el
+		-- grid caía al primer item (Default).
+		if categoryKey == LockerMainCategory.STYLE and navKey == "Body" then
+			local equippedOutfit = getOptionalString(equippedLookup.Outfits) or getOptionalString(getCurrentLoadout().Outfit)
+			if equippedOutfit then
+				return LockerConfig.makeQualifiedId(LockerCategory.OUTFITS, equippedOutfit)
+			end
+		end
+
 		if categoryKey == LockerMainCategory.STYLE and navKey == LockerCategory.FACES then
 			local equippedFace = getOptionalString(equippedLookup.Faces) or getOptionalString(getCurrentLoadout().Face)
 			if equippedFace then

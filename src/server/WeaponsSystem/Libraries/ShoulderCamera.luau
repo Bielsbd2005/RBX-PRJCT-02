@@ -155,7 +155,11 @@ function ShoulderCamera.new(weaponsSystem)
 	self.fieldOfView = 70
 	self.minPitch = math.rad(-75) -- min degrees camera can angle down
 	self.maxPitch = math.rad(75) -- max degrees camera can cangle up
-	self.normalOffset = Vector3.new(2.25, 2.25, 10.5) -- this is the camera's offset from the player
+	-- Offset cámara→jugador (X lateral, Y altura, Z distancia). Hombro más marcado
+	-- (estilo TPS moderno): más offset lateral y un pelín más cerca, dejando el
+	-- centro/mira más despejado. El zoom (ADS) tira por el LookVector sin tocar el
+	-- lateral, así que el hombro se mantiene al apuntar.
+	self.normalOffset = Vector3.new(3.0, 2.25, 9.5)
 	self.zoomedOffsetDistance = 6 -- number of studs to zoom in from default offset when zooming
 	self.normalCrosshairScale = 1
 	self.zoomedCrosshairScale = 0.75
