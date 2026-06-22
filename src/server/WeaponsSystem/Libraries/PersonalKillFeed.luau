@@ -11,15 +11,22 @@ local DISPLAY_TIME = 3.5
 local HEADSHOT_BONUS_XP = ActionRewards.GetXP("Headshot")
 local MAX_NOTIFS = 5
 
+-- Count-up animado del XP del KO ("+ X" con los números subiendo hasta el
+-- objetivo). Para cifras grandes no se cuenta desde 0: se anima sólo el último
+-- tramo (XP_COUNT_UP_MAX_SPAN), así no tarda eternamente ni salta de golpe.
+local XP_COUNT_UP_TIME = 0.45
+local XP_COUNT_UP_MAX_SPAN = 200
+
 local currentNotificationOrder = 0
 
 -- ==============================================================================
 -- Tiempos de Animación HEAVY
 -- ==============================================================================
--- Entrada
-local TI_HEAVY_MOVE_IN = TweenInfo.new(0.3, Enum.EasingStyle.Exponential, Enum.EasingDirection.Out)
-local TI_HEAVY_PUNCH_IN = TweenInfo.new(0.6, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out)
-local TI_HEAVY_COLOR_FLASH = TweenInfo.new(0.15, Enum.EasingStyle.Linear, Enum.EasingDirection.Out)
+-- Entrada "juicy": slam con overshoot + punch elástico + flash de impacto.
+local TI_SLAM_IN    = TweenInfo.new(0.34, Enum.EasingStyle.Back, Enum.EasingDirection.Out)    -- posición (se pasa de 0 y vuelve)
+local TI_PUNCH_IN   = TweenInfo.new(0.55, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out) -- escala (rebota alrededor de 1)
+local TI_WOBBLE_IN  = TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out)      -- rotación settle (wobble)
+local TI_CONTENT_IN = TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)     -- contenido aparece casi instantáneo
 
 -- Salida (NUEVA: Directa a la Izquierda, sin rebote)
 -- Usamos Exponential.In: Acelera brutalmente hacia la izquierda de forma limpia.
@@ -201,19 +208,24 @@ local function slideInFromRight(frame, container, isHeadshot)
 	wrapper.AutomaticSize = Enum.AutomaticSize.X
 	frame.Size = UDim2.new(0, 0, 1, 0)
 
-	local uiScale = Instance.new("UIScale")
+	-- Reusar la UIScale de la plantilla si la trae (las templates nuevas KO/
+	-- Headshot ya incluyen una). Crear una nueva además dejaría dos UIScale en
+	-- el mismo frame y Roblox sólo aplica una → el punch-in no se vería.
+	local uiScale = frame:FindFirstChildOfClass("UIScale") or Instance.new("UIScale")
 	uiScale.Parent = frame
 
-	frame.Position = UDim2.new(0, 80, 0, 0)
-	uiScale.Scale = isHeadshot and 1.6 or 1.4
-	frame.Rotation = isHeadshot and 10 or 6
+	-- ── Estado inicial (pre-animación) ─────────────────────────────────────
+	-- Entra desde la derecha, sobredimensionado e inclinado. El headshot pega
+	-- más fuerte. El fondo del frame es transparente (el look viene del
+	-- contenido), así que NO tocamos BackgroundTransparency/Color: la juice es
+	-- puro movimiento.
+	local startOffsetX = isHeadshot and 130 or 110
+	local startScale = isHeadshot and 1.95 or 1.5
+	local startRot = isHeadshot and 13 or 7
 
-	local originalColor = frame.BackgroundColor3
-	if isHeadshot then
-		frame.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
-	else
-		frame.BackgroundColor3 = Color3.fromRGB(255, 200, 50)
-	end
+	frame.Position = UDim2.new(0, startOffsetX, 0, 0)
+	uiScale.Scale = startScale
+	frame.Rotation = startRot
 
 	setInitialTransparency(frame)
 	frame.Visible = true
@@ -221,13 +233,43 @@ local function slideInFromRight(frame, container, isHeadshot)
 	frame.Parent = wrapper
 	wrapper.Parent = container
 
-	TweenService:Create(frame, TI_HEAVY_MOVE_IN, {Position = UDim2.new(0, 0, 0, 0), Rotation = 0}):Play()
-	TweenService:Create(uiScale, TI_HEAVY_PUNCH_IN, {Scale = 1}):Play()
-
-	tweenChildrenTransparency(frame, TI_HEAVY_COLOR_FLASH, 0)
-	TweenService:Create(frame, TI_HEAVY_COLOR_FLASH, {BackgroundColor3 = originalColor}):Play()
+	-- ── Animaciones de entrada (en paralelo) ───────────────────────────────
+	TweenService:Create(frame, TI_SLAM_IN, { Position = UDim2.new(0, 0, 0, 0) }):Play() -- slam con overshoot
+	TweenService:Create(frame, TI_WOBBLE_IN, { Rotation = 0 }):Play()                    -- rotación con wobble propio
+	TweenService:Create(uiScale, TI_PUNCH_IN, { Scale = 1 }):Play()                      -- punch elástico
+	tweenChildrenTransparency(frame, TI_CONTENT_IN, 0)                                   -- contenido aparece rápido
 
 	return wrapper
+end
+
+-- Anima el texto de `label` como "+ N" subiendo desde un valor inicial hasta
+-- `target` con easing. Cifras pequeñas cuentan desde 0; las grandes empiezan en
+-- target - XP_COUNT_UP_MAX_SPAN. Aborta solo si la etiqueta se destruye antes.
+local function animateXpCountUp(label, xpGained)
+	local target = tonumber(xpGained) or 0
+	local startValue = if target > XP_COUNT_UP_MAX_SPAN then target - XP_COUNT_UP_MAX_SPAN else 0
+	local span = target - startValue
+	if span <= 0 then
+		label.Text = "+ " .. tostring(target)
+		return
+	end
+
+	label.Text = "+ " .. tostring(startValue)
+	local startClock = os.clock()
+	task.spawn(function()
+		while true do
+			if not label.Parent then return end -- notificación expirada/expulsada
+			local t = (os.clock() - startClock) / XP_COUNT_UP_TIME
+			if t >= 1 then
+				label.Text = "+ " .. tostring(target)
+				return
+			end
+			-- easeOutCubic: arranca rápido y desacelera al llegar al objetivo.
+			local eased = 1 - (1 - t) ^ 3
+			label.Text = "+ " .. tostring(math.floor(startValue + span * eased + 0.5))
+			task.wait()
+		end
+	end)
 end
 
 function PersonalKillFeed.showKill(victimName, xpGained, wasHeadshot)
@@ -242,7 +284,7 @@ function PersonalKillFeed.showKill(victimName, xpGained, wasHeadshot)
 			local koXpLabel = koFrame:FindFirstChild("XP")
 
 			if victimLabel then victimLabel.Text = victimName end
-			if koXpLabel then koXpLabel.Text = tostring(xpGained) end
+			if koXpLabel then animateXpCountUp(koXpLabel, xpGained) end
 
 			local koWrapper = slideInFromRight(koFrame, container, false)
 			manageQueue(koFrame, koWrapper)
