@@ -36,6 +36,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	local GiftingService = require(serverRoot.features.gifting.GiftingService)
 	local LockerService = require(serverRoot.features.locker.LockerService)
 	local ClearDataCommandService = require(serverRoot.features.testing.ClearDataCommandService)
+	local TrainingDummyService = require(serverRoot.features.testing.TrainingDummyService)
 
 	DataService:Start()
 	-- RewardService arranca justo después de DataService: cualquier service
@@ -66,9 +67,15 @@ function ServerBootstrap.start(serverRoot: Script): ()
 			end
 
 			-- Idempotencia: si ya procesamos este PurchaseId, no re-otorgar Cash.
+			-- Aun así forzamos un save: si un intento anterior concedió en memoria
+			-- pero no llegó a persistir, esto lo confirma antes de devolver
+			-- PurchaseGranted (Roblox consume el receipt al concederlo).
 			local purchaseId = tostring(receiptInfo.PurchaseId)
 			if DataService:IsReceiptProcessed(buyer, purchaseId) then
-				return Enum.ProductPurchaseDecision.PurchaseGranted
+				if DataService:ForceSave(buyer) then
+					return Enum.ProductPurchaseDecision.PurchaseGranted
+				end
+				return Enum.ProductPurchaseDecision.NotProcessedYet
 			end
 
 			-- Atómico: grant Cash + mark receipt en el mismo BatchUpdate.
@@ -78,13 +85,22 @@ function ServerBootstrap.start(serverRoot: Script): ()
 				{ path = { "Stats", "TotalRobuxSpent" }, delta = storeProduct.RobuxPrice },
 				{ path = { "ProcessedReceipts", purchaseId }, value = os.time() },
 			})
-			if ok then
-				local profile = DataService:GetProfile(buyer)
-				local balance = if profile and profile.Data then profile.Data.Stats.Cash else 0
-				EconomyAnalytics.Source(buyer, storeProduct.CashAmount, balance, "RobuxPurchase", storeProduct.ButtonName)
-				return Enum.ProductPurchaseDecision.PurchaseGranted
+			if not ok then
+				return Enum.ProductPurchaseDecision.NotProcessedYet
 			end
-			return Enum.ProductPurchaseDecision.NotProcessedYet
+
+			-- Durabilidad del receipt: Roblox da por consumido el receipt al
+			-- devolver PurchaseGranted, sin esperar a nuestro write. Forzamos un
+			-- save confirmado ANTES de conceder; si falla, NotProcessedYet hace que
+			-- Roblox reentregue (la idempotencia de arriba evita doble-grant).
+			if not DataService:ForceSave(buyer) then
+				return Enum.ProductPurchaseDecision.NotProcessedYet
+			end
+
+			local profile = DataService:GetProfile(buyer)
+			local balance = if profile and profile.Data then profile.Data.Stats.Cash else 0
+			EconomyAnalytics.Source(buyer, storeProduct.CashAmount, balance, "RobuxPurchase", storeProduct.ButtonName)
+			return Enum.ProductPurchaseDecision.PurchaseGranted
 		end
 
 		warn("[ServerBootstrap] Unknown ProductId:", receiptInfo.ProductId)
@@ -123,30 +139,15 @@ function ServerBootstrap.start(serverRoot: Script): ()
 			-- (UI del killer en el mismo frame). NO concede cash/XP — eso lo hace
 			-- MatchService vía RewardService en _registerKillEvent. Aquí solo
 			-- replicamos lo que va a otorgar para que la UI no mienta.
-			WeaponsSystem.killHook = function(killer: Player, _victimHum: Humanoid, _weaponName: string, wasHeadshot: boolean)
-				local streakAfterKill = 1
-				if MatchService and (MatchService :: any).GetPlayerKillStreak then
-					local ok, currentStreak = pcall(function()
-						return (MatchService :: any):GetPlayerKillStreak(killer)
-					end)
-					if ok and typeof(currentStreak) == "number" then
-						streakAfterKill = math.max(1, currentStreak + 1)
-					end
-				end
-
-				-- Valores reales de ActionRewards (no hardcoded). Streak3/5 se
-				-- conceden por separado en MatchService y se mostrarán con su
-				-- propia UI cuando suceda.
+			WeaponsSystem.killHook = function(_killer: Player, _victimHum: Humanoid, _weaponName: string, wasHeadshot: boolean)
+				-- Valores reales de ActionRewards (no hardcoded). El cash/XP lo otorga
+				-- MatchService vía RewardService; aquí solo se replica el XP a mostrar.
 				local xpGained = ActionRewards.GetXP("Kill")
-				local coinAmount = ActionRewards.GetCash("Kill")
 				if wasHeadshot then
 					xpGained += ActionRewards.GetXP("Headshot")
-					coinAmount += ActionRewards.GetCash("Headshot")
 				end
 
 				return {
-					streakAfterKill = streakAfterKill,
-					coinAmount = coinAmount,
 					xpGained = xpGained,
 				}
 			end
@@ -172,6 +173,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	MatchService:Start(DataService)
 	LockerService:Start(DataService)
 	ClearDataCommandService:Start(DataService)
+	TrainingDummyService:Start()
 
 	-- ── Onboarding Funnel ──────────────────────────────────────
 	-- Track first-session players through: Joined → FirstMatch → FirstKill →

@@ -329,6 +329,12 @@ local function _pickupLoopTick(dt: number)
 			i += 1
 		end
 	end
+	-- Autodesconexión en idle (mismo patrón que el bucle global de proyectiles
+	-- de BulletWeapon): _ensurePickupLoop reconecta en el próximo spawn.
+	if #activePickups == 0 and pickupLoopConn then
+		pickupLoopConn:Disconnect()
+		pickupLoopConn = nil
+	end
 end
 
 local function _ensurePickupLoop()

@@ -78,10 +78,11 @@ function GlobalKillFeed.new(matchHudGui: ScreenGui, matchHudInstance: any): any
 	self._template = template
 	template.Visible = false
 
-	-- Alinear el feed a la izquierda de la pantalla
+	-- Alinear el feed a la derecha de la pantalla (los items salen por la derecha,
+	-- creciendo de derecha a izquierda).
 	local listLayout = container:FindFirstChildOfClass("UIListLayout")
 	if listLayout then
-		listLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+		listLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
 	end
 
 	-- Escuchar el evento de KillFeed

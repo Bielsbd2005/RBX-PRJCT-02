@@ -107,11 +107,42 @@ WeaponPreviewController.__index = WeaponPreviewController
 
 -- ── Helpers internos ──────────────────────────────────────────
 
+local WRAP_ORIGINAL_MATERIAL_ATTR = "WrapOriginalMaterial"
+
 local function getOptionalString(value: any): string?
 	if type(value) == "string" and value ~= "" then
 		return value
 	end
 	return nil
+end
+
+local function getOptionalMaterial(value: any): Enum.Material?
+	if typeof(value) == "EnumItem" and value.EnumType == Enum.Material then
+		return value :: Enum.Material
+	end
+	return nil
+end
+
+-- Aplica/restaura el Material de la parte del arma. Recuerda el material
+-- original la primera vez para poder volver a él cuando una skin no define
+-- Material (el preview reutiliza la misma instancia al cambiar de wrap).
+local function applyMaterialToPart(part: BasePart, material: Enum.Material?)
+	if part:GetAttribute(WRAP_ORIGINAL_MATERIAL_ATTR) == nil then
+		part:SetAttribute(WRAP_ORIGINAL_MATERIAL_ATTR, part.Material.Name)
+	end
+
+	if material then
+		part.Material = material
+		return
+	end
+
+	local originalName = part:GetAttribute(WRAP_ORIGINAL_MATERIAL_ATTR)
+	if type(originalName) == "string" then
+		local restored = (Enum.Material :: any)[originalName]
+		if restored then
+			part.Material = restored
+		end
+	end
 end
 
 local function isWeaponCategory(category: string): boolean
@@ -353,6 +384,7 @@ function WeaponPreviewController:_applyWrap(previewInstance: Instance, weaponCat
 	local baseColor = if validDef and typeof(wrapDefinition.BaseColor) == "Color3"
 		then wrapDefinition.BaseColor
 		else nil
+	local material = if validDef then getOptionalMaterial(wrapDefinition.Material) else nil
 	local studsPerTile = if validDef
 		then math.max(0.01, tonumber(wrapDefinition.StudsPerTile) or DEFAULT_WRAP_STUDS_PER_TILE)
 		else DEFAULT_WRAP_STUDS_PER_TILE
@@ -396,6 +428,8 @@ function WeaponPreviewController:_applyWrap(previewInstance: Instance, weaponCat
 	elseif baseColor then
 		primaryPart.Color = baseColor
 	end
+
+	applyMaterialToPart(primaryPart, material)
 
 	if textureId and animated and #animatedTextures > 0 then
 		local tileU = if studsPerTile > 0.001 then studsPerTile else 1
@@ -777,6 +811,11 @@ function WeaponPreviewController:Destroy()
 	table.clear(self._wrapAnimDataByCategory)
 	table.clear(self._motionDataByCategory)
 	table.clear(self._activeMotionTweenByCategory)
+	-- Destruir los clones cacheados (parented a nil) antes de soltar la tabla, en
+	-- vez de solo table.clear, para liberarlos de inmediato al teardown.
+	for _, clone in self._lockedTemplateCache do
+		clone:Destroy()
+	end
 	table.clear(self._lockedTemplateCache)
 end
 

@@ -263,14 +263,14 @@ end
 --
 -- Roblox lee StarterPlayer.StarterCharacter al llamar player:LoadCharacter().
 -- Para servir bodies distintos por jugador, clonamos el template desde
--- ServerStorage.Bodies[outfitId], lo parenteamos como StarterCharacter,
+-- Shared.Bodies[outfitId], lo parenteamos como StarterCharacter,
 -- llamamos LoadCharacter (yields) y limpiamos. El mutex serializa swaps
 -- concurrentes para que dos LoadCharacter simultáneos no se pisen el template.
 
 local _bodySwapBusy = false
 
 local function _resolveFullBodyTemplate(outfitId: string?): Model?
-	local bodies = ServerStorage:FindFirstChild(BODIES_ROOT_NAME)
+	local bodies = Shared:FindFirstChild(BODIES_ROOT_NAME)
 	if not bodies then
 		return nil
 	end

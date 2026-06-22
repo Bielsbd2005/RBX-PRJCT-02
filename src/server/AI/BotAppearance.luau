@@ -95,7 +95,7 @@ local function _buildWrapPool(): { string }
 end
 
 local function _getBodiesRoot(): Folder?
-	local root = ServerStorage:FindFirstChild(BODIES_ROOT_NAME)
+	local root = Shared:FindFirstChild(BODIES_ROOT_NAME)
 	if root and root:IsA("Folder") then
 		return root :: Folder
 	end
@@ -112,7 +112,7 @@ local function _buildOutfitPool(): { string }
 	if type(outfitsConfig) ~= "table" then
 		return pool
 	end
-	-- Intersect ItemsConfig.Outfits con los Models reales en ServerStorage.Bodies
+	-- Intersect ItemsConfig.Outfits con los Models reales en Shared.Bodies
 	-- para no warnar cuando un outfit existe en config pero falta .rbxm.
 	for outfitId in outfitsConfig do
 		local node = bodiesRoot:FindFirstChild(outfitId)

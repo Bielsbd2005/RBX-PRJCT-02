@@ -292,6 +292,12 @@ function MapVoteView.new(votingFrame: GuiObject?): any
 	-- Token de generación: un show()/hide()/showWinner() nuevo lo bumpea para que
 	-- un task.delay tardío de un showWinner viejo no oculte una votación fresca.
 	self._voteToken = 0
+	-- Mientras se muestra el ganador, congelamos los votos/% (ignoramos updateVotes)
+	-- para que no se borren si el servidor limpia el snapshot al acabar la votación.
+	-- Se limpian recién en hide().
+	self._showingWinner = false
+	-- Último estado de votos CON contenido; showWinner lo restaura si hace falta.
+	self._lastVoterData = nil :: VoterData?
 	self._connections = {} :: { RBXScriptConnection }
 	self._janitor = Janitor.new()
 
@@ -332,6 +338,8 @@ end
 
 function MapVoteView:show(options: { option1: OptionModel, option2: OptionModel, option3: OptionModel }, duration: number)
 	self._voteToken += 1
+	self._showingWinner = false
+	self._lastVoterData = nil
 	self._duration = math.max(1, duration)
 	self._selectedKey = ""
 
@@ -365,6 +373,8 @@ end
 
 function MapVoteView:hide()
 	self._voteToken += 1
+	self._showingWinner = false
+	self._lastVoterData = nil
 	self._selectedKey = ""
 	if self._timerLabel then self._timerLabel.Visible = true end
 	for _, slot in self._slots do
@@ -388,7 +398,9 @@ end
 
 -- ── Votos + porcentajes ──────────────────────────────────────
 
-function MapVoteView:updateVotes(voterData: VoterData)
+-- Render puro de votos/% (sin guard ni cache). showWinner lo reusa para restaurar
+-- el estado final si el snapshot se limpió en la transición de fase.
+function MapVoteView:_renderVotes(voterData: VoterData)
 	-- Conteos por slot y total, para los porcentajes.
 	local countsByKey: { [string]: number } = {}
 	local total = 0
@@ -426,6 +438,21 @@ function MapVoteView:updateVotes(voterData: VoterData)
 	end
 end
 
+function MapVoteView:updateVotes(voterData: VoterData)
+	-- Mientras se muestra el ganador, ignoramos actualizaciones (incl. el snapshot
+	-- vaciado al acabar la votación): los votos/% quedan congelados hasta hide().
+	if self._showingWinner then
+		return
+	end
+	-- Cachea el último estado CON votos para poder restaurarlo al mostrar el ganador
+	-- (el servidor puede limpiar Votes1/2/3 en la transición, llegando aquí como
+	-- vacío justo antes de showWinner). No cacheamos el vacío para no perder el final.
+	if voterData.random ~= "" or voterData.option1 ~= "" or voterData.option2 ~= "" or voterData.option3 ~= "" then
+		self._lastVoterData = voterData
+	end
+	self:_renderVotes(voterData)
+end
+
 -- ── Ganador ──────────────────────────────────────────────────
 
 -- winnerMapName es siempre un mapa concreto (el servidor ya resolvió Random).
@@ -435,6 +462,14 @@ end
 function MapVoteView:showWinner(winnerMapName: string, onDone: (() -> ())?)
 	self._voteToken += 1
 	local token = self._voteToken
+	-- Congela los votos/% en su estado final mientras se resalta al ganador; un
+	-- updateVotes tardío (snapshot limpiado por el servidor) ya no los borra.
+	self._showingWinner = true
+	-- Restaura el estado final por si el snapshot ya se limpió justo antes (entonces
+	-- el display estaría a 0%/sin avatares). _renderVotes ignora el guard.
+	if self._lastVoterData then
+		self:_renderVotes(self._lastVoterData)
+	end
 	if self._timerLabel then self._timerLabel.Visible = false end
 
 	local winnerSlot: SlotRefs? = nil
@@ -507,6 +542,14 @@ function MapVoteView:Destroy()
 	table.clear(self._connections)
 	if self._janitor then
 		self._janitor:Destroy()
+	end
+	-- _hideVoteIcons solo oculta (Visible=false); los clones de avatares quedan
+	-- residentes en el árbol GUI. Al teardown destruirlos de verdad libera el pool.
+	for _, slot in self._slots do
+		for _, icon in slot.spawnedVotes do
+			icon:Destroy()
+		end
+		table.clear(slot.spawnedVotes)
 	end
 	self:hide()
 end

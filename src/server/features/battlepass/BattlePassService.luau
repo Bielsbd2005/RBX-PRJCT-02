@@ -508,11 +508,22 @@ local function _grantSkip(player: Player, purchaseId: string): boolean
 	local maxTier = BattlePassConfig.GetMaxTier(season)
 	local currentTier = math.max(1, math.floor(state.CurrentTier or 1))
 
+	-- Contabilizar el gasto en el MISMO BatchUpdate atómico que GrantedSkips, no
+	-- en un Increment separado posterior. Si el Increment fallaba tras persistir
+	-- ProcessedReceipts, la reentrega devolvía PurchaseGranted sin reejecutarlo y
+	-- el gasto se subcontaba para siempre. El path no-op (ya concedido arriba) no
+	-- pasa por aquí, así que no hay doble conteo.
+	local skipRobux = (season.SkipRobuxPrice and season.SkipRobuxPrice > 0) and season.SkipRobuxPrice or 0
+
 	if currentTier > maxTier then
 		-- Season ya completada: marcamos el receipt para no quedar en loop.
-		return _dataService:BatchUpdate(player, {
+		local updates: { any } = {
 			{ path = { "BattlePass", "GrantedSkips", purchaseId }, value = true },
-		})
+		}
+		if skipRobux > 0 then
+			table.insert(updates, { path = { "Stats", "TotalRobuxSpent" }, delta = skipRobux })
+		end
+		return _dataService:BatchUpdate(player, updates)
 	end
 
 	local currentXP = math.max(0, math.floor(state.XP or 0))
@@ -522,12 +533,16 @@ local function _grantSkip(player: Player, purchaseId: string): boolean
 
 	local xpToFill = math.max(0, tierDef.XPRequired - currentXP)
 
-	return _dataService:BatchUpdate(player, {
+	local updates: { any } = {
 		{ path = { "BattlePass", "CurrentTier" },              value = currentTier + 1 },
 		{ path = { "BattlePass", "XP" },                       value = 0 },
 		{ path = { "BattlePass", "TotalXPEarned" },            value = totalXP + xpToFill },
 		{ path = { "BattlePass", "GrantedSkips", purchaseId }, value = true },
-	})
+	}
+	if skipRobux > 0 then
+		table.insert(updates, { path = { "Stats", "TotalRobuxSpent" }, delta = skipRobux })
+	end
+	return _dataService:BatchUpdate(player, updates)
 end
 
 --[[
@@ -558,7 +573,12 @@ function BattlePassService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchas
 
 	local purchaseId = tostring(receiptInfo.PurchaseId)
 	if _dataService:IsReceiptProcessed(player, purchaseId) then
-		return Enum.ProductPurchaseDecision.PurchaseGranted
+		-- Ya concedido en memoria; confirmar que está persistido antes de
+		-- conceder (Roblox consume el receipt al devolver PurchaseGranted).
+		if _dataService:ForceSave(player) then
+			return Enum.ProductPurchaseDecision.PurchaseGranted
+		end
+		return Enum.ProductPurchaseDecision.NotProcessedYet
 	end
 
 	-- Por si la season cambió entre prompt y receipt: garantiza que la
@@ -582,6 +602,11 @@ function BattlePassService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchas
 		if not ok then
 			return Enum.ProductPurchaseDecision.NotProcessedYet
 		end
+		-- Durabilidad del receipt: persistir confirmado antes de conceder
+		-- (Roblox no espera a nuestro write tras PurchaseGranted).
+		if not _dataService:ForceSave(player) then
+			return Enum.ProductPurchaseDecision.NotProcessedYet
+		end
 		local sessionId = _bpFunnelSessionByUserId[player.UserId]
 		EconomyAnalytics.BPPremiumStep(player, 3, sessionId)
 		_bpFunnelSessionByUserId[player.UserId] = nil
@@ -598,8 +623,14 @@ function BattlePassService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchas
 	if not _dataService:MarkReceiptProcessed(player, purchaseId) then
 		return Enum.ProductPurchaseDecision.NotProcessedYet
 	end
-	if season.SkipRobuxPrice and season.SkipRobuxPrice > 0 then
-		pcall(_dataService.Increment, _dataService, player, { "Stats", "TotalRobuxSpent" }, season.SkipRobuxPrice)
+	-- TotalRobuxSpent se contabiliza dentro del BatchUpdate atómico de _grantSkip
+	-- (antes era un Increment suelto aquí que podía perderse y subcontar el gasto).
+
+	-- Durabilidad del receipt: persistir el skip (GrantedSkips + ProcessedReceipts
+	-- + tier) confirmado antes de conceder. Si falla, NotProcessedYet → Roblox
+	-- reentrega y la idempotencia de GrantedSkips evita un segundo tier-up.
+	if not _dataService:ForceSave(player) then
+		return Enum.ProductPurchaseDecision.NotProcessedYet
 	end
 
 	local profile = _dataService:GetProfile(player)

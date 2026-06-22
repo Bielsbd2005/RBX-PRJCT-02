@@ -2,14 +2,20 @@
 --[[
 	MatchNotificationsQueue.luau
 	Queue + animaciones de notificaciones in-match: level up, BattlePass level up,
-	challenge completed. Extraído de MatchHud para que ese módulo no orqueste
-	tanto. Los frames y sus posiciones originales se cachean por instancia.
+	daily task completed, y maestría de armas (hitos + completar). Extraído de
+	MatchHud para que ese módulo no orqueste tanto. Los frames y sus posiciones
+	originales se cachean por instancia.
+
+	Frames esperados bajo MatchHud.Container:
+		LevelUp.Value · BattlePassLevelUp.{Value, Reward} · TaskCompleted.Reward ·
+		Maestry.{Bar.Fill, Reward.ItemViewport, Value}
 
 	API:
 		MatchNotificationsQueue.new(matchHudGui: ScreenGui?)
 		:playLevelUpAnimation(newLevel: number, unlock: LevelUpUnlock?)
-		:playBattlePassLevelUpAnimation(newLevel: number)
-		:playChallengeCompletedAnimation(reward: ChallengeCompletedReward)
+		:playBattlePassLevelUpAnimation(newLevel: number, reward: ChallengeCompletedReward?)
+		:playTaskCompletedAnimation(reward: ChallengeCompletedReward)
+		:playMasteryAnimation(progress: MasteryProgress)
 		:destroy()
 ]]
 
@@ -41,9 +47,30 @@ export type ChallengeCompletedReward = {
 	category: string?,
 	textureID: string?,
 	baseColor: Color3?,
+	material: Enum.Material?,
 	animated: boolean?,
 	studsPerTile: number?,
 	cashAmount: number?,
+}
+
+-- Progreso de maestría de un arma hacia el siguiente tier (o el recién completado).
+-- `current`/`target` se muestran como "current/target" y rellenan la barra.
+-- `isComplete` = true cuando se acaba de ganar el wrap (100%, con confeti).
+export type MasteryProgress = {
+	current: number,
+	target: number,
+	name: string,
+	isComplete: boolean?,
+	-- Preview 3D del wrap de maestría (siguiente tier o el recién ganado).
+	previewWeaponCategory: string?,
+	previewWeaponId: string?,
+	itemId: string?,
+	category: string?,
+	textureID: string?,
+	baseColor: Color3?,
+	material: Enum.Material?,
+	animated: boolean?,
+	studsPerTile: number?,
 }
 
 -- ── Constantes ───────────────────────────────────────────────
@@ -81,6 +108,18 @@ local CHALLENGE_CONFETTI_COLORS = {
 	Color3.fromRGB(200, 255, 210),
 	Color3.fromRGB(30, 140, 60),
 }
+
+-- Maestría de armas usa paleta dorada (logro/achievement). Solo se lanza confeti
+-- al completar un tier (100%), no en los hitos intermedios.
+local MASTERY_CONFETTI_COLORS = {
+	Color3.fromRGB(255, 205, 70),
+	Color3.fromRGB(255, 175, 30),
+	Color3.fromRGB(255, 230, 140),
+	Color3.fromRGB(230, 150, 20),
+	Color3.fromRGB(255, 245, 200),
+}
+-- Tween de la barra de progreso de maestría (se rellena tras entrar el frame).
+local MASTERY_BAR_TWEEN_INFO = TweenInfo.new(0.6, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
 
 local LEVEL_UP_FILLER_PHRASES = {
 	"Science says you're cool now",
@@ -130,6 +169,119 @@ local function _findDescendantTextLabel(parent: Instance?, path: { string }): Te
 	return nil
 end
 
+-- Calcula el tamaño objetivo de un Fill horizontal para un ratio [0,1], cacheando
+-- la escala/offset base del asset (igual criterio que MatchHud._setHorizontalFill).
+local function _targetFillSize(fillNode: GuiObject, ratio: number): UDim2
+	local clampedRatio = math.min(1, math.max(0, ratio))
+	local baseScale = fillNode:GetAttribute("BaseFillScale")
+	local baseOffset = fillNode:GetAttribute("BaseFillOffset")
+	local currentSize = fillNode.Size
+	if type(baseScale) ~= "number" then
+		baseScale = currentSize.X.Scale
+		fillNode:SetAttribute("BaseFillScale", baseScale)
+	end
+	if type(baseOffset) ~= "number" then
+		baseOffset = currentSize.X.Offset
+		fillNode:SetAttribute("BaseFillOffset", baseOffset)
+	end
+	local nextScale = baseScale + ((1 - baseScale) * clampedRatio)
+	return UDim2.new(nextScale, baseOffset, currentSize.Y.Scale, currentSize.Y.Offset)
+end
+
+-- Renderiza el preview 3D de un wrap (maestría / item) dentro de un ViewportFrame.
+-- Limpia hijos no-GUI previos y devuelve un Janitor con el preview para cleanup.
+local function _renderWrapPreview(itemViewport: ViewportFrame, reward: any): any
+	for _, child in itemViewport:GetChildren() do
+		if not child:IsA("GuiObject") then
+			child:Destroy()
+		end
+	end
+	local previewJanitor = Janitor.new()
+	local previewItem = {
+		qualifiedId = LockerConfig.makeQualifiedId(reward.category or LockerCategory.WEAPON_WRAPS, tostring(reward.itemId or reward.name)),
+		Category = reward.category or LockerCategory.WEAPON_WRAPS,
+		id = reward.itemId or reward.name,
+		Name = reward.name,
+		Price = 0,
+		LevelRequired = 0,
+		Rarity = "Common",
+		Image = "",
+		CanPurchase = false,
+		TextureID = reward.textureID,
+		BaseColor = reward.baseColor,
+		Material = reward.material,
+		isAnimated = reward.animated,
+		StudsPerTile = reward.studsPerTile,
+		PreviewWeaponCategory = reward.previewWeaponCategory,
+		PreviewWeaponId = reward.previewWeaponId,
+	}
+	WeaponWrapPreviewer.Render(itemViewport, previewItem :: any, previewJanitor)
+	return previewJanitor
+end
+
+-- Rellena un nodo `Reward` con hijos { ItemImage, ItemViewport, Amount }. Si
+-- `reward` es nil, oculta el nodo. Si trae `image`, usa ItemImage; si no y trae
+-- datos de wrap (textureID/baseColor/previewWeaponId/itemId), renderiza el preview
+-- 3D en ItemViewport. `cashAmount` se muestra en Amount. Devuelve el Janitor del
+-- preview (o nil) para limpiarlo al cerrar la notificación.
+local function _populateItemReward(rewardNode: Instance, reward: any): any
+	local itemImage = rewardNode:FindFirstChild("ItemImage")
+	local itemViewport = rewardNode:FindFirstChild("ItemViewport")
+	local amountLabel = rewardNode:FindFirstChild("Amount")
+
+	if not reward then
+		if rewardNode:IsA("GuiObject") then
+			rewardNode.Visible = false
+		end
+		return nil
+	end
+	if rewardNode:IsA("GuiObject") then
+		rewardNode.Visible = true
+	end
+
+	local hasImage = type(reward.image) == "string" and reward.image ~= ""
+	local hasPreview = type(reward.textureID) == "string"
+		or typeof(reward.baseColor) == "Color3"
+		or type(reward.previewWeaponId) == "string"
+		or type(reward.itemId) == "string"
+
+	if itemImage and (itemImage:IsA("ImageLabel") or itemImage:IsA("ImageButton")) then
+		if hasImage then
+			itemImage.Image = reward.image :: string
+			itemImage.Visible = true
+		else
+			itemImage.Visible = false
+		end
+	end
+
+	local previewJanitor: any = nil
+	if itemViewport and itemViewport:IsA("ViewportFrame") then
+		if not hasImage and hasPreview then
+			itemViewport.Visible = true
+			previewJanitor = _renderWrapPreview(itemViewport, reward)
+		else
+			itemViewport.Visible = false
+			for _, child in itemViewport:GetChildren() do
+				if not child:IsA("GuiObject") then
+					child:Destroy()
+				end
+			end
+			itemViewport.CurrentCamera = nil
+		end
+	end
+
+	if amountLabel and amountLabel:IsA("TextLabel") then
+		if type(reward.cashAmount) == "number" then
+			amountLabel.Text = UIUtils.formatCashAmount(reward.cashAmount)
+			amountLabel.Visible = true
+		else
+			amountLabel.Visible = false
+		end
+	end
+
+	return previewJanitor
+end
+
 -- ── Módulo ───────────────────────────────────────────────────
 
 local MatchNotificationsQueue = {}
@@ -141,10 +293,16 @@ function MatchNotificationsQueue.new(matchHudGui: ScreenGui?): any
 	self._destroyed = false
 	self._queue = {} :: { (onDone: () -> ()) -> () }
 	self._active = false
+	-- "Notifying" = hay una notificación en pantalla o en cola. Avisamos en cada
+	-- transición (con detección de cambio para no parpadear entre notificaciones
+	-- consecutivas). Lo usa MatchHud para ocultar las filas de jugadores.
+	self._notifying = false
+	self._onNotifyingChanged = nil :: ((notifying: boolean) -> ())?
 	-- Cache de posiciones originales de cada frame (se setean en el primer play).
 	self._levelUpOriginalPosition = nil :: UDim2?
 	self._battlePassLevelUpOriginalPosition = nil :: UDim2?
-	self._completedOriginalPosition = nil :: UDim2?
+	self._taskCompletedOriginalPosition = nil :: UDim2?
+	self._maestryOriginalPosition = nil :: UDim2?
 	return self
 end
 
@@ -158,6 +316,23 @@ function MatchNotificationsQueue:_resolveContainer(): GuiObject?
 	return _findChildGuiObject(matchHudGui, "Container")
 end
 
+-- Registra un callback que recibe `true` cuando empieza a haber notificaciones y
+-- `false` cuando se vacía la cola (sin parpadeo entre notificaciones encadenadas).
+function MatchNotificationsQueue:setOnNotifyingChanged(callback: ((notifying: boolean) -> ())?)
+	self._onNotifyingChanged = callback
+end
+
+function MatchNotificationsQueue:_refreshNotifying()
+	local notifying = self._active or #self._queue > 0
+	if notifying == self._notifying then
+		return
+	end
+	self._notifying = notifying
+	if self._onNotifyingChanged then
+		self._onNotifyingChanged(notifying)
+	end
+end
+
 function MatchNotificationsQueue:_processQueue()
 	if self._active or self._destroyed then
 		return
@@ -168,12 +343,14 @@ function MatchNotificationsQueue:_processQueue()
 	end
 
 	self._active = true
+	self:_refreshNotifying()
 	task.spawn(function()
 		nextRun(function()
 			self._active = false
 			if not self._destroyed then
 				self:_processQueue()
 			end
+			self:_refreshNotifying()
 		end)
 	end)
 end
@@ -187,6 +364,57 @@ function MatchNotificationsQueue:_enqueue(runFn: (onDone: () -> ()) -> ())
 	end
 	table.insert(self._queue, runFn)
 	self:_processQueue()
+end
+
+-- Patrón común de notificación: cachea la posición original del frame, lo mete
+-- fuera de pantalla (arriba), lo muestra, desliza dentro, opcionalmente lanza
+-- confeti y corre `afterShown`, mantiene `LEVEL_UP_HOLD_SECONDS`, y sale. `cacheKey`
+-- es el campo de self donde se cachea la Position original. Bloquea hasta terminar
+-- (se llama dentro del runFn de la cola).
+function MatchNotificationsQueue:_playFrameSlide(frame: GuiObject, cacheKey: string, confettiColors: { Color3 }?, spawnDuration: number?, afterShown: (() -> ())?)
+	local matchHudGui = self._gui
+	local originalPosition = (self :: any)[cacheKey]
+	if not originalPosition then
+		originalPosition = frame.Position
+		;(self :: any)[cacheKey] = originalPosition
+	end
+
+	local aboveScreenPosition = UDim2.new(
+		originalPosition.X.Scale,
+		originalPosition.X.Offset,
+		-1,
+		originalPosition.Y.Offset
+	)
+
+	frame.Position = aboveScreenPosition
+	frame.Visible = true
+
+	if confettiColors and matchHudGui then
+		Confetti.Rain(matchHudGui, {
+			colors = confettiColors,
+			count = 60,
+			minLifetime = 0.9,
+			maxLifetime = 1.5,
+			spawnDuration = spawnDuration or 1.2,
+		})
+	end
+
+	local tweenIn = TweenService:Create(frame, LEVEL_UP_TWEEN_IN_INFO, { Position = originalPosition })
+	tweenIn:Play()
+	tweenIn.Completed:Wait()
+
+	if afterShown then
+		afterShown()
+	end
+
+	task.wait(LEVEL_UP_HOLD_SECONDS)
+
+	local tweenOut = TweenService:Create(frame, LEVEL_UP_TWEEN_OUT_INFO, { Position = aboveScreenPosition })
+	tweenOut:Play()
+	tweenOut.Completed:Wait()
+
+	frame.Visible = false
+	frame.Position = originalPosition
 end
 
 function MatchNotificationsQueue:playLevelUpAnimation(newLevel: number, unlock: LevelUpUnlock?)
@@ -277,7 +505,9 @@ function MatchNotificationsQueue:playLevelUpAnimation(newLevel: number, unlock: 
 	end)
 end
 
-function MatchNotificationsQueue:playBattlePassLevelUpAnimation(newLevel: number)
+-- `reward` opcional: BattlePassLevelUp.Reward.{ItemImage, ItemViewport}. Si no se
+-- pasa, el nodo Reward se oculta. (El call site actual no envía reward todavía.)
+function MatchNotificationsQueue:playBattlePassLevelUpAnimation(newLevel: number, reward: ChallengeCompletedReward?)
 	self:_enqueue(function(onDone)
 		local matchHudGui = self._gui
 		if not matchHudGui then onDone() return end
@@ -288,55 +518,29 @@ function MatchNotificationsQueue:playBattlePassLevelUpAnimation(newLevel: number
 		local frame = _findChildGuiObject(container, "BattlePassLevelUp")
 		if not frame then onDone() return end
 
-		local originalPosition = self._battlePassLevelUpOriginalPosition
-		if not originalPosition then
-			originalPosition = frame.Position
-			self._battlePassLevelUpOriginalPosition = originalPosition
-		end
-
-		local aboveScreenPosition = UDim2.new(
-			originalPosition.X.Scale,
-			originalPosition.X.Offset,
-			-1,
-			originalPosition.Y.Offset
-		)
-
 		local resolvedLevel = math.max(0, math.floor(newLevel))
-
-		local levelLabel = _findDescendantTextLabel(frame, { "Level" })
+		local levelLabel = _findDescendantTextLabel(frame, { "Value" })
+			or _findDescendantTextLabel(frame, { "Level" })
 		if levelLabel then
 			levelLabel.Text = tostring(resolvedLevel)
 		end
 
-		frame.Position = aboveScreenPosition
-		frame.Visible = true
+		local rewardNode = _findChildGuiObject(frame, "Reward")
+		local previewJanitor: any = if rewardNode then _populateItemReward(rewardNode, reward) else nil
 
-		Confetti.Rain(matchHudGui, {
-			colors = BATTLEPASS_LEVEL_UP_CONFETTI_COLORS,
-			count = 60,
-			minLifetime = 0.9,
-			maxLifetime = 1.5,
-			spawnDuration = 1.2,
-		})
+		self:_playFrameSlide(frame, "_battlePassLevelUpOriginalPosition", BATTLEPASS_LEVEL_UP_CONFETTI_COLORS, 1.2)
 
-		local tweenIn = TweenService:Create(frame, LEVEL_UP_TWEEN_IN_INFO, { Position = originalPosition })
-		tweenIn:Play()
-		tweenIn.Completed:Wait()
-
-		task.wait(LEVEL_UP_HOLD_SECONDS)
-
-		local tweenOut = TweenService:Create(frame, LEVEL_UP_TWEEN_OUT_INFO, { Position = aboveScreenPosition })
-		tweenOut:Play()
-		tweenOut.Completed:Wait()
-
-		frame.Visible = false
-		frame.Position = originalPosition
+		if previewJanitor then
+			previewJanitor:Cleanup()
+		end
 
 		onDone()
 	end)
 end
 
-function MatchNotificationsQueue:playChallengeCompletedAnimation(reward: ChallengeCompletedReward)
+-- Daily task completada → frame Container.TaskCompleted. Reward.Amount muestra el
+-- cash; Reward.ItemImage/ItemViewport el premio (imagen o preview de item).
+function MatchNotificationsQueue:playTaskCompletedAnimation(reward: ChallengeCompletedReward)
 	self:_enqueue(function(onDone)
 		local matchHudGui = self._gui
 		if not matchHudGui then onDone() return end
@@ -344,128 +548,82 @@ function MatchNotificationsQueue:playChallengeCompletedAnimation(reward: Challen
 		local container = self:_resolveContainer()
 		if not container then onDone() return end
 
-		local completedFrame = _findChildGuiObject(container, "Completed")
-		if not completedFrame then onDone() return end
+		local frame = _findChildGuiObject(container, "TaskCompleted")
+		if not frame then onDone() return end
 
-		local rewardNode = _findChildGuiObject(completedFrame, "Reward")
-			or _findChildGuiObject(container, "Reward")
-		local itemImage = if rewardNode then rewardNode:FindFirstChild("ItemImage") else nil
-		local itemViewport = if rewardNode then rewardNode:FindFirstChild("ItemViewport") else nil
-		local rewardValueLabel = if rewardNode then rewardNode:FindFirstChild("Value") else nil
-		local descriptionLabel = _findDescendantTextLabel(completedFrame, { "Description" })
-
-		-- Reward.Value está oculto por defecto (no lo usan los challenges de
-		-- wrap). Si llega cashAmount, lo mostramos con la cantidad y lo
-		-- restauramos a oculto al cerrar el frame.
-		local showedRewardValue = false
-		if rewardValueLabel and rewardValueLabel:IsA("TextLabel") and type(reward.cashAmount) == "number" then
-			rewardValueLabel.Text = UIUtils.formatCashAmount(reward.cashAmount)
-			rewardValueLabel.Visible = true
-			showedRewardValue = true
-		end
-
-		local originalPosition = self._completedOriginalPosition
-		if not originalPosition then
-			originalPosition = completedFrame.Position
-			self._completedOriginalPosition = originalPosition
-		end
-
-		local aboveScreenPosition = UDim2.new(
-			originalPosition.X.Scale,
-			originalPosition.X.Offset,
-			-1,
-			originalPosition.Y.Offset
-		)
-
+		local descriptionLabel = _findDescendantTextLabel(frame, { "Description" })
 		if descriptionLabel then
 			descriptionLabel.Text = "You earned " .. tostring(reward.name)
 		end
 
+		local rewardNode = _findChildGuiObject(frame, "Reward")
+		local previewJanitor: any = if rewardNode then _populateItemReward(rewardNode, reward) else nil
+
+		self:_playFrameSlide(frame, "_taskCompletedOriginalPosition", CHALLENGE_CONFETTI_COLORS, 0.4)
+
+		if previewJanitor then
+			previewJanitor:Cleanup()
+		end
+
+		onDone()
+	end)
+end
+
+-- Maestría de arma → frame Container.Maestry. Value muestra "current/target",
+-- Bar.Fill se rellena con tween hasta el ratio, y Reward.ItemViewport muestra el
+-- preview del wrap (siguiente tier o el recién ganado). Solo lanza confeti al
+-- completar un tier (progress.isComplete).
+function MatchNotificationsQueue:playMasteryAnimation(progress: MasteryProgress)
+	self:_enqueue(function(onDone)
+		local matchHudGui = self._gui
+		if not matchHudGui then onDone() return end
+
+		local container = self:_resolveContainer()
+		if not container then onDone() return end
+
+		local frame = _findChildGuiObject(container, "Maestry")
+		if not frame then onDone() return end
+
+		local current = math.max(0, math.floor(progress.current))
+		local target = math.max(1, math.floor(progress.target))
+		local ratio = math.min(1, current / target)
+		local isComplete = progress.isComplete == true
+
+		local valueLabel = _findDescendantTextLabel(frame, { "Value" })
+		if valueLabel then
+			valueLabel.Text = string.format("%d/%d", current, target)
+		end
+
+		-- Reward.ItemViewport: preview 3D del wrap de maestría.
+		local rewardNode = _findChildGuiObject(frame, "Reward")
+		local itemViewport = if rewardNode then rewardNode:FindFirstChild("ItemViewport") else nil
 		local previewJanitor: any = nil
-
-		local hasImage = type(reward.image) == "string" and reward.image ~= ""
-		if itemImage and (itemImage:IsA("ImageLabel") or itemImage:IsA("ImageButton")) then
-			if hasImage then
-				itemImage.Image = reward.image :: string
-				itemImage.Visible = true
-			else
-				itemImage.Visible = false
-			end
-		end
-
 		if itemViewport and itemViewport:IsA("ViewportFrame") then
-			if hasImage then
-				itemViewport.Visible = false
-				for _, child in itemViewport:GetChildren() do
-					if not child:IsA("GuiObject") then
-						child:Destroy()
-					end
-				end
-				itemViewport.CurrentCamera = nil
-			else
-				itemViewport.Visible = true
-				for _, child in itemViewport:GetChildren() do
-					if not child:IsA("GuiObject") then
-						child:Destroy()
-					end
-				end
-				previewJanitor = Janitor.new()
-				local previewItem = {
-					qualifiedId = LockerConfig.makeQualifiedId(reward.category or LockerCategory.WEAPON_WRAPS, tostring(reward.itemId or reward.name)),
-					Category = reward.category or LockerCategory.WEAPON_WRAPS,
-					id = reward.itemId or reward.name,
-					Name = reward.name,
-					Price = 0,
-					LevelRequired = 0,
-					Rarity = "Common",
-					Image = "",
-					CanPurchase = false,
-					TextureID = reward.textureID,
-					BaseColor = reward.baseColor,
-					isAnimated = reward.animated,
-					StudsPerTile = reward.studsPerTile,
-					PreviewWeaponCategory = reward.previewWeaponCategory,
-					PreviewWeaponId = reward.previewWeaponId,
-				}
-				WeaponWrapPreviewer.Render(itemViewport, previewItem :: any, previewJanitor)
-			end
+			itemViewport.Visible = true
+			previewJanitor = _renderWrapPreview(itemViewport, progress)
 		end
 
-		completedFrame.Position = aboveScreenPosition
-		completedFrame.Visible = true
+		-- Barra: arranca vacía y se rellena con tween tras entrar el frame.
+		local barFill = _findDescendantGuiObject(frame, { "Bar", "Fill" })
+		if barFill then
+			barFill.Size = _targetFillSize(barFill, 0)
+		end
 
-		Confetti.Rain(matchHudGui, {
-			colors = CHALLENGE_CONFETTI_COLORS,
-			count = 60,
-			minLifetime = 0.9,
-			maxLifetime = 1.5,
-			spawnDuration = 0.4,
-		})
-
-		local tweenIn = TweenService:Create(completedFrame, LEVEL_UP_TWEEN_IN_INFO, { Position = originalPosition })
-		tweenIn:Play()
-		tweenIn.Completed:Wait()
-
-		task.wait(LEVEL_UP_HOLD_SECONDS)
-
-		local tweenOut = TweenService:Create(completedFrame, LEVEL_UP_TWEEN_OUT_INFO, { Position = aboveScreenPosition })
-		tweenOut:Play()
-		tweenOut.Completed:Wait()
-
-		completedFrame.Visible = false
-		completedFrame.Position = originalPosition
+		local confettiColors = if isComplete then MASTERY_CONFETTI_COLORS else nil
+		self:_playFrameSlide(frame, "_maestryOriginalPosition", confettiColors, 0.4, function()
+			if barFill then
+				local tween = TweenService:Create(barFill, MASTERY_BAR_TWEEN_INFO, {
+					Size = _targetFillSize(barFill, ratio),
+				})
+				tween:Play()
+			end
+		end)
 
 		if previewJanitor then
 			previewJanitor:Cleanup()
 		end
 		if itemViewport and itemViewport:IsA("ViewportFrame") then
 			itemViewport.CurrentCamera = nil
-		end
-
-		-- Restaurar Reward.Value a oculto si lo habíamos mostrado, para no
-		-- contaminar la próxima notificación que use este mismo frame.
-		if showedRewardValue and rewardValueLabel and rewardValueLabel:IsA("TextLabel") then
-			rewardValueLabel.Visible = false
 		end
 
 		onDone()
@@ -478,6 +636,8 @@ function MatchNotificationsQueue:destroy()
 	end
 	self._destroyed = true
 	table.clear(self._queue)
+	self._active = false
+	self:_refreshNotifying()
 end
 
 return MatchNotificationsQueue

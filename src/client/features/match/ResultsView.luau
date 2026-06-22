@@ -9,7 +9,7 @@
 	             colocada en Workspace.Results.Player1..4.
 
 	Las réplicas se generan igual que el preview del locker/lobby: clonan el body
-	equipado (`Shared.LockerBodies[Outfit]`, fallback `Default`) y aplican la cara
+	equipado (`Shared.Bodies[Outfit]`, fallback `Default`) y aplican la cara
 	y el hat equipados del loadout local (FaceApplier/HatApplier) + idle. No
 	dependen de los Characters vivos ni del teardown del mapa/bots.
 
@@ -183,6 +183,12 @@ local function _resolveRewardRefs(resultsFrame: GuiObject): RewardRefs
 		template.Visible = false
 	end
 
+	if not rewardsFrame then
+		warn("[ResultsView] No se encontró Results.Rewards — no se mostrarán recompensas.")
+	elseif not template then
+		warn("[ResultsView] No se encontró ItemTemplate (bajo Rewards o Results) — no se pueden clonar recompensas.")
+	end
+
 	return {
 		valueLabel = if valueNode and valueNode:IsA("TextLabel") then valueNode :: TextLabel else nil,
 		rewardsFrame = rewardsFrame,
@@ -221,11 +227,18 @@ function ResultsView.new(resultsFrame: GuiObject?): any
 	self._slots = {} :: { UiSlot }
 
 	if resultsFrame then
+		local resolvedSlots = 0
 		for i = 1, SLOT_COUNT do
 			local slotFrame = resultsFrame:FindFirstChild("Player" .. tostring(i))
 			self._slots[i] = if slotFrame and slotFrame:IsA("GuiObject")
 				then _resolveUiSlot(slotFrame)
 				else nil :: any
+			if self._slots[i] then
+				resolvedSlots += 1
+			end
+		end
+		if resolvedSlots == 0 then
+			warn("[ResultsView] Results existe pero no se encontró ningún Player1.." .. tostring(SLOT_COUNT) .. " — revisa los nombres de los frames de jugador.")
 		end
 		resultsFrame.Visible = false
 		self._rewards = _resolveRewardRefs(resultsFrame)
@@ -250,8 +263,9 @@ local function _readLoadout(): (string?, string?, string?)
 end
 
 function ResultsView:_resolveBodyTemplate(outfitId: string?): Model?
-	local folder = Shared:FindFirstChild("LockerBodies")
+	local folder = Shared:FindFirstChild("Bodies")
 	if not folder then
+		warn("[ResultsView] No se encontró Shared.Bodies — no se pueden generar las réplicas 3D.")
 		return nil
 	end
 	local byId = if outfitId then folder:FindFirstChild(outfitId) else nil
@@ -305,6 +319,7 @@ function ResultsView:_buildReplicas(team: { ResultEntry })
 
 	local resultsFolder = workspace:FindFirstChild("Results")
 	if not resultsFolder then
+		warn("[ResultsView] No se encontró workspace.Results (anclas Player1..N) — no se generan las réplicas 3D de jugadores.")
 		return
 	end
 

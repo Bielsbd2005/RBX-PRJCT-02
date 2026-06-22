@@ -2,9 +2,11 @@ local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
 local Debris = game:GetService("Debris")
 local ContextActionService = game:GetService("ContextActionService")
+local UserInputService = game:GetService("UserInputService")
 local CollectionService = game:GetService("CollectionService")
 local ContentProvider = game:GetService("ContentProvider")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
 
 local IsServer = RunService:IsServer()
 
@@ -15,6 +17,7 @@ local BaseWeapon = require(Libraries:WaitForChild("BaseWeapon"))
 local Parabola = require(Libraries:WaitForChild("Parabola"))
 local Roblox = require(Libraries:WaitForChild("Roblox"))
 local WeaponsNetwork = require(Libraries:WaitForChild("WeaponsNetwork"))
+local HitVFX = require(Libraries:WaitForChild("HitVFX"))
 local TeamUtils = require(Shared.utils.TeamUtils)
 
 local Effects = WeaponsSystemFolder:WaitForChild("Assets"):WaitForChild("Effects")
@@ -260,6 +263,18 @@ function BulletWeapon:onEquippedChanged()
 		end
 
 		self.triggerDisconnected = false
+
+		-- Re-sincroniza el gatillo con el botón físico al equipar. Si el jugador
+		-- cambia de arma SIN soltar el disparo (p. ej. mientras apunta y dispara a
+		-- la vez), Roblox no vuelve a emitir Tool.Activated para el botón que ya
+		-- estaba mantenido, así que el arma recién equipada nunca se entera de que
+		-- el gatillo sigue presionado y no dispara hasta soltar y volver a pulsar.
+		-- Solo cliente y solo para el arma del jugador local.
+		if self.equipped and self.player == Players.LocalPlayer then
+			if UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then
+				self:setActivated(true)
+			end
+		end
 	end
 end
 
@@ -320,6 +335,30 @@ end
 -- y lo destruye automáticamente tras HIT_MARK_LIFETIME segundos.
 local HIT_MARK_LIFETIME = 5
 
+-- Efecto "caliente": el impacto arranca incandescente (rojo) y se enfría a blanco
+-- neutro. En un Decal/Texture, Color3 = blanco no tinta la imagen, así que el
+-- estado final es el aspecto normal del agujero; el rojo inicial simula el calor.
+local HIT_MARK_HEAT_START = Color3.fromRGB(255, 120, 30) -- naranja incandescente
+local HIT_MARK_HEAT_END = Color3.fromRGB(255, 255, 255) -- blanco (sin tinte)
+local HIT_MARK_HEAT_DURATION = 1.5
+local HIT_MARK_HEAT_TWEEN = TweenInfo.new(HIT_MARK_HEAT_DURATION, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+-- Aplica el gradiente de enfriamiento rojo→blanco al hitMark recién spawneado.
+-- Tinta tanto la parte (Color) como cualquier Decal/Texture (Color3) para no
+-- depender de la estructura interna del template.
+function BulletWeapon:_applyHitMarkHeat(hitMark: Instance)
+	if hitMark:IsA("BasePart") then
+		hitMark.Color = HIT_MARK_HEAT_START
+		TweenService:Create(hitMark, HIT_MARK_HEAT_TWEEN, { Color = HIT_MARK_HEAT_END }):Play()
+	end
+	for _, descendant in hitMark:GetDescendants() do
+		if descendant:IsA("Decal") or descendant:IsA("Texture") then
+			descendant.Color3 = HIT_MARK_HEAT_START
+			TweenService:Create(descendant, HIT_MARK_HEAT_TWEEN, { Color3 = HIT_MARK_HEAT_END }):Play()
+		end
+	end
+end
+
 function BulletWeapon:_spawnHitMark(hitPart: BasePart, hitPoint: Vector3, hitNormal: Vector3, parabola: any)
 	if NO_BULLET_DECALS or not hitPart or not hitPart.Parent or not self.hitMarkTemplate then
 		return
@@ -354,6 +393,10 @@ function BulletWeapon:_spawnHitMark(hitPart: BasePart, hitPoint: Vector3, hitNor
 	weld.Part0 = hitMark
 	weld.Part1 = hitPart
 	weld.Parent = hitMark
+
+	if self:getConfigValue("HitMarkHeatEffect", true) then
+		self:_applyHitMarkHeat(hitMark)
+	end
 
 	Debris:AddItem(hitMark, HIT_MARK_LIFETIME)
 end
@@ -417,6 +460,7 @@ function BulletWeapon:getIgnoreList(includeLocalPlayer)
 			end
 		end
 		self.ignoreList = ignoreList
+		self.ignoreListRefreshTime = now
 	end
 	return ignoreList
 end
@@ -556,7 +600,13 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 				WeaponsNetwork.fireWeaponHit(weaponInst, hitPayload)
 			end)
 
-			if hitSound then hitSound:Play() end
+			-- VFX de impacto: sistema modular por superficie (HitVFX) por
+			-- defecto; fallback al hitSound heredado si ModularHitVFX = false.
+			if self:getConfigValue("ModularHitVFX", true) then
+				HitVFX.play(hitInfo, localPlayerInitiatedShot)
+			elseif hitSound then
+				hitSound:Play()
+			end
 			self:_spawnHitMark(hitPart, hitPoint, hitNormal, parabola)
 		end
 
@@ -603,6 +653,12 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 		d = 1e9,
 	}
 
+	-- Ignore list para los raycasts del proyectil. Construirla vía getIgnoreList
+	-- (igual que el path hitscan) garantiza ignorar al tirador/cámara incluso en
+	-- armas sin TipAttachment, donde self.ignoreList nunca se puebla (queda {})
+	-- y la bala colisionaría contra el propio tirador en el primer frame.
+	local projectileIgnoreList = self:getIgnoreList(localPlayerInitiatedShot)
+
 	local steppedCallback = function(dt)
 		local now = os.clock()
 		timeSinceStart = now - startTime
@@ -621,7 +677,7 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 			-- Check if bullet hit since last frame
 			local castProjBack, castProjFront = projFront, projFront + travelDist
 			parabola:setDomain(castProjBack, castProjFront)
-			local hitPart, hitPoint, hitNormal, hitMaterial, hitT = parabola:findPart(self.ignoreList)
+			local hitPart, hitPoint, hitNormal, hitMaterial, hitT = parabola:findPart(projectileIgnoreList)
 
 			if hitPart then
 				didHit = true
@@ -707,41 +763,49 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 					hitAttach.CFrame = beam0.Attachment1.CFrame * CFrame.Angles(0, math.rad(90), 0)
 				end
 
-				-- Show hit particle effect
-				local hitPartColor = hitPart and hitPart.Color or Color3.fromRGB(255, 255, 255)
-				if hitPart and hitPart:IsA("Terrain") then
-					hitPartColor = workspace.Terrain:GetMaterialColor(hitMaterial or Enum.Material.Sand)
-				end
-				if hitInfo.h and hitInfo.h:IsA("Humanoid") and hitParticles and numHitParticles > 0 and hitPart and isEnemyHumanoidForPlayer(hitInfo.h, self.player) then
-					-- Show particle effect for hitting a player/humanoid
-					hitParticles.Color = ColorSequence.new(Color3.fromRGB(255, 255, 255))
-					hitParticles:Emit(numHitParticles)
-					visualEffectsLingerTime = math.max(visualEffectsLingerTime, hitParticles.Lifetime.Max)
-				elseif (not hitInfo.h or not hitInfo.h:IsA("Humanoid")) and hitParticles and numHitParticles > 0 then
-					-- Show particle effect for hitting anything else
-					if hitPart and self:getConfigValue("HitParticlesUsePartColor", true) then
-						local existingSeq = hitParticles.Color
-						local newKeypoints = {}
+				-- Efectos de impacto: sistema modular por superficie (HitVFX) por
+				-- defecto. Resuelve dirt/metal/body/headshot/... y reproduce sus
+				-- partículas + sonido propios. El VFX heredado por-arma queda como
+				-- fallback cuando ModularHitVFX = false.
+				if self:getConfigValue("ModularHitVFX", true) then
+					HitVFX.play(hitInfo, localPlayerInitiatedShot)
+				else
+					-- Show hit particle effect
+					local hitPartColor = hitPart and hitPart.Color or Color3.fromRGB(255, 255, 255)
+					if hitPart and hitPart:IsA("Terrain") then
+						hitPartColor = workspace.Terrain:GetMaterialColor(hitMaterial or Enum.Material.Sand)
+					end
+					if hitInfo.h and hitInfo.h:IsA("Humanoid") and hitParticles and numHitParticles > 0 and hitPart and isEnemyHumanoidForPlayer(hitInfo.h, self.player) then
+						-- Show particle effect for hitting a player/humanoid
+						hitParticles.Color = ColorSequence.new(Color3.fromRGB(255, 255, 255))
+						hitParticles:Emit(numHitParticles)
+						visualEffectsLingerTime = math.max(visualEffectsLingerTime, hitParticles.Lifetime.Max)
+					elseif (not hitInfo.h or not hitInfo.h:IsA("Humanoid")) and hitParticles and numHitParticles > 0 then
+						-- Show particle effect for hitting anything else
+						if hitPart and self:getConfigValue("HitParticlesUsePartColor", true) then
+							local existingSeq = hitParticles.Color
+							local newKeypoints = {}
 
-						for i, keypoint in pairs(existingSeq.Keypoints) do
-							local newColor = keypoint.Value
-							if newColor == Color3.fromRGB(255, 0, 255) then
-								newColor = hitPartColor
+							for i, keypoint in pairs(existingSeq.Keypoints) do
+								local newColor = keypoint.Value
+								if newColor == Color3.fromRGB(255, 0, 255) then
+									newColor = hitPartColor
+								end
+								newKeypoints[i] = ColorSequenceKeypoint.new(keypoint.Time, newColor)
 							end
-							newKeypoints[i] = ColorSequenceKeypoint.new(keypoint.Time, newColor)
+
+							hitParticles.Color = ColorSequence.new(newKeypoints)
 						end
 
-						hitParticles.Color = ColorSequence.new(newKeypoints)
+						hitParticles:Emit(numHitParticles)
+						visualEffectsLingerTime = math.max(visualEffectsLingerTime, hitParticles.Lifetime.Max)
 					end
 
-					hitParticles:Emit(numHitParticles)
-					visualEffectsLingerTime = math.max(visualEffectsLingerTime, hitParticles.Lifetime.Max)
-				end
-
-				-- Play hit sound
-				if hitSound then
-					hitSound:Play()
-					visualEffectsLingerTime = math.max(visualEffectsLingerTime, hitSound.TimeLength)
+					-- Play hit sound
+					if hitSound then
+						hitSound:Play()
+						visualEffectsLingerTime = math.max(visualEffectsLingerTime, hitSound.TimeLength)
+					end
 				end
 
 				-- Manage/show decals, billboards, and models (such as an arrow) that appear where the projectile hit

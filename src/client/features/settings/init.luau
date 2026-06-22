@@ -10,7 +10,7 @@
 		    MusicVolume   (slider) → SliderFrame { Slider, Value }
 		    SfxVolume     (slider)
 		    Sensitivity   (slider)
-		    Vibration     (toggle) → Toggle { Circle } + Title
+		    Vibration     (toggle) → ToggleContainer { Knob, HitArea } + Title
 		    AutoShoot     (toggle)
 		    CreditsBtn    (sin acción por ahora)
 
@@ -72,10 +72,14 @@ function SettingsFeature.start(menuController: any): any
 	local player = Players.LocalPlayer
 	local playerGui = player:WaitForChild("PlayerGui")
 
-	-- Botón de apertura opcional (Menu.settings). Si no existe, Settings se
-	-- configura igual, solo sin abrirse desde el menú.
+	-- Botón de apertura opcional (Menu.TopFrame.Settings). Si no existe, Settings se
+	-- configura igual, solo sin abrirse desde el menú. Resolvemos prefiriendo
+	-- TopFrame y cayendo al hijo directo de Menu (compat. con disposición antigua).
 	local menuGui = menuController:getGui()
-	local settingsBtnInstance = menuGui:FindFirstChild("settings")
+	local topFrame = menuGui:FindFirstChild("TopFrame")
+	local settingsBtnInstance = (topFrame and topFrame:FindFirstChild("Settings"))
+		or menuGui:FindFirstChild("Settings")
+		or menuGui:FindFirstChild("settings")
 	local settingsBtn: GuiButton? = if settingsBtnInstance and settingsBtnInstance:IsA("GuiButton")
 		then settingsBtnInstance
 		else nil

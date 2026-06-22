@@ -102,8 +102,14 @@ end
 function MatchSnapshot.set(values: { [string]: string | number })
 	assert(RunService:IsServer(), "MatchSnapshot.set es server-only")
 	local folder = getFolder()
-	for key, value in values do
+	-- Validar TODAS las claves ANTES de escribir ninguna: si una clave inválida
+	-- aborta a mitad del bucle, las previas ya quedaban replicadas y se saltaba
+	-- Phase (escrito al final a propósito), violando la invariante "al cambiar la
+	-- fase, el resto ya está aplicado".
+	for key in values do
 		assert(DEFAULTS[key] ~= nil, "MatchSnapshot: clave desconocida " .. tostring(key))
+	end
+	for key, value in values do
 		if key ~= "Phase" then
 			folder:SetAttribute(key, value)
 		end

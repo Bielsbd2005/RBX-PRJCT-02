@@ -155,7 +155,11 @@ function ShoulderCamera.new(weaponsSystem)
 	self.fieldOfView = 70
 	self.minPitch = math.rad(-75) -- min degrees camera can angle down
 	self.maxPitch = math.rad(75) -- max degrees camera can cangle up
-	self.normalOffset = Vector3.new(2.25, 2.25, 10.5) -- this is the camera's offset from the player
+	-- Offset cámara→jugador (X lateral, Y altura, Z distancia). Hombro más marcado
+	-- (estilo TPS moderno): más offset lateral y un pelín más cerca, dejando el
+	-- centro/mira más despejado. El zoom (ADS) tira por el LookVector sin tocar el
+	-- lateral, así que el hombro se mantiene al apuntar.
+	self.normalOffset = Vector3.new(3.0, 2.25, 9.5)
 	self.zoomedOffsetDistance = 6 -- number of studs to zoom in from default offset when zooming
 	self.normalCrosshairScale = 1
 	self.zoomedCrosshairScale = 0.75
@@ -510,12 +514,21 @@ function ShoulderCamera:onRenderStep(dt)
 	self:processGamepadInput(dt)
 
 	-- Smoothly zoom to desired values
+	-- Target solo cuando el valor no está ya asentado en el goal: antes corría
+	-- incondicional a 60Hz, alocando tabla goal + LinearValue (+ spring nuevo,
+	-- porque el spring dormido se recreaba) por frame y por propiedad incluso
+	-- con la cámara en reposo. Epsilon en vez de igualdad exacta porque los
+	-- springs duermen a <1e-4 del goal sin snap final.
+	local zoomGoal = self.zoomState and 1 or 0
+	local springDamping, springFrequency = 0.9, 5
 	if self.hasScope then
-		ShoulderCamera.SpringService:Target(self, 0.85, 10, { zoomAlpha = self.zoomState and 1 or 0 })
-		ShoulderCamera.SpringService:Target(self.currentCamera, 0.85, 10, { FieldOfView = self.desiredFieldOfView })
-	else
-		ShoulderCamera.SpringService:Target(self, 0.9, 5, { zoomAlpha = self.zoomState and 1 or 0 })
-		ShoulderCamera.SpringService:Target(self.currentCamera, 0.9, 5, { FieldOfView = self.desiredFieldOfView })
+		springDamping, springFrequency = 0.85, 10
+	end
+	if math.abs(self.zoomAlpha - zoomGoal) > 1e-3 then
+		ShoulderCamera.SpringService:Target(self, springDamping, springFrequency, { zoomAlpha = zoomGoal })
+	end
+	if math.abs(self.currentCamera.FieldOfView - self.desiredFieldOfView) > 1e-3 then
+		ShoulderCamera.SpringService:Target(self.currentCamera, springDamping, springFrequency, { FieldOfView = self.desiredFieldOfView })
 	end
 
 	-- Handle walk speed changes
@@ -532,7 +545,12 @@ function ShoulderCamera:onRenderStep(dt)
 			self.isSprinting = false
 		end
 
-		ShoulderCamera.SpringService:Target(self.currentHumanoid, 0.95, 4, { WalkSpeed = self.desiredWalkSpeed })
+		-- Mismo gating por epsilon que los springs de zoom/FOV. Si algo externo
+		-- toca WalkSpeed, la diferencia re-dispara el Target (mismo re-assert
+		-- que antes), pero en reposo no se aloca nada.
+		if math.abs(self.currentHumanoid.WalkSpeed - self.desiredWalkSpeed) > 1e-3 then
+			ShoulderCamera.SpringService:Target(self.currentHumanoid, 0.95, 4, { WalkSpeed = self.desiredWalkSpeed })
+		end
 	else
 		self.isSprinting = false
 	end
@@ -1333,6 +1351,15 @@ end
 
 function ShoulderCamera:onInputBegan(inputObj, wasProcessed)
 	if self.touchObj then
+		-- Desconectar el listener del touch que abandonamos. Sin esto, un segundo
+		-- dedo sobreescribía eventConnections.touchChanged dejando el del primer
+		-- touch conectado: dos listeners aplicando input a la vez (cámara errática
+		-- con dos dedos) y la conexión vieja filtrada — onInputEnded del primer
+		-- touch ya no la limpiaba porque touchObj apuntaba al nuevo.
+		if self.eventConnections.touchChanged then
+			self.eventConnections.touchChanged:Disconnect()
+			self.eventConnections.touchChanged = nil
+		end
 		self.touchObj = nil
 		wasProcessed = false
 	end

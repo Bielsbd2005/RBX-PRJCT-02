@@ -12,6 +12,7 @@ local sharedWeaponAssets = Shared:WaitForChild("Locker"):WaitForChild("weapons")
 export type WeaponWrapPreviewItem = {
     TextureID: string?,
     BaseColor: Color3?,
+    Material: Enum.Material?,
     isAnimated: boolean?,
     StudsPerTile: number?,
     PreviewWeaponCategory: string?,
@@ -212,12 +213,17 @@ end
 local function applyWrapAppearanceToPrimaryPart(previewPrimaryPart: BasePart, item: WeaponWrapPreviewItem, previewJanitor: any): ()
     local textureId = if type(item.TextureID) == "string" and item.TextureID ~= "" then item.TextureID else nil
     local baseColor = item.BaseColor
+    local material = if typeof(item.Material) == "EnumItem" and item.Material.EnumType == Enum.Material then item.Material else nil
     local animated = item.isAnimated == true
     local studsPerTile = math.max(0.01, tonumber(item.StudsPerTile) or DEFAULT_WRAP_STUDS_PER_TILE)
     local animatedTextures = {} :: { Texture }
 
     if not textureId and typeof(baseColor) == "Color3" then
         previewPrimaryPart.Color = baseColor
+    end
+
+    if material then
+        previewPrimaryPart.Material = material
     end
 
     for _, child in previewPrimaryPart:GetChildren() do

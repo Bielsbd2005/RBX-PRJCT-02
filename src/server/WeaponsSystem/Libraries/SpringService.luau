@@ -241,7 +241,12 @@ local springMetadata = {
 	},
 }
 
-local springStates = {} -- {[object] = {[property] = Spring}
+-- Claves débiles: las claves son Instances (camera/humanoid) que pueden
+-- destruirse en un respawn antes de que su spring duerma. Con claves fuertes la
+-- entrada las pinneaba (leak) y el loop de RenderStepped seguía leyendo/escribiendo
+-- sobre la Instance muerta hasta que canSleep la eliminara. __mode='k' deja que el
+-- GC recoja la Instance y su entrada en cuanto nadie más la referencie.
+local springStates = setmetatable({}, { __mode = "k" }) -- {[object] = {[property] = Spring}
 
 local steppedEvent = RunService:IsClient() and RunService.RenderStepped or RunService.Heartbeat
 steppedEvent:Connect(function(dt)

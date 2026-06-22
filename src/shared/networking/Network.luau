@@ -195,7 +195,6 @@ local MatchNamespace = ByteNet.DefineNamespace("Match", function()
 			Value = ByteNet.Struct({
 				userId = ByteNet.String,
 				kills = ByteNet.Int32,
-				streak = ByteNet.Int32,
 				deaths = ByteNet.Int32,
 				assists = ByteNet.Int32,
 			}),

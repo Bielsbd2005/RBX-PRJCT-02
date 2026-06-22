@@ -136,8 +136,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local player = Players.LocalPlayer
 	local playerGui = player:WaitForChild("PlayerGui")
 	local menuGui = menuController:getGui()
-	local lockerBodiesFolder = Shared:WaitForChild("LockerBodies") :: Folder
-	local killEffectDummyTemplate = lockerBodiesFolder:WaitForChild("KillEffectDummy") :: Model
+	local bodiesFolder = Shared:WaitForChild("Bodies") :: Folder
+	local killEffectDummyTemplate = bodiesFolder:WaitForChild("KillEffectDummy") :: Model
 
 	-- El preview del personaje (outfit/cara/hat) ya no usa un maniquí propio en
 	-- Workspace.Locker.CharacterSpawn: se previsualiza sobre el personaje del lobby
@@ -1027,6 +1027,18 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			return selectedQualifiedId
 		end
 
+		-- El nav del body se llama "Body" pero su categoría es "Outfits" (única
+		-- traducción no-identidad nav→categoría, ver LockerConfig.ItemsConfigByNav).
+		-- Hay que comparar contra el NAV key "Body", no contra LockerCategory.OUTFITS
+		-- ("Outfits") — por eso antes nunca preseleccionaba el body equipado y el
+		-- grid caía al primer item (Default).
+		if categoryKey == LockerMainCategory.STYLE and navKey == "Body" then
+			local equippedOutfit = getOptionalString(equippedLookup.Outfits) or getOptionalString(getCurrentLoadout().Outfit)
+			if equippedOutfit then
+				return LockerConfig.makeQualifiedId(LockerCategory.OUTFITS, equippedOutfit)
+			end
+		end
+
 		if categoryKey == LockerMainCategory.STYLE and navKey == LockerCategory.FACES then
 			local equippedFace = getOptionalString(equippedLookup.Faces) or getOptionalString(getCurrentLoadout().Face)
 			if equippedFace then
@@ -1441,11 +1453,17 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 				item = item,
 			}
 			pendingShopAction = buyAction
+			-- Snapshot de la categoría/nav al momento de comprar: si el usuario
+			-- navega a otra vista durante el timeout, repoblar la vista ACTUAL
+			-- forzando un qualifiedId que probablemente no existe allí es incorrecto.
+			local buyMainCategory = selectedMainCategory
+			local buyNavKey = selectedNavKey
 			task.delay(SHOP_REQUEST_TIMEOUT, function()
 				if pendingShopAction == buyAction then
 					pendingShopAction = nil
-					if selectedMainCategory and selectedNavKey then
-						populateMainContentForNavItem(selectedMainCategory, selectedNavKey, buyAction.item.qualifiedId)
+					if buyMainCategory and buyNavKey
+						and selectedMainCategory == buyMainCategory and selectedNavKey == buyNavKey then
+						populateMainContentForNavItem(buyMainCategory, buyNavKey, buyAction.item.qualifiedId)
 					end
 				end
 			end)
@@ -1616,6 +1634,13 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			rebuildOwnedLookup()
 			rebuildEquippedLookup()
 		end
+		-- Reaplicar el BODY equipado primero (antes que cara/hat): beginPreview no
+		-- reconstruye el modelo, así que si el preview del lobby se construyó antes
+		-- de llegar el loadout (outfit nil → body por defecto), al abrir mostraría
+		-- un body no equipado. applyOutfit es no-op si ya coincide. El orden importa:
+		-- reconstruir el body recrea los appliers, y cara/hat se aplican sobre el
+		-- modelo nuevo.
+		applyEquippedBodyPreview()
 		applyEquippedFacePreview()
 		applyEquippedHatPreview()
 		hideActionFrame()

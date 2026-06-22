@@ -27,6 +27,7 @@ export type LockerCatalogItem = {
 	CanPurchase: boolean,
 	TextureID: string?,
 	BaseColor: Color3?,
+	Material: Enum.Material?,
 	isAnimated: boolean?,
 	StudsPerTile: number?,
 	PreviewWeaponCategory: string?,
@@ -270,6 +271,7 @@ function LockerGrid:_applyWeaponWrapViewportPreview(card: GuiObject, item: Locke
 	local previewItem = {
 		TextureID = item.TextureID,
 		BaseColor = item.BaseColor,
+		Material = item.Material,
 		isAnimated = item.isAnimated,
 		StudsPerTile = item.StudsPerTile,
 	}

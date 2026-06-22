@@ -433,7 +433,7 @@ local _hasWarnedMissingTemplate = false
 -- decouplear cloning del spawn moment.
 --
 -- Pool por outfit: con apariencia variable, cada outfit es un Model distinto
--- en ServerStorage.Bodies. Un único pool compartido implicaría todos los bots
+-- en Shared.Bodies. Un único pool compartido implicaría todos los bots
 -- con el mismo body. La key del pool es el outfitId.
 local _botRigPoolByKey: { [string]: { Model } } = {}
 local _botRigRefillingByKey: { [string]: boolean } = {}
@@ -562,7 +562,7 @@ local function _createBotModel(botName: string, outfitId: string?): Model
 	-- al fallback — no necesitamos N warns iguales, solo uno con contexto.
 	if not _hasWarnedMissingTemplate then
 		_hasWarnedMissingTemplate = true
-		warn("[AIService] BotTemplate no encontrado (esperado en ServerStorage.Bodies.<outfitId> o ServerStorage.Bodies.Default). Usando modelo barebones — los bots aparecerán en T-pose y sin arma hasta que se restaure el template.")
+		warn("[AIService] BotTemplate no encontrado (esperado en Shared.Bodies.<outfitId> o Shared.Bodies.Default). Usando modelo barebones — los bots aparecerán en T-pose y sin arma hasta que se restaure el template.")
 	end
 	return _buildFallbackBotModel(botName)
 end
@@ -736,9 +736,16 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 	end
 
 	-- Position BEFORE parenting: avoids one frame of physics/replication at
-	-- the template's stored position. Setting the root CFrame moves the whole
-	-- joined assembly, same as the old post-parent teleport.
-	root.CFrame = spawnPoint.CFrame + Vector3.new(0, 4, 0)
+	-- the template's stored position. PivotTo (not root.CFrame): WeldConstraints
+	-- no son rígidos fuera del Workspace, así que asignar root.CFrame con el rig
+	-- aún en ServerStorage movía el esqueleto (Motor6D) pero dejaba atrás las
+	-- piezas de ropa unidas por WeldConstraint — al entrar al Workspace el
+	-- constraint se activaba con el offset roto (ropa descolocada). PivotTo
+	-- mueve TODOS los descendientes geométricamente, con o sin joints.
+	-- El offset compensa pivots que no coincidan con el HumanoidRootPart para
+	-- conservar la semántica exacta del viejo root.CFrame = spawn.
+	local rootToPivot = root.CFrame:ToObjectSpace(botModel:GetPivot())
+	botModel:PivotTo((spawnPoint.CFrame + Vector3.new(0, 4, 0)) * rootToPivot)
 	botModel.Parent = botsFolder
 	humanoid.Health = humanoid.MaxHealth
 	humanoid.BreakJointsOnDeath = false

@@ -1,14 +1,16 @@
 --!strict
 --[[
 	ToggleController.luau (Client UI Library)
-	Toggle (interruptor) reutilizable. `Toggle` es la pista clicable cuyo color
-	cambia según el estado; `Circle` es el knob que se desliza izquierda/derecha.
+	Toggle (interruptor) reutilizable. `ToggleContainer` es la pista cuyo color
+	cambia según el estado; `Knob` es la bola que se desliza izquierda/derecha
+	(posicionada por escala); `HitArea` es el botón transparente que recibe el tap.
 
 	Estructura GUI esperada (relativa a `root`):
 		root
-		  Toggle        ← pista clicable (cambia de color)
-		    Circle      ← knob que se desliza
-		  Title         ← etiqueta (ignorada por la lógica)
+		  ToggleContainer   ← pista (cambia de color)
+		    Knob            ← bola que se desliza
+		    HitArea         ← TextButton transparente, zona clicable
+		  Title             ← etiqueta del ajuste (ignorada por la lógica)
 
 	Callbacks (mismo contrato que SliderController):
 		onChange(state)  — en cada cambio de estado, incluido :set() no silencioso.
@@ -21,17 +23,16 @@ local TweenService = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Packages = ReplicatedStorage:WaitForChild("Packages")
 local Janitor = require(Packages.janitor) :: any
-local Client = script.Parent.Parent.Parent
-local UITheme = require(Client.core.ui.UITheme)
 
-local TWEEN_INFO = UITheme.HoverMedium
--- ON: pista naranja, bola blanca. OFF (deshabilitado): pista blanca, bola negra.
-local TRACK_ON = Color3.fromRGB(255, 139, 0)
-local TRACK_OFF = Color3.fromRGB(255, 255, 255)
-local KNOB_ON = Color3.fromRGB(255, 255, 255)
-local KNOB_OFF = Color3.fromRGB(0, 0, 0)
--- Margen en px entre la bola y los bordes de la pista en cada extremo.
-local KNOB_PADDING = 8
+-- Tween y estados visuales (knob por escala, color en el container).
+local TWEEN_INFO = TweenInfo.new(0.25, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+local KNOB_ON_POS = UDim2.new(0.55, 0, 0.5, 0)
+local KNOB_OFF_POS = UDim2.new(0.05, 0, 0.5, 0)
+local TRACK_ON = Color3.fromRGB(0, 140, 255)
+local TRACK_OFF = Color3.fromRGB(80, 80, 80)
+-- Debounce contra el doble-evento por tap en móvil (toque + click emulado), que
+-- alternaba el estado dos veces y dejaba el toggle "al revés" respecto al tap.
+local TOGGLE_DEBOUNCE = 0.1
 
 export type ToggleConfig = {
 	root: Instance,
@@ -61,10 +62,11 @@ function ToggleController.new(config: ToggleConfig)
 	self._state = false
 	self._activeTweens = {} :: { Tween }
 	self._inert = false
+	self._lastToggleAt = 0
 
-	-- Resolución tolerante: avisa y queda inerte si falta Toggle/Circle.
-	local track = resolve(config.root, "Toggle")
-	local knob = track and resolve(track, "Circle")
+	-- Resolución tolerante: avisa y queda inerte si falta la pista o la bola.
+	local track = resolve(config.root, "ToggleContainer")
+	local knob = track and resolve(track, "Knob")
 	if not (track and knob) then
 		self._inert = true
 		return self
@@ -73,19 +75,20 @@ function ToggleController.new(config: ToggleConfig)
 	self._track = track :: GuiObject
 	self._knob = knob :: GuiObject
 
-	self._knob.AnchorPoint = Vector2.new(0.5, 0.5)
-
 	self._janitor:Add(function()
 		self:_cancelTweens()
 	end, true)
 
-	-- `Activated` cubre ratón y táctil para GuiButton; para un Frame caemos a
-	-- InputBegan. Así el toggle funciona sea botón o frame en el diseño nuevo.
-	if self._track:IsA("GuiButton") then
-		self._janitor:Add((self._track :: GuiButton).Activated:Connect(function()
+	-- HitArea (TextButton transparente) recibe el tap. `Activated` cubre ratón,
+	-- táctil y selección por mando de forma unificada (y deduplica touch + click
+	-- emulado). Si faltara, caemos a InputBegan sobre la pista.
+	local hitArea = track:FindFirstChild("HitArea")
+	if hitArea and hitArea:IsA("GuiButton") then
+		self._janitor:Add((hitArea :: GuiButton).Activated:Connect(function()
 			self:_toggle()
 		end), "Disconnect")
 	else
+		self._track.Active = true
 		self._janitor:Add(self._track.InputBegan:Connect(function(input: InputObject)
 			if input.UserInputType == Enum.UserInputType.MouseButton1
 				or input.UserInputType == Enum.UserInputType.Touch then
@@ -93,12 +96,6 @@ function ToggleController.new(config: ToggleConfig)
 			end
 		end), "Disconnect")
 	end
-
-	-- Reposicionar la bola al obtener tamaño real (p. ej. al abrir el panel
-	-- oculto): si se colocó con medidas 0, el margen quedaría nulo.
-	self._janitor:Add(self._track:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
-		self:_apply(self._state, false, false)
-	end), "Disconnect")
 
 	return self
 end
@@ -110,38 +107,25 @@ function ToggleController:_cancelTweens()
 	table.clear(self._activeTweens)
 end
 
-function ToggleController:_knobPositions(): (UDim2, UDim2)
-	local trackWidth = self._track.AbsoluteSize.X
-	local knobWidth = self._knob.AbsoluteSize.X
-	local inset = if trackWidth > 0 and knobWidth > 0 then (knobWidth / 2) + KNOB_PADDING else 0
-	local onPos = UDim2.new(1, -inset, 0.5, 0)
-	local offPos = UDim2.new(0, inset, 0.5, 0)
-	return onPos, offPos
-end
-
 function ToggleController:_apply(state: boolean, animate: boolean, fireChange: boolean)
 	self._state = state
 
-	local onPos, offPos = self:_knobPositions()
-	local targetPos = if state then onPos else offPos
+	local targetPos = if state then KNOB_ON_POS else KNOB_OFF_POS
 	local trackColor = if state then TRACK_ON else TRACK_OFF
-	local knobColor = if state then KNOB_ON else KNOB_OFF
 
 	self:_cancelTweens()
 
 	if animate then
-		local knobTween = TweenService:Create(self._knob, TWEEN_INFO, {
-			Position = targetPos,
-			BackgroundColor3 = knobColor,
-		})
+		local knobTween = TweenService:Create(self._knob, TWEEN_INFO, { Position = targetPos })
 		local trackTween = TweenService:Create(self._track, TWEEN_INFO, { BackgroundColor3 = trackColor })
 		table.insert(self._activeTweens, knobTween)
 		table.insert(self._activeTweens, trackTween)
 		knobTween:Play()
 		trackTween:Play()
 	else
+		-- Aplicación instantánea (carga de settings): las posiciones son por escala,
+		-- así que funcionan aunque el panel esté oculto (sin medidas reales).
 		self._knob.Position = targetPos
-		self._knob.BackgroundColor3 = knobColor
 		self._track.BackgroundColor3 = trackColor
 	end
 
@@ -151,6 +135,13 @@ function ToggleController:_apply(state: boolean, animate: boolean, fireChange: b
 end
 
 function ToggleController:_toggle()
+	-- Debounce contra el doble-evento por tap en móvil.
+	local now = os.clock()
+	if now - self._lastToggleAt < TOGGLE_DEBOUNCE then
+		return
+	end
+	self._lastToggleAt = now
+
 	self:_apply(not self._state, true, true)
 	if self._onCommit then
 		self._onCommit(self._state)

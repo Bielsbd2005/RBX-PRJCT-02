@@ -60,7 +60,11 @@ function HitFeedback.new(weaponsGui: any)
 	local self = setmetatable({}, HitFeedback)
 	self.weaponsGui = weaponsGui
 
-	self._activeHitHighlights = {}
+	-- Claves débiles (Models golpeados): si el Model muere durante la ventana de
+	-- fade (~0.3s), Destroy() cancela los tweens y los callbacks Completed hacen
+	-- early-return sin borrar la entrada → quedaría huérfana pinneando el Model.
+	-- __mode='k' deja que el GC recoja el Model y su entrada.
+	self._activeHitHighlights = setmetatable({}, { __mode = "k" })
 	self._hitHighlightSerial = 0
 	self._mobileHapticPulseId = 0
 	self._lastMobileHapticAt = 0
@@ -168,7 +172,7 @@ function HitFeedback:_playLocalHitHighlight(humanoidHit: Humanoid)
 		fadeTween = nil,
 	}
 
-	colorTween.Completed:Connect(function(playbackState)
+	colorTween.Completed:Once(function(playbackState)
 		if playbackState ~= Enum.PlaybackState.Completed then
 			return
 		end
@@ -184,7 +188,7 @@ function HitFeedback:_playLocalHitHighlight(humanoidHit: Humanoid)
 		})
 		state.fadeTween = fadeTween
 
-		fadeTween.Completed:Connect(function()
+		fadeTween.Completed:Once(function()
 			local currentState = self._activeHitHighlights[targetModel]
 			if currentState and currentState.serial == serial then
 				self._activeHitHighlights[targetModel] = nil
@@ -206,6 +210,14 @@ function HitFeedback:onHitOtherPlayer(damage: number, humanoidHit: Humanoid, hit
 
 	local isHeadshot = hitPart and hitPart.Name == "Head" or false
 	self:_pulseMobileHaptics(isHeadshot)
+
+	-- hitMarker lo asigna setup() vía WaitForChild en un coroutine diferido; un
+	-- golpe que llegue antes de que complete indexaría nil. Ventana muy estrecha
+	-- (los hijos del clone local existen síncronamente), pero el guard evita el
+	-- error en consola sin coste. El háptico de arriba ya disparó.
+	if not self.hitMarker then
+		return
+	end
 
 	if not self._hitMarkerAnchorSet then
 		self.hitMarker.AnchorPoint = CENTER_ANCHOR_V2

@@ -18,9 +18,6 @@
     "ServerStorage": {
       "WeaponTools": {
         "$path": "src/serverStorage/WeaponTools"
-      },
-      "Bodies": {
-        "$path": "src/serverStorage/Bodies"
       }
     },
 

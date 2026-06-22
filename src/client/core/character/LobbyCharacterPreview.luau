@@ -105,7 +105,7 @@ local function playIdleAnimation(model: Model, janitor: any)
 end
 
 local function resolveBodyTemplate(outfitId: string?): Model?
-	local folder = Shared:WaitForChild("LockerBodies", RESOLVE_TIMEOUT)
+	local folder = Shared:WaitForChild("Bodies", RESOLVE_TIMEOUT)
 	if not folder then
 		return nil
 	end
@@ -164,16 +164,20 @@ function LobbyCharacterPreview:_ensureResolved(): boolean
 	if self._resolved then
 		return self._p1 ~= nil
 	end
-	self._resolved = true
 
 	local lobby = Workspace:WaitForChild("Lobby", RESOLVE_TIMEOUT)
 	local spawners = lobby and lobby:WaitForChild("Spawners", RESOLVE_TIMEOUT)
 	local p1 = spawners and spawners:WaitForChild("P1", RESOLVE_TIMEOUT)
 	if not p1 then
+		-- NO marcar _resolved aquí: si la geometría del lobby aún no replicó
+		-- (móvil lento / stall), dejarlo en false permite reintentar en la
+		-- siguiente llamada (son por acción del usuario, no por frame). Marcarlo
+		-- antes del WaitForChild deshabilitaba el preview el resto de la sesión.
 		warn("[LobbyCharacterPreview] Workspace.Lobby.Spawners.P1 no encontrado (timeout)")
 		return false
 	end
 	self._p1 = p1
+	self._resolved = true
 
 	local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui") :: PlayerGui
 	local uiGui = playerGui:WaitForChild("UserInterface")

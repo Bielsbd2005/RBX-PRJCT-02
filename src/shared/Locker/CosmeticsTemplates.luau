@@ -41,11 +41,43 @@ local WEAPON_WRAP_TEXTURE_ORDER = {
 	"ScrollTexture_Back",
 }
 
+local WRAP_ORIGINAL_MATERIAL_ATTR = "WrapOriginalMaterial"
+
 local function _getOptionalString(value: any): string?
 	if type(value) == "string" and value ~= "" then
 		return value
 	end
 	return nil
+end
+
+local function _getOptionalMaterial(value: any): Enum.Material?
+	if typeof(value) == "EnumItem" and value.EnumType == Enum.Material then
+		return value :: Enum.Material
+	end
+	return nil
+end
+
+-- Aplica (o restaura) el Material de la parte principal del arma. Guarda el
+-- material original la primera vez que se toca la parte para poder volver a él
+-- cuando una skin no define Material; así cambiar de skin nunca deja "pegado"
+-- el material de la skin anterior.
+local function _applyMaterialToPart(part: BasePart, material: Enum.Material?)
+	if part:GetAttribute(WRAP_ORIGINAL_MATERIAL_ATTR) == nil then
+		part:SetAttribute(WRAP_ORIGINAL_MATERIAL_ATTR, part.Material.Name)
+	end
+
+	if material then
+		part.Material = material
+		return
+	end
+
+	local originalName = part:GetAttribute(WRAP_ORIGINAL_MATERIAL_ATTR)
+	if type(originalName) == "string" then
+		local restored = (Enum.Material :: any)[originalName]
+		if restored then
+			part.Material = restored
+		end
+	end
 end
 
 local function _getHatsRoot(): Folder?
@@ -104,6 +136,7 @@ function CosmeticsTemplates.applyWeaponWrapToTool(tool: Tool, wrapId: string)
 	local baseColor = if validDefinition and typeof(wrapDefinition.BaseColor) == "Color3"
 		then wrapDefinition.BaseColor
 		else nil
+	local material = if validDefinition then _getOptionalMaterial(wrapDefinition.Material) else nil
 	local studsPerTile = if validDefinition
 		then math.max(0.01, tonumber(wrapDefinition.StudsPerTile) or DEFAULT_WRAP_STUDS_PER_TILE)
 		else DEFAULT_WRAP_STUDS_PER_TILE
@@ -151,6 +184,8 @@ function CosmeticsTemplates.applyWeaponWrapToTool(tool: Tool, wrapId: string)
 	elseif baseColor then
 		primaryPart.Color = baseColor
 	end
+
+	_applyMaterialToPart(primaryPart, material)
 end
 
 function CosmeticsTemplates.applyFaceToHead(head: BasePart, faceId: string)
