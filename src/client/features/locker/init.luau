@@ -1622,6 +1622,13 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			rebuildOwnedLookup()
 			rebuildEquippedLookup()
 		end
+		-- Reaplicar el BODY equipado primero (antes que cara/hat): beginPreview no
+		-- reconstruye el modelo, así que si el preview del lobby se construyó antes
+		-- de llegar el loadout (outfit nil → body por defecto), al abrir mostraría
+		-- un body no equipado. applyOutfit es no-op si ya coincide. El orden importa:
+		-- reconstruir el body recrea los appliers, y cara/hat se aplican sobre el
+		-- modelo nuevo.
+		applyEquippedBodyPreview()
 		applyEquippedFacePreview()
 		applyEquippedHatPreview()
 		hideActionFrame()

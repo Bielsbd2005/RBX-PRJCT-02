@@ -14,6 +14,7 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local TeamUtils = require(Shared.utils.TeamUtils)
@@ -24,6 +25,16 @@ local COLOR_ENEMY  = Color3.fromRGB(220, 40, 40)
 local COLOR_LOCAL  = Color3.fromRGB(0, 0, 0)
 local FILL_ALPHA   = 0.65
 local OUTLINE_ALPHA = 0.1
+
+-- Flash verde sobre el highlight del jugador local al absorber un orbe de vida:
+-- entra rápido a verde con fill visible y vuelve suave al estado base (contorno
+-- negro, sin fill). Umbral igual al de HealthBarController para no flashear con
+-- la regen de 1 HP/s.
+local HEAL_FLASH_COLOR = Color3.fromRGB(60, 255, 120)
+local HEAL_FLASH_FILL_ALPHA = 0.4
+local HEAL_FLASH_THRESHOLD = 5
+local TI_HEAL_FLASH_IN  = TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local TI_HEAL_FLASH_OUT = TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
 -- Atributos que indican team — mismos que TeamUtils.getSide consulta. Cuando
 -- cualquiera de estos cambia (incluido el primer set vía replicación tardía
@@ -40,6 +51,11 @@ local _moduleConns: { RBXScriptConnection } = {}
 local _trackedHighlights: { [Model]: Highlight } = {}
 local _trackedConns: { [Model]: { RBXScriptConnection } } = {}
 local _started = false
+
+-- Flash de heal del jugador local
+local _healFlashToken = 0
+local _healFlashTweens: { Tween } = {}
+local _localLastHealth: number? = nil
 
 -- ────────────────────────────────────────────────────────────────
 -- Helpers
@@ -92,6 +108,50 @@ local function _refreshColor(model: Model)
 	highlight.OutlineTransparency = OUTLINE_ALPHA
 end
 
+-- Pulso verde breve sobre el highlight del jugador local (orbe de vida). Entra a
+-- verde con fill visible y vuelve al estado base. El token invalida un flash
+-- previo si llega otro heal antes de terminar.
+local function _flashLocalHeal()
+	local char = localPlayer.Character
+	if not char then
+		return
+	end
+	local highlight = _trackedHighlights[char]
+	if not highlight then
+		return
+	end
+
+	_healFlashToken += 1
+	local token = _healFlashToken
+	for _, t in _healFlashTweens do
+		t:Cancel()
+	end
+	table.clear(_healFlashTweens)
+
+	local tweenIn = TweenService:Create(highlight, TI_HEAL_FLASH_IN, {
+		FillColor = HEAL_FLASH_COLOR,
+		OutlineColor = HEAL_FLASH_COLOR,
+		FillTransparency = HEAL_FLASH_FILL_ALPHA,
+		OutlineTransparency = 0,
+	})
+	_healFlashTweens[#_healFlashTweens + 1] = tweenIn
+	tweenIn.Completed:Once(function(state)
+		if state ~= Enum.PlaybackState.Completed or _healFlashToken ~= token then
+			return
+		end
+		-- Vuelta al estado base del self (contorno negro, sin fill).
+		local tweenOut = TweenService:Create(highlight, TI_HEAL_FLASH_OUT, {
+			FillColor = COLOR_LOCAL,
+			OutlineColor = COLOR_LOCAL,
+			FillTransparency = 1,
+			OutlineTransparency = OUTLINE_ALPHA,
+		})
+		_healFlashTweens[#_healFlashTweens + 1] = tweenOut
+		tweenOut:Play()
+	end)
+	tweenIn:Play()
+end
+
 local function _detach(model: Model)
 	local highlight = _trackedHighlights[model]
 	if highlight then
@@ -131,6 +191,22 @@ local function _attach(model: Model)
 		table.insert(conns, player:GetPropertyChangedSignal("Team"):Connect(function()
 			_refreshColor(model)
 		end))
+	end
+
+	-- Char del jugador local: detectar heals discretos (orbe de vida, etc.) para
+	-- el flash verde. Umbral filtra la regen lenta. lastHealth se reinicia por
+	-- char (respawn) y se compara solo cuando ya hay baseline.
+	if player == localPlayer then
+		local humanoid = model:FindFirstChildOfClass("Humanoid")
+		if humanoid then
+			_localLastHealth = humanoid.Health
+			table.insert(conns, humanoid.HealthChanged:Connect(function(newHealth: number)
+				if _localLastHealth ~= nil and newHealth - _localLastHealth >= HEAL_FLASH_THRESHOLD then
+					_flashLocalHeal()
+				end
+				_localLastHealth = newHealth
+			end))
+		end
 	end
 
 	-- Re-evaluar color cuando llegue/cambie cualquier atributo de team. Para

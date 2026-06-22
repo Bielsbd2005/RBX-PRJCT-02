@@ -132,12 +132,20 @@ local V3_BILLBOARD_OFFSET = Vector3.new(0, 5, 0)
 -- Colors
 local COLOR_NORMAL_TEXT   = Color3.fromRGB(255, 255, 255)  -- normal hits text
 local COLOR_NORMAL_STROKE = Color3.fromRGB(0, 0, 0)        -- normal hits stroke
-local COLOR_HEADSHOT_TEXT = Color3.fromRGB(235, 71, 62)    -- headshot text
-local COLOR_HEADSHOT_STROKE = Color3.fromRGB(118, 35, 32)  -- headshot stroke
+local COLOR_HEADSHOT_TEXT = Color3.fromRGB(255, 210, 70)   -- headshot text (dorado)
+local COLOR_HEADSHOT_STROKE = Color3.fromRGB(92, 56, 12)   -- headshot stroke (marrón oscuro)
 
 -- TweenInfos
 local TI_NUM_APPEAR   = TweenInfo.new(0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-local TI_NUM_MOVE     = TweenInfo.new(1.20, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+-- Flotación: sube y se desvanece en un único gesto, desacelerando (Out). Sin
+-- tramo de caída — el descenso de vuelta al origen era lo que hacía parecer que
+-- el número "desaparecía y reaparecía".
+local TI_NUM_FLOAT    = TweenInfo.new(1.05, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+-- Geometría de la flotación (en scale del billboard)
+local FLOAT_RISE      = 1.1  -- cuánto sube en total
+local FLOAT_DRIFT_X   = 0.4  -- deriva horizontal máxima (±), da un toque orgánico
+local FLOAT_MAX_ROT   = 14   -- rotación final (±)
 
 -- Desktop-only profile (no mobile distinctions)
 local MAX_UI_DISTANCE     = 200
@@ -402,27 +410,17 @@ function DamageBillboardHandler:CreateBillboardForAdornee(adornee: Instance): Bi
 	return billboard
 end
 
--- Dispersed motion (wide upward cone)
-local function randomDispersedOffset()
-	local angleDeg = RNG:NextNumber(-140, -40)
-	local angleRad = math.rad(angleDeg)
-	local dist = RNG:NextNumber(1.3, 2.8)
-	local dx = math.cos(angleRad) * dist
-	local dy = math.sin(angleRad) * dist
-	return dx, dy
-end
-
--- Render a single number
+-- Render a single number con trayectoria en arco (sube a un ápex y cae con gravedad)
 local function renderNumber(billboard: BillboardGui, value: number, isHeadshot: boolean)
 	local label = getBillboardLabel(billboard, isHeadshot)
 	if not label then return end
 
 	label.Text = tostring(value)
 
-	-- Small spawn jitter
-	local jitterX = RNG:NextNumber(-0.04, 0.04)
-	local jitterY = RNG:NextNumber(-0.04, 0.04)
-	label.Position = UDim2.fromScale(0.5 + jitterX, 0.5 + jitterY)
+	-- Pequeño jitter de spawn alrededor del centro
+	local startX = 0.5 + RNG:NextNumber(-0.04, 0.04)
+	local startY = 0.5 + RNG:NextNumber(-0.04, 0.04)
+	label.Position = UDim2.fromScale(startX, startY)
 
 	-- Use cached stroke (already guaranteed to exist via ensureStroke)
 	local stroke = labelStrokes[label]
@@ -432,25 +430,31 @@ local function renderNumber(billboard: BillboardGui, value: number, isHeadshot: 
 		stroke.Transparency = isHeadshot and 0 or 0.8
 	end
 
-	local moveX, moveY = randomDispersedOffset()
+	-- Destino: sube con una pequeña deriva horizontal (un solo gesto, sin bajar).
+	local driftX = RNG:NextNumber(-FLOAT_DRIFT_X, FLOAT_DRIFT_X)
+	local endX = startX + driftX
+	local endY = startY - FLOAT_RISE
 
+	-- Pop de aparición (tamaño), en paralelo a la flotación.
 	local appearTween = TweenService:Create(label, TI_NUM_APPEAR, {
 		Size = UDim2_APPEAR_END,
 	})
 
-	-- Headshot stays fully opaque; normal fades a bit
-	local moveProps = {
-		Position = UDim2.fromScale(0.5 + moveX, 0.5 + moveY),
-		Rotation = RNG:NextNumber(-40, 40),
-		TextTransparency = isHeadshot and 0 or 0.55,
-	}
+	-- Sube y se desvanece. El stroke se desvanece a la vez (mismo TweenInfo, así
+	-- termina a la par que floatTween, justo cuando se libera el label → sin
+	-- conflicto con el reuso del pool).
+	local floatTween = TweenService:Create(label, TI_NUM_FLOAT, {
+		Position = UDim2.fromScale(endX, endY),
+		Rotation = RNG:NextNumber(-FLOAT_MAX_ROT, FLOAT_MAX_ROT),
+		TextTransparency = 1,
+	})
+	if stroke then
+		TweenService:Create(stroke, TI_NUM_FLOAT, { Transparency = 1 }):Play()
+	end
 
-	local moveTween = TweenService:Create(label, TI_NUM_MOVE, moveProps)
-
-	-- Cleanup + reduce overdraw at end. Audit mobile: :Once auto-disconnect
-	-- (Completed dispara una sola vez por tween, tanto en finalización como
-	-- en cancel). Elimina la conn local + el disconnect manual.
-	moveTween.Completed:Once(function()
+	-- Cleanup al terminar. Audit mobile: :Once auto-disconnect (Completed dispara
+	-- una vez, tanto en finalización como en cancel).
+	floatTween.Completed:Once(function()
 		if stroke then
 			stroke.Transparency = 1
 		end
@@ -458,7 +462,7 @@ local function renderNumber(billboard: BillboardGui, value: number, isHeadshot: 
 	end)
 
 	appearTween:Play()
-	moveTween:Play()
+	floatTween:Play()
 end
 
 --// Public API
