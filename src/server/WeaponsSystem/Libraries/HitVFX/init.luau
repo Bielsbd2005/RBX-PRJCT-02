@@ -5,6 +5,11 @@
 	Los efectos viven SIEMPRE en una carpeta de Studio (ReplicatedStorage.HitVFX),
 	con una plantilla "Body" y otra "Headshot". Ver Config.luau para el contrato.
 
+	SÓLO PARTÍCULAS. El sonido de hit/headshot NO se gestiona aquí — vive en
+	SoundService.Audio.Gameplay.HitSound/Headshot y lo dispara DamageBillboardHandler
+	(2D, pitch progresivo de combo). Mantener el sonido en un único sitio evita el
+	doble audio; por eso el motor ignora cualquier Sound dentro de las plantillas.
+
 	Eficiencia: pool por categoría (clones reusados, cero Instance.new en régimen),
 	escalado de partículas en móvil y, por defecto, sólo se renderizan los impactos
 	del jugador local (Config.LocalPlayerOnly).
@@ -27,14 +32,11 @@ local IS_MOBILE = UserInputService.TouchEnabled and not UserInputService.MouseEn
 local PARTICLE_SCALE = IS_MOBILE and Config.MobileScale or 1
 local DEFAULT_EMIT_COUNT = 15
 
-local localRandom = Random.new()
-
 local HitVFX = {}
 
 type Unit = {
 	part: Part,
 	emitters: { { e: ParticleEmitter, n: number } },
-	sounds: { Sound },
 	busy: boolean,
 }
 
@@ -106,19 +108,17 @@ local function getPrototype(name: string): Part?
 	return host
 end
 
--- Indexa emitters (con su EmitCount) y sonidos de una clone recién creada.
+-- Indexa los emitters (con su EmitCount) de una clone recién creada. Los Sound
+-- de la plantilla se ignoran a propósito (el audio vive en SoundService).
 local function indexUnit(part: Part): Unit
 	local emitters = {}
-	local sounds = {}
 	for _, d in part:GetDescendants() do
 		if d:IsA("ParticleEmitter") then
 			d.Enabled = false
 			table.insert(emitters, { e = d, n = (d:GetAttribute("EmitCount") :: number?) or DEFAULT_EMIT_COUNT })
-		elseif d:IsA("Sound") then
-			table.insert(sounds, d)
 		end
 	end
-	return { part = part, emitters = emitters, sounds = sounds, busy = false }
+	return { part = part, emitters = emitters, busy = false }
 end
 
 local function acquire(name: string): Unit?
@@ -159,11 +159,6 @@ local function release(unit: Unit)
 	end
 	unit.busy = false
 	active -= 1
-	for _, sound in unit.sounds do
-		if sound.IsPlaying then
-			sound:Stop()
-		end
-	end
 end
 
 -- CFrame en `point` con UpVector = normal (las partículas emiten hacia Top = +Y).
@@ -219,20 +214,10 @@ function HitVFX.play(hitInfo: any, isLocalShot: boolean?)
 		end
 	end
 
-	if #unit.sounds > 0 then
-		local sound = unit.sounds[localRandom:NextInteger(1, #unit.sounds)]
-		sound.TimePosition = 0
-		sound:Play()
-		local len = sound.TimeLength > 0 and sound.TimeLength or 2.5
-		if len > hold then
-			hold = len
-		end
-	end
-
 	task.delay(hold + 0.15, release, unit)
 end
 
--- Opcional: precarga texturas/sonidos de la carpeta para evitar el primer hitch.
+-- Opcional: precarga las texturas de la carpeta para evitar el primer hitch.
 function HitVFX.preload()
 	if IS_SERVER then
 		return
@@ -244,7 +229,7 @@ function HitVFX.preload()
 		end
 		local assets = {}
 		for _, d in folder:GetDescendants() do
-			if d:IsA("ParticleEmitter") or d:IsA("Sound") then
+			if d:IsA("ParticleEmitter") then
 				table.insert(assets, d)
 			end
 		end

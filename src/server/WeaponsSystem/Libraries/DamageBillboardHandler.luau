@@ -152,7 +152,6 @@ local MAX_UI_DISTANCE     = 200
 local MAX_ACTIVE_LABELS   = 10
 -- MERGE_WINDOW removed: each hit renders its own number immediately.
 -- MAX_ACTIVE_LABELS caps simultaneous labels per target to stay readable.
-local PARTICLES_PER_HEAD  = 25        -- fixed desktop value
 
 -- Rendering knobs (desktop)
 local NORMAL_STROKE_THICK = 2
@@ -319,27 +318,6 @@ local function releaseBillboardLabel(billboard: BillboardGui, label: TextLabel)
 	pool[#pool + 1] = label
 end
 
---// Cached head emitters
-local headEmitters = setmetatable({}, { __mode = "k" }) -- head -> {emitters}
-local function emitHeadshotParticles(head: BasePart)
-	local list = headEmitters[head]
-	if not list then
-		list = {}
-		local att = head:FindFirstChild("HeadShotAttachment")
-		if att then
-			for _, p in ipairs(att:GetChildren()) do
-				if p:IsA("ParticleEmitter") then
-					list[#list+1] = p
-				end
-			end
-		end
-		headEmitters[head] = list
-	end
-	for _, p in ipairs(list) do
-		p:Emit(PARTICLES_PER_HEAD)
-	end
-end
-
 --// Utils
 local function getHeadFromAdornee(adornee: Instance?): BasePart?
 	if not adornee then return nil end
@@ -491,13 +469,10 @@ function DamageBillboardHandler:ShowDamageBillboard(damageAmount: number, adorne
 
 	local billboard = self:CreateBillboardForAdornee(adornee)
 
-	if headshot and adornee and adornee.Parent then
-		local head = getHeadFromAdornee(adornee)
-		if head then
-			emitHeadshotParticles(head)
-		end
-	end
-
+	-- Las partículas de headshot/body las gestiona ahora HitVFX (plantillas en
+	-- ReplicatedStorage.HitVFX, disparadas desde BulletWeapon). Aquí sólo quedan
+	-- el sonido (SoundService.Audio.Gameplay, arriba) y los números de daño, para
+	-- no gestionar el mismo efecto en dos sitios.
 	renderNumber(billboard, shownDamage, headshot)
 end
 

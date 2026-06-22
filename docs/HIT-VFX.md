@@ -1,34 +1,53 @@
 # VFX de impacto de balas
 
-Sólo **dos efectos**: `Body` (impacto en cuerpo) y `Headshot` (impacto en
-cabeza). Los impactos contra el mundo (suelo, metal, ...) no producen nada.
+Feedback de impacto **a jugador**, dividido en dos responsabilidades que no se
+solapan:
 
-Los efectos viven **siempre en una carpeta de Studio**, nunca en código.
+| Efecto | Dueño | Disparado desde |
+| --- | --- | --- |
+| **Partículas** (Body / Headshot) | carpeta `ReplicatedStorage.HitVFX` (Studio) | `HitVFX.play` en `BulletWeapon` |
+| **Sonido** hit/headshot | `SoundService.Audio.Gameplay.HitSound`/`Headshot` | `DamageBillboardHandler` (2D, pitch progresivo) |
+| **Números** de daño | `DamageBillboardHandler` | — |
 
-## Montar la carpeta (Studio)
+Sólo **dos categorías de partícula**: `Body` y `Headshot`. Los impactos contra el
+mundo (suelo, metal, ...) no producen partículas.
+
+## Partículas — montar la carpeta (Studio)
 
 ```
 ReplicatedStorage/
   HitVFX/                 (Folder)
-    Body                  (Attachment o Part)
-    Headshot              (Attachment o Part)
+    Body                  (Attachment o Part)  ← sólo ParticleEmitters
+    Headshot              (Attachment o Part)  ← sólo ParticleEmitters
 ```
 
 - La carpeta y los hijos se llaman EXACTO `HitVFX` / `Body` / `Headshot`
   (configurable en `Config.FolderName` / `Config.BodyCategory` / `HeadshotCategory`).
-- Dentro de cada plantilla pones tus **`ParticleEmitter`** y **`Sound`** y los
-  tuneas en vivo. Como está fuera de los paths de Rojo, **no la borra** al sync.
+- Dentro de cada plantilla pones tus **`ParticleEmitter`** y los tuneas en vivo.
+  Como está fuera de los paths de Rojo, **no la borra** al sync.
+- **NO pongas `Sound`** dentro: el motor lo ignora (el audio va en SoundService,
+  ver abajo). Así nunca suena doble.
 
-### Atributos de la plantilla
+### Atributo de la plantilla
 
 | Instancia | Atributo | Efecto |
 | --- | --- | --- |
 | `ParticleEmitter` | `EmitCount` *(number)* | partículas por ráfaga (def. 15; en móvil ×`MobileScale`) |
-| `Sound` | — | si hay varios, se elige uno al azar por impacto |
 
 El motor clona la plantilla, la orienta a la normal (las partículas salen "hacia
-arriba" del Attachment → `EmissionDirection = Top`), emite la ráfaga y reproduce
-el sonido. Reusa todo en pool por categoría → cero `Instance.new` en régimen.
+arriba" del Attachment → `EmissionDirection = Top`) y emite la ráfaga. Reusa todo
+en pool por categoría → cero `Instance.new` en régimen.
+
+> **Migración:** los emitters de headshot que tenías en el `HeadShotAttachment`
+> de las cabezas (`Shared.Bodies.*`) cópialos dentro de `HitVFX/Headshot`. Antes
+> los emitía `DamageBillboardHandler`; ahora los emite HitVFX.
+
+## Sonido — vive en SoundService
+
+El sonido de hit/headshot **no** se toca en HitVFX. Está en
+`SoundService.Audio.Gameplay.HitSound` / `Headshot` y lo reproduce
+`DamageBillboardHandler` (pooled ×5, con **pitch progresivo de combo** y
+distance-aware). Para cambiarlo: sustituye esos dos `Sound` en Studio.
 
 ## Archivos
 
