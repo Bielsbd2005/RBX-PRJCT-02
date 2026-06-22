@@ -127,20 +127,27 @@ function serverProcess.start()
 		end
 
 		for _, player in Players:GetPlayers() do
-			if perPlayerReliable[player].cursor > 0 then
-				local b, r = dump(perPlayerReliable[player])
+			-- Defensive nil-guard: con SignalBehavior = Deferred hay una ventana
+			-- de un frame en la que un player ya está en GetPlayers() pero su
+			-- canal aún no se creó (PlayerAdded diferido) o ya se borró
+			-- (PlayerRemoving). Sin el guard, indexar el canal nil tira
+			-- "attempt to index nil with 'cursor'". (Patch local sobre el paquete.)
+			local reliable = perPlayerReliable[player]
+			if reliable and reliable.cursor > 0 then
+				local b, r = dump(reliable)
 				reliableRemote:FireClient(player, b, r)
 
-				perPlayerReliable[player].cursor = 0
-				table.clear(perPlayerReliable[player].references)
+				reliable.cursor = 0
+				table.clear(reliable.references)
 			end
 
-			if perPlayerUnreliable[player].cursor > 0 then
-				local b, r = dump(perPlayerUnreliable[player])
+			local unreliable = perPlayerUnreliable[player]
+			if unreliable and unreliable.cursor > 0 then
+				local b, r = dump(unreliable)
 				unreliableRemote:FireClient(player, b, r)
 
-				perPlayerUnreliable[player].cursor = 0
-				table.clear(perPlayerUnreliable[player].references)
+				unreliable.cursor = 0
+				table.clear(unreliable.references)
 			end
 		end
 	end)
