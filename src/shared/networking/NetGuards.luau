@@ -41,6 +41,8 @@ NetGuards.MAX = table.freeze({
 	UserIdString  = 16,   -- numeric UserId codificado como string
 	AssetUri      = 96,   -- "rbxassetid://<digits>"
 	Username      = 32,   -- nombre de usuario Roblox (≤20 chars; margen para espacios/typos)
+	GiftId        = 64,   -- key de PendingGifts (PurchaseId del receipt, GUID-like)
+	GiftMessage   = 200,  -- mensaje adjunto a un regalo, en BYTES (el cliente corta a 150 chars Y ≤180 bytes)
 })
 
 --[[

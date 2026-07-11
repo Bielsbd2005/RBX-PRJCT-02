@@ -382,6 +382,8 @@ function WeaponsGui:onRenderStepped(dt: number)
 	if self._hotbarDirty then
 		self.hotbar:refresh()
 	end
+	-- Anima por frame los "..." de recarga en el slot del arma actual del hotbar.
+	self.hotbar:tickReloadDots()
 
 	self.crosshair:update(dt)
 	self:_updateAmmoDisplay()

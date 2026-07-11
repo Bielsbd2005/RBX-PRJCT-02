@@ -9,17 +9,35 @@ local LocalPlayer = (not IsServer) and Players.LocalPlayer or nil
 --  CLIENT-ONLY CONTROLLERS — reset / init on respawn
 -- =====================================================================
 local HealthBarController = nil
+local StreakDisplay = nil
 
 if not IsServer then
 	HealthBarController = require(script.Parent:WaitForChild("Libraries"):WaitForChild("HealthBarController"))
+	StreakDisplay = require(script.Parent:WaitForChild("Libraries"):WaitForChild("StreakDisplay"))
+
+	-- Resetea la racha al morir (Humanoid.Died) — inmediato, sin esperar al respawn.
+	local function _hookCharacterForStreak(character: Model)
+		task.spawn(function()
+			local humanoid = character:FindFirstChildOfClass("Humanoid")
+				or character:WaitForChild("Humanoid", 10) :: Humanoid?
+			if humanoid then
+				humanoid.Died:Connect(function()
+					StreakDisplay.reset()
+				end)
+			end
+		end)
+	end
 
 	LocalPlayer.CharacterAdded:Connect(function(character)
 		HealthBarController.onCharacterAdded(character)
+		StreakDisplay.reset() -- nueva vida → racha a cero
+		_hookCharacterForStreak(character)
 	end)
 
 	-- Handle already-spawned character
 	if LocalPlayer.Character then
 		task.spawn(HealthBarController.onCharacterAdded, LocalPlayer.Character)
+		_hookCharacterForStreak(LocalPlayer.Character)
 	end
 end
 -- =====================================================================
@@ -215,6 +233,12 @@ function NetworkingCallbacks.PlayerEliminated(victimName, xpGained, wasHeadshot,
 	local PersonalKillFeed = _getPersonalKillFeed()
 	if PersonalKillFeed then
 		PersonalKillFeed.showKill(victimName or "Unknown", xpGained or 100, wasHeadshot or false)
+	end
+
+	-- Racha sin morir: PlayerEliminated sólo se dispara al killer local, así que
+	-- cada llamada es una baja propia → incrementa la racha (DOUBLE, TRIPLE, …).
+	if StreakDisplay then
+		StreakDisplay.onKill()
 	end
 
 	if WeaponsSystem then

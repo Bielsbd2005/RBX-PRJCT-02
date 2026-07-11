@@ -66,6 +66,7 @@ local RARITY_RANK = table.freeze({
 	Rare = 3,
 	Epic = 4,
 	Legendary = 5,
+	Mythic = 6,
 })
 
 local function makeQualifiedId(category: string, id: string): string

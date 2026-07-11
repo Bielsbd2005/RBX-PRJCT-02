@@ -85,14 +85,39 @@ local function _acquireBulletEffect(template: Instance, parent: Instance): Insta
 	return effect
 end
 
+-- Devuelve los attachments de un beam a su origen (offset local cero) y aplana la
+-- curva. Necesario al parquear en el pool: renderToBeam sobrescribe estas posiciones
+-- CADA frame, pero el beam se re-enable ANTES del primer render del siguiente disparo
+-- (el render vive en el stepped callback del Heartbeat siguiente). Sin reset, ese
+-- primer frame dibuja el beam entre los extremos del disparo ANTERIOR — pudiendo
+-- aparecer detrás del jugador. Con los offsets a cero, el frame residual es un beam
+-- de longitud cero en el muzzle (invisible).
+local function _resetBeamAttachments(beam: Beam)
+	local att0, att1 = beam.Attachment0, beam.Attachment1
+	if att0 then
+		att0.CFrame = CFrame.identity
+	end
+	if att1 then
+		att1.CFrame = CFrame.identity
+	end
+	beam.CurveSize0 = 0
+	beam.CurveSize1 = 0
+end
+
 local function _releaseBulletEffect(template: Instance, effect: Instance)
 	-- Limpiar estado audible/visual antes de parquear. Beams quedan apagados
 	-- (siguiente acquire los re-enable), sonidos paran (siguiente Play arranca
 	-- de cero), CFrame se sobrescribe en simulateProjectile.
 	local beam0 = effect:FindFirstChild("Beam0")
-	if beam0 and beam0:IsA("Beam") then beam0.Enabled = false end
+	if beam0 and beam0:IsA("Beam") then
+		beam0.Enabled = false
+		_resetBeamAttachments(beam0)
+	end
 	local beam1 = effect:FindFirstChild("Beam1")
-	if beam1 and beam1:IsA("Beam") then beam1.Enabled = false end
+	if beam1 and beam1:IsA("Beam") then
+		beam1.Enabled = false
+		_resetBeamAttachments(beam1)
+	end
 	local flyingSound = effect:FindFirstChild("Flying", true)
 	if flyingSound and flyingSound:IsA("Sound") then flyingSound:Stop() end
 	local hitSound = effect:FindFirstChild("HitSound", true)
@@ -172,6 +197,18 @@ local function isEnemyHumanoidForPlayer(humanoid, player)
 	end
 
 	return TeamUtils.areEnemies(player.Character, targetCharacter)
+end
+
+-- Los VFX de impacto a jugador (HitVFX body/headshot) solo deben mostrarse contra
+-- enemigos: al disparar a un aliado del propio equipo no se emiten partículas.
+-- Impactos que no son contra un Humanoid (superficies) no se bloquean aquí —
+-- HitVFX ya es no-op para ellos.
+local function shouldPlayPlayerHitVFX(hitInfo, player): boolean
+	local h = hitInfo.h
+	if h and typeof(h) == "Instance" and h:IsA("Humanoid") then
+		return isEnemyHumanoidForPlayer(h, player)
+	end
+	return true
 end
 
 BulletWeapon.CanAimDownSights = true
@@ -481,8 +518,14 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 	local explodeOnImpact = self:getConfigValue("ExplodeOnImpact", false)
 	local blastRadius = self:getConfigValue("BlastRadius", 8)
 
-	-- Cheat the origin of the shot back if gun tip in wall/object
-	if self.tipAttach ~= nil then
+	-- Cheat the origin of the shot back if gun tip in wall/object.
+	-- Solo en el disparo del jugador local: el cheat-back recasta desde detrás del
+	-- cañón, y su ignore list únicamente excluye al personaje del tirador cuando es
+	-- el LocalPlayer (ver getIgnoreList). Al re-simular el disparo de un jugador
+	-- remoto, el recast chocaría contra el propio cuerpo del tirador y reubicaría
+	-- fireInfo.origin DETRÁS de él (beam saliendo por la espalda). El tirador ya
+	-- aplicó este ajuste antes de enviar el fireInfo por red, así que aquí se salta.
+	if self.tipAttach ~= nil and localPlayerInitiatedShot then
 		local tipCFrame = self.tipAttach.WorldCFrame
 		local tipPos = tipCFrame.Position
 		local tipDir = tipCFrame.LookVector
@@ -603,7 +646,9 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 			-- VFX de impacto: sistema modular por superficie (HitVFX) por
 			-- defecto; fallback al hitSound heredado si ModularHitVFX = false.
 			if self:getConfigValue("ModularHitVFX", true) then
-				HitVFX.play(hitInfo, localPlayerInitiatedShot)
+				if shouldPlayPlayerHitVFX(hitInfo, self.player) then
+					HitVFX.play(hitInfo, localPlayerInitiatedShot)
+				end
 			elseif hitSound then
 				hitSound:Play()
 			end
@@ -768,7 +813,9 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 				-- partículas + sonido propios. El VFX heredado por-arma queda como
 				-- fallback cuando ModularHitVFX = false.
 				if self:getConfigValue("ModularHitVFX", true) then
-					HitVFX.play(hitInfo, localPlayerInitiatedShot)
+					if shouldPlayPlayerHitVFX(hitInfo, self.player) then
+						HitVFX.play(hitInfo, localPlayerInitiatedShot)
+					end
 				else
 					-- Show hit particle effect
 					local hitPartColor = hitPart and hitPart.Color or Color3.fromRGB(255, 255, 255)

@@ -35,6 +35,12 @@ export type LockerCatalogItem = {
 	PreviewWeaponDisplayName: string?,
 	KillGoal: number?,
 	KillProgress: number?,
+	-- En la vista Maestry, marca un desafío YA desbloqueado (poseído): la tarjeta
+	-- muestra "UNLOCKED" en lugar del progreso de kills.
+	ChallengeUnlocked: boolean?,
+	-- Nombre de la case/caja de la que se obtiene el wrap (si aplica). En Collection
+	-- la tarjeta muestra este nombre como forma de obtención (en vez del precio).
+	Case: string?,
 }
 
 export type TemplateKey = "default" | "wraps"
@@ -49,10 +55,16 @@ type ItemGridCardRefs = {
 	button: GuiButton?,
 	itemNode: GuiObject?,
 	itemNodeDefaultSize: UDim2?,
+	nameNode: TextLabel?,
 	viewportNode: ViewportFrame?,
 	-- Status { Value (label de estado/progreso), Locked (imagen) }.
 	statusValueNode: TextLabel?,
 	lockedNode: GuiObject?,
+	-- Glow (resplandor coloreado por rareza) y Template.UIGradient (gradiente
+	-- de la card, también por rareza).
+	glowNode: GuiObject?,
+	rarityGradientNode: UIGradient?,
+	appliedRarity: string?,
 	buttonStroke: UIStroke?,
 	hasButtonStrokeCached: boolean?,
 }
@@ -107,6 +119,8 @@ export type LockerGrid = {
 	_bindCatalogButtonHover: (self: LockerGrid, button: GuiButton) -> (),
 	_clearCardViewportPreview: (self: LockerGrid, card: GuiObject) -> (),
 	_applyWeaponWrapViewportPreview: (self: LockerGrid, card: GuiObject, item: LockerCatalogItem) -> boolean,
+	_applyRarityVisuals: (self: LockerGrid, card: GuiObject, rarity: string) -> (),
+	_syncWrapPreviewVisibility: (self: LockerGrid, card: GuiObject, item: LockerCatalogItem, isOwned: boolean) -> (),
 	_applyCatalogItemToCard: (self: LockerGrid, card: GuiObject, item: LockerCatalogItem, layoutOrder: number) -> (),
 	_resetTransientState: (self: LockerGrid, notifySelection: boolean) -> (),
 }
@@ -118,8 +132,16 @@ local GRID_BUTTON_HOVER_SCALE = UITheme.ButtonHoverScale
 local GRID_BUTTON_CLICK_SCALE = UITheme.ButtonClickScale
 local GRID_ITEM_DEFAULT_COLOR = Color3.fromRGB(255, 255, 255)
 local GRID_ITEM_LOCKED_COLOR = Color3.fromRGB(24, 24, 24)
+-- Wrap no desbloqueado (ni por mastery ni por case): en vez del viewport 3D se
+-- muestra esta imagen placeholder en Item.
+local WRAP_LOCKED_PLACEHOLDER_IMAGE = "rbxassetid://82849715642061"
 local STROKE_DEFAULT = UITheme.StrokeDefault
 local STROKE_WHITE = UITheme.StrokeHover
+-- Glow + gradiente de la card por rareza. Rarezas sin entrada (legacy
+-- Uncommon/Rare aún no re-tieradas) caen al visual de Common.
+local RARITY_GLOW = UITheme.LockerRarityGlow
+local RARITY_GRADIENTS = UITheme.LockerRarityGradients
+local RARITY_FALLBACK = "Common"
 local POPULATE_SYNC_ITEM_COUNT = 24
 local POPULATE_ASYNC_BATCH_SIZE = 16
 
@@ -201,18 +223,31 @@ function LockerGrid:_buildGridCardRefs(card: GuiObject, templateKey: TemplateKey
 	local itemNode = if button then button:FindFirstChild("Item") else nil
 	local resolvedItemNode = if itemNode and (itemNode:IsA("ImageLabel") or itemNode:IsA("ImageButton")) then itemNode else nil
 
-	local statusNode = if button then button:FindFirstChild("Status") else nil
+	-- Name: label con el nombre del item (raíz del template nuevo).
+	local nameNode = if button then button:FindFirstChild("Name") else nil
+	local resolvedNameNode = if nameNode and nameNode:IsA("TextLabel") then nameNode else nil
+
+	-- Status vive bajo Footer en el template nuevo; fallback a hijo directo (legacy).
+	local statusNode = if button then (button:FindFirstChild("Status", true) or button:FindFirstChild("Status")) else nil
 	local statusValueNode = if statusNode then statusNode:FindFirstChild("Value") else nil
 	local statusLockedNode = if statusNode then statusNode:FindFirstChild("Locked") else nil
+
+	-- Glow (resplandor) y el UIGradient directo de la card (Template.UIGradient),
+	-- ambos coloreados por rareza en _applyRarityVisuals.
+	local glowNode = if button then button:FindFirstChild("Glow") else nil
+	local rarityGradient = if button then button:FindFirstChildOfClass("UIGradient") else nil
 
 	local refs: ItemGridCardRefs = {
 		templateKey = templateKey,
 		button = button,
 		itemNode = resolvedItemNode,
 		itemNodeDefaultSize = if resolvedItemNode then resolvedItemNode.Size else nil,
+		nameNode = resolvedNameNode,
 		viewportNode = viewport,
 		statusValueNode = if statusValueNode and statusValueNode:IsA("TextLabel") then statusValueNode else nil,
 		lockedNode = if statusLockedNode and statusLockedNode:IsA("GuiObject") then statusLockedNode else nil,
+		glowNode = if glowNode and glowNode:IsA("GuiObject") then glowNode else nil,
+		rarityGradientNode = rarityGradient,
 	}
 
 	self._cachedGridCardRefs[card] = refs
@@ -344,6 +379,7 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 	local isSelectedButton = button == self._selectedCatalogButton
 
 	if refs.templateKey == "wraps" then
+		self:_syncWrapPreviewVisibility(card, item, isOwned)
 		local isChallenge = isKillChallengeItem(item) and not isOwned
 
 		-- Status.Locked: candado visible solo en wraps de desafío bloqueados.
@@ -359,7 +395,25 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 				refs.statusValueNode.Text = UIUtils.formatCountShort(progress) .. "/" .. UIUtils.formatCountShort(goal)
 			end
 		elseif refs.statusValueNode then
-			refs.statusValueNode.Text = if isEquipped then "EQUIPED" else "OWNED"
+			if isEquipped then
+				refs.statusValueNode.Text = "EQUIPED"
+			elseif item.ChallengeUnlocked then
+				-- Desafío ya desbloqueado (vista Maestry/Owned).
+				refs.statusValueNode.Text = "UNLOCKED"
+			elseif isOwned then
+				refs.statusValueNode.Text = "OWNED"
+			else
+				-- Collection: wrap no poseído → cómo se obtiene. Si pertenece a una
+				-- case, el nombre de la caja; si es comprable con cash, el precio.
+				local caseName = item.Case
+				if caseName and caseName ~= "" then
+					refs.statusValueNode.Text = caseName
+				elseif item.CanPurchase and item.Price > 0 then
+					refs.statusValueNode.Text = UIUtils.formatCashAmount(item.Price)
+				else
+					refs.statusValueNode.Text = ""
+				end
+			end
 		end
 
 		local stroke = self:_getButtonStroke(button)
@@ -492,14 +546,43 @@ function LockerGrid:_bindCatalogButtonHover(button: GuiButton)
 	end), "Disconnect")
 end
 
-function LockerGrid:_applyCatalogItemToCard(card: GuiObject, item: LockerCatalogItem, layoutOrder: number)
-	card.Name = item.Name
-	card.LayoutOrder = layoutOrder
-	card.Visible = true
-
+function LockerGrid:_applyRarityVisuals(card: GuiObject, rarity: string)
 	local refs = self:_getGridCardRefs(card)
-	local needsViewport = shouldUseWeaponWrapViewportPreview(item)
-		or (refs.templateKey == "wraps" and item.Category == LockerCategory.WEAPON_WRAPS)
+	-- Rarity fijo por item: evita re-teñir Glow/gradiente si no cambió (reuso de pool).
+	if refs.appliedRarity == rarity then
+		return
+	end
+	refs.appliedRarity = rarity
+
+	local glowColor = RARITY_GLOW[rarity] or RARITY_GLOW[RARITY_FALLBACK]
+	local glowNode = refs.glowNode
+	if glowNode and glowColor then
+		if glowNode:IsA("ImageLabel") or glowNode:IsA("ImageButton") then
+			glowNode.ImageColor3 = glowColor
+		elseif glowNode:IsA("Frame") then
+			glowNode.BackgroundColor3 = glowColor
+		end
+	end
+
+	local gradient = RARITY_GRADIENTS[rarity] or RARITY_GRADIENTS[RARITY_FALLBACK]
+	if refs.rarityGradientNode and gradient then
+		refs.rarityGradientNode.Color = gradient
+	end
+end
+
+-- Sincroniza viewport 3D vs. imagen placeholder de un wrap según posesión.
+-- Se llama tanto al pintar el card (_applyCatalogItemToCard) como al
+-- refrescar visual sin repoblar (_updateGridCardVisual), para que un wrap que
+-- se desbloquea mientras el grid ya está abierto (case recién abierta, kill
+-- challenge completado) pase de placeholder a render 3D sin necesitar Populate.
+function LockerGrid:_syncWrapPreviewVisibility(card: GuiObject, item: LockerCatalogItem, isOwned: boolean)
+	local refs = self:_getGridCardRefs(card)
+	local isWrap = item.Category == LockerCategory.WEAPON_WRAPS
+	-- Wrap bloqueado (ni mastery ni case): no renderizar el viewport 3D, mostrar
+	-- el placeholder en Item en su lugar.
+	local isLockedWrap = isWrap and not isOwned
+	local needsViewport = not isLockedWrap
+		and (shouldUseWeaponWrapViewportPreview(item) or (refs.templateKey == "wraps" and isWrap))
 	local usesViewportPreview = false
 
 	if needsViewport then
@@ -511,7 +594,7 @@ function LockerGrid:_applyCatalogItemToCard(card: GuiObject, item: LockerCatalog
 
 	if refs.viewportNode then
 		if refs.templateKey == "wraps" then
-			refs.viewportNode.Visible = true
+			refs.viewportNode.Visible = not isLockedWrap
 		else
 			refs.viewportNode.Visible = usesViewportPreview
 		end
@@ -519,13 +602,30 @@ function LockerGrid:_applyCatalogItemToCard(card: GuiObject, item: LockerCatalog
 
 	if refs.itemNode and (refs.itemNode:IsA("ImageLabel") or refs.itemNode:IsA("ImageButton")) then
 		refs.itemNode.Visible = not usesViewportPreview
-		refs.itemNode.Image = item.Image
+		refs.itemNode.Image = if isLockedWrap then WRAP_LOCKED_PLACEHOLDER_IMAGE else item.Image
 		-- El ImageColor3 (oscurecido si locked) lo fija _updateGridCardVisual justo después.
 		if shouldUseFullSizeWeaponImage(item) then
 			refs.itemNode.Size = UDim2.fromScale(1, 1)
 		elseif refs.itemNodeDefaultSize then
 			refs.itemNode.Size = refs.itemNodeDefaultSize
 		end
+	end
+end
+
+function LockerGrid:_applyCatalogItemToCard(card: GuiObject, item: LockerCatalogItem, layoutOrder: number)
+	card.Name = item.Name
+	card.LayoutOrder = layoutOrder
+	card.Visible = true
+
+	local refs = self:_getGridCardRefs(card)
+	self:_applyRarityVisuals(card, item.Rarity)
+	self:_syncWrapPreviewVisibility(card, item, self._callbacks.isItemOwned(item))
+
+	if refs.nameNode then
+		-- Faces y Hats no muestran el nombre en la card.
+		local showName = item.Category ~= LockerCategory.FACES and item.Category ~= LockerCategory.HATS
+		refs.nameNode.Visible = showName
+		refs.nameNode.Text = if showName then item.Name else ""
 	end
 
 	local button = refs.button

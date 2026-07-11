@@ -173,6 +173,8 @@ type SlotRefs = {
 	status: TextLabel?,
 	typeLabel: TextLabel?,
 	typeGradient: UIGradient?,
+	-- Content.Check: visible solo si el item del tier está reclamado.
+	check: ImageLabel?,
 }
 
 local function _resolveSlot(pathFolder: Instance, index: number): SlotRefs?
@@ -190,6 +192,7 @@ local function _resolveSlot(pathFolder: Instance, index: number): SlotRefs?
 	local viewportNode = content and content:FindFirstChild("Viewport")
 	local descriptionNode = content and content:FindFirstChild("Description")
 	local contentGradientNode = if content then content:FindFirstChildOfClass("UIGradient") else nil
+	local checkNode = content and content:FindFirstChild("Check")
 
 	local footer = content and content:FindFirstChild("Footer")
 	local footerContainer = footer and footer:FindFirstChild("Container")
@@ -209,6 +212,7 @@ local function _resolveSlot(pathFolder: Instance, index: number): SlotRefs?
 		status = if statusNode and statusNode:IsA("TextLabel") then statusNode else nil,
 		typeLabel = if typeNode and typeNode:IsA("TextLabel") then typeNode else nil,
 		typeGradient = if typeNode then typeNode:FindFirstChildOfClass("UIGradient") else nil,
+		check = if checkNode and checkNode:IsA("ImageLabel") then checkNode else nil,
 	}
 end
 
@@ -233,6 +237,14 @@ function BattlePassFeature.start(menuController: any): any
 	local navMenu = menuGui:FindFirstChild("Nav")
 	local btnInstance = navMenu and navMenu:FindFirstChild("BattlePass")
 	local menuBtn: GuiButton? = if btnInstance and btnInstance:IsA("GuiButton") then btnInstance else nil
+
+	-- Menu.Nav.BattlePass.Icon.Value → nivel del Battle Pass.
+	-- Menu.Nav.BattlePass.Indicator  → visible si hay alguna recompensa reclamable.
+	local navIconValueNode = menuBtn and menuBtn:FindFirstChild("Icon")
+	local navValueNode = navIconValueNode and navIconValueNode:FindFirstChild("Value")
+	local navIconValue: TextLabel? = if navValueNode and navValueNode:IsA("TextLabel") then navValueNode else nil
+	local navIndicatorNode = menuBtn and menuBtn:FindFirstChild("Indicator")
+	local navIndicator: GuiObject? = if navIndicatorNode and navIndicatorNode:IsA("GuiObject") then navIndicatorNode else nil
 
 	-- Header.
 	local header = main:FindFirstChild("Header")
@@ -573,6 +585,25 @@ function BattlePassFeature.start(menuController: any): any
 		return false
 	end
 
+	-- Estado del botón Menu.Nav.BattlePass. Independiente de `render` (que solo pinta
+	-- con el panel abierto): esto debe reflejar nivel + indicador aunque esté cerrado.
+	local function updateNavButton()
+		if not (navIconValue or navIndicator) then
+			return
+		end
+		local state = Fusion.peek(DataController.BattlePass)
+		if type(state) ~= "table" then
+			return
+		end
+		local currentTier = math.max(1, math.floor(state.CurrentTier or 1))
+		if navIconValue then
+			navIconValue.Text = tostring(math.clamp(currentTier, 1, maxTier))
+		end
+		if navIndicator then
+			navIndicator.Visible = anyClaimableInRange(1, maxTier, state)
+		end
+	end
+
 	-- ── Render ───────────────────────────────────────────────
 	local slotConnections: { RBXScriptConnection } = {}
 	local function clearSlotConnections()
@@ -671,6 +702,10 @@ function BattlePassFeature.start(menuController: any): any
 		if refs.viewport then
 			refs.viewport.ImageColor3 = tintColor
 			refs.viewport.ImageTransparency = tintTransp
+		end
+		-- Check: visible solo si el item del tier está reclamado.
+		if refs.check then
+			refs.check.Visible = isClaimed
 		end
 	end
 
@@ -875,12 +910,18 @@ function BattlePassFeature.start(menuController: any): any
 	DataController:WhenReady():andThen(function()
 		currentPage = pageForCurrentTier()
 		render()
+		updateNavButton()
 		local scope = Fusion.scoped(Fusion)
 		janitor:Add(function()
 			Fusion.doCleanup(scope)
 		end, true)
 		local obs = scope:Observer(DataController.BattlePass :: any)
-		janitor:Add(obs:onBind(render), true)
+		-- El panel solo se repinta abierto (render), pero el botón del menú debe
+		-- reflejar nivel/indicador en cada cambio de estado aunque esté cerrado.
+		janitor:Add(obs:onBind(function()
+			render()
+			updateNavButton()
+		end), true)
 	end)
 
 	return janitor

@@ -98,6 +98,7 @@ DataController.NewItemFlags  = nil :: any
 DataController.DailyTasks    = nil :: any
 DataController.BattlePass    = nil :: any
 DataController.Metadata      = nil :: any
+DataController.PendingGifts  = nil :: any
 
 -- ────────────────────────────────────────────────────────────
 -- API PÚBLICA
@@ -140,6 +141,7 @@ function DataController:Start(): ()
 	DataController.DailyTasks    = _scope:Value(_deepCopy(DataTemplate.DailyTasks))
 	DataController.BattlePass    = _scope:Value(_deepCopy(DataTemplate.BattlePass))
 	DataController.Metadata      = _scope:Value(_deepCopy(DataTemplate.Metadata))
+	DataController.PendingGifts  = _scope:Value(_deepCopy(DataTemplate.PendingGifts))
 
 	-- Promise que se resuelve cuando llega la Replica del servidor
 	_readyPromise = Promise.new(function(resolve: (any) -> ())
@@ -174,6 +176,7 @@ function DataController:Start(): ()
 		DataController.DailyTasks:set(replica.Data.DailyTasks)
 		DataController.BattlePass:set(replica.Data.BattlePass)
 		DataController.Metadata:set(replica.Data.Metadata)
+		DataController.PendingGifts:set(replica.Data.PendingGifts)
 
 		-- ── Suscribir listeners de cambio por sección ────
 		-- Cada listener recibe la NUEVA tabla de sección (nueva referencia
@@ -248,6 +251,12 @@ function DataController:Start(): ()
 		replica:AddCleanupTask(
 			replica:ListenToChange({ "Metadata" }, function(newMetadata: any)
 				DataController.Metadata:set(newMetadata)
+			end)
+		)
+
+		replica:AddCleanupTask(
+			replica:ListenToChange({ "PendingGifts" }, function(newPendingGifts: any)
+				DataController.PendingGifts:set(newPendingGifts)
 			end)
 		)
 

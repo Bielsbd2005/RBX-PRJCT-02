@@ -8,6 +8,7 @@
 	Estructura del overlay:
 		Shade            ← Frame contenedor, SIEMPRE transparente; ZIndex fijo detrás
 		  Background     ← Frame con el color de oscurecido
+		  Shadow         ← Frame que se tiñe con el mismo `ShadeColor` (opcional)
 		  CanvasGroup    ← imagen/gradiente (GroupTransparency desvanece su contenido)
 		    ImageLabel, UIGradient, ...
 
@@ -18,6 +19,11 @@
 	Aparición/desaparición animadas con tween de transparencia: se desvanece
 	`Background.BackgroundTransparency` y `CanvasGroup.GroupTransparency` entre sus
 	valores diseñados (estado visible) y 1 (oculto). No toca el `Shade` en sí.
+
+	Blur: todo frame con Shade lleva blur de fondo, así que el blur va atado al
+	overlay — se activa cuando el Shade se muestra y se suelta cuando se oculta,
+	vía BlurController (refcount, key única "Shade"). Los frames que usan Shade
+	NO necesitan tocar el blur ellos mismos.
 ]]
 
 local Players = game:GetService("Players")
@@ -26,9 +32,12 @@ local TweenService = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Packages = ReplicatedStorage:WaitForChild("Packages")
 local Janitor = require(Packages.janitor) :: any
+local BlurController = require(script.Parent.BlurController)
 
 local SHADE_ATTRIBUTE = "Shade"
 local COLOR_ATTRIBUTE = "ShadeColor"
+-- Key del refcount de blur para el overlay del Shade.
+local BLUR_KEY = "Shade"
 -- ZIndex bajo y fijo: el overlay siempre detrás de cualquier panel. Asume que
 -- los frames usan ZIndex >= 0 (default) y que el ScreenGui ordena por ZIndex.
 local SHADE_ZINDEX = -1
@@ -58,17 +67,24 @@ function ShadeController.start(_menuController: any?): any
 	local canvasInst = shade:FindFirstChild("CanvasGroup")
 	local canvas = if canvasInst and canvasInst:IsA("CanvasGroup") then canvasInst else nil
 
+	local shadowInst = shade:FindFirstChild("Shadow")
+	local shadow = if shadowInst and shadowInst:IsA("GuiObject") then shadowInst else nil
+
 	-- Fijar el ZIndex una sola vez para que el overlay quede siempre detrás.
 	shade.ZIndex = SHADE_ZINDEX
 
 	-- Transparencias "visibles" diseñadas en Studio: se desvanece entre éstas y 1.
 	local bgVisible = background.BackgroundTransparency
 	local canvasVisible = if canvas then canvas.GroupTransparency else 0
+	local shadowVisible = if shadow then shadow.BackgroundTransparency else 0
 
 	-- Estado inicial: oculto.
 	background.BackgroundTransparency = 1
 	if canvas then
 		canvas.GroupTransparency = 1
+	end
+	if shadow then
+		shadow.BackgroundTransparency = 1
 	end
 	shade.Visible = false
 
@@ -82,8 +98,12 @@ function ShadeController.start(_menuController: any?): any
 		table.clear(activeTweens)
 	end
 	janitor:Add(cancelTweens, true)
+	-- Soltar el blur si nos destruyen con el Shade activo (hot reload).
+	janitor:Add(function()
+		BlurController.release(BLUR_KEY)
+	end, true)
 
-	local function tweenTo(info: TweenInfo, bgTarget: number, canvasTarget: number)
+	local function tweenTo(info: TweenInfo, bgTarget: number, canvasTarget: number, shadowTarget: number)
 		cancelTweens()
 
 		local bgTween = TweenService:Create(background, info, { BackgroundTransparency = bgTarget })
@@ -96,20 +116,32 @@ function ShadeController.start(_menuController: any?): any
 			canvasTween:Play()
 		end
 
+		if shadow then
+			local shadowTween = TweenService:Create(shadow, info, { BackgroundTransparency = shadowTarget })
+			table.insert(activeTweens, shadowTween)
+			shadowTween:Play()
+		end
+
 		return bgTween
 	end
 
 	local function show(color: Color3?)
 		if color then
 			background.BackgroundColor3 = color
+			if shadow then
+				shadow.BackgroundColor3 = color
+			end
 		end
 		if shown then
 			return
 		end
 		shown = true
 
+		-- El blur acompaña al Shade (todo frame con Shade lo lleva).
+		BlurController.acquire(BLUR_KEY)
+
 		shade.Visible = true
-		tweenTo(SHOW_INFO, bgVisible, canvasVisible)
+		tweenTo(SHOW_INFO, bgVisible, canvasVisible, shadowVisible)
 	end
 
 	local function hide()
@@ -118,7 +150,9 @@ function ShadeController.start(_menuController: any?): any
 		end
 		shown = false
 
-		local bgTween = tweenTo(HIDE_INFO, 1, 1)
+		BlurController.release(BLUR_KEY)
+
+		local bgTween = tweenTo(HIDE_INFO, 1, 1, 1)
 		bgTween.Completed:Once(function(state: Enum.PlaybackState)
 			-- No ocultar si un show() canceló este fade-out en el camino.
 			if state == Enum.PlaybackState.Completed and not shown then

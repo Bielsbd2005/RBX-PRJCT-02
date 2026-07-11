@@ -16,15 +16,17 @@ local Janitor = require(Packages.janitor) :: any
 local Fusion = require(Packages.fusion) :: any
 local LockerCameraController = require(Client.core.camera.LockerCameraController)
 local CameraLock = require(Client.core.camera.CameraLock)
-local LightingPresetController = require(Client.core.lighting.LightingPresetController)
+local ScenePresetController = require(Client.core.lighting.ScenePresetController)
 local LobbyCharacterPreview = require(Client.core.character.LobbyCharacterPreview)
 local LockerCatalog = require(script:WaitForChild("LockerCatalog"))
 local LockerGrid = require(script:WaitForChild("LockerGrid"))
 local WeaponPreviewController = require(script:WaitForChild("WeaponPreviewController"))
+local WeaponStatsPanel = require(script:WaitForChild("WeaponStatsPanel"))
 local MenuHover = require(Client.core.ui.MenuHover)
 local NavStaggerController = require(Client.core.ui.NavStaggerController)
 local UIUtils = require(Client.core.ui.UIUtils)
 local ItemsConfig = require(Shared.constants.ItemsConfig)
+local WeaponLevelConfig = require(Shared.constants.WeaponLevelConfig)
 local LockerConfig = require(Shared.constants.LockerConfig)
 local WeaponCategoryMod = require(Shared.constants.WeaponCategory)
 local ItemDefaults = require(Shared.constants.ItemDefaults)
@@ -83,6 +85,8 @@ type LockerCatalogItem = {
 	PreviewWeaponDisplayName: string?,
 	KillGoal: number?,
 	KillProgress: number?,
+	ChallengeUnlocked: boolean?,
+	Case: string?,
 }
 
 type PendingShopAction = {
@@ -146,6 +150,17 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 	local lockerFolder = Workspace:WaitForChild("Locker")
 	local lockerWeaponsFolder = lockerFolder:WaitForChild("weapons")
+
+	-- Lighting por atributo: el look del Locker lo lleva Workspace.Locker
+	-- (LightingPreset="Locker") y el de vuelta al menú lo lleva
+	-- Workspace.Cameras.lobby. Ningún nombre de preset vive en código.
+	local function applyLobbyPreset()
+		local cameras = Workspace:FindFirstChild("Cameras")
+		local lobbyNode = if cameras then cameras:FindFirstChild("lobby") else nil
+		if lobbyNode then
+			ScenePresetController.applyFrom(lobbyNode)
+		end
+	end
 	local dummySpawn = lockerFolder:WaitForChild("DummySpawn")
 	local mainWeaponSpawn = lockerFolder:WaitForChild("MainSpawn")
 	local specialWeaponSpawn = lockerFolder:WaitForChild("SpecialSpawn")
@@ -182,38 +197,19 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local defaultNavItemSize = navTemplate.Size
 	local nav1 = lockerFrame:WaitForChild("Nav1")
 	local closeBtn = nav1:WaitForChild("CloseBtn") :: GuiButton
-	-- Los botones de Nav1 se renombraron en Studio (Style→Character, Arsenal→Weapons);
-	-- las claves internas de categoría siguen siendo "Style"/"Arsenal"/"Effects"
-	-- (ver mainCategoryButtons), porque NavTabController indexa por key, no por Name.
-	local styleBtn = nav1:WaitForChild("Character") :: GuiButton
-	local arsenalBtn = nav1:WaitForChild("Weapons") :: GuiButton
-	local effectsBtn = nav1:WaitForChild("Effects") :: GuiButton
-	local wrapsTitle = lockerFrame:WaitForChild("WrapsTitle") :: TextLabel
+	-- Nav1 pasó a ser template-driven: sus tabs se clonan de Nav1.Template según el
+	-- modo. En el locker normal son Character/Effects/Weapons (categorías internas
+	-- Style/Effects/Arsenal); en modo wraps son Collection/Maestry/Owned. El Name de
+	-- cada botón clonado ES la key (nav1TabController y nav1Stagger indexan por Name).
+	local nav1Template = nav1:WaitForChild("Template") :: GuiButton
+	local defaultNav1ItemSize = nav1Template.Size
 	local itemGrid = lockerFrame:WaitForChild("ScrollingFrame")
 	-- ItemTemplate es ahora la única plantilla del grid: la vista de wraps la
 	-- reutiliza (incluye ViewportFrame para el preview 3D; el progreso de los
 	-- wraps de desafío se muestra como texto en Status.Value).
 	local itemGridTemplate = itemGrid:WaitForChild("ItemTemplate") :: GuiObject
-	local actionFrame = lockerFrame:WaitForChild("ActionFrame") :: GuiObject
-	-- Estructura nueva del ActionFrame:
-	--   ActionFrame.Title.Text.Title / .Subtitle  → título y subtítulo
-	--   ActionFrame.Title.Icon                     → icono (candado / compra)
-	--   ActionBtn (bajo ActionFrame o Title)       → botón de acción
-	local actionTitle = actionFrame:WaitForChild("Title")
-	local actionTextContainer = actionTitle:WaitForChild("Text")
-	local actionTitleLabel = actionTextContainer:WaitForChild("Title") :: TextLabel
-	local actionSubtitleLabel = actionTextContainer:WaitForChild("Subtitle") :: TextLabel
-	local actionIcon = actionTitle:WaitForChild("Icon") :: ImageLabel
-	-- ActionBtn se describió colgando tanto de ActionFrame como de ActionFrame.Title;
-	-- lo buscamos recursivamente para tolerar ambas ubicaciones. (El nombre interno
-	-- `purchaseButton` se mantiene: la animación de hover/escala y el handler de
-	-- compra ya colgaban de él.)
-	local purchaseButton = actionFrame:FindFirstChild("ActionBtn", true) :: GuiButton
-	-- Botón separado (fuera del ActionFrame) para personalizar los wraps de un arma poseída.
-	local wrapsButton = lockerFrame:WaitForChild("Wraps") :: GuiButton
-
 	-- El texto del ActionBtn puede vivir en el propio botón (TextButton) o en un hijo
-	-- (Title/Label/Text). Resolvemos el destino una vez.
+	-- (Title/Label/Text). Resolvemos el destino una vez por botón.
 	local function resolveActionButtonTextTarget(button: GuiButton): Instance?
 		for _, name in { "Title", "Label", "Text", "Price", "Value" } do
 			local child = button:FindFirstChild(name)
@@ -226,10 +222,64 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end
 		return button:FindFirstChildWhichIsA("TextLabel", true)
 	end
-	local actionButtonTextTarget = resolveActionButtonTextTarget(purchaseButton)
-	local function setActionButtonText(text: string)
-		if actionButtonTextTarget then
-			(actionButtonTextTarget :: any).Text = text
+
+	-- Panel de acción (compra / bloqueo). Hay DOS frames de idéntica estructura:
+	-- ActionFrame (ítems normales) y WeaponActionFrame (armas, con su tamaño/posición
+	-- propios). showActionFrameForItem enruta según la categoría del ítem.
+	--   <Frame>.Title.Text.Title / .Subtitle  → título y subtítulo
+	--   <Frame>.Title.Icon                     → icono (candado / compra)
+	--   <Frame>**.ActionBtn                    → botón de acción (búsqueda recursiva)
+	type ActionPanel = {
+		frame: GuiObject,
+		titleLabel: TextLabel,
+		subtitleLabel: TextLabel,
+		icon: ImageLabel,
+		button: GuiButton,
+		buttonTextTarget: Instance?,
+		visiblePosition: UDim2,
+		hiddenPosition: UDim2,
+		activeTween: Tween?,
+	}
+
+	local function makeActionPanel(frame: GuiObject): ActionPanel
+		local title = frame:WaitForChild("Title")
+		local textContainer = title:WaitForChild("Text")
+		local button = frame:FindFirstChild("ActionBtn", true) :: GuiButton
+		local visiblePosition = frame.Position
+		return {
+			frame = frame,
+			titleLabel = textContainer:WaitForChild("Title") :: TextLabel,
+			subtitleLabel = textContainer:WaitForChild("Subtitle") :: TextLabel,
+			icon = title:WaitForChild("Icon") :: ImageLabel,
+			button = button,
+			buttonTextTarget = resolveActionButtonTextTarget(button),
+			visiblePosition = visiblePosition,
+			-- Oculto: deslizado bajo el borde inferior (mismo X, Y fuera de pantalla).
+			hiddenPosition = UDim2.new(visiblePosition.X.Scale, visiblePosition.X.Offset, 1.15, visiblePosition.Y.Offset),
+			activeTween = nil,
+		}
+	end
+
+	local actionPanel = makeActionPanel(lockerFrame:WaitForChild("ActionFrame") :: GuiObject)
+	-- WeaponActionFrame: misma estructura que ActionFrame, con su tamaño/posición
+	-- propios (deja sitio al panel de stats). Geometría que pediste; ajústala aquí.
+	local weaponActionFrame = lockerFrame:WaitForChild("WeaponActionFrame") :: GuiObject
+	weaponActionFrame.Size = UDim2.new(0.229, 0, 0.143, 0)
+	weaponActionFrame.Position = UDim2.new(0.137, 0, 0.804, 0)
+	local weaponActionPanel = makeActionPanel(weaponActionFrame)
+	-- Panel de acción actualmente visible (nil = ninguno).
+	local activeActionPanel: ActionPanel? = nil
+	-- Botón separado (fuera del ActionFrame) para personalizar los wraps de un arma poseída.
+	-- El nav de armas (Locker.WeaponNav) agrupa las acciones específicas del arma y
+	-- se muestra al seleccionar un arma poseída. El botón de wraps vive dentro; su
+	-- visibilidad la controla la del contenedor.
+	local wrapsButton = lockerFrame:WaitForChild("Wraps") :: GuiButton
+	-- Indicator: nº de wraps poseídos para el arma seleccionada (sin contar Default).
+	local wrapsIndicator = wrapsButton:WaitForChild("Indicator") :: TextLabel
+
+	local function setPanelButtonText(panel: ActionPanel, text: string)
+		if panel.buttonTextTarget then
+			(panel.buttonTextTarget :: any).Text = text
 		end
 	end
 
@@ -245,12 +295,24 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 	MenuHover.bindButton(closeBtn, janitor)
 
-	local mainCategoryButtons = {
-		Style = styleBtn,
-		Arsenal = arsenalBtn,
-		Effects = effectsBtn,
-	} :: { [LockerCategoryKey]: GuiButton }
+	-- Los tabs de categoría de Nav1 (Character/Effects/Weapons) se clonan de
+	-- Nav1.Template en populateMainCategoryNav; cada tab lleva su key de categoría.
+	local NAV1_MAIN_CATEGORY_ITEMS: { { key: LockerCategoryKey, title: string } } = {
+		{ key = LockerMainCategory.STYLE, title = "Character" },
+		{ key = LockerMainCategory.EFFECTS, title = "Effects" },
+		{ key = LockerMainCategory.ARSENAL, title = "Weapons" },
+	}
+	-- Tabs de Nav1 en modo wraps. Las keys son las mismas que consume `wrapsView`.
+	local NAV1_WRAPS_VIEW_ITEMS: { { key: string, title: string } } = {
+		{ key = "owned", title = "Owned" },
+		{ key = "maestry", title = "Maestry" },
+		{ key = "collection", title = "Collection" },
+	}
 	local navButtons = {} :: { GuiButton }
+	-- Janitor de los botones clonados de Nav1 (conexiones + hover). Se limpia en cada
+	-- repoblación para no acumular listeners de tabs destruidos.
+	local nav1ButtonsJanitor = Janitor.new()
+	janitor:Add(nav1ButtonsJanitor, "Destroy")
 	local activeNavSizeTweens = {} :: { [GuiButton]: Tween }
 	local selectedNavButton: GuiButton? = nil
 	local selectedMainCategory: LockerCategoryKey? = nil
@@ -261,7 +323,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		Special = "",
 	} :: { [WeaponCategory]: string }
 	local pendingShopAction: PendingShopAction? = nil
-	local activeActionFrameTween: Tween? = nil
 	local activePurchaseButtonScaleTween: Tween? = nil
 	local activePurchaseButtonStrokeTween: Tween? = nil
 	local purchaseButtonIsHovered = false
@@ -273,43 +334,60 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	} :: { [WeaponCategory]: { [string]: { [string]: number } } }
 	local equippedLookup = {} :: { [string]: string }
 	local selectedNavKey: string? = nil
-	-- Forward decl: el controlador del stagger de Nav2 se construye más abajo
-	-- (cuando `navTemplate`/janitor están listos) pero `populateNavButtons` lo
-	-- llama para re-tweenear los items al cambiar de categoría.
+	-- Forward decl: los controladores del stagger de Nav1/Nav2 se construyen más
+	-- abajo (cuando `navTemplate`/janitor están listos) pero se referencian antes:
+	-- `populateNavButtons` re-tweenea Nav2 al cambiar de categoría, y `setWrapsMode`
+	-- re-tweenea Nav1 al alternar entre el locker normal y el modo wraps.
+	local nav1Stagger: NavStaggerController.NavStaggerController? = nil
 	local nav2Stagger: NavStaggerController.NavStaggerController? = nil
+	-- Forward decl de la repoblación de Nav1: setWrapsMode las invoca para reconstruir
+	-- los tabs (Character/Effects/Weapons ↔ Collection/Maestry/Owned); se asignan más
+	-- abajo, cuando sus dependencias (handleMainCategoryButtonClick / showWrapsView)
+	-- ya existen.
+	local populateMainCategoryNav: () -> ()
+	local populateWrapsViewNav: () -> ()
 	local isOpen = false
 	local dirtyWhileClosed = false
 	local nextAllowedMainCategorySwitchAt = 0
 	local sharedLockerAssets = Shared:WaitForChild("Locker")
 	local sharedWeaponAssets = sharedLockerAssets:WaitForChild("weapons")
-	local actionFrameVisiblePosition = actionFrame.Position
-	local actionFrameHiddenPosition = UDim2.new(actionFrameVisiblePosition.X.Scale, actionFrameVisiblePosition.X.Offset, 1.15, actionFrameVisiblePosition.Y.Offset)
 	local catalog: any = nil
 	local grid: any = nil
 
 	local isWrapsMode = false
+	-- Sub-vista de la pantalla de wraps (tabs de Nav1 en modo wraps):
+	--   "collection" → wraps de lootbox (todos los no-desafío del arma)
+	--   "maestry"    → desafíos de kills del arma
+	--   "owned"      → wraps que posees en el inventario
+	local wrapsView = "collection"
 
 	local function setWrapsMode(enabled: boolean)
 		isWrapsMode = enabled
 		if levelContainer then levelContainer.Visible = not enabled end
 		if cashFrame then cashFrame.Visible = not enabled end
 		if nav then nav.Visible = not enabled end
-		if wrapsTitle then wrapsTitle.Visible = enabled end
-		-- Entrar al modo wraps oculta el botón de entrada (Locker.Wraps); al salir,
-		-- updateActionFrameForSelected lo vuelve a mostrar si toca.
+		-- Entrar al modo wraps oculta el WeaponNav; al salir, updateActionFrameForSelected
+		-- lo vuelve a mostrar si toca.
 		if enabled then wrapsButton.Visible = false end
-
-		for _, child in nav1:GetChildren() do
-			if child.Name ~= "CloseBtn" and child:IsA("GuiObject") then
-				child.Visible = not enabled
-			end
+		-- Reconstruir los tabs de Nav1 según el modo: wraps (Collection/Maestry/Owned)
+		-- vs locker normal (Character/Effects/Weapons). Cada repoblación destruye los
+		-- botones del modo anterior y clona los nuevos desde Nav1.Template.
+		if enabled then
+			populateWrapsViewNav()
+		else
+			populateMainCategoryNav()
+		end
+		if nav1Stagger then
+			nav1Stagger:play()
 		end
 	end
 
-	actionFrame.Visible = false
+	actionPanel.frame.Visible = false
+	weaponActionPanel.frame.Visible = false
 	wrapsButton.Visible = false
-	if wrapsTitle then wrapsTitle.Visible = false end
-	actionFrame.Position = actionFrameHiddenPosition
+	nav1Template.Visible = false
+	actionPanel.frame.Position = actionPanel.hiddenPosition
+	weaponActionPanel.frame.Position = weaponActionPanel.hiddenPosition
 
 	local function getOptionalString(value: any): string?
 		if type(value) == "string" and value ~= "" then
@@ -593,7 +671,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local weaponPreviewController: any = nil
 
 	janitor:Add(function()
-		activeActionFrameTween = cancelTween(activeActionFrameTween)
+		actionPanel.activeTween = cancelTween(actionPanel.activeTween)
+		weaponActionPanel.activeTween = cancelTween(weaponActionPanel.activeTween)
 		activePurchaseButtonScaleTween = cancelTween(activePurchaseButtonScaleTween)
 		activePurchaseButtonStrokeTween = cancelTween(activePurchaseButtonStrokeTween)
 		cancelTweenMap(activeNavSizeTweens)
@@ -704,6 +783,22 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		return weaponLookup[wrapId] or 0
 	end
 
+	-- Cuenta los wraps poseídos para un arma, SIN contar el Default.
+	local function countOwnedWrapsForWeapon(weaponCategory: WeaponCategory, weaponId: string): number
+		local categoryLookup = ownedWrapsByWeaponLookup[weaponCategory]
+		local weaponLookup = categoryLookup and categoryLookup[weaponId]
+		if not weaponLookup then
+			return 0
+		end
+		local count = 0
+		for wrapId, amount in weaponLookup do
+			if wrapId ~= ItemDefaults.ITEM_ID and (tonumber(amount) or 0) > 0 then
+				count += 1
+			end
+		end
+		return count
+	end
+
 	local function rebuildEquippedLookup()
 		local loadout = getCurrentLoadout()
 		local nextLookup = {} :: { [string]: string }
@@ -794,14 +889,12 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		weaponPreviewController:restoreEquippedFor(category)
 	end
 
-	local mainCategoryNavController = NavTabController.new()
+	-- Controlador de estado activo de Nav1 (tabs de categoría o de wraps, según el
+	-- modo). Los botones se registran en cada populateNav1, ya que son dinámicos.
+	local nav1TabController = NavTabController.new()
 	local navItemController = NavTabController.new()
-	janitor:Add(mainCategoryNavController, "Destroy")
+	janitor:Add(nav1TabController, "Destroy")
 	janitor:Add(navItemController, "Destroy")
-
-	for key, button in mainCategoryButtons do
-		mainCategoryNavController:register(key, button)
-	end
 
 	local function clearNavButtons()
 		navItemsJanitor:Cleanup()
@@ -838,7 +931,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local function setSelectedMainCategory(categoryKey: LockerCategoryKey)
 		selectedMainCategory = categoryKey
 		updateWeaponCategoryIndicators()
-		mainCategoryNavController:setActive(categoryKey)
+		nav1TabController:setActive(categoryKey)
 	end
 
 	local function bindStrokeHover(button: GuiButton, parentJanitor: any, isSelected: () -> boolean)
@@ -861,6 +954,55 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end), "Disconnect")
 	end
 
+	type Nav1TabDefinition = {
+		key: string,
+		title: string,
+		onActivated: () -> (),
+	}
+
+	-- Reconstruye los tabs de Nav1 clonando Nav1.Template: destruye los del modo
+	-- anterior, registra los nuevos en nav1TabController (estado activo) y engancha
+	-- hover de stroke + click. El template sólo tiene un hijo Title (sin Icon).
+	-- `selectedKey` marca el tab activo tras poblar (nil = ninguno; lo fija el caller).
+	local function populateNav1(definitions: { Nav1TabDefinition }, selectedKey: string?)
+		nav1ButtonsJanitor:Cleanup()
+		nav1TabController:clear()
+		for _, child in nav1:GetChildren() do
+			if child:IsA("GuiButton") and child ~= nav1Template and child ~= closeBtn then
+				child:Destroy()
+			end
+		end
+
+		for layoutOrder, definition in ipairs(definitions) do
+			local button = nav1Template:Clone()
+			button.Name = definition.key
+			button.Visible = true
+			button.LayoutOrder = layoutOrder
+			button.Size = defaultNav1ItemSize
+			local titleNode = button:FindFirstChild("Title")
+			if titleNode and titleNode:IsA("TextLabel") then
+				titleNode.Text = definition.title
+			end
+			button.Parent = nav1
+			nav1TabController:register(definition.key, button)
+
+			local stroke = getButtonStroke(button)
+			if stroke then
+				stroke.Color = STROKE_DEFAULT
+			end
+			bindStrokeHover(button, nav1ButtonsJanitor, function()
+				return false
+			end)
+
+			local onActivated = definition.onActivated
+			nav1ButtonsJanitor:Add(button.Activated:Connect(onActivated), "Disconnect")
+		end
+
+		if selectedKey then
+			nav1TabController:setActive(selectedKey)
+		end
+	end
+
 	local function setNavButtonContent(button: GuiButton, definition: LockerNavItemDefinition)
 		local iconNode = button:FindFirstChild("Icon")
 		if iconNode and (iconNode:IsA("ImageLabel") or iconNode:IsA("ImageButton")) then
@@ -873,25 +1015,24 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end
 	end
 
-	local function tweenActionFrame(targetPosition: UDim2, visible: boolean)
-		if activeActionFrameTween then
-			activeActionFrameTween:Cancel()
-			activeActionFrameTween = nil
+	local function tweenPanel(panel: ActionPanel, visible: boolean)
+		if panel.activeTween then
+			panel.activeTween:Cancel()
+			panel.activeTween = nil
 		end
 
 		if visible then
-			actionFrame.Visible = true
+			panel.frame.Visible = true
 		end
 
-		local tween = TweenService:Create(actionFrame, ACTION_FRAME_TWEEN_INFO, {
-			Position = targetPosition,
-		})
-		activeActionFrameTween = tween
+		local target = if visible then panel.visiblePosition else panel.hiddenPosition
+		local tween = TweenService:Create(panel.frame, ACTION_FRAME_TWEEN_INFO, { Position = target })
+		panel.activeTween = tween
 		tween.Completed:Once(function()
-			if activeActionFrameTween == tween then
-				activeActionFrameTween = nil
+			if panel.activeTween == tween then
+				panel.activeTween = nil
 				if not visible then
-					actionFrame.Visible = false
+					panel.frame.Visible = false
 				end
 			end
 		end)
@@ -899,31 +1040,41 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	local function showActionFrameForItem(item: LockerCatalogItem)
+		-- Armas → WeaponActionFrame; resto → ActionFrame (misma estructura).
+		local panel = if isWeaponCategory(item.Category) then weaponActionPanel else actionPanel
 		local isLevelLocked = getCurrentLevel() < item.LevelRequired
 
 		if isLevelLocked then
-			actionTitleLabel.Text = "THIS ITEM IS LOCKED"
-			actionSubtitleLabel.Text = string.format("Reach level %d to unlock this item.", item.LevelRequired)
-			actionIcon.Image = ACTION_ICON_LOCKED
-			setActionButtonText("LOCKED")
-			purchaseButton.BackgroundColor3 = ACTION_BTN_COLOR_LOCKED
+			panel.titleLabel.Text = "THIS ITEM IS LOCKED"
+			panel.subtitleLabel.Text = string.format("Reach level %d to unlock this item.", item.LevelRequired)
+			panel.icon.Image = ACTION_ICON_LOCKED
+			setPanelButtonText(panel, "LOCKED")
+			panel.button.BackgroundColor3 = ACTION_BTN_COLOR_LOCKED
 		else
-			actionTitleLabel.Text = item.Name
-			actionSubtitleLabel.Text = item.Rarity
-			actionIcon.Image = ACTION_ICON_PURCHASE
+			panel.titleLabel.Text = item.Name
+			panel.subtitleLabel.Text = item.Rarity
+			panel.icon.Image = ACTION_ICON_PURCHASE
 			-- Item comprable: el botón muestra el precio (en lugar de "PURCHASE").
-			setActionButtonText(UIUtils.formatCashAmount(item.Price))
-			purchaseButton.BackgroundColor3 = ACTION_BTN_COLOR_PURCHASE
+			setPanelButtonText(panel, UIUtils.formatCashAmount(item.Price))
+			panel.button.BackgroundColor3 = ACTION_BTN_COLOR_PURCHASE
 		end
 
-		purchaseButton.Active = not isLevelLocked
-		purchaseButton.Selectable = not isLevelLocked
+		panel.button.Active = not isLevelLocked
+		panel.button.Selectable = not isLevelLocked
 
-		tweenActionFrame(actionFrameVisiblePosition, true)
+		-- Si había otro panel visible (cambio arma↔no-arma), deslízalo fuera.
+		if activeActionPanel and activeActionPanel ~= panel then
+			tweenPanel(activeActionPanel, false)
+		end
+		activeActionPanel = panel
+		tweenPanel(panel, true)
 	end
 
 	local function hideActionFrame()
-		tweenActionFrame(actionFrameHiddenPosition, false)
+		if activeActionPanel then
+			tweenPanel(activeActionPanel, false)
+			activeActionPanel = nil
+		end
 	end
 
 	local function isItemOwned(item: LockerCatalogItem): boolean
@@ -963,6 +1114,214 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		return equippedItem == item.id
 	end
 
+	-- ── Panel de stats del arma (Locker.Stats) ───────────────────
+	-- Los stats de combate viven en la Configuration del Tool (ServerStorage,
+	-- no replicado), así que se piden al server (Network.WeaponStats). Los
+	-- valores BASE se cachean por arma (estáticos) y el escalado por nivel se
+	-- aplica aquí con las WeaponKills locales — así subir de nivel re-anima sin
+	-- otro round-trip. El panel compara la SELECCIONADA contra la EQUIPADA
+	-- (delta bar verde/rojo), así que se piden/cachean ambas armas.
+	local weaponStatsPanel = WeaponStatsPanel.new(lockerFrame, janitor)
+
+	type WeaponBaseStats = {
+		damage: number,
+		fireRate: number,
+		reloadTime: number,
+		ammoCapacity: number,
+		damageMax: number,
+		fireRateMax: number,
+		reloadMin: number,
+	}
+	-- Valores escalados por nivel + sus fills 0..1 (para comparar y mostrar).
+	type ScaledStats = {
+		damage: number,
+		fireRate: number,
+		reload: number,
+		ammo: number,
+		damageFill: number,
+		fireRateFill: number,
+		reloadFill: number,
+	}
+	local weaponStatsCache = {} :: { [string]: WeaponBaseStats }
+	-- Requests en vuelo (evita reenviar el mismo paquete mientras se espera).
+	local pendingStatsRequests = {} :: { [string]: boolean }
+	-- Arma seleccionada ahora (category/id, "" si ninguna). Se compara contra la
+	-- equipada de su misma categoría.
+	local statsSelectedCategory = ""
+	local statsSelectedId = ""
+	-- Token del debounce: invalida renders pendientes al cambiar de selección.
+	local statsRenderToken = 0
+
+	local function weaponStatsKey(category: string, weaponId: string): string
+		return category .. "|" .. weaponId
+	end
+
+	local function getWeaponKillsFor(category: WeaponCategory, weaponId: string): number
+		local weaponKills = Fusion.peek(DataController.WeaponKills) :: any
+		if type(weaponKills) ~= "table" then
+			return 0
+		end
+		local categoryKills = weaponKills[category]
+		if type(categoryKills) ~= "table" then
+			return 0
+		end
+		local value = tonumber(categoryKills[weaponId])
+		return if value and value > 0 then math.floor(value) else 0
+	end
+
+	-- Pide los stats de un arma al server si no están cacheados ni en vuelo.
+	local function requestStats(category: string, weaponId: string)
+		local key = weaponStatsKey(category, weaponId)
+		if weaponStatsCache[key] or pendingStatsRequests[key] then
+			return
+		end
+		pendingStatsRequests[key] = true
+		Network.WeaponStats.Request.Send({ weaponCategory = category, weaponId = weaponId })
+	end
+
+	-- Escala los stats base al nivel del arma y calcula sus fills 0..1 (las barras
+	-- se normalizan contra los rangos del arsenal; reload invertido = menos mejor).
+	local function scaledStatsFor(base: WeaponBaseStats, level: number): ScaledStats
+		-- HitDamage y BlastDamage escalan con el mismo factor, así que aplicar la
+		-- clave "HitDamage" al daño efectivo es correcto sea balístico o explosivo.
+		local damage = WeaponLevelConfig.ApplyScaling("HitDamage", base.damage, level)
+		local ammo = WeaponLevelConfig.ApplyScaling("AmmoCapacity", base.ammoCapacity, level)
+		-- Cadencia y recarga NO escalan con nivel.
+		local fireRate = base.fireRate
+		local reload = base.reloadTime
+		return {
+			damage = damage,
+			fireRate = fireRate,
+			reload = reload,
+			ammo = ammo,
+			damageFill = if base.damageMax > 0 then damage / base.damageMax else 0,
+			fireRateFill = if base.fireRateMax > 0 then fireRate / base.fireRateMax else 0,
+			-- Recarga: menos es mejor → barra más llena = recarga más rápida.
+			reloadFill = if reload > 0 then base.reloadMin / reload else 1,
+		}
+	end
+
+	-- Bondad de la seleccionada vs la equipada en espacio de fill (los fills ya
+	-- codifican dirección: más fill = mejor para todos los stats, reload incluido).
+	local function dirFromFill(selFill: number, eqFill: number): string
+		if selFill > eqFill + 1e-3 then
+			return "up"
+		elseif selFill < eqFill - 1e-3 then
+			return "down"
+		end
+		return "equal"
+	end
+
+	local function buildStatsModel(sel: ScaledStats, eq: ScaledStats): WeaponStatsPanel.StatsModel
+		return {
+			Damage = {
+				value = sel.damage,
+				fill = sel.damageFill,
+				compareFill = eq.damageFill,
+				delta = sel.damage - eq.damage,
+				dir = dirFromFill(sel.damageFill, eq.damageFill),
+			},
+			FireRate = {
+				value = sel.fireRate,
+				fill = sel.fireRateFill,
+				compareFill = eq.fireRateFill,
+				delta = sel.fireRate - eq.fireRate,
+				dir = dirFromFill(sel.fireRateFill, eq.fireRateFill),
+			},
+			Reload = {
+				value = sel.reload,
+				fill = sel.reloadFill,
+				compareFill = eq.reloadFill,
+				delta = sel.reload - eq.reload,
+				dir = dirFromFill(sel.reloadFill, eq.reloadFill),
+			},
+			Ammo = {
+				value = sel.ammo,
+				fill = 0, -- Ammo no tiene barra
+				compareFill = 0,
+				delta = sel.ammo - eq.ammo,
+				-- Más munición = mejor: el delta en fill equivale al signo del valor.
+				dir = dirFromFill(sel.ammo, eq.ammo),
+			},
+		}
+	end
+
+	-- Renderiza la comparación seleccionada-vs-equipada. Pide las armas que falten
+	-- (vuelve al llegar su respuesta); sólo anima cuando ambas están cacheadas.
+	local function tryRenderStats()
+		local category = statsSelectedCategory
+		local selId = statsSelectedId
+		if category == "" or selId == "" then
+			return
+		end
+
+		local selBase = weaponStatsCache[weaponStatsKey(category, selId)]
+		if not selBase then
+			requestStats(category, selId)
+			return
+		end
+
+		local eqId = getEquippedWeaponByCategory(category :: WeaponCategory)
+		local eqBase = weaponStatsCache[weaponStatsKey(category, eqId)]
+		if not eqBase then
+			requestStats(category, eqId)
+			return
+		end
+
+		local selLevel = WeaponLevelConfig.GetLevelForKills(getWeaponKillsFor(category :: WeaponCategory, selId))
+		local eqLevel = WeaponLevelConfig.GetLevelForKills(getWeaponKillsFor(category :: WeaponCategory, eqId))
+		weaponStatsPanel:setStats(buildStatsModel(scaledStatsFor(selBase, selLevel), scaledStatsFor(eqBase, eqLevel)))
+	end
+
+	-- Item seleccionado: no-arma ⇒ oculta el panel. Arma ⇒ debounce 0.06s y
+	-- renderiza (evita ráfagas al scrollear: sólo el arma donde uno se detiene).
+	local function requestWeaponStatsForItem(item: LockerCatalogItem?)
+		if not item or not isWeaponCategory(item.Category) then
+			statsSelectedCategory = ""
+			statsSelectedId = ""
+			weaponStatsPanel:hide()
+			return
+		end
+
+		statsSelectedCategory = item.Category
+		statsSelectedId = item.id
+
+		statsRenderToken += 1
+		local myToken = statsRenderToken
+		task.delay(0.06, function()
+			if myToken ~= statsRenderToken then
+				return -- la selección cambió durante el debounce
+			end
+			tryRenderStats()
+		end)
+	end
+
+	janitor:Add(Network.WeaponStats.Response.Listen(function(response: any)
+		local key = weaponStatsKey(response.weaponCategory, response.weaponId)
+		pendingStatsRequests[key] = nil
+		if not response.success then
+			return
+		end
+		weaponStatsCache[key] = {
+			damage = response.damage,
+			fireRate = response.fireRate,
+			reloadTime = response.reloadTime,
+			ammoCapacity = response.ammoCapacity,
+			damageMax = response.damageMax,
+			fireRateMax = response.fireRateMax,
+			reloadMin = response.reloadMin,
+		}
+		-- Re-render sólo si el arma recibida es la seleccionada o su equipada
+		-- (su baseline de comparación) — evita renders redundantes.
+		if statsSelectedCategory ~= "" then
+			local selKey = weaponStatsKey(statsSelectedCategory, statsSelectedId)
+			local eqKey = weaponStatsKey(statsSelectedCategory, getEquippedWeaponByCategory(statsSelectedCategory :: WeaponCategory))
+			if key == selKey or key == eqKey then
+				tryRenderStats()
+			end
+		end
+	end), true)
+
 	catalog = LockerCatalog.new(ItemsConfig, ITEMS_CONFIG_BY_NAV, DEFAULT_NAV_THUMBNAIL, getRarityRank, isItemOwned)
 	local updateActionFrameForSelected: () -> ()
 	local populateMainContentForNavItem: (LockerCategoryKey, string, string?, boolean?) -> ()
@@ -988,6 +1347,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			applySelectedFacePreview(item)
 			applySelectedHatPreview(item)
 			applySelectedWeaponPreview(item)
+			requestWeaponStatsForItem(item)
 			if item and item.Category == LockerCategory.KILL_EFFECTS then
 				if suppressNextKillEffectPreview then
 					suppressNextKillEffectPreview = false
@@ -1095,22 +1455,47 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		for _, item in items do
 			local isOwned = isWrapOwnedForWeapon(targetWeaponCategory, targetWeaponId, item.id)
 			local isChallenge = item.KillGoal ~= nil and item.KillGoal > 0
-			if isOwned or isChallenge then
+			-- Filtro por sub-vista de Nav1:
+			--   Collection → wraps de lootbox: todos los NO-desafío (poseídos o no).
+			--   Maestry    → desafíos de kills del arma (desbloqueados o no).
+			--   Owned      → sólo lo que posees en el inventario.
+			local include: boolean
+			if wrapsView == "maestry" then
+				include = isChallenge
+			elseif wrapsView == "owned" then
+				include = isOwned
+			else -- "collection"
+				-- Collection = wraps de case que AÚN no posees. Se excluyen:
+				--   · los poseídos (pestaña Owned)
+				--   · los desafíos (pestaña Maestry)
+				--   · el Default (wrap base, no de lootbox)
+				--   · los comprables con cash → irán a la tienda de rotación (pendiente)
+				local isCashShopWrap = item.CanPurchase and item.Price > 0
+				include = not isChallenge
+					and not isOwned
+					and item.id ~= ItemDefaults.ITEM_ID
+					and not isCashShopWrap
+			end
+			if include then
 				local wrapItem = table.clone(item)
 				wrapItem.PreviewWeaponCategory = targetWeaponCategory
 				wrapItem.PreviewWeaponId = targetWeaponId
 				wrapItem.PreviewWeaponDisplayName = targetWeaponDisplayName
 				if isChallenge and not isOwned then
 					wrapItem.KillProgress = getKillProgressForWeaponWrap(targetWeaponCategory, targetWeaponId, item.id)
+				elseif isChallenge and isOwned then
+					-- Desafío ya desbloqueado (visible en Maestry/Owned): "UNLOCKED".
+					wrapItem.ChallengeUnlocked = true
 				end
 				table.insert(wrapItems, wrapItem)
 			end
 		end
 
 		-- Orden dentro de la vista Wraps:
-		--   1) Default (siempre primero)
-		--   2) Challenges de kill no desbloqueados
-		--   3) Resto (owned) por rareza descendente
+		--   1) Default (siempre primero; sólo aparece en Owned)
+		--   2) Challenges de kill no desbloqueados (Maestry) por kills ascendente
+		--   3) Resto (wraps de Collection y poseídos) por RAREZA descendente
+		-- Collection cae íntegra en el grupo 3 → queda ordenada por rareza.
 		local function groupRank(it: LockerCatalogItem): number
 			if it.id == ItemDefaults.ITEM_ID then
 				return 1
@@ -1187,12 +1572,25 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end
 
 		if isItemOwned(selectedItem) then
-			-- Arma poseída: el ActionFrame se oculta y se ofrece el botón separado
-			-- Locker.Wraps para personalizar sus wraps. Otros items poseídos: nada.
-			wrapsButton.Visible = isWeaponCategory(selectedItem.Category) and not isWrapsMode
+			-- Arma poseída: el ActionFrame se oculta y se muestra el botón Wraps para
+			-- personalizar sus wraps. Otros items poseídos: nada.
+			local showWraps = isWeaponCategory(selectedItem.Category) and not isWrapsMode
+			wrapsButton.Visible = showWraps
+			if showWraps then
+				-- Indicator: oculto si no hay wraps (sin contar Default); si hay, su número.
+				local ownedWrapsCount = countOwnedWrapsForWeapon(selectedItem.Category :: WeaponCategory, selectedItem.id)
+				wrapsIndicator.Visible = ownedWrapsCount > 0
+				if ownedWrapsCount > 0 then
+					wrapsIndicator.Text = tostring(ownedWrapsCount)
+				end
+			end
 			hideActionFrame()
-		elseif selectedItem.KillGoal ~= nil and selectedItem.KillGoal > 0 then
-			-- Wraps de desafío de kills: no se compran, solo se desbloquean por progreso.
+		elseif (selectedItem.KillGoal ~= nil and selectedItem.KillGoal > 0)
+			or (selectedItem.Category == LockerCategory.WEAPON_WRAPS
+				and not (selectedItem.CanPurchase and selectedItem.Price > 0)) then
+			-- No comprables con cash → sin ActionFrame de compra:
+			--   · wraps de desafío de kills → se desbloquean por progreso.
+			--   · wraps de case (Price 0 / CanPurchase false) → se abren desde la caja.
 			wrapsButton.Visible = false
 			hideActionFrame()
 		else
@@ -1304,6 +1702,23 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		selectItem(selectedKey)
 	end
 
+	-- Tabs de categoría del locker normal. Cada uno cambia la main-category; el tab
+	-- activo lo marca `selectedMainCategory` (nil al abrir → lo fija selectItem).
+	populateMainCategoryNav = function()
+		local definitions = {} :: { Nav1TabDefinition }
+		for _, item in NAV1_MAIN_CATEGORY_ITEMS do
+			local categoryKey = item.key
+			table.insert(definitions, {
+				key = categoryKey,
+				title = item.title,
+				onActivated = function()
+					handleMainCategoryButtonClick(categoryKey)
+				end,
+			})
+		end
+		populateNav1(definitions, selectedMainCategory)
+	end
+
 	local function updateStatsUi()
 		local stats = getCurrentStats()
 		if cashValueLabel then
@@ -1320,86 +1735,9 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		updateActionFrameForSelected()
 	end
 
-	for categoryKey, button in mainCategoryButtons do
-		bindStrokeHover(button, janitor, function()
-			return selectedMainCategory == categoryKey
-		end)
-	end
-
 	navTemplate.Visible = false
 	itemGridTemplate.Visible = false
 	do
-		purchaseButton.Active = true
-		purchaseButton.Selectable = true
-		purchaseButton.AutoButtonColor = false
-
-		local purchaseButtonScaleNode = purchaseButton:FindFirstChild("ButtonScale")
-		if not (purchaseButtonScaleNode and purchaseButtonScaleNode:IsA("UIScale")) then
-			purchaseButtonScaleNode = Instance.new("UIScale")
-			purchaseButtonScaleNode.Name = "ButtonScale"
-			purchaseButtonScaleNode.Parent = purchaseButton
-		end
-		purchaseButtonScaleNode.Scale = PURCHASE_BUTTON_DEFAULT_SCALE
-
-		local purchaseButtonStroke = getButtonStroke(purchaseButton)
-		if purchaseButtonStroke then
-			purchaseButtonStroke.Color = STROKE_DEFAULT
-		end
-
-		local function tweenPurchaseButtonScale(targetScale: number, tweenInfo: TweenInfo)
-			local scaleNode = purchaseButtonScaleNode :: UIScale
-			if activePurchaseButtonScaleTween then
-				activePurchaseButtonScaleTween:Cancel()
-				activePurchaseButtonScaleTween = nil
-			end
-
-			activePurchaseButtonScaleTween = TweenService:Create(scaleNode, tweenInfo, { Scale = targetScale })
-			activePurchaseButtonScaleTween:Play()
-		end
-
-		local function tweenPurchaseButtonStroke(targetColor: Color3, tweenInfo: TweenInfo)
-			if not purchaseButtonStroke then
-				return
-			end
-
-			if activePurchaseButtonStrokeTween then
-				activePurchaseButtonStrokeTween:Cancel()
-				activePurchaseButtonStrokeTween = nil
-			end
-
-			activePurchaseButtonStrokeTween = TweenService:Create(purchaseButtonStroke, tweenInfo, { Color = targetColor })
-			activePurchaseButtonStrokeTween:Play()
-		end
-
-		if canUseHoverAnimations then
-			janitor:Add(purchaseButton.MouseEnter:Connect(function()
-				purchaseButtonIsHovered = true
-				tweenPurchaseButtonScale(PURCHASE_BUTTON_HOVER_SCALE, PURCHASE_BUTTON_HOVER_TWEEN_INFO)
-				tweenPurchaseButtonStroke(STROKE_WHITE, PURCHASE_BUTTON_HOVER_TWEEN_INFO)
-			end), "Disconnect")
-
-			janitor:Add(purchaseButton.MouseLeave:Connect(function()
-				purchaseButtonIsHovered = false
-				tweenPurchaseButtonScale(PURCHASE_BUTTON_DEFAULT_SCALE, PURCHASE_BUTTON_HOVER_TWEEN_INFO)
-				tweenPurchaseButtonStroke(STROKE_DEFAULT, PURCHASE_BUTTON_HOVER_TWEEN_INFO)
-			end), "Disconnect")
-		end
-
-		janitor:Add(purchaseButton.MouseButton1Down:Connect(function()
-			tweenPurchaseButtonScale(PURCHASE_BUTTON_CLICK_SCALE, PURCHASE_BUTTON_CLICK_TWEEN_INFO)
-			tweenPurchaseButtonStroke(STROKE_WHITE, PURCHASE_BUTTON_CLICK_TWEEN_INFO)
-		end), "Disconnect")
-
-		janitor:Add(purchaseButton.MouseButton1Up:Connect(function()
-			local targetScale = if purchaseButtonIsHovered and canUseHoverAnimations
-				then PURCHASE_BUTTON_HOVER_SCALE
-				else PURCHASE_BUTTON_DEFAULT_SCALE
-			tweenPurchaseButtonScale(targetScale, PURCHASE_BUTTON_HOVER_TWEEN_INFO)
-
-			local targetStrokeColor = if purchaseButtonIsHovered and canUseHoverAnimations then STROKE_WHITE else STROKE_DEFAULT
-			tweenPurchaseButtonStroke(targetStrokeColor, PURCHASE_BUTTON_HOVER_TWEEN_INFO)
-		end), "Disconnect")
-
 		local function promptBestFitPack(item: LockerCatalogItem)
 			local cash = getCurrentStats().Cash
 			local deficit = item.Price - cash
@@ -1424,7 +1762,9 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			end
 		end
 
-		janitor:Add(purchaseButton.Activated:Connect(function()
+		-- Handler de compra: idéntico para el botón de ambos ActionFrame (actúa sobre
+		-- selectedCatalogItem, no sobre el frame), así que se comparte.
+		local function onPurchaseActivated()
 			local item = selectedCatalogItem
 			if not item or pendingShopAction then
 				return
@@ -1476,7 +1816,109 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 				weaponCategory = weaponCategory,
 				weaponId = weaponId,
 			})
-		end), "Disconnect")
+		end
+
+		-- Wiring de hover/escala/click + handler de compra de un botón de acción.
+		-- Se aplica al ActionBtn de AMBOS frames (ActionFrame y WeaponActionFrame).
+		local function setupActionButton(button: GuiButton)
+			button.Active = true
+			button.Selectable = true
+			button.AutoButtonColor = false
+
+			local scaleNode = button:FindFirstChild("ButtonScale")
+			if not (scaleNode and scaleNode:IsA("UIScale")) then
+				scaleNode = Instance.new("UIScale")
+				scaleNode.Name = "ButtonScale"
+				scaleNode.Parent = button
+			end
+			scaleNode.Scale = PURCHASE_BUTTON_DEFAULT_SCALE
+
+			local stroke = getButtonStroke(button)
+			if stroke then
+				stroke.Color = STROKE_DEFAULT
+			end
+
+			local function tweenScale(targetScale: number, tweenInfo: TweenInfo)
+				if activePurchaseButtonScaleTween then
+					activePurchaseButtonScaleTween:Cancel()
+					activePurchaseButtonScaleTween = nil
+				end
+				activePurchaseButtonScaleTween = TweenService:Create(scaleNode :: UIScale, tweenInfo, { Scale = targetScale })
+				activePurchaseButtonScaleTween:Play()
+			end
+
+			local function tweenStroke(targetColor: Color3, tweenInfo: TweenInfo)
+				if not stroke then
+					return
+				end
+				if activePurchaseButtonStrokeTween then
+					activePurchaseButtonStrokeTween:Cancel()
+					activePurchaseButtonStrokeTween = nil
+				end
+				activePurchaseButtonStrokeTween = TweenService:Create(stroke, tweenInfo, { Color = targetColor })
+				activePurchaseButtonStrokeTween:Play()
+			end
+
+			if canUseHoverAnimations then
+				janitor:Add(button.MouseEnter:Connect(function()
+					purchaseButtonIsHovered = true
+					tweenScale(PURCHASE_BUTTON_HOVER_SCALE, PURCHASE_BUTTON_HOVER_TWEEN_INFO)
+					tweenStroke(STROKE_WHITE, PURCHASE_BUTTON_HOVER_TWEEN_INFO)
+				end), "Disconnect")
+
+				janitor:Add(button.MouseLeave:Connect(function()
+					purchaseButtonIsHovered = false
+					tweenScale(PURCHASE_BUTTON_DEFAULT_SCALE, PURCHASE_BUTTON_HOVER_TWEEN_INFO)
+					tweenStroke(STROKE_DEFAULT, PURCHASE_BUTTON_HOVER_TWEEN_INFO)
+				end), "Disconnect")
+			end
+
+			janitor:Add(button.MouseButton1Down:Connect(function()
+				tweenScale(PURCHASE_BUTTON_CLICK_SCALE, PURCHASE_BUTTON_CLICK_TWEEN_INFO)
+				tweenStroke(STROKE_WHITE, PURCHASE_BUTTON_CLICK_TWEEN_INFO)
+			end), "Disconnect")
+
+			janitor:Add(button.MouseButton1Up:Connect(function()
+				local targetScale = if purchaseButtonIsHovered and canUseHoverAnimations
+					then PURCHASE_BUTTON_HOVER_SCALE
+					else PURCHASE_BUTTON_DEFAULT_SCALE
+				tweenScale(targetScale, PURCHASE_BUTTON_HOVER_TWEEN_INFO)
+
+				local targetStrokeColor = if purchaseButtonIsHovered and canUseHoverAnimations then STROKE_WHITE else STROKE_DEFAULT
+				tweenStroke(targetStrokeColor, PURCHASE_BUTTON_HOVER_TWEEN_INFO)
+			end), "Disconnect")
+
+			janitor:Add(button.Activated:Connect(onPurchaseActivated), "Disconnect")
+		end
+
+		setupActionButton(actionPanel.button)
+		setupActionButton(weaponActionPanel.button)
+	end
+
+	-- Sub-pestañas dentro de wraps: Collection (lootbox) / Maestry (desafíos) / Owned.
+	local function showWrapsView(view: string)
+		if not isWrapsMode or wrapsView == view then
+			return
+		end
+		wrapsView = view
+		nav1TabController:setActive(view)
+		populateMainContentForNavItem(LockerMainCategory.ARSENAL, LockerCategory.WEAPON_WRAPS, nil, true)
+	end
+
+	-- Tabs de Nav1 en modo wraps. La key de cada tab ES el valor de `wrapsView`.
+	populateWrapsViewNav = function()
+		local definitions = {} :: { Nav1TabDefinition }
+		for _, item in NAV1_WRAPS_VIEW_ITEMS do
+			local viewKey = item.key
+			table.insert(definitions, {
+				key = viewKey,
+				title = item.title,
+				onActivated = function()
+					showWrapsView(viewKey)
+				end,
+			})
+		end
+		populateNav1(definitions, wrapsView)
 	end
 
 	do
@@ -1495,6 +1937,9 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			setStoredWrapsTargetWeaponId(selectedWeaponCategory, item.id)
 			updateWeaponCategoryIndicators()
 
+			-- Arrancar en Owned ANTES de setWrapsMode: populateWrapsViewNav usa
+			-- `wrapsView` como tab activo al reconstruir Nav1.
+			wrapsView = "owned"
 			setWrapsMode(true)
 			local spawnPart = if selectedWeaponCategory == WeaponCategoryMod.MAIN then mainWeaponSpawn else specialWeaponSpawn
 			if spawnPart and spawnPart:IsA("BasePart") then
@@ -1547,6 +1992,9 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 				dirtyWhileClosed = true
 				return
 			end
+			-- Si el arma seleccionada (o su equipada de referencia) subió de nivel
+			-- por kills, re-escalar y re-animar (los valores base están cacheados).
+			tryRenderStats()
 			if selectedMainCategory == LockerMainCategory.ARSENAL and selectedNavKey == LockerCategory.WEAPON_WRAPS then
 				local selectedQualifiedId = if selectedCatalogItem then selectedCatalogItem.qualifiedId else nil
 				populateMainContentForNavItem(selectedMainCategory, selectedNavKey, selectedQualifiedId)
@@ -1606,11 +2054,18 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	-- ── Stagger de aparición de los items de Nav ─────────────
-	-- Dos controladores separados: nav1 solo se anima al abrir el locker;
-	-- nav2 se re-anima además cada vez que se repuebla (cambio de categoría
-	-- en nav1) para que los nuevos items aparezcan escalonados.
-	local nav1Stagger = NavStaggerController.new({
-		{ container = nav1, getSelectedKey = function() return selectedMainCategory end },
+	-- Dos controladores separados: nav1 se re-anima al abrir el locker y al alternar
+	-- entre el locker normal y el modo wraps (setWrapsMode); nav2 se re-anima cada vez
+	-- que se repuebla (cambio de categoría en nav1). El tab activo depende del modo:
+	-- wrapsView en modo wraps, selectedMainCategory en el locker normal.
+	nav1Stagger = NavStaggerController.new({
+		{
+			container = nav1,
+			getSelectedKey = function()
+				return if isWrapsMode then wrapsView else selectedMainCategory
+			end,
+			exclude = { nav1Template },
+		},
 	})
 	nav2Stagger = NavStaggerController.new({
 		{ container = nav, getSelectedKey = function() return selectedNavKey end, exclude = { navTemplate } },
@@ -1644,13 +2099,16 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		applyEquippedFacePreview()
 		applyEquippedHatPreview()
 		hideActionFrame()
+		-- Construir los tabs de categoría de Nav1 (Character/Effects/Weapons) antes de
+		-- seleccionar la primera categoría, para que nav1TabController pueda marcarla.
+		populateMainCategoryNav()
 		selectItem(LockerMainCategory.STYLE)
 		-- Abrimos en Character: la cámara parte de la del lobby/menú y se desplaza
 		-- (travelling) hasta Workspace.Cameras.character.
 		cameraController:apply()
 		lockerFrame.Visible = true
 		setMenuVisibleInstant(false)
-		LightingPresetController.apply("Locker")
+		ScenePresetController.applyFrom(lockerFolder)
 		nav1Stagger:play()
 		if nav2Stagger then nav2Stagger:play() end
 	end
@@ -1664,6 +2122,9 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		selectedMainCategory = nil
 		selectedNavKey = nil
 		selectedCatalogItem = nil
+		statsSelectedCategory = ""
+		statsSelectedId = ""
+		weaponStatsPanel:hide()
 		hideActionFrame()
 		restoreLockerSceneState(true)
 		setWrapsMode(false)
@@ -1672,7 +2133,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		clearItemGrid()
 		destroyKillEffectDummy()
 		lockerFrame.Visible = false
-		LightingPresetController.apply("Lobby")
+		applyLobbyPreset()
 	end
 
 	if lockerBtn then
@@ -1697,17 +2158,14 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			closeLockerGui()
 		end
 	end), "Disconnect")
-	for categoryKey, button in mainCategoryButtons do
-		janitor:Add(button.MouseButton1Click:Connect(function()
-			handleMainCategoryButtonClick(categoryKey)
-		end), "Disconnect")
-	end
+	-- El click de los tabs de categoría de Nav1 lo engancha populateNav1 (botones
+	-- dinámicos): ya no hay botones estáticos que conectar aquí.
 
 	janitor:Add(lockerFrame:GetPropertyChangedSignal("Visible"):Connect(function()
 		if not lockerFrame.Visible and isOpen then
 			isOpen = false
 			restoreLockerSceneState(true)
-			LightingPresetController.apply("Lobby")
+			applyLobbyPreset()
 		end
 	end), "Disconnect")
 

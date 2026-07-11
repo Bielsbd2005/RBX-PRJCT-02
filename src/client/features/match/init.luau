@@ -4,6 +4,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local HttpService = game:GetService("HttpService")
 local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
 
 local Client = script.Parent.Parent
 local Packages = ReplicatedStorage:WaitForChild("Packages")
@@ -33,7 +34,7 @@ local MapVoteView = require(script.MapVoteView)
 local PanelController = require(Client.core.ui.PanelController)
 local BlurController = require(Client.core.ui.BlurController)
 local TouchControlsController = require(Client.core.ui.TouchControlsController)
-local LightingPresetController = require(Client.core.lighting.LightingPresetController)
+local ScenePresetController = require(Client.core.lighting.ScenePresetController)
 local DepthOfFieldController = require(Client.core.lighting.DepthOfFieldController)
 
 
@@ -52,13 +53,41 @@ local RESULTS_PRELOAD_SCORE_LEAD = 20
 -- si no llega en este tiempo (no se pudo iniciar), se vuelve al menú.
 local VOTE_AUTO_TIMEOUT = 8
 
--- Mapeo mapName (GameConfig.Maps) → preset de LightingPresets. Mapas sin
--- entrada caen al preset genérico "Match".
-local MAP_TO_LIGHTING_PRESET: { [string]: string } = {
-	Canyon = "Match_Canyon",
-	Factory = "Match_Factory",
-	Rooftops = "Match_Rooftops",
-}
+-- Lighting 100% dirigido por atributo `LightingPreset` (ScenePresetController):
+-- ningún nombre de preset vive en código. Cada contexto lee el atributo del nodo
+-- de escena correspondiente:
+--   * Lobby/menú → Workspace.Cameras.lobby      (atributo LightingPreset="Lobby")
+--   * Partida    → el mapa cargado en Workspace.ActiveMap (o su modelo hijo), que
+--                  el diseñador autora con su propio LightingPreset por mapa.
+local function resolveLobbyPresetNode(): Instance?
+	local cameras = Workspace:FindFirstChild("Cameras")
+	return if cameras then cameras:FindFirstChild("lobby") else nil
+end
+
+local function resolveMapPresetNode(): Instance?
+	local activeMap = Workspace:FindFirstChild("ActiveMap")
+	if not activeMap then
+		return nil
+	end
+	if activeMap:GetAttribute("LightingPreset") ~= nil then
+		return activeMap
+	end
+	-- El atributo lo suele llevar el modelo del mapa (hijo del contenedor ActiveMap).
+	for _, child in activeMap:GetChildren() do
+		if child:GetAttribute("LightingPreset") ~= nil then
+			return child
+		end
+	end
+	return nil
+end
+
+-- Aplica el preset leyendo el atributo del nodo (no-op si el nodo no existe o no
+-- lleva atributo — ScenePresetController.applyFrom ya degrada con gracia).
+local function applyScenePreset(node: Instance?)
+	if node then
+		ScenePresetController.applyFrom(node)
+	end
+end
 
 -- ── Helpers de resolución de GUI ──
 
@@ -164,13 +193,49 @@ function MatchFeature.start(menuController: any): any
 	-- ── Inicializar sub-módulos ──────────────────────────────
 	MatchState.reset()
 
-	-- Lighting: aplicar preset Lobby al arrancar (sin tween) y alternar
-	-- entre Match/Lobby según la fase. El Locker se controla en su feature.
-	-- `activeMapName` lo actualiza el observer de MatchSnapshot.MapName más
-	-- abajo; al entrar a una fase de match se mapea a un preset específico del
-	-- mapa (MAP_TO_LIGHTING_PRESET) o se cae al genérico "Match".
-	local activeMapName = ""
-	LightingPresetController.applyImmediate("Lobby")
+	-- Lighting: preset del Lobby al arrancar y alternar entre el look del mapa y el
+	-- del Lobby según la fase. Todo por atributo (ver resolvers arriba); el Locker
+	-- se controla en su feature.
+	--
+	-- Robustez ante el race de replicación: al entrar a partida el modelo del mapa
+	-- (Workspace.ActiveMap) puede no haber replicado aún cuando llega el snapshot de
+	-- fase. Si el nodo no está, esperamos (poll acotado) y aplicamos en cuanto
+	-- aparezca. Un contador de generación cancela esperas obsoletas al cambiar de
+	-- fase o destruir el feature.
+	local lightingGeneration = 0
+	local function applyLobbyLighting()
+		lightingGeneration += 1
+		applyScenePreset(resolveLobbyPresetNode())
+	end
+	local function applyMapLighting()
+		lightingGeneration += 1
+		local myGen = lightingGeneration
+		local node = resolveMapPresetNode()
+		if node then
+			applyScenePreset(node)
+			return
+		end
+		task.spawn(function()
+			local deadline = os.clock() + 10
+			while os.clock() < deadline do
+				task.wait(0.1)
+				if lightingGeneration ~= myGen then
+					return -- otra transición (o el teardown) tomó el control
+				end
+				local ready = resolveMapPresetNode()
+				if ready then
+					applyScenePreset(ready)
+					return
+				end
+			end
+		end)
+	end
+	janitor:Add(function()
+		-- Invalida cualquier espera de mapa pendiente al destruir el feature.
+		lightingGeneration += 1
+	end, true)
+
+	applyLobbyLighting()
 	-- DOF de fondo del menú: encendido al arrancar (estamos en Lobby) y alternado
 	-- por fase abajo. El locker lo suprime mientras usa su propio ShowcaseDOF.
 	DepthOfFieldController.setEnabled(true)
@@ -181,11 +246,11 @@ function MatchFeature.start(menuController: any): any
 		local inMenu = nextPhase == "Lobby" or nextPhase == "ReturningToMenu"
 		DepthOfFieldController.setEnabled(inMenu)
 		if inMenu then
-			LightingPresetController.apply("Lobby")
+			applyLobbyLighting()
 		else
-			-- Joining/InMatch/Dying/ShowingResults usan el look del mapa actual.
-			local presetName = MAP_TO_LIGHTING_PRESET[activeMapName] or "Match"
-			LightingPresetController.apply(presetName)
+			-- Joining/InMatch/Dying/ShowingResults: el look lo autora el propio mapa
+			-- (atributo LightingPreset en Workspace.ActiveMap o su modelo).
+			applyMapLighting()
 		end
 
 		-- El joystick solo en gameplay controlable (InMatch/Dying); en
@@ -568,11 +633,6 @@ function MatchFeature.start(menuController: any): any
 		matchMenu:enforceHidden()
 	end
 
-	janitor:Add(MatchSnapshot.observe("MapName", function(value)
-		-- Capturado para que el handler de fase pueda elegir el preset de
-		-- iluminación específico del mapa (ver MAP_TO_LIGHTING_PRESET arriba).
-		activeMapName = if type(value) == "string" then value else ""
-	end), "Disconnect")
 	janitor:Add(MatchSnapshot.observe("Phase", function(value)
 		applySnapshotPhase(if type(value) == "string" then value else "Idle")
 	end), "Disconnect")

@@ -15,6 +15,7 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local InventoryRepository = require(Shared.data.InventoryRepository)
 local WeaponCategory = require(Shared.constants.WeaponCategory)
 local ItemDefaults = require(Shared.constants.ItemDefaults)
+local WeaponLevelConfig = require(Shared.constants.WeaponLevelConfig)
 local CosmeticsTemplates = require(Shared.Locker.CosmeticsTemplates)
 
 local LoadoutService = {}
@@ -174,6 +175,9 @@ local function _grantMatchLoadoutTools(player: Player, dataService: any): (boole
 		local backpackClone = template:Clone()
 		CosmeticsTemplates.applyWeaponWrapToTool(backpackClone, wrapId)
 		backpackClone:SetAttribute(MATCH_LOADOUT_TOOL_ATTRIBUTE, true)
+		-- Nivel de arma (1..5) derivado de las kills acumuladas con esa arma.
+		-- BaseWeapon lee este atributo para escalar daño/cadencia/recarga/cargador.
+		backpackClone:SetAttribute(WeaponLevelConfig.ATTRIBUTE, LoadoutService.GetWeaponLevel(profileData, loadoutCategory, weaponId))
 		backpackClone.Parent = backpack
 		return true
 	end
@@ -226,6 +230,47 @@ local function _equipMainLoadoutTool(player: Player, mainWeaponId: string): bool
 end
 
 -- ── API pública ──────────────────────────────────────────────
+
+--[[
+	Nivel de arma (1..MAX_LEVEL) derivado de las kills acumuladas con esa arma.
+	Lee `WeaponKills[category][weaponId]` del profile; tolera profiles sin la
+	sección poblada (arma sin kills → nivel 1).
+]]
+function LoadoutService.GetWeaponLevel(profileData: any, category: string, weaponId: string): number
+	local kills = 0
+	local weaponKills = profileData and profileData.WeaponKills
+	local byCategory = if type(weaponKills) == "table" then weaponKills[category] else nil
+	if type(byCategory) == "table" and type(byCategory[weaponId]) == "number" then
+		kills = byCategory[weaponId]
+	end
+	return WeaponLevelConfig.GetLevelForKills(kills)
+end
+
+--[[
+	Actualiza el atributo de nivel en el Tool VIVO del jugador (character o
+	backpack) para que un level-up a mitad de partida aplique al instante.
+	No-op si el jugador no tiene ese Tool equipado/en mochila. Idempotente:
+	sólo escribe si el nivel cambió.
+]]
+function LoadoutService.UpdateWeaponLevel(player: Player, weaponId: string, level: number)
+	if type(weaponId) ~= "string" or weaponId == "" then
+		return
+	end
+	local clamped = WeaponLevelConfig.ClampLevel(level)
+
+	local roots = {
+		player.Character,
+		player:FindFirstChildOfClass("Backpack"),
+	}
+	for _, root in roots do
+		local tool = if root then root:FindFirstChild(weaponId) else nil
+		if tool and tool:IsA("Tool") and tool:GetAttribute(MATCH_LOADOUT_TOOL_ATTRIBUTE) == true then
+			if tool:GetAttribute(WeaponLevelConfig.ATTRIBUTE) ~= clamped then
+				tool:SetAttribute(WeaponLevelConfig.ATTRIBUTE, clamped)
+			end
+		end
+	end
+end
 
 --- Aplica cosméticos (hat + face) al personaje de forma síncrona.
 function LoadoutService.applyCosmetics(player: Player, character: Model, dataService: any)

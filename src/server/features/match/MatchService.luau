@@ -24,6 +24,8 @@ local CollisionGroups = require(Shared.CollisionGroups)
 local ItemsConfig = require(Shared.constants.ItemsConfig)
 local WeaponCategory = require(Shared.constants.WeaponCategory)
 local ItemDefaults = require(Shared.constants.ItemDefaults)
+local WeaponLevelConfig = require(Shared.constants.WeaponLevelConfig)
+local LoadoutService = require(script.Parent:WaitForChild("LoadoutService"))
 local DailyTasksService = require(script.Parent.Parent.dailyTasks.DailyTasksService)
 
 local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
@@ -621,6 +623,14 @@ local function _registerWeaponKillForAttacker(attackerUserId: number?, weaponId:
 
 	if success and type(newCount) == "number" then
 		_grantMasteryWrapsIfEligible(attackerPlayer, weaponCategory, resolvedWeaponId, newCount)
+
+		-- Subida de nivel de arma en vivo: si esta kill cruzó un umbral, aplica
+		-- el buff al Tool que el jugador lleva ahora mismo (no espera al respawn).
+		-- UpdateWeaponLevel es idempotente: sólo reescribe el atributo si cambió.
+		local newLevel = WeaponLevelConfig.GetLevelForKills(newCount)
+		if newLevel > WeaponLevelConfig.GetLevelForKills(newCount - 1) then
+			LoadoutService.UpdateWeaponLevel(attackerPlayer, resolvedWeaponId, newLevel)
+		end
 	end
 end
 

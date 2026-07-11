@@ -370,30 +370,146 @@ end)
 
 -- ────────────────────────────────────────────────────────────
 -- NAMESPACE: Gifting
--- Selección del destinatario de un regalo: el cliente manda un nombre de
--- usuario, el servidor lo resuelve (GetUserIdFromNameAsync) + filtra el texto
--- (TextService) y responde con el userId/nombre canónico o un error.
+-- Envío de regalos (packs de cash comprados con Robux) y su claim.
+--
+-- Envío: el cliente elige receptor en UserInterface.Gifting y manda SendGift;
+-- el servidor valida (producto, receptor, GiftsEnabled del receptor), persiste
+-- la intención en el perfil del comprador (GiftIntent) y lanza el prompt de
+-- compra. Al procesarse el receipt, el regalo se entrega al receptor (online:
+-- write directo a PendingGifts; offline/otro server: ProfileStore MessageAsync)
+-- y el comprador recibe GiftDelivered.
+--
+-- Recepción: NO tiene packet de aviso — PendingGifts se replica por
+-- ReplicaService y el GiftAlert del cliente lo observa; solo el claim viaja.
 -- ────────────────────────────────────────────────────────────
 
 local GiftingNamespace = ByteNet.DefineNamespace("Gifting", function()
 	return {
-		-- C → S: Validar un nombre de usuario como posible destinatario.
-		ValidateUser = ByteNet.DefinePacket({
+		-- C → S: Enviar un regalo. receiverUserId = UserId numérico como string.
+		-- productId va en Float64: los developer products actuales (~3.5e9) ya
+		-- desbordan Int32; Float64 es exacto para enteros hasta 2^53.
+		SendGift = ByteNet.DefinePacket({
 			Value = ByteNet.Struct({
-				username = ByteNet.String,
+				receiverUserId = ByteNet.String,
+				productId      = ByteNet.Float64,
+				message        = ByteNet.String,
 			}),
 			ReliabilityType = "Reliable",
 		}),
 
-		-- S → C: Resultado de la validación. success=false ⇒ message contiene el
-		-- motivo (usuario inexistente, no se puede uno mismo, etc.). En éxito,
-		-- userId es el UserId numérico como string y username el nombre filtrado.
+		-- S → C: Resultado de la VALIDACIÓN de SendGift. success=true significa
+		-- "prompt de compra lanzado", no "regalo entregado" (eso es GiftDelivered).
+		SendResponse = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				success = ByteNet.Bool,
+				message = ByteNet.String,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- S → C: El receipt se procesó y el regalo quedó entregado (o encolado
+		-- para un receptor offline). Cierra el flujo de envío en el cliente.
+		GiftDelivered = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				receiverUserId = ByteNet.String,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- C → S: Reclamar un regalo pendiente (botón Claim del GiftAlert).
+		ClaimGift = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				giftId = ByteNet.String,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- S → C: Resultado del claim. cashAmount alimenta el toast de éxito.
+		ClaimResponse = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				success    = ByteNet.Bool,
+				giftId     = ByteNet.String,
+				message    = ByteNet.String,
+				cashAmount = ByteNet.Int32,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+	}
+end)
+
+-- ────────────────────────────────────────────────────────────
+-- NAMESPACE: WeaponStats
+-- El locker muestra los stats de combate del arma seleccionada. Esos valores
+-- viven en la Configuration del Tool real (ServerStorage.WeaponTools), que NO
+-- se replica al cliente — así que el cliente los PIDE y el server los lee y
+-- responde. Valores BASE (nivel 1): el escalado por nivel (WeaponLevelConfig)
+-- es config pública compartida y lo aplica el cliente con sus propias kills,
+-- evitando un round-trip por cada subida de nivel.
+-- ────────────────────────────────────────────────────────────
+
+local WeaponStatsNamespace = ByteNet.DefineNamespace("WeaponStats", function()
+	return {
+		-- C → S: pedir los stats de un arma (por categoría + id).
+		Request = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				weaponCategory = ByteNet.String,  -- "Main" | "Special"
+				weaponId       = ByteNet.String,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- S → C: stats BASE del arma + rangos del arsenal para normalizar barras.
+		-- weaponCategory/weaponId se reflejan para que el cliente correlacione la
+		-- respuesta con su selección actual (descarta respuestas tardías de un
+		-- arma que ya no está seleccionada). damage = HitDamage o BlastDamage si
+		-- el arma explota al impactar. fireRate = balas/min (60/ShotCooldown).
+		-- damageMax/fireRateMax/reloadMin son agregados del arsenal entero.
 		Response = ByteNet.DefinePacket({
 			Value = ByteNet.Struct({
-				success  = ByteNet.Bool,
-				message  = ByteNet.String,
-				userId   = ByteNet.String,
-				username = ByteNet.String,
+				weaponCategory = ByteNet.String,
+				weaponId       = ByteNet.String,
+				success        = ByteNet.Bool,
+				damage         = ByteNet.Float32,
+				fireRate       = ByteNet.Float32,
+				reloadTime     = ByteNet.Float32,
+				ammoCapacity   = ByteNet.Int32,
+				damageMax      = ByteNet.Float32,
+				fireRateMax    = ByteNet.Float32,
+				reloadMin      = ByteNet.Float32,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+	}
+end)
+
+-- ────────────────────────────────────────────────────────────
+-- NAMESPACE: WrapCases
+-- Unboxing de cases de wraps (Store). El cliente pide abrir una case; el
+-- server valida cash, rolea wrap (ponderado, WrapCasesConfig) + arma (uniforme
+-- entre las armas del inventario, excluyendo combinaciones ya poseídas),
+-- concede y responde con el resultado — el cliente solo ANIMA el resultado.
+-- ────────────────────────────────────────────────────────────
+
+local WrapCasesNamespace = ByteNet.DefineNamespace("WrapCases", function()
+	return {
+		-- C → S: Abrir una case (compra + roll en la misma acción).
+		Open = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				caseId = ByteNet.String,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- S → C: Resultado del unboxing. Con success=false, los campos de roll
+		-- van vacíos y message explica el rechazo.
+		Result = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				success        = ByteNet.Bool,
+				message        = ByteNet.String,
+				caseId         = ByteNet.String,
+				wrapId         = ByteNet.String,
+				weaponCategory = ByteNet.String,
+				weaponId       = ByteNet.String,
 			}),
 			ReliabilityType = "Reliable",
 		}),
@@ -405,12 +521,14 @@ end)
 -- ────────────────────────────────────────────────────────────
 
 return {
-	Settings   = SettingsNamespace,
-	Shop       = ShopNamespace,
-	Combat     = CombatNamespace,
-	Rewards    = RewardsNamespace,
-	Locker     = LockerNamespace,
-	Match      = MatchNamespace,
-	BattlePass = BattlePassNamespace,
-	Gifting    = GiftingNamespace,
+	Settings    = SettingsNamespace,
+	Shop        = ShopNamespace,
+	Combat      = CombatNamespace,
+	Rewards     = RewardsNamespace,
+	Locker      = LockerNamespace,
+	Match       = MatchNamespace,
+	BattlePass  = BattlePassNamespace,
+	Gifting     = GiftingNamespace,
+	WeaponStats = WeaponStatsNamespace,
+	WrapCases   = WrapCasesNamespace,
 }
