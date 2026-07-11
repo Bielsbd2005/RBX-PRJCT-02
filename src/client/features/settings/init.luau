@@ -8,10 +8,10 @@
 		    CloseBtn
 		  Content
 		    MusicVolume   (slider) → SliderFrame { Slider, Value }
-		    SfxVolume     (slider)
 		    Sensitivity   (slider)
 		    Vibration     (toggle) → ToggleContainer { Knob, HitArea } + Title
 		    AutoShoot     (toggle)
+		    Gifts         (toggle) → aceptar o no regalos de otros jugadores
 		    CreditsBtn    (sin acción por ahora)
 
 	Toda la mecánica de slider/toggle vive en SliderController/ToggleController;
@@ -48,6 +48,7 @@ local SLIDER_DEFAULTS: { [string]: number } = {
 local TOGGLE_DEFAULTS: { [string]: boolean } = {
 	Vibration = true,
 	AutoShoot = true,
+	GiftsEnabled = true,
 }
 
 local SettingsFeature = {}
@@ -166,17 +167,6 @@ function SettingsFeature.start(menuController: any): any
 	})
 	janitor:Add(musicSlider, "Destroy")
 
-	local sfxSlider = SliderController.new({
-		root = content:WaitForChild("SfxVolume"),
-		onChange = function(value)
-			player:SetAttribute("SFXVolume", value)
-		end,
-		onCommit = function(value)
-			saveSlider("SFXVolume", value)
-		end,
-	})
-	janitor:Add(sfxSlider, "Destroy")
-
 	local sensSlider = SliderController.new({
 		root = content:WaitForChild("Sensitivity"),
 		onChange = function(value)
@@ -210,6 +200,25 @@ function SettingsFeature.start(menuController: any): any
 	})
 	janitor:Add(autoShootToggle, "Destroy")
 
+	-- Aceptar regalos de otros jugadores. Solo persiste: el enforcement es
+	-- server-side (GiftingService lee Settings.GiftsEnabled del receptor).
+	-- Con timeout y opcional: si la GUI publicada aún no trae el frame Gifts,
+	-- el resto de settings debe seguir cargando igual (un WaitForChild
+	-- infinito aquí bloqueaba TODA la aplicación de valores guardados).
+	local giftsToggle: any = nil
+	local giftsNode = content:WaitForChild("Gifts", 5)
+	if giftsNode then
+		giftsToggle = ToggleController.new({
+			root = giftsNode,
+			onCommit = function(state)
+				saveToggle("GiftsEnabled", state)
+			end,
+		})
+		janitor:Add(giftsToggle, "Destroy")
+	else
+		warn("[SettingsFeature] Falta Settings.Content.Gifts; toggle de regalos omitido.")
+	end
+
 	-- Carga inicial: aplica los valores guardados (onChange) sin re-persistir.
 	DataController:WhenReady():andThen(function()
 		local saved = Fusion.peek(DataController.Settings)
@@ -224,10 +233,16 @@ function SettingsFeature.start(menuController: any): any
 		end
 
 		musicSlider:set(num("MusicVolume"))
-		sfxSlider:set(num("SFXVolume"))
 		sensSlider:set(num("CameraSensitivity"))
 		vibrationToggle:set(bool("Vibration"))
 		autoShootToggle:set(bool("AutoShoot"))
+		if giftsToggle then
+			giftsToggle:set(bool("GiftsEnabled"))
+		end
+
+		-- El slider de SFX se quitó de la GUI, pero el valor guardado sigue
+		-- aplicándose como atributo para los sistemas de sonido que lo lean.
+		player:SetAttribute("SFXVolume", num("SFXVolume"))
 	end)
 
 	return janitor

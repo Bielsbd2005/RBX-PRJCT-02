@@ -1,6 +1,7 @@
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local IsServer = RunService:IsServer()
 
@@ -9,6 +10,7 @@ local AnimationsFolder = WeaponsSystemFolder:WaitForChild("Assets"):WaitForChild
 local AutoAimSystem = require(script.Parent:WaitForChild("AutoAimSystem"))
 local WeaponsNetwork = require(script.Parent:WaitForChild("WeaponsNetwork"))
 local PewEffect = require(script.Parent:WaitForChild("PewEffect"))
+local WeaponLevelConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("WeaponLevelConfig"))
 
 -- DEBUG: forzar comportamiento de autoshoot de movil tambien en PC.
 -- Poner en false para volver al gating normal por plataforma.
@@ -431,11 +433,25 @@ function BaseWeapon:onFired(firingPlayer, fireInfo, fromNetwork)
 end
 
 function BaseWeapon:getConfigValue(valueName, defaultValue)
+	local value
 	if self.configValues[valueName] ~= nil then
-		return self.configValues[valueName]
+		value = self.configValues[valueName]
 	else
-		return defaultValue
+		value = defaultValue
 	end
+
+	-- Escalado por nivel de arma (1..5). Sólo afecta a stats whitelisted en
+	-- WeaponLevelConfig (daño, cadencia, recarga, cargador). El nivel viaja como
+	-- atributo `WeaponLevel` en el Tool (lo escribe el servidor; se replica), así
+	-- que cliente y servidor calculan el MISMO valor escalado de forma determinista.
+	if WeaponLevelConfig.IsScaledStat(valueName) then
+		local level = self.instance and self.instance:GetAttribute(WeaponLevelConfig.ATTRIBUTE)
+		if type(level) == "number" and level > 1 then
+			value = WeaponLevelConfig.ApplyScaling(valueName, value, level)
+		end
+	end
+
+	return value
 end
 
 --[[

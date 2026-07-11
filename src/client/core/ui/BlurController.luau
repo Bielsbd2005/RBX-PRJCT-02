@@ -35,6 +35,11 @@ local BlurController = {}
 
 local _holders: { [string]: boolean } = {}
 local _activeCount = 0
+-- Supresores: fuerzan el blur OFF mientras al menos uno está activo, sin tocar
+-- el refcount de holders (p. ej. el reveal del unboxing muestra una escena 3D a
+-- pantalla completa que no debe ir borrosa aunque el Store siga "abierto").
+local _suppressors: { [string]: boolean } = {}
+local _suppressCount = 0
 
 local function _ensureBlur(): BlurEffect
 	local existing = Lighting:FindFirstChild(BLUR_NAME)
@@ -52,9 +57,10 @@ local function _ensureBlur(): BlurEffect
 	return blur
 end
 
-local function _setEnabled(enabled: boolean)
+-- El blur está activo solo si algún holder lo pide y ningún supresor lo veta.
+local function _applyState()
 	local blur = _ensureBlur()
-	blur.Enabled = enabled
+	blur.Enabled = _activeCount > 0 and _suppressCount == 0
 end
 
 --[[
@@ -71,9 +77,7 @@ function BlurController.acquire(owner: string)
 	end
 	_holders[owner] = true
 	_activeCount += 1
-	if _activeCount == 1 then
-		_setEnabled(true)
-	end
+	_applyState()
 end
 
 --[[
@@ -89,10 +93,47 @@ function BlurController.release(owner: string)
 	end
 	_holders[owner] = nil
 	_activeCount -= 1
-	if _activeCount <= 0 then
+	if _activeCount < 0 then
 		_activeCount = 0
-		_setEnabled(false)
 	end
+	_applyState()
+end
+
+--[[
+	Fuerza el blur OFF mientras `owner` lo suprima, sin alterar el refcount de
+	holders. Idempotente por owner. Úsalo para escenas 3D a pantalla completa
+	(reveal del unboxing) que no deben ir borrosas aunque el panel siga abierto.
+]]
+function BlurController.suppress(owner: string)
+	if type(owner) ~= "string" or owner == "" then
+		warn("[BlurController] suppress: owner inválido")
+		return
+	end
+	if _suppressors[owner] then
+		return
+	end
+	_suppressors[owner] = true
+	_suppressCount += 1
+	_applyState()
+end
+
+--[[
+	Levanta la supresión de `owner`. El blur vuelve si algún holder lo pedía y no
+	quedan más supresores. Idempotente: unsuppress sin suppress previo es no-op.
+]]
+function BlurController.unsuppress(owner: string)
+	if type(owner) ~= "string" or owner == "" then
+		return
+	end
+	if not _suppressors[owner] then
+		return
+	end
+	_suppressors[owner] = nil
+	_suppressCount -= 1
+	if _suppressCount < 0 then
+		_suppressCount = 0
+	end
+	_applyState()
 end
 
 --[[

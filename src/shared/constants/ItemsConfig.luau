@@ -31,6 +31,9 @@ export type ItemConfig = {
 	ScrollSpeedU: number?,
 	ScrollSpeedV: number?,
 	KillChallenge: { Kills: number }?,
+	-- La pertenencia a cases NO vive aquí: ver WrapCasesConfig (single source of
+	-- truth de cajas, items y pesos). El Locker resuelve la case de un wrap vía
+	-- WrapCasesConfig.GetCaseNameForWrap.
 }
 
 export type ItemCategory = { [string]: ItemConfig }
@@ -149,6 +152,85 @@ Special = {
 			Rarity = "Legendary",
 			CanPurchase = true,
 			BaseColor = Color3.fromRGB(214, 170, 55),
+			isAnimated = false,
+			StudsPerTile = 3,
+		},
+		-- ── Wraps de case (ejemplo; ver WrapCasesConfig para cajas/pesos) ──
+		-- Se obtienen abriendo cases: CanPurchase=false y Price=0. En la vista
+		-- Collection del Locker su Status.Value muestra el nombre de su case.
+		-- Starter Case:
+		Wrap_Case_Amber = {
+			Name = "Amber",
+			Price = 0,
+			LevelRequired = 0,
+			Rarity = "Common",
+			CanPurchase = false,
+			BaseColor = Color3.fromRGB(255, 170, 60),
+			isAnimated = false,
+			StudsPerTile = 3,
+		},
+		Wrap_Case_Aqua = {
+			Name = "Aqua",
+			Price = 0,
+			LevelRequired = 0,
+			Rarity = "Rare",
+			CanPurchase = false,
+			BaseColor = Color3.fromRGB(64, 196, 255),
+			isAnimated = false,
+			StudsPerTile = 3,
+		},
+		Wrap_Case_Frost = {
+			Name = "Frost",
+			Price = 0,
+			LevelRequired = 0,
+			Rarity = "Epic",
+			CanPurchase = false,
+			BaseColor = Color3.fromRGB(210, 240, 255),
+			Material = Enum.Material.Ice,
+			isAnimated = false,
+			StudsPerTile = 3,
+		},
+		-- Mythic Case:
+		Wrap_Case_Inferno = {
+			Name = "Inferno",
+			Price = 0,
+			LevelRequired = 0,
+			Rarity = "Rare",
+			CanPurchase = false,
+			BaseColor = Color3.fromRGB(255, 90, 40),
+			isAnimated = false,
+			StudsPerTile = 3,
+		},
+		Wrap_Case_Venom = {
+			Name = "Venom",
+			Price = 0,
+			LevelRequired = 0,
+			Rarity = "Epic",
+			CanPurchase = false,
+			BaseColor = Color3.fromRGB(120, 240, 40),
+			isAnimated = false,
+			StudsPerTile = 3,
+		},
+		Wrap_Case_Void = {
+			Name = "Void",
+			Price = 0,
+			LevelRequired = 0,
+			Rarity = "Legendary",
+			CanPurchase = false,
+			BaseColor = Color3.fromRGB(150, 60, 255),
+			Material = Enum.Material.Neon,
+			isAnimated = false,
+			StudsPerTile = 3,
+		},
+		-- Cash wrap de prueba: irá a la tienda de rotación (pendiente); mientras,
+		-- excluido de Collection por CanPurchase+Price.
+		Test_Cash_Coral = {
+			Name = "Coral",
+			Price = 750,
+			LevelRequired = 0,
+			Rarity = "Uncommon",
+			CanPurchase = true,
+			BaseColor = Color3.fromRGB(255, 120, 90),
 			isAnimated = false,
 			StudsPerTile = 3,
 		},

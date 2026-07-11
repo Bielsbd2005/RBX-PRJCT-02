@@ -128,6 +128,7 @@ export type Settings = {
 	Vibration: boolean,
 	AutoShoot: boolean,
 	ShowDamageNumbers: boolean,
+	GiftsEnabled: boolean,  -- acepta recibir regalos de otros jugadores
 	-- Choices (string enums whitelisted en SettingsService)
 	ColorblindMode: string, -- "None" | "Protanopia" | "Deuteranopia" | "Tritanopia"
 	Language: string,       -- ISO 639-1 ("en", "es", ...)
@@ -184,6 +185,50 @@ export type Metadata = {
 -- reintenta el receipt (p. ej. crash entre Increment y PurchaseGranted),
 -- detectamos el duplicado y devolvemos PurchaseGranted sin re-otorgar.
 export type ProcessedReceipts = { [string]: number }
+
+--[[
+	PendingGifts: regalos RECIBIDOS pendientes de reclamar. Key = PurchaseId del
+	receipt del comprador — idempotencia natural: una re-entrega (receipt
+	reintentado o message duplicado) sobrescribe la misma key en vez de duplicar.
+	El GiftAlert del cliente los muestra de uno en uno; ClaimGift (GiftingService)
+	concede el CashAmount y borra la entrada.
+]]
+export type PendingGift = {
+	SenderUserId: number,
+	SenderName: string,
+	Message: string,    -- ya filtrado (TextService) en el server del remitente
+	CashAmount: number,
+	ProductId: number,
+	SentAt: number,
+}
+export type PendingGifts = { [string]: PendingGift }
+
+--[[
+	ClaimedGifts: ledger de regalos YA reclamados (giftId/PurchaseId → os.time()
+	del claim). Barrera anti doble-claim: un receipt o message re-entregado
+	(crash entre la entrega al receptor y la persistencia del comprador) no
+	debe volver a crear un PendingGift reclamable del mismo PurchaseId.
+	DataService lo poda por edad (30 días) al cargar el perfil.
+]]
+export type ClaimedGifts = { [string]: number }
+
+--[[
+	GiftIntent: intención de regalo del COMPRADOR. GiftingService la escribe al
+	validar SendGift (antes del prompt de compra) y la consume ProcessReceipt
+	para redirigir el grant del developer product al receptor en vez de al
+	comprador. Vive en el perfil (no en memoria) para sobrevivir reintentos del
+	receipt, incluso si llegan en otro servidor tras un crash.
+
+	ReceiverUserId = 0 ⇒ sin intención activa (ProfileStore no persiste nils).
+	Expira por CreatedAt (INTENT_TTL en GiftingService); un prompt cancelado la
+	limpia vía PromptProductPurchaseFinished.
+]]
+export type GiftIntent = {
+	ReceiverUserId: number,
+	ProductId: number,
+	Message: string,
+	CreatedAt: number,
+}
 
 -- DailyTasks: progreso diario por jugador. La definición de las tareas vive
 -- en `shared/constants/DailyTasks.luau`. Aquí solo se almacena el estado.
@@ -254,6 +299,9 @@ export type PlayerProfile = {
 	BattlePass: BattlePassState,
 	Metadata: Metadata,
 	ProcessedReceipts: ProcessedReceipts,
+	PendingGifts: PendingGifts,
+	ClaimedGifts: ClaimedGifts,
+	GiftIntent: GiftIntent,
 }
 
 -- ────────────────────────────────────────────────────────────
@@ -345,6 +393,7 @@ local DEFAULT: PlayerProfile = {
 		Vibration = true,
 		AutoShoot = true,
 		ShowDamageNumbers = true,
+		GiftsEnabled = true,
 		ColorblindMode = "None",
 		Language = "en",
 		CrosshairColor = { R = 1, G = 1, B = 1 },
@@ -406,6 +455,17 @@ local DEFAULT: PlayerProfile = {
 	},
 
 	ProcessedReceipts = {},
+
+	PendingGifts = {},
+
+	ClaimedGifts = {},
+
+	GiftIntent = {
+		ReceiverUserId = 0,
+		ProductId = 0,
+		Message = "",
+		CreatedAt = 0,
+	},
 }
 
 -- Congelado para prevenir mutaciones accidentales del template.

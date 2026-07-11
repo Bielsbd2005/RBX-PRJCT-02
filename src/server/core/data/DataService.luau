@@ -71,6 +71,8 @@ export type DataServiceModule = {
 	MarkItemSeen: (self: DataServiceModule, player: Player, category: string, itemId: string) -> boolean,
 	ResetProfile: (self: DataServiceModule, player: Player) -> boolean,
 	ForceSave: (self: DataServiceModule, player: Player) -> boolean,
+	MessageProfile: (self: DataServiceModule, userId: number, message: any, timeoutSeconds: number?) -> boolean,
+	ViewProfileAsync: (self: DataServiceModule, userId: number, timeoutSeconds: number?) -> (any, boolean),
 	Destroy: (self: DataServiceModule) -> (),
 	ProfileLoaded: RBXScriptSignal,
 	ProfileUnloading: RBXScriptSignal,
@@ -355,6 +357,20 @@ local function _loadPlayer(player: Player): ()
 				end
 			else
 				profile.Data.ProcessedReceipts = {}
+			end
+
+			-- Prune de ClaimedGifts (ledger anti doble-claim de GiftingService):
+			-- las re-entregas de un mismo regalo no sobreviven más de unos días
+			-- de reintentos; 30 días de margen mantienen la tabla acotada.
+			if type((profile.Data :: any).ClaimedGifts) == "table" then
+				local cutoff = os.time() - (30 * 24 * 3600)
+				for giftId, claimedAt in (profile.Data :: any).ClaimedGifts do
+					if type(claimedAt) ~= "number" or claimedAt < cutoff then
+						(profile.Data :: any).ClaimedGifts[giftId] = nil
+					end
+				end
+			else
+				(profile.Data :: any).ClaimedGifts = {}
 			end
 
 			-- GDPR: asociar UserId para cumplimiento de políticas de privacidad.
@@ -1219,6 +1235,92 @@ function DataService:ForceSave(player: Player): boolean
 	-- No limpiamos el dirty flag a propósito: dejar que el autosave persista
 	-- de nuevo es una segunda red de seguridad barata y deseable aquí.
 	return true
+end
+
+--[[
+	Ejecuta fn en un thread aparte y espera como mucho timeoutSeconds a que
+	termine. ProfileStore (MessageAsync/GetAsync) reintenta con backoff
+	INDEFINIDAMENTE ante errores del DataStore — un caller síncrono (p. ej.
+	MarketplaceService.ProcessReceipt) no puede permitirse ese cuelgue: debe
+	devolver NotProcessedYet y dejar que Roblox reintente.
+
+	Devuelve (finished, ok, result). Con finished=false el thread sigue vivo y
+	puede completar más tarde — los callers deben tolerar ese "éxito tardío"
+	(las operaciones que pasan por aquí son idempotentes por diseño).
+]]
+local function _runBounded(timeoutSeconds: number, fn: () -> any): (boolean, boolean, any)
+	local finished = false
+	local ok = false
+	local result: any = nil
+	task.spawn(function()
+		local callOk, callResult = pcall(fn)
+		ok = callOk
+		result = callResult
+		finished = true
+	end)
+	local deadline = os.clock() + timeoutSeconds
+	while not finished and os.clock() < deadline do
+		task.wait()
+	end
+	return finished, ok, result
+end
+
+--[[
+	Envía un message de ProfileStore al perfil de un usuario ARBITRARIO — offline
+	o con sesión en otro servidor. Yielda (acotado a timeoutSeconds, default 10).
+	El mensaje queda en una cola persistente dentro del perfil y lo consume el
+	MessageHandler que el servicio interesado registre al cargarse la sesión
+	(via ProfileLoaded).
+
+	Caso de uso: entrega de regalos a receptores que no están en este servidor.
+
+	Devuelve true si ProfileStore confirmó el enqueue dentro del timeout. Un
+	false por timeout puede aun así entregar tarde — el consumidor debe deduplicar
+	por la key del mensaje (los regalos usan el PurchaseId + ledger de claims).
+]]
+function DataService:MessageProfile(userId: number, message: any, timeoutSeconds: number?): boolean
+	local finished, ok, result = _runBounded(timeoutSeconds or 10, function()
+		return _PlayerStore:MessageAsync("Player_" .. userId, message)
+	end)
+	if not finished then
+		warn(("[DataService] MessageProfile: timeout para user %d (DataStore lento/caído)"):format(userId))
+		return false
+	end
+	if not ok then
+		warn(("[DataService] MessageProfile falló para user %d: %s"):format(userId, tostring(result)))
+		return false
+	end
+	return result == true
+end
+
+--[[
+	Snapshot READ-ONLY del perfil de un usuario sin sesión en este servidor
+	(ProfileStore:GetAsync). Yielda (acotado, default 10s). NO usar para mutar
+	ni para jugadores presentes (para esos, GetProfile).
+
+	Devuelve (view, apiOk):
+	  • apiOk=false  → timeout o error de API; el caller decide su fallback.
+	  • view         → Profile view. OJO: para un perfil que NUNCA existió,
+	                   GetAsync NO devuelve nil — devuelve una vista sembrada
+	                   del template con view.SessionLoadCount == 0. Esa es la
+	                   señal de "usuario que nunca jugó aquí".
+
+	Caso de uso: consultar Settings.GiftsEnabled / existencia del receptor de
+	un regalo.
+]]
+function DataService:ViewProfileAsync(userId: number, timeoutSeconds: number?): (any, boolean)
+	local finished, ok, view = _runBounded(timeoutSeconds or 10, function()
+		return _PlayerStore:GetAsync("Player_" .. userId)
+	end)
+	if not finished then
+		warn(("[DataService] ViewProfileAsync: timeout para user %d (DataStore lento/caído)"):format(userId))
+		return nil, false
+	end
+	if not ok then
+		warn(("[DataService] ViewProfileAsync falló para user %d: %s"):format(userId, tostring(view)))
+		return nil, false
+	end
+	return view, true
 end
 
 return DataService

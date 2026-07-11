@@ -28,6 +28,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	local DataService = require(serverRoot.core.data.DataService)
 	local RewardService = require(serverRoot.core.RewardService)
 	local ShopService = require(serverRoot.features.shop.ShopService)
+	local WrapCasesService = require(serverRoot.features.shop.WrapCasesService)
 	local SettingsService = require(serverRoot.features.settings.SettingsService)
 	local RewardsService = require(serverRoot.features.rewards.RewardsService)
 	local MatchService = require(serverRoot.features.match.MatchService)
@@ -35,6 +36,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	local BattlePassService = require(serverRoot.features.battlepass.BattlePassService)
 	local GiftingService = require(serverRoot.features.gifting.GiftingService)
 	local LockerService = require(serverRoot.features.locker.LockerService)
+	local WeaponStatsService = require(serverRoot.features.locker.WeaponStatsService)
 	local ClearDataCommandService = require(serverRoot.features.testing.ClearDataCommandService)
 	local TrainingDummyService = require(serverRoot.features.testing.TrainingDummyService)
 
@@ -44,6 +46,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	-- WeaponsSystem injected) lo necesita listo antes de su propio Start.
 	RewardService.Start(DataService)
 	ShopService:Start(DataService)
+	WrapCasesService:Start(DataService)
 	SettingsService:Start(DataService)
 	RewardsService:Start(DataService)
 	BattlePassService:Start(DataService)
@@ -57,6 +60,14 @@ function ServerBootstrap.start(serverRoot: Script): ()
 		local bpDecision = BattlePassService:ProcessReceipt(receiptInfo)
 		if bpDecision ~= nil then
 			return bpDecision
+		end
+
+		-- Gifting intercepta receipts de store products cuando el comprador tiene
+		-- una intención de regalo activa (GiftIntent): el cash va al receptor, no
+		-- al comprador. nil ⇒ compra normal, sigue el handler de abajo.
+		local giftDecision = GiftingService:ProcessReceipt(receiptInfo)
+		if giftDecision ~= nil then
+			return giftDecision
 		end
 
 		local storeProduct = STORE_PRODUCTS_BY_ID[receiptInfo.ProductId]
@@ -172,6 +183,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 
 	MatchService:Start(DataService)
 	LockerService:Start(DataService)
+	WeaponStatsService:Start()
 	ClearDataCommandService:Start(DataService)
 	TrainingDummyService:Start()
 

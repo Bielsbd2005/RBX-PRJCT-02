@@ -76,6 +76,7 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 	playerGui.ScreenOrientation = Enum.ScreenOrientation.LandscapeSensor
 
 	local DataController = require(clientRoot.core.data.DataController)
+	local ScenePresetController = require(clientRoot.core.lighting.ScenePresetController)
 	local MenuController = require(clientRoot.core.ui.MenuController)
 	local UISoundsController = require(clientRoot.core.ui.UISoundsController)
 	local ShadeController = require(clientRoot.core.ui.ShadeController)
@@ -88,9 +89,13 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 	local LobbyFeature = require(clientRoot.features.lobby)
 	local LobbyMusicFeature = require(clientRoot.features.music)
 	local MatchFeature = require(clientRoot.features.match)
+	local GiftingFeature = require(clientRoot.features.gifting)
 
 	DataController:Start()
 	WeaponWrapAnimator.start()
+	-- Precarga (no bloqueante) los assets de los presets de lighting para que el
+	-- primer cambio de escena no sufra el streaming de skyboxes/texturas.
+	ScenePresetController.preload()
 	_janitor:Add(function()
 		WeaponWrapAnimator.stop()
 	end, true)
@@ -127,6 +132,7 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 		{ label = "lobby", start = LobbyFeature.start },
 		{ label = "music", start = LobbyMusicFeature.start },
 		{ label = "match", start = MatchFeature.start },
+		{ label = "gifting", start = GiftingFeature.start },
 	} :: { DeferredFeatureEntry }
 
 	for _, feature in deferredFeatures do

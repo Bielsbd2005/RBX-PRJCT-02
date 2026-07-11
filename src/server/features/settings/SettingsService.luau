@@ -56,6 +56,7 @@ local BOOLEAN_SETTINGS = {
 	Vibration = true,
 	AutoShoot = true,
 	ShowDamageNumbers = true,
+	GiftsEnabled = true,
 }
 
 -- Enums: clave → set de valores válidos. Defensa contra clientes que envían

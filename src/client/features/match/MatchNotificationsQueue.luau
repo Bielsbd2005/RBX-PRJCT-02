@@ -190,7 +190,7 @@ end
 
 -- Renderiza el preview 3D de un wrap (maestría / item) dentro de un ViewportFrame.
 -- Limpia hijos no-GUI previos y devuelve un Janitor con el preview para cleanup.
-local function _renderWrapPreview(itemViewport: ViewportFrame, reward: any): any
+local function _renderWrapPreview(itemViewport: ViewportFrame, reward: any, useWrapModel: boolean?): any
 	for _, child in itemViewport:GetChildren() do
 		if not child:IsA("GuiObject") then
 			child:Destroy()
@@ -212,8 +212,11 @@ local function _renderWrapPreview(itemViewport: ViewportFrame, reward: any): any
 		Material = reward.material,
 		isAnimated = reward.animated,
 		StudsPerTile = reward.studsPerTile,
-		PreviewWeaponCategory = reward.previewWeaponCategory,
-		PreviewWeaponId = reward.previewWeaponId,
+		-- useWrapModel: sin arma → WeaponWrapPreviewer cae al modelo ReplicatedStorage.Wrap
+		-- (la apariencia del wrap se aplica igual). La maestría lo usa para mostrar el
+		-- wrap sobre su propio modelo, no sobre el arma.
+		PreviewWeaponCategory = if useWrapModel then nil else reward.previewWeaponCategory,
+		PreviewWeaponId = if useWrapModel then nil else reward.previewWeaponId,
 	}
 	WeaponWrapPreviewer.Render(itemViewport, previewItem :: any, previewJanitor)
 	return previewJanitor
@@ -600,7 +603,7 @@ function MatchNotificationsQueue:playMasteryAnimation(progress: MasteryProgress)
 		local previewJanitor: any = nil
 		if itemViewport and itemViewport:IsA("ViewportFrame") then
 			itemViewport.Visible = true
-			previewJanitor = _renderWrapPreview(itemViewport, progress)
+			previewJanitor = _renderWrapPreview(itemViewport, progress, true)
 		end
 
 		-- Barra: arranca vacía y se rellena con tween tras entrar el frame.

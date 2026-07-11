@@ -20,8 +20,10 @@
 	cliente clona su propio preview y cada jugador ve solo el suyo.
 ]]
 
+local ContentProvider = game:GetService("ContentProvider")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 
 local Core = script.Parent.Parent
@@ -69,7 +71,42 @@ local function placeCharacter(model: Model, target: Instance)
 	end
 end
 
-local function playIdleAnimation(model: Model, janitor: any)
+-- Animación idle COMPARTIDA y precargada: reutilizar la misma Animation (y
+-- precargar su asset una sola vez) evita que al cambiar de outfit se vea "cargar"
+-- la animación; con el asset listo, LoadAnimation/Play aplican la pose al instante.
+local _idleAnimation: Animation? = nil
+local _idlePreloadStarted = false
+local function getIdleAnimation(): Animation
+	local anim = _idleAnimation
+	if not anim then
+		anim = Instance.new("Animation")
+		anim.Name = "LobbyPreviewIdle"
+		anim.AnimationId = IDLE_ANIMATION_ID
+		_idleAnimation = anim
+	end
+	if not _idlePreloadStarted then
+		_idlePreloadStarted = true
+		task.spawn(function()
+			pcall(function()
+				ContentProvider:PreloadAsync({ anim })
+			end)
+		end)
+	end
+	return anim
+end
+
+-- Oculta/revela el preview localmente (LocalTransparencyModifier no toca la
+-- transparencia base ni replica). Cubre partes, decals y texturas (cara incluida).
+local function setPreviewHidden(model: Model, hidden: boolean)
+	local modifier = if hidden then 1 else 0
+	for _, d in model:GetDescendants() do
+		if d:IsA("BasePart") or d:IsA("Decal") or d:IsA("Texture") then
+			(d :: any).LocalTransparencyModifier = modifier
+		end
+	end
+end
+
+local function playIdleAnimation(model: Model, janitor: any): AnimationTrack?
 	local humanoid = model:FindFirstChildWhichIsA("Humanoid", true)
 	local animator: Animator? = nil
 	if humanoid then
@@ -87,21 +124,21 @@ local function playIdleAnimation(model: Model, janitor: any)
 		return
 	end
 
-	local animation = Instance.new("Animation")
-	animation.Name = "LobbyPreviewIdle"
-	animation.AnimationId = IDLE_ANIMATION_ID
-
-	local track = animator:LoadAnimation(animation)
+	local track = animator:LoadAnimation(getIdleAnimation())
 	track.Name = "LobbyPreviewIdle"
 	track.Looped = true
 	track.Priority = Enum.AnimationPriority.Idle
-	track:Play(0.1)
+	-- Sin fade: la pose idle (sentado) se fija de inmediato. El modelo se mantiene
+	-- oculto en _rebuild hasta que esta pose se aplica, así que no se ve el frame en
+	-- pie del template antes de "sentarse".
+	track:Play(0)
 
 	janitor:Add(function()
-		track:Stop(0.1)
+		track:Stop(0)
 		track:Destroy()
-		animation:Destroy()
 	end, true)
+
+	return track
 end
 
 local function resolveBodyTemplate(outfitId: string?): Model?
@@ -231,7 +268,7 @@ function LobbyCharacterPreview:_rebuild(outfitId: string?)
 	self._previewJanitor:Add(preview, "Destroy")
 
 	placeCharacter(preview, self._p1 :: Instance)
-	playIdleAnimation(preview, self._previewJanitor)
+	local idleTrack = playIdleAnimation(preview, self._previewJanitor)
 
 	self._model = preview
 	self._faceApplier = FaceApplier.new(preview, ItemsConfig)
@@ -239,6 +276,22 @@ function LobbyCharacterPreview:_rebuild(outfitId: string?)
 	self:_bindHighlight(preview)
 
 	self._lastOutfitId = outfitId
+
+	-- Ocultar el modelo recién clonado hasta que la animación idle aplique su pose
+	-- (sentado), para que no se vea el frame en pie del template. Se revela cuando
+	-- el asset cargó (Length > 0) + un par de frames para que el Animator pose el rig.
+	setPreviewHidden(preview, true)
+	task.spawn(function()
+		local deadline = os.clock() + 1
+		while idleTrack and idleTrack.Length <= 0 and os.clock() < deadline do
+			RunService.RenderStepped:Wait()
+		end
+		RunService.RenderStepped:Wait()
+		RunService.RenderStepped:Wait()
+		if self._model == preview and preview.Parent then
+			setPreviewHidden(preview, false)
+		end
+	end)
 end
 
 --- Reconstruye el body solo si el outfit cambió respecto al actual.
