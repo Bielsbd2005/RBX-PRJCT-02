@@ -234,6 +234,20 @@ function BulletWeapon.new(weaponsSystem, instance)
 	self.recoilIntensity = 0
 	self.aimPoint = Vector3.new()
 
+	-- Retroceso visual del arma (kick hacia atrás al disparar). Es puramente
+	-- client-side y SOLO lo ve el LocalPlayer: offseteamos un joint (el grip
+	-- hand↔Handle, o el HandleWeld como fallback) en el cliente, que no replica
+	-- (mismo patrón que ShoulderCamera:applyRootJointFix, que setea rootJoint.C0
+	-- por frame en el cliente sin afectar a otros). Preferimos el grip porque
+	-- mueve el arma ENTERA (todo es rígido respecto al Handle), sin depender de
+	-- cómo esté soldado el modelo internamente. _viewKick es el acumulador 0..1
+	-- que sube por disparo y decae por frame.
+	self._viewKick = 0
+	self._viewKickJoint = nil :: (Weld | Motor6D)? -- joint a offsetear
+	self._viewKickProp = "C1" -- "C0" o "C1", según de qué lado esté la parte movida
+	self._viewKickBase = nil :: CFrame? -- valor base del prop offseteado
+	self._viewKickPart = nil :: BasePart? -- la parte que se mueve (Handle o PrimaryPart)
+
 	self:addOptionalDescendant("tipAttach", "TipAttachment")
 
 	self:addOptionalDescendant("chargeGlowPart", "ChargeGlow")
@@ -287,6 +301,11 @@ function BulletWeapon:onEquippedChanged()
 			ContextActionService:BindAction("ReloadWeapon", function(...) self:onReloadAction(...) end, false, Enum.KeyCode.R, Enum.KeyCode.ButtonX)
 		else
 			ContextActionService:UnbindAction("ReloadWeapon")
+
+			-- Al desequipar, deshacer cualquier retroceso visual pendiente para no
+			-- dejar el arma desplazada (y soltar el ref del joint del tool anterior).
+			self:_resetViewKick()
+			self._viewKickJoint = nil
 
 			-- Stop charging/discharging sounds
 			local chargingSound = self:getSound("Charging")
@@ -456,6 +475,18 @@ function BulletWeapon:simulateFire(firingPlayer, fireInfo)
 	end
 
 	if self.player == Players.LocalPlayer then
+		-- Temblor de cámara inmediato al disparar (independiente del recoil
+		-- vertical, que va con RecoilDelayTime). Configurable por arma:
+		-- ShakeIntensity acumula trauma, ShakeFOVKick añade un punch de FOV leve.
+		local shakeIntensity = self:getConfigValue("ShakeIntensity", 0.16)
+		if shakeIntensity > 0 then
+			self.weaponsSystem.camera:addCameraShake(shakeIntensity, self:getConfigValue("ShakeFOVKick", 1.2))
+		end
+
+		-- Retroceso visual del modelo del arma: acumula kick (clamp a 1 para que el
+		-- full-auto no lo mande al infinito). onRenderStepped lo aplica y decae.
+		self._viewKick = math.min(self._viewKick + self:getConfigValue("ViewKickPerShot", 0.8), 1)
+
 		coroutine.wrap(function()
 			-- W12: task.wait sólo. El RenderStepped:Wait extra que había aquí
 			-- añadía 1 frame (~16ms) de latencia sin propósito documentado —
@@ -1153,6 +1184,62 @@ function BulletWeapon:onActivatedChanged()
 	end
 end
 
+-- Resuelve (una vez, perezoso) el joint a offsetear y la parte que se mueve. El
+-- rig y los welds llegan por replicación, así que puede no estar listo el primer
+-- frame; devolvemos false hasta que lo esté. Solo cliente / LocalPlayer.
+--
+-- Preferencia: el GRIP (weld hand↔Handle) — mover ahí desplaza el arma entera. Si
+-- no está (raro), fallback al HandleWeld (Handle→PrimaryPart del modelo).
+function BulletWeapon:_ensureViewKickRefs(): boolean
+	local joint = self._viewKickJoint
+	if joint and joint.Parent then
+		return true
+	end
+	local handle = self.instance:FindFirstChild("Handle") :: BasePart?
+	if not handle then
+		return false
+	end
+
+	-- Grip: entre los joints del Handle, el que conecta con una parte que NO es
+	-- del propio Tool (es un miembro del personaje). El HandleWeld conecta con el
+	-- modelo (descendiente del Tool), así que ese queda excluido aquí.
+	for _, j in handle:GetJoints() do
+		if j:IsA("Weld") or j:IsA("Motor6D") then
+			local other = if j.Part0 == handle then j.Part1 else j.Part0
+			if other and not other:IsDescendantOf(self.instance) then
+				self._viewKickJoint = j
+				self._viewKickProp = if j.Part0 == handle then "C0" else "C1"
+				self._viewKickBase = (j :: any)[self._viewKickProp]
+				self._viewKickPart = handle
+				return true
+			end
+		end
+	end
+
+	-- Fallback: HandleWeld (Handle→PrimaryPart). Mueve solo el modelo respecto al
+	-- Handle; requiere que las partes visibles estén soldadas al PrimaryPart.
+	local model = self.instance:FindFirstChildOfClass("Model")
+	local weld = handle:FindFirstChild("HandleWeld")
+	if model and model.PrimaryPart and weld and weld:IsA("Weld") then
+		self._viewKickJoint = weld
+		self._viewKickProp = "C1"
+		self._viewKickBase = weld.C1
+		self._viewKickPart = model.PrimaryPart
+		return true
+	end
+
+	return false
+end
+
+-- Restaura el joint a su valor base y limpia el kick. Idempotente.
+function BulletWeapon:_resetViewKick()
+	self._viewKick = 0
+	local joint = self._viewKickJoint
+	if joint and joint.Parent and self._viewKickBase then
+		(joint :: any)[self._viewKickProp] = self._viewKickBase
+	end
+end
+
 function BulletWeapon:onRenderStepped(dt)
 	BaseWeapon.onRenderStepped(self, dt)
 	if not self.tipAttach then return end
@@ -1161,6 +1248,35 @@ function BulletWeapon:onRenderStepped(dt)
 	local tipCFrame = self.tipAttach.WorldCFrame
 
 	if self.player == Players.LocalPlayer then
+		-- Retroceso visual del arma hacia atrás (client-only, solo LocalPlayer).
+		-- Offsetea el joint resuelto (grip o HandleWeld) y decae exponencial (mismo
+		-- estilo de decay que recoilIntensity). Snap final al valor base para no dejar
+		-- residuo. Config por arma: ViewKickDistance (studs), ViewKickReturn.
+		if self._viewKick > 1e-3 then
+			local cam = workspace.CurrentCamera
+			if cam and self:_ensureViewKickRefs() then
+				local joint = self._viewKickJoint :: any
+				local base = self._viewKickBase :: CFrame
+				local part = self._viewKickPart :: BasePart
+				-- Las armas explosivas (RPG) patean bastante más que las balísticas.
+				-- Un ViewKickDistance explícito en la config del Tool gana igualmente.
+				local defaultKick = if self:getConfigValue("ExplodeOnImpact", false) then 0.85 else 0.07
+				local maxBack = self:getConfigValue("ViewKickDistance", defaultKick)
+				-- "Hacia atrás" = hacia el jugador = opuesto al LookVector de la cámara
+				-- (referencia fiable; el TipAttachment no tiene orientación garantizada).
+				-- Lo pasamos al espacio local de la parte movida para offsetear el joint.
+				local backLocal = part.CFrame:VectorToObjectSpace(-cam.CFrame.LookVector)
+				local offset = backLocal * (self._viewKick * maxBack)
+				-- part_new = part_old * CFrame.new(offset) ⇒ prop = CFrame.new(-offset) * base
+				joint[self._viewKickProp] = CFrame.new(-offset) * base
+			end
+			local returnRate = self:getConfigValue("ViewKickReturn", 13)
+			self._viewKick *= math.exp(-returnRate * dt)
+			if self._viewKick <= 1e-3 then
+				self:_resetViewKick()
+			end
+		end
+
 		-- Retrieve aim point from camera and update player's aim animation
 		local aimTrack = self:getAnimTrack(self:getConfigValue("AimTrack", "RifleAim"))
 		local aimZoomTrack = self:getAnimTrack(self:getConfigValue("AimZoomTrack", "RifleAimDownSights"))

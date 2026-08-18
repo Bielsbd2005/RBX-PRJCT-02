@@ -25,12 +25,25 @@
 
 	Cuando el bot vuelve a moverse (speed >= epsilon) los contadores y
 	triggers se resetean automáticamente.
+
+	Los primeros BotConfig.Navigation.StuckSpawnGrace segundos de vida del
+	detector no acumulan: recién spawneado el bot cae sobre el pad, espera
+	path en la cola y se empuja con los otros bots del mismo spawn.
+
+	Debug de mapa: si el BoolValue ServerStorage.ShowStuckMarkers está en true,
+	cada escalada de nivel >= 2 deja una esfera neon rosa en el punto del
+	atasco (ver debug/StuckViz).
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local BotConfig = require(Shared:WaitForChild("constants"):WaitForChild("BotConfig"))
+local StuckViz = require(script.Parent.Parent:WaitForChild("debug"):WaitForChild("StuckViz"))
+
+-- Nivel mínimo que deja marker en el mapa. El nivel 1 (1s) dispara también con
+-- atascos transitorios entre bots, que no son un problema de geometría.
+local VIZ_MIN_LEVEL = 2
 
 type Navigator = {
 	isMoving: (self: any) -> boolean,
@@ -42,10 +55,6 @@ type RoamGraph = {
 	nearestPoint: (self: any, pos: Vector3) -> Vector3?,
 }
 
-type MetricsSink = {
-	record: (tag: string, payload: { [string]: any }, immediate: boolean?) -> (),
-}
-
 local StuckDetector = {}
 StuckDetector.__index = StuckDetector
 
@@ -54,11 +63,10 @@ export type StuckDetector = typeof(setmetatable({} :: {
 	_humanoid: Humanoid,
 	_navigator: Navigator,
 	_roamGraph: RoamGraph?,
-	_metrics: MetricsSink?,
 	_botName: string,
-	_mapName: string,
 	_lastPos: Vector3,
 	_lastTickT: number,
+	_spawnedAt: number,
 	_stuckAccum: number,
 	_triggered: { [number]: boolean },
 }, StuckDetector))
@@ -68,20 +76,17 @@ function StuckDetector.new(
 	humanoid: Humanoid,
 	navigator: Navigator,
 	roamGraph: RoamGraph?,
-	metrics: MetricsSink?,
-	botName: string?,
-	mapName: string?
+	botName: string?
 ): StuckDetector
 	local self = setmetatable({
 		_rootPart = rootPart,
 		_humanoid = humanoid,
 		_navigator = navigator,
 		_roamGraph = roamGraph,
-		_metrics = metrics,
 		_botName = botName or rootPart.Parent and rootPart.Parent.Name or "?",
-		_mapName = mapName or "?",
 		_lastPos = rootPart.Position,
 		_lastTickT = os.clock(),
+		_spawnedAt = os.clock(),
 		_stuckAccum = 0,
 		_triggered = {},
 	}, StuckDetector) :: StuckDetector
@@ -99,18 +104,6 @@ function StuckDetector:reset()
 	self._lastTickT = os.clock()
 end
 
-local function _emit(self, tag: string, level: number, immediate: boolean)
-	if not self._metrics then
-		return
-	end
-	self._metrics.record(tag, {
-		bot = self._botName,
-		map = self._mapName,
-		level = level,
-		pos = self._rootPart.Position,
-	}, immediate)
-end
-
 -- Las acciones de cada nivel NO emiten `humanoid:MoveTo` directos: hacerlo
 -- cancela el MoveTo del walk loop del Navigator y dispara MoveToFinished
 -- espuriamente, lo que hace que el walk loop avance a waypoints que el
@@ -120,6 +113,13 @@ end
 -- (cancel/recomputeLast) y deja que el caller (PATROL/CHASE) decida el
 -- siguiente movimiento.
 local function _applyLevel(self, level: number)
+	-- Antes de tocar nada: el marker debe quedar donde el bot ESTÁ atascado.
+	-- En nivel 4 el teleport mueve el rootPart, así que marcar aquí (y no al
+	-- final) es lo que hace que el punto señalado sea el problemático.
+	if level >= VIZ_MIN_LEVEL then
+		StuckViz.mark(self._rootPart.Position, level, self._botName)
+	end
+
 	if level == 1 then
 		-- 1s sin progreso: abandonar la navegación actual. cancel(true)
 		-- dispara onFailed deferred → PATROL polling sale del bucle y
@@ -128,19 +128,16 @@ local function _applyLevel(self, level: number)
 		-- (bot bloqueado contra otro NPC) se resuelven aquí porque al
 		-- pedir otro destino el path va por otra ruta.
 		self._navigator:cancel(true)
-		_emit(self, "stuck_lateral", level, false)
 	elseif level == 2 then
 		-- 2s: recompute al mismo destino. Si la ruta original tenía un
 		-- problema dinámico (otro bot bloqueando), una nueva ComputeAsync
 		-- puede encontrar otra forma.
 		self._navigator:recomputeLast()
-		_emit(self, "stuck_repath", level, false)
 	elseif level == 3 then
 		-- 4s: jump + abandonar + onFailed. El jump puede ayudar si el bot
 		-- está atascado contra un escalón pequeño que el pathfinder no vio.
 		self._humanoid.Jump = true
 		self._navigator:cancel(true)
-		_emit(self, "stuck_jump", level, true)
 	elseif level == 4 then
 		-- 8s: teleport al roam point navegable más cercano. Última opción.
 		local roamGraph = self._roamGraph
@@ -150,10 +147,7 @@ local function _applyLevel(self, level: number)
 		end
 		if nearest then
 			self._rootPart.CFrame = CFrame.new(nearest + Vector3.new(0, 3, 0))
-			_emit(self, "stuck_teleport", level, true)
 			self._lastPos = self._rootPart.Position
-		else
-			_emit(self, "stuck_teleport_unavailable", level, true)
 		end
 		self._navigator:cancel(true)
 		-- Reset post-teleport: el bot está en nuevo sitio, los contadores
@@ -166,6 +160,16 @@ end
 function StuckDetector:tick(now: number)
 	local dt = now - self._lastTickT
 	self._lastTickT = now
+
+	-- Gracia de spawn: durante los primeros segundos el bot cae desde +4 studs
+	-- sobre el pad, espera su turno en la cola de pathfinding (saturada en
+	-- round-start) y se empuja con los otros bots del mismo spawn. Nada de eso
+	-- es un problema de geometría del mapa, pero el detector lo veía como
+	-- "moving sin progreso" y escalaba en cada spawn.
+	if now - self._spawnedAt < BotConfig.Navigation.StuckSpawnGrace then
+		self._lastPos = self._rootPart.Position
+		return
+	end
 
 	local navigator = self._navigator
 	local moving = navigator:isMoving()

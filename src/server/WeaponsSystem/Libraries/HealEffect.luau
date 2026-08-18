@@ -1,7 +1,8 @@
 -- HealEffect.luau (Client Library)
--- Efecto visual de curación: partículas verdes que suben desde los bordes de la
--- pantalla + un glow verde sutil en el marco. Se dispara vía HealEffect.play()
--- cuando el jugador gana salud (ver HealthBarController).
+-- Efecto visual de curación: "+" verdes que suben desde las dos esquinas
+-- inferiores de la pantalla abriéndose hacia dentro + un glow verde sutil en el
+-- marco. Se dispara vía HealEffect.play() cuando el jugador gana salud (ver
+-- HealthBarController).
 --
 -- El ScreenGui es persistente (ResetOnSpawn=false) y se construye una sola vez
 -- de forma lazy. Cada play() corre una "envolvente" de intensidad (entra,
@@ -83,21 +84,38 @@ local function ensureGui(): boolean
 	return true
 end
 
--- Posición aleatoria SOLO en los bordes (nunca el centro).
-local function getEdgePosition(): UDim2
-	local edge = math.random(1, 4)
-	local margin = 0.13
-	local x, y
-	if edge == 1 then
-		x, y = math.random(), math.random() * margin
-	elseif edge == 2 then
-		x, y = math.random(), 1 - (math.random() * margin)
-	elseif edge == 3 then
-		x, y = math.random() * margin, math.random()
-	else
-		x, y = 1 - (math.random() * margin), math.random()
+-- Los "+" salen SOLO por las dos esquinas inferiores, nunca por el centro ni por
+-- los bordes de arriba: así el efecto no tapa el punto de mira ni el HUD. El
+-- exponente sesga la distribución hacia el vértice para que se lea como esquina
+-- y no como una banda; las esquinas se alternan para que no se agolpen en una.
+local CORNER_SPREAD_X = 0.26 -- fracción de ancho desde el lateral
+local CORNER_SPREAD_Y = 0.34 -- fracción de alto desde abajo
+local CORNER_BIAS = 1.7      -- >1 concentra hacia el vértice
+local _spawnFromLeft = false
+
+-- Devuelve la posición de salida y hacia dónde deriva en horizontal (+1 desde la
+-- esquina izquierda, -1 desde la derecha), para que suban abriéndose hacia dentro.
+local function getCornerSpawn(): (UDim2, number)
+	_spawnFromLeft = not _spawnFromLeft
+	local offsetX = (math.random() ^ CORNER_BIAS) * CORNER_SPREAD_X
+	local offsetY = (math.random() ^ CORNER_BIAS) * CORNER_SPREAD_Y
+	local x = if _spawnFromLeft then offsetX else 1 - offsetX
+	return UDim2.fromScale(x, 1 - offsetY), if _spawnFromLeft then 1 else -1
+end
+
+-- Tamaño relativo a 1080p: antes eran offsets fijos en px, así que en móvil un
+-- "+" grande se comía media pantalla mientras que en 1440p apenas se veía. El
+-- clamp evita que desaparezcan en resoluciones muy bajas o crezcan de más en 4K.
+local SIZE_REFERENCE_HEIGHT = 1080
+local SIZE_SCALE_MIN = 0.55
+local SIZE_SCALE_MAX = 1.15
+
+local function getSizeScale(gui: ScreenGui): number
+	local height = gui.AbsoluteSize.Y
+	if height <= 0 then
+		return 1
 	end
-	return UDim2.new(x, 0, y, 0)
+	return math.clamp(height / SIZE_REFERENCE_HEIGHT, SIZE_SCALE_MIN, SIZE_SCALE_MAX)
 end
 
 -- P8: cap duro de ImageLabels concurrentes. Sin esto, un heal genera ~45
@@ -105,8 +123,9 @@ end
 local MAX_ACTIVE_HEAL_IMAGES = 20
 local activeHealImages = 0
 
--- Una partícula de curación: aparece creciendo desde un borde, deriva hacia
--- arriba girando levemente y se desvanece. Se auto-destruye al terminar.
+-- Una partícula de curación: aparece creciendo desde una esquina inferior, sube
+-- abriéndose hacia dentro girando levemente y se desvanece. Se auto-destruye al
+-- terminar.
 local function spawnHealImage()
 	local gui = screenGui
 	if not gui then
@@ -119,30 +138,33 @@ local function spawnHealImage()
 		return
 	end
 
-	-- Tamaño en tres niveles: normales, grandes y enormes.
-	local targetSize, depth
+	-- Tamaño en tres niveles: pequeños, medianos y grandes. Los px son la
+	-- referencia a 1080p; getSizeScale los adapta a la resolución real. Los
+	-- grandes viven algo más porque recorren más pantalla.
+	local sizeScale = getSizeScale(gui)
+	local targetSize, depth, lifetime
 	local roll = math.random()
 	if roll < 0.10 then
-		targetSize = math.random(135, 195)
-		depth = "front"
+		targetSize, depth, lifetime = math.random(74, 108), "front", 0.95
 	elseif roll < 0.30 then
-		targetSize = math.random(80, 118)
-		depth = "front"
+		targetSize, depth, lifetime = math.random(44, 66), "front", 0.8
 	else
-		targetSize = math.random(38, 68)
-		depth = "back"
+		targetSize, depth, lifetime = math.random(21, 38), "back", 0.65
 	end
+	targetSize = math.max(8, math.floor(targetSize * sizeScale))
 
 	-- Profundidad: fondo tenue y detrás, frente nítido y delante.
 	local maxOpacity = if depth == "front" then 0.1 else 0.4
 	local zIndex = if depth == "front" then 20 else 8
 
+	local spawnPos, inwardDir = getCornerSpawn()
+
 	local img = Instance.new("ImageLabel")
 	img.Image = IMAGE_ID
 	img.BackgroundTransparency = 1
 	img.AnchorPoint = Vector2.new(0.5, 0.5)
-	img.Size = UDim2.fromOffset(targetSize * 0.4, targetSize * 0.4)
-	img.Position = getEdgePosition()
+	img.Size = UDim2.fromOffset(math.floor(targetSize * 0.4), math.floor(targetSize * 0.4))
+	img.Position = spawnPos
 	img.ImageColor3 = HEAL_COLOR
 	img.ImageTransparency = 1
 	img.Rotation = math.random(-8, 8)
@@ -150,19 +172,12 @@ local function spawnHealImage()
 	img.Parent = gui
 	activeHealImages += 1
 
+	-- Suben abriéndose hacia el centro (el componente horizontal apunta hacia
+	-- dentro desde su esquina), como un pequeño surtidor.
 	local startPos = img.Position
-	local driftPos = startPos + UDim2.new(math.random(-35, 35) / 1000, 0, -math.random(60, 100) / 1000, 0)
+	local driftPos = startPos
+		+ UDim2.new(inwardDir * math.random(10, 45) / 1000, 0, -math.random(70, 120) / 1000, 0)
 	local endRotation = img.Rotation + math.random(-6, 6)
-
-	-- Tiempos de vida cortos = movimiento rápido.
-	local lifetime
-	if targetSize > 150 then
-		lifetime = 0.95
-	elseif targetSize > 90 then
-		lifetime = 0.8
-	else
-		lifetime = 0.65
-	end
 
 	-- Fase 1: aparición suave (crece + se hace visible + gira un poco).
 	local appearInfo = TweenInfo.new(lifetime * 0.45, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
@@ -177,7 +192,7 @@ local function spawnHealImage()
 	local fade = TweenService:Create(img, fadeInfo, {
 		Position = driftPos,
 		ImageTransparency = 1,
-		Size = UDim2.fromOffset(targetSize * 0.75, targetSize * 0.75),
+		Size = UDim2.fromOffset(math.floor(targetSize * 0.75), math.floor(targetSize * 0.75)),
 		Rotation = endRotation,
 	})
 

@@ -59,6 +59,15 @@ local VIGNETTE_DAMAGE_PEAK_ALPHA = 1 - VIGNETTE_DAMAGE_PEAK_TRANSPARENCY
 local DAMAGE_FLASH_IN_INFO = TweenInfo.new(0.06, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local DAMAGE_FLASH_OUT_INFO = TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 
+-- Flash AZUL de viñeta al conseguir una baja propia. Se dispara junto al kick de
+-- FOV (ver NetworkingCallbacks.PlayerEliminated). Driver propio (KillAlphaDriver),
+-- que el renderer compone con menor prioridad que rojo/verde. Solo se dispara si
+-- la viñeta NO está ya ocupada por daño o curación.
+local VIGNETTE_KILL_PEAK_TRANSPARENCY = 0.35 -- 0 = opaco, 1 = invisible (en el pico)
+local VIGNETTE_KILL_PEAK_ALPHA = 1 - VIGNETTE_KILL_PEAK_TRANSPARENCY
+local KILL_FLASH_IN_INFO = TweenInfo.new(0.07, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local KILL_FLASH_OUT_INFO = TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+
 -- Damage trail ("ghost bar" estilo AAA): una barra roja detrás del Fill que
 -- muestra el chunk de vida recién perdido y se drena despacio hasta el valor
 -- actual. El Fill cae al instante; el trail lo persigue con un pequeño delay y
@@ -75,12 +84,15 @@ local vignette: GuiObject? = nil
 local healthAlphaDriver: NumberValue? = nil -- rojo, vida baja
 local healAlphaDriver: NumberValue? = nil -- verde, curación
 local damageAlphaDriver: NumberValue? = nil -- rojo, flash al recibir daño
+local killAlphaDriver: NumberValue? = nil -- azul, flash de baja propia
 local healVignetteTween: Tween? = nil
 local damageVignetteTween: Tween? = nil
+local killVignetteTween: Tween? = nil
 local healthConn: RBXScriptConnection? = nil
 local lastSeenHealth: number? = nil
 local healVignetteGeneration = 0
 local damageVignetteGeneration = 0
+local killVignetteGeneration = 0
 -- true mientras el flash verde de curación está en pantalla: durante ese tiempo
 -- los disparos NO ponen la viñeta roja (el verde manda).
 local healVignetteActive = false
@@ -183,6 +195,7 @@ local function getVignetteNodes(): (GuiObject?, NumberValue?, NumberValue?)
 	healthAlphaDriver = ensureDriver(vignette, "HealthAlphaDriver")
 	healAlphaDriver = ensureDriver(vignette, "HealAlphaDriver")
 	damageAlphaDriver = ensureDriver(vignette, "DamageAlphaDriver")
+	killAlphaDriver = ensureDriver(vignette, "KillAlphaDriver")
 
 	return vignette, healthAlphaDriver, healAlphaDriver
 end
@@ -281,6 +294,54 @@ local function showDamageVignette()
 	end)
 end
 
+-- Flash azul de baja propia. Sube rápido al pico y baja a 0 (sin hold), igual que
+-- el flash de daño. GATE: no se dispara si la viñeta ya está ocupada por curación
+-- (verde) o por daño/peligro de vida baja (rojo) — en esos casos el otro efecto
+-- manda y no queremos pisarlo con azul.
+local function showKillVignette()
+	getVignetteNodes()
+	local driver = killAlphaDriver
+	if not driver then return end
+
+	-- "Si no está visible por daño o curación": verde activo, flash de daño en
+	-- curso, o vignette rojo de peligro por vida baja → abortamos.
+	local dangerActive = healthAlphaDriver ~= nil and healthAlphaDriver.Value > 0
+	local damageActive = damageAlphaDriver ~= nil and damageAlphaDriver.Value > 0
+	if healVignetteActive or dangerActive or damageActive then
+		return
+	end
+
+	killVignetteGeneration += 1
+	local myGen = killVignetteGeneration
+
+	if killVignetteTween then
+		killVignetteTween:Cancel()
+		killVignetteTween = nil
+	end
+
+	driver.Value = 0
+	local fadeIn = TweenService:Create(driver, KILL_FLASH_IN_INFO, {
+		Value = VIGNETTE_KILL_PEAK_ALPHA,
+	})
+	killVignetteTween = fadeIn
+	fadeIn:Play()
+
+	task.spawn(function()
+		fadeIn.Completed:Wait()
+		if killVignetteGeneration ~= myGen then return end
+		if not driver.Parent then return end
+
+		local fadeOut = TweenService:Create(driver, KILL_FLASH_OUT_INFO, {
+			Value = 0,
+		})
+		killVignetteTween = fadeOut
+		fadeOut:Play()
+		fadeOut.Completed:Wait()
+		if killVignetteGeneration ~= myGen then return end
+		killVignetteTween = nil
+	end)
+end
+
 local function updateHealthBar(humanoid: Humanoid, animateUp: boolean?)
 	local bar, value = getHealthBarNodes()
 
@@ -365,6 +426,7 @@ function HealthBarController.onCharacterAdded(character: Model)
 	lastSeenHealth = nil
 	healVignetteGeneration += 1
 	damageVignetteGeneration += 1
+	killVignetteGeneration += 1
 	healVignetteActive = false
 	if healVignetteTween then
 		healVignetteTween:Cancel()
@@ -373,6 +435,10 @@ function HealthBarController.onCharacterAdded(character: Model)
 	if damageVignetteTween then
 		damageVignetteTween:Cancel()
 		damageVignetteTween = nil
+	end
+	if killVignetteTween then
+		killVignetteTween:Cancel()
+		killVignetteTween = nil
 	end
 	HealEffect.reset()
 	if damageTrailTween then
@@ -392,6 +458,9 @@ function HealthBarController.onCharacterAdded(character: Model)
 	if damageAlphaDriver and damageAlphaDriver.Parent then
 		damageAlphaDriver.Value = 0
 	end
+	if killAlphaDriver and killAlphaDriver.Parent then
+		killAlphaDriver.Value = 0
+	end
 
 	-- Clear cached nodes so they are re-fetched for the new character's GUI
 	fillBar = nil
@@ -401,6 +470,7 @@ function HealthBarController.onCharacterAdded(character: Model)
 	healthAlphaDriver = nil
 	healAlphaDriver = nil
 	damageAlphaDriver = nil
+	killAlphaDriver = nil
 
 	local humanoid = character:WaitForChild("Humanoid", 5) :: Humanoid?
 	if not humanoid then return end
@@ -429,6 +499,12 @@ function HealthBarController.onCharacterAdded(character: Model)
 		-- resto (daño, regen, respawn) se aplica al instante.
 		updateHealthBar(humanoid, isHeal)
 	end)
+end
+
+-- Flash azul de baja propia. Se llama desde NetworkingCallbacks.PlayerEliminated
+-- junto al kick de FOV. Internamente se auto-suprime si hay daño/curación visible.
+function HealthBarController.onKill()
+	showKillVignette()
 end
 
 return HealthBarController

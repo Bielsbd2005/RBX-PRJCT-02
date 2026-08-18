@@ -167,19 +167,12 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local mainIndicator = lockerWeaponsFolder:FindFirstChild("MainIndicator")
 	local specialIndicator = lockerWeaponsFolder:FindFirstChild("SpecialIndicator")
 
-	-- El botón vive donde sea dentro del menú (antes estaba fijo en "Bottom", que
-	-- se eliminó). Es opcional: si no existe, el locker se inicializa igual pero
-	-- sin enganchar el click de apertura (ver más abajo). Buscamos por nombre+clase
-	-- (como ClientBootstrap.findLockerButton): un FindFirstChild("Locker", true)
-	-- ciego podía devolver un nodo que NO es GuiButton y romper el feature al
-	-- enganchar MouseButton1Click.
-	local lockerBtn: GuiButton? = nil
-	for _, descendant in menuGui:GetDescendants() do
-		if descendant.Name == "Locker" and descendant:IsA("GuiButton") then
-			lockerBtn = descendant
-			break
-		end
-	end
+	-- Botón de apertura en Menu.Container.Locker
+	local container = menuGui:FindFirstChild("Container")
+	local lockerBtnInstance = container and container:FindFirstChild("Locker")
+	local lockerBtn: GuiButton? = if lockerBtnInstance and lockerBtnInstance:IsA("GuiButton")
+		then lockerBtnInstance
+		else nil
 	local uiGui = playerGui:WaitForChild("UserInterface") :: ScreenGui
 	local lockerFrame = uiGui:WaitForChild("Locker") :: Frame
 

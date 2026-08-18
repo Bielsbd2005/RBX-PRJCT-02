@@ -20,6 +20,11 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local TeamUtils = require(Shared.utils.TeamUtils)
 
 local HIGHLIGHT_NAME = "CharacterHighlight"
+-- Atributo que el servidor pone en el cuerpo cuando arranca el fundido del kill
+-- effect (ver RagdollCleanup.fadeAndDestroy), con la duración del fundido. Lo
+-- escuchamos para desvanecer el highlight en sync con el cuerpo. Literal
+-- compartido con el server; mantener ambos iguales.
+local FADE_OUT_ATTR = "KillEffectFadeOut"
 local COLOR_ALLY   = Color3.fromRGB(0, 210, 80)
 local COLOR_ENEMY  = Color3.fromRGB(220, 40, 40)
 local COLOR_LOCAL  = Color3.fromRGB(0, 0, 0)
@@ -27,11 +32,17 @@ local FILL_ALPHA   = 0.65
 local OUTLINE_ALPHA = 0.1
 
 -- Flash verde sobre el highlight del jugador local al absorber un orbe de vida:
--- entra rápido a verde con fill visible y vuelve suave al estado base (contorno
--- negro, sin fill). Umbral igual al de HealthBarController para no flashear con
--- la regen de 1 HP/s.
+-- entra rápido a verde y vuelve suave al estado base (contorno negro, sin fill).
+-- Umbral igual al de HealthBarController para no flashear con la regen de 1 HP/s.
+--
+-- El peso lo lleva el CONTORNO, no el relleno: el fill tiñe el cuerpo entero y
+-- se comía al personaje en verde, y encima se solapa con la viñeta verde de
+-- HealthBarController y los "+" de HealEffect. Queda en un tinte leve que se
+-- nota sin tapar nada (recordatorio: son transparencias, más alto = menos
+-- visible).
 local HEAL_FLASH_COLOR = Color3.fromRGB(60, 255, 120)
-local HEAL_FLASH_FILL_ALPHA = 0.4
+local HEAL_FLASH_FILL_ALPHA = 0.82
+local HEAL_FLASH_OUTLINE_ALPHA = 0
 local HEAL_FLASH_THRESHOLD = 5
 local HEAL_FLASH_HOLD = 0.45 -- segundos que el verde se mantiene antes de desvanecerse
 local TI_HEAL_FLASH_IN  = TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
@@ -109,9 +120,9 @@ local function _refreshColor(model: Model)
 	highlight.OutlineTransparency = OUTLINE_ALPHA
 end
 
--- Pulso verde breve sobre el highlight del jugador local (orbe de vida). Entra a
--- verde con fill visible y vuelve al estado base. El token invalida un flash
--- previo si llega otro heal antes de terminar.
+-- Pulso verde breve sobre el highlight del jugador local (orbe de vida): contorno
+-- verde marcado + un tinte muy leve en el cuerpo, y vuelta al estado base. El
+-- token invalida un flash previo si llega otro heal antes de terminar.
 local function _flashLocalHeal()
 	local char = localPlayer.Character
 	if not char then
@@ -133,7 +144,7 @@ local function _flashLocalHeal()
 		FillColor = HEAL_FLASH_COLOR,
 		OutlineColor = HEAL_FLASH_COLOR,
 		FillTransparency = HEAL_FLASH_FILL_ALPHA,
-		OutlineTransparency = 0,
+		OutlineTransparency = HEAL_FLASH_OUTLINE_ALPHA,
 	})
 	_healFlashTweens[#_healFlashTweens + 1] = tweenIn
 	tweenIn.Completed:Once(function(state)
@@ -158,6 +169,22 @@ local function _flashLocalHeal()
 		end)
 	end)
 	tweenIn:Play()
+end
+
+-- Desvanece el highlight a transparente en `fadeTime` segundos, en sync con el
+-- fundido del cuerpo del kill effect. Cuando el server destruye el cadáver al
+-- terminar el fundido, AncestryChanged → _detach elimina el Highlight ya invisible
+-- (sin pop). Lineal para casar con el tween lineal del cuerpo (RagdollCleanup).
+local function _fadeOutHighlight(model: Model, fadeTime: number)
+	local highlight = _trackedHighlights[model]
+	if not highlight then
+		return
+	end
+	local info = TweenInfo.new(fadeTime, Enum.EasingStyle.Linear, Enum.EasingDirection.Out)
+	TweenService:Create(highlight, info, {
+		FillTransparency = 1,
+		OutlineTransparency = 1,
+	}):Play()
 end
 
 local function _detach(model: Model)
@@ -201,20 +228,36 @@ local function _attach(model: Model)
 		end))
 	end
 
+	-- _shouldTrack ya garantizó que el model tiene Humanoid, pero guardamos por si
+	-- acaso. Lo reusamos para el flash de heal (local) y el fade al morir (todos).
+	local humanoid = model:FindFirstChildOfClass("Humanoid")
+
 	-- Char del jugador local: detectar heals discretos (orbe de vida, etc.) para
 	-- el flash verde. Umbral filtra la regen lenta. lastHealth se reinicia por
 	-- char (respawn) y se compara solo cuando ya hay baseline.
-	if player == localPlayer then
-		local humanoid = model:FindFirstChildOfClass("Humanoid")
-		if humanoid then
-			_localLastHealth = humanoid.Health
-			table.insert(conns, humanoid.HealthChanged:Connect(function(newHealth: number)
-				if _localLastHealth ~= nil and newHealth - _localLastHealth >= HEAL_FLASH_THRESHOLD then
-					_flashLocalHeal()
-				end
-				_localLastHealth = newHealth
-			end))
-		end
+	if player == localPlayer and humanoid then
+		_localLastHealth = humanoid.Health
+		table.insert(conns, humanoid.HealthChanged:Connect(function(newHealth: number)
+			if _localLastHealth ~= nil and newHealth - _localLastHealth >= HEAL_FLASH_THRESHOLD then
+				_flashLocalHeal()
+			end
+			_localLastHealth = newHealth
+		end))
+	end
+
+	-- Al eliminar al character (player o NPC) quitamos su highlight de golpe, en
+	-- vez de dejarlo acompañar al cadáver durante el ragdoll y desvanecerse al
+	-- final en sync con el cuerpo (KillEffectFadeOut). Enabled=false es instantáneo
+	-- y no toca los colores; el highlight se destruye luego por AncestryChanged
+	-- cuando el cuerpo sale del workspace. El respawn crea un char nuevo → _attach
+	-- fresco, así que nunca queda oculto un highlight que deba volver.
+	if humanoid then
+		table.insert(conns, humanoid.Died:Connect(function()
+			-- `highlight` es el de este _attach (capturado). Si el cuerpo ya salió
+			-- del workspace, _detach habría desconectado esta conn, así que aquí
+			-- siempre es válido.
+			highlight.Enabled = false
+		end))
 	end
 
 	-- Re-evaluar color cuando llegue/cambie cualquier atributo de team. Para
@@ -227,6 +270,15 @@ local function _attach(model: Model)
 		end))
 	end
 
+	-- Fundido del highlight en sync con el fundido del cuerpo (kill effect). El
+	-- server pone FADE_OUT_ATTR = duración al empezar a disolver el cadáver.
+	table.insert(conns, model:GetAttributeChangedSignal(FADE_OUT_ATTR):Connect(function()
+		local fadeTime = model:GetAttribute(FADE_OUT_ATTR)
+		if type(fadeTime) == "number" and fadeTime > 0 then
+			_fadeOutHighlight(model, fadeTime)
+		end
+	end))
+
 	-- Cleanup cuando el char sale del workspace (death/despawn/removal).
 	-- AncestryChanged cubre tanto Destroy() como reparenteo.
 	table.insert(conns, model.AncestryChanged:Connect(function(_, parent)
@@ -237,6 +289,13 @@ local function _attach(model: Model)
 
 	_trackedConns[model] = conns
 	_refreshColor(model)
+
+	-- Adjuntado tarde sobre un cadáver que YA está en fundido (p.ej. attr replicó
+	-- antes de que el model fuese trackeable): arrancar el fundido de inmediato.
+	local pendingFade = model:GetAttribute(FADE_OUT_ATTR)
+	if type(pendingFade) == "number" and pendingFade > 0 then
+		_fadeOutHighlight(model, pendingFade)
+	end
 end
 
 local function _refreshAll()

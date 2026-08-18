@@ -529,6 +529,21 @@ function BaseWeapon:getSound(soundName)
 end
 
 function BaseWeapon:onDestroyed()
+	-- Desvincular el render loop por-frame. Se bindea con BindToRenderStep en
+	-- onEquippedChanged y se guarda en self.activeRenderStepName (NO en
+	-- self.connections), así que el loop de disconnect de abajo no lo toca.
+	-- Si el Tool se destruye estando equipado (p.ej. RagdollCleanup borra el
+	-- cadáver tras morir, sin que dispare Unequipped), el render seguiría
+	-- corriendo para siempre spammeando "No animation controller"/"no aimTrack"
+	-- cada frame porque self.instance.Parent ya es nil. Limpiar equipped
+	-- garantiza además que los guards `if not self.equipped then return end`
+	-- cortan cualquier callback en vuelo.
+	if self.activeRenderStepName then
+		RunService:UnbindFromRenderStep(self.activeRenderStepName)
+		self.activeRenderStepName = nil
+	end
+	self.equipped = false
+
 	-- Disconnect all RBXScriptConnections
 	if self.connections then
 		for name, conn in self.connections do
@@ -777,7 +792,16 @@ function BaseWeapon:onStepped(dt)
 
 	-- Tracking continuo cada frame (no throttled). Usa `dt` real del Heartbeat
 	-- para que el desplazamiento por segundo sea independiente del framerate.
-	if self.weaponsSystem and self.weaponsSystem.camera then
+	-- IMPORTANTE: no aplicamos el pull mientras el jugador arrastra la cámara
+	-- activamente (touchObj activo). Antes el pull sobreescribía yaw/pitch cada
+	-- frame aunque el jugador estuviera moviendo el dedo → la cámara se sentía
+	-- magnetizada/bloqueada al enemigo durante el autoshoot y no se podía apuntar
+	-- a otro lado. El auto-fire (más abajo) sigue funcionando; solo se cede el
+	-- control de encuadre al jugador mientras arrastra.
+	local playerIsDraggingCamera = self.weaponsSystem
+		and self.weaponsSystem.camera
+		and self.weaponsSystem.camera.touchObj ~= nil
+	if self.weaponsSystem and self.weaponsSystem.camera and not playerIsDraggingCamera then
 		local directionToTarget = (targetPos - cameraOrigin).Unit
 		local desiredYaw = math.atan2(-directionToTarget.X, -directionToTarget.Z)
 		local desiredPitch = math.asin(directionToTarget.Y)

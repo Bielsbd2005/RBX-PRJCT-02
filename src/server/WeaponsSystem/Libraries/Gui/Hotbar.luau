@@ -3,13 +3,15 @@
 -- Gestiona la interfaz del hotbar (PC y Touchscreen) del sistema de armas.
 --
 -- Estructura esperada por slot (Item1 / Item2), ambos idénticos:
---   Item.Ammo.Value            -> balas restantes (solo el número actual)
---   Item.Container             -> ImageColor3 cyan si está equipado, gris si no
---   Item.Container.Thumbnail   -> imagen del arma; ImageColor3 blanco si seleccionado, gris si no
+--   Item.Image                    -> imagen del arma
+--   Item.Footer.Value             -> munición "actual/cargador" en RichText
+--   Item.UIAspectRatioConstraint  -> el slot seleccionado se ensancha
+--   Item.UIStroke                 -> blanco si seleccionado, morado oscuro si no
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 
 local ItemsConfig = require(Shared.constants.ItemsConfig)
@@ -19,30 +21,54 @@ local WeaponsSystemFolder = script.Parent.Parent.Parent
 local WeaponData = WeaponsSystemFolder:WaitForChild("WeaponData")
 local Libraries = WeaponsSystemFolder:WaitForChild("Libraries")
 
--- Container: borde/fondo del slot
-local HOTBAR_CONTAINER_EQUIPPED_COLOR = Color3.fromRGB(0, 222, 248)
-local HOTBAR_CONTAINER_IDLE_COLOR = Color3.fromRGB(84, 84, 84)
--- Thumbnail: imagen del arma
-local HOTBAR_THUMBNAIL_SELECTED_COLOR = Color3.fromRGB(255, 255, 255)
-local HOTBAR_THUMBNAIL_IDLE_COLOR = Color3.fromRGB(190, 190, 190)
--- Tween de tamaño del slot seleccionado
-local HOTBAR_SELECTED_SCALE = 1.18
-local HOTBAR_DEFAULT_SCALE = 1
-local HOTBAR_TWEEN_INFO = TweenInfo.new(0.18, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+-- Selección de slot: el tamaño lo manda el UIAspectRatioConstraint (el
+-- seleccionado se ensancha) y el UIStroke pasa a blanco. El Back del aspect da el
+-- "pop"; el stroke va con Quad porque un overshoot sobre un Color3 se sale de
+-- rango y pega un fogonazo.
+local HOTBAR_ASPECT_SELECTED = 1.6
+local HOTBAR_ASPECT_IDLE = 1
+local HOTBAR_STROKE_SELECTED_COLOR = Color3.fromRGB(255, 255, 255)
+local HOTBAR_STROKE_IDLE_COLOR = Color3.fromRGB(58, 52, 67)
+local HOTBAR_ASPECT_TWEEN_INFO = TweenInfo.new(0.18, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+local HOTBAR_STROKE_TWEEN_INFO = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+-- Un único layout para todos los dispositivos, colocado por el UIListLayout del
+-- root: en PC pegado a la derecha y en táctil centrado (entre los dos pulgares,
+-- sin chocar con el joystick ni el botón de disparo).
+local HOTBAR_ALIGNMENT_PC = Enum.HorizontalAlignment.Right
+local HOTBAR_ALIGNMENT_TOUCH = Enum.HorizontalAlignment.Center
 
 -- Texto de munición: color por munición baja y "..." animado al recargar.
 local AMMO_LOW_RATIO = 0.45 -- naranja por debajo de este % del cargador
 local AMMO_CRITICAL_RATIO = 0.2 -- rojo por debajo de este %
+local AMMO_COLOR_NORMAL = Color3.fromRGB(255, 255, 255)
 local AMMO_COLOR_LOW = Color3.fromRGB(255, 150, 0)
 local AMMO_COLOR_CRITICAL = Color3.fromRGB(230, 55, 55)
 local AMMO_COLOR_RELOAD = Color3.fromRGB(255, 255, 255)
 local RELOAD_DOT_INTERVAL = 0.25 -- segundos por punto del "..." de recarga
+-- "actual/cargador": el actual lleva el color de munición baja y el total va en
+-- gris pequeño. El color va DENTRO del tag porque con RichText el TextColor3 del
+-- label no afecta a los spans que traen su propio <font color>.
+local AMMO_RICH_FORMAT = '<font color="#%s">%d</font><font color="#d6d6d6" size="10">/%d</font>'
 
 local Hotbar = {}
 Hotbar.__index = Hotbar
 
 local function isHotbarImageNode(node)
 	return node and (node:IsA("ImageLabel") or node:IsA("ImageButton"))
+end
+
+local function isHotbarTextNode(node)
+	return node and (node:IsA("TextLabel") or node:IsA("TextButton"))
+end
+
+local function toHexColor(color: Color3): string
+	return string.format(
+		"%02X%02X%02X",
+		math.round(color.R * 255),
+		math.round(color.G * 255),
+		math.round(color.B * 255)
+	)
 end
 
 local function getCategoryByToolName(toolName)
@@ -100,48 +126,25 @@ end
 function Hotbar:_captureSlot(hotbarRoot, itemName)
 	if not hotbarRoot then return nil end
 
-	local itemsFolder = hotbarRoot:FindFirstChild("Items")
-	local searchRoot = if itemsFolder then itemsFolder else hotbarRoot
-
-	local itemFrame = searchRoot:FindFirstChild(itemName)
-	if not itemFrame then
-		local lowercaseName = string.lower(itemName)
-		for _, child in ipairs(searchRoot:GetChildren()) do
-			if string.lower(child.Name) == lowercaseName then
-				itemFrame = child
-				break
-			end
-		end
-	end
+	local itemFrame = hotbarRoot:FindFirstChild(itemName)
 	if not itemFrame or not itemFrame:IsA("GuiObject") then
 		return nil
 	end
 
-	local containerNode = itemFrame:FindFirstChild("Container")
-	local thumbnailNode = if containerNode then containerNode:FindFirstChild("Thumbnail") else nil
-	if not isHotbarImageNode(thumbnailNode) and containerNode then
-		thumbnailNode = containerNode:FindFirstChildWhichIsA("ImageButton")
-			or containerNode:FindFirstChildWhichIsA("ImageLabel")
-	end
-
-	local ammoRoot = itemFrame:FindFirstChild("Ammo")
-	local ammoValueNode = if ammoRoot then ammoRoot:FindFirstChild("Value") else nil
-	local ammoValueLabel = if ammoValueNode and (
-		ammoValueNode:IsA("TextLabel")
-		or ammoValueNode:IsA("TextButton")
-		or ammoValueNode:IsA("TextBox")
-	) then ammoValueNode else nil
+	local imageNode = itemFrame:FindFirstChild("Image")
+	local footerNode = itemFrame:FindFirstChild("Footer")
+	local ammoValueNode = if footerNode then footerNode:FindFirstChild("Value") else nil
 
 	return {
 		frame = itemFrame,
-		container = if containerNode and isHotbarImageNode(containerNode) then containerNode else nil,
-		thumbnail = if isHotbarImageNode(thumbnailNode) then thumbnailNode else nil,
+		image = if isHotbarImageNode(imageNode) then imageNode else nil,
+		aspect = itemFrame:FindFirstChildWhichIsA("UIAspectRatioConstraint"),
+		stroke = itemFrame:FindFirstChildWhichIsA("UIStroke"),
 		ammoValueNode = ammoValueNode,
-		ammoValueLabel = ammoValueLabel,
-		ammoDefaultColor = if ammoValueLabel then ammoValueLabel.TextColor3 else Color3.fromRGB(255, 255, 255),
-		baseSize = itemFrame.Size,
+		ammoValueLabel = if isHotbarTextNode(ammoValueNode) then ammoValueNode else nil,
 		_selected = nil,
-		_tween = nil,
+		_aspectTween = nil,
+		_strokeTween = nil,
 	}
 end
 
@@ -152,49 +155,44 @@ function Hotbar:_getWeaponImageByTool(tool, category)
 end
 
 function Hotbar:_setSlotImage(slotNode, image)
-	local thumbnail = slotNode and slotNode.thumbnail
-	if isHotbarImageNode(thumbnail) then
-		thumbnail.Image = image
-		thumbnail.ImageTransparency = if image == "" then 1 else 0
+	local imageNode = slotNode and slotNode.image
+	if isHotbarImageNode(imageNode) then
+		imageNode.Image = image
+		imageNode.ImageTransparency = if image == "" then 1 else 0
 	end
-end
-
-function Hotbar:_tweenSlotScale(slotNode, scale)
-	local frame = slotNode.frame
-	local baseSize = slotNode.baseSize
-	if not frame or not baseSize then return end
-	if slotNode._tween then
-		slotNode._tween:Cancel()
-		slotNode._tween = nil
-	end
-	local targetSize = UDim2.new(
-		baseSize.X.Scale * scale,
-		math.floor(baseSize.X.Offset * scale + 0.5),
-		baseSize.Y.Scale * scale,
-		math.floor(baseSize.Y.Offset * scale + 0.5)
-	)
-	local tween = TweenService:Create(frame, HOTBAR_TWEEN_INFO, { Size = targetSize })
-	slotNode._tween = tween
-	tween:Play()
 end
 
 function Hotbar:_setSlotSelected(slotNode, isSelected)
 	if not slotNode then return end
-	if slotNode.container then
-		slotNode.container.ImageColor3 = if isSelected
-			then HOTBAR_CONTAINER_EQUIPPED_COLOR
-			else HOTBAR_CONTAINER_IDLE_COLOR
+	-- Solo animamos cuando el estado de selección cambia, para no reiniciar los
+	-- tweens en cada refresh() (que se llama muy a menudo).
+	if slotNode._selected == isSelected then
+		return
 	end
-	if slotNode.thumbnail then
-		slotNode.thumbnail.ImageColor3 = if isSelected
-			then HOTBAR_THUMBNAIL_SELECTED_COLOR
-			else HOTBAR_THUMBNAIL_IDLE_COLOR
+	slotNode._selected = isSelected
+
+	local aspect = slotNode.aspect
+	if aspect then
+		if slotNode._aspectTween then
+			slotNode._aspectTween:Cancel()
+		end
+		local tween = TweenService:Create(aspect, HOTBAR_ASPECT_TWEEN_INFO, {
+			AspectRatio = if isSelected then HOTBAR_ASPECT_SELECTED else HOTBAR_ASPECT_IDLE,
+		})
+		slotNode._aspectTween = tween
+		tween:Play()
 	end
-	-- Solo animamos cuando el estado de selección cambia, para no reiniciar
-	-- el tween en cada refresh() (que se llama muy a menudo).
-	if slotNode._selected ~= isSelected then
-		slotNode._selected = isSelected
-		self:_tweenSlotScale(slotNode, if isSelected then HOTBAR_SELECTED_SCALE else HOTBAR_DEFAULT_SCALE)
+
+	local stroke = slotNode.stroke
+	if stroke then
+		if slotNode._strokeTween then
+			slotNode._strokeTween:Cancel()
+		end
+		local tween = TweenService:Create(stroke, HOTBAR_STROKE_TWEEN_INFO, {
+			Color = if isSelected then HOTBAR_STROKE_SELECTED_COLOR else HOTBAR_STROKE_IDLE_COLOR,
+		})
+		slotNode._strokeTween = tween
+		tween:Play()
 	end
 end
 
@@ -262,7 +260,8 @@ function Hotbar:_isToolReloading(tool): boolean
 end
 
 -- Pinta la munición de un slot: "..." blanco animado si su arma se recarga; si
--- no, el número con color por munición baja (naranja → rojo).
+-- no, "actual/cargador" con el número actual coloreado por munición baja
+-- (blanco → naranja → rojo).
 function Hotbar:_renderSlotAmmo(slotNode, tool)
 	if not slotNode then return end
 	local ammoValueLabel = slotNode.ammoValueLabel
@@ -281,29 +280,30 @@ function Hotbar:_renderSlotAmmo(slotNode, tool)
 	local currentAmmo = if tool then tool:GetAttribute("CurrentAmmo") else nil
 	local hasAmmo = type(currentAmmo) == "number"
 	local roundedAmmo = if hasAmmo then math.max(0, math.floor(currentAmmo + 0.5)) else 0
-	local text = if hasAmmo then tostring(roundedAmmo) else ""
 
 	if ammoValueLabel then
-		ammoValueLabel.RichText = false
+		if not hasAmmo then
+			ammoValueLabel.RichText = false
+			ammoValueLabel.Text = ""
+			return
+		end
+		local capacity = math.max(0, math.floor(getToolAmmoCapacity(tool)))
 		-- Color por munición baja (% del cargador): naranja, luego rojo.
-		local color = slotNode.ammoDefaultColor or AMMO_COLOR_RELOAD
-		if hasAmmo then
-			local capacity = getToolAmmoCapacity(tool)
-			if capacity > 0 then
-				local ratio = roundedAmmo / capacity
-				if ratio <= AMMO_CRITICAL_RATIO then
-					color = AMMO_COLOR_CRITICAL
-				elseif ratio <= AMMO_LOW_RATIO then
-					color = AMMO_COLOR_LOW
-				end
+		local color = AMMO_COLOR_NORMAL
+		if capacity > 0 then
+			local ratio = roundedAmmo / capacity
+			if ratio <= AMMO_CRITICAL_RATIO then
+				color = AMMO_COLOR_CRITICAL
+			elseif ratio <= AMMO_LOW_RATIO then
+				color = AMMO_COLOR_LOW
 			end
 		end
-		ammoValueLabel.TextColor3 = color
-		ammoValueLabel.Text = text
+		ammoValueLabel.RichText = true
+		ammoValueLabel.Text = string.format(AMMO_RICH_FORMAT, toHexColor(color), roundedAmmo, capacity)
 		return
 	end
 	if ammoValueNode and ammoValueNode:IsA("StringValue") then
-		ammoValueNode.Value = text
+		ammoValueNode.Value = if hasAmmo then tostring(roundedAmmo) else ""
 	elseif ammoValueNode and (ammoValueNode:IsA("IntValue") or ammoValueNode:IsA("NumberValue")) then
 		ammoValueNode.Value = roundedAmmo
 	end
@@ -488,6 +488,19 @@ function Hotbar:_registerButton(button, slot)
 	end))
 end
 
+-- Alinea el UIListLayout del hotbar según el dispositivo. Se reaplica en cada
+-- cambio de pantalla porque TouchEnabled puede pasar a true en caliente (una
+-- tablet a la que se le conecta un teclado, o al revés).
+function Hotbar:applyDeviceAlignment()
+	local alignment = if UserInputService.TouchEnabled then HOTBAR_ALIGNMENT_TOUCH else HOTBAR_ALIGNMENT_PC
+	for _, layout in ipairs(self.layouts) do
+		local listLayout = layout.root and layout.root:FindFirstChildWhichIsA("UIListLayout")
+		if listLayout then
+			listLayout.HorizontalAlignment = alignment
+		end
+	end
+end
+
 function Hotbar:setupLayout(hotbarRoot)
 	if not hotbarRoot then return end
 	local layout = {
@@ -496,11 +509,12 @@ function Hotbar:setupLayout(hotbarRoot)
 		item2 = self:_captureSlot(hotbarRoot, "Item2"),
 	}
 	table.insert(self.layouts, layout)
+	self:applyDeviceAlignment()
 
 	local item1Button = (layout.item1 and layout.item1.frame and layout.item1.frame:IsA("GuiButton") and layout.item1.frame)
-		or (layout.item1 and layout.item1.thumbnail)
+		or (layout.item1 and layout.item1.image)
 	local item2Button = (layout.item2 and layout.item2.frame and layout.item2.frame:IsA("GuiButton") and layout.item2.frame)
-		or (layout.item2 and layout.item2.thumbnail)
+		or (layout.item2 and layout.item2.image)
 	self:_registerButton(item1Button, 1)
 	self:_registerButton(item2Button, 2)
 end
@@ -514,9 +528,14 @@ function Hotbar:Destroy()
 	table.clear(self._charConns)
 	for _, layout in ipairs(self.layouts) do
 		for _, slotNode in { layout.item1, layout.item2 } do
-			if slotNode and slotNode._tween then
-				slotNode._tween:Cancel()
-				slotNode._tween = nil
+			if not slotNode then continue end
+			if slotNode._aspectTween then
+				slotNode._aspectTween:Cancel()
+				slotNode._aspectTween = nil
+			end
+			if slotNode._strokeTween then
+				slotNode._strokeTween:Cancel()
+				slotNode._strokeTween = nil
 			end
 		end
 	end

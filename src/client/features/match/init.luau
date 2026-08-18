@@ -5,6 +5,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local HttpService = game:GetService("HttpService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
+local StarterGui = game:GetService("StarterGui")
 
 local Client = script.Parent.Parent
 local Packages = ReplicatedStorage:WaitForChild("Packages")
@@ -39,6 +40,22 @@ local DepthOfFieldController = require(Client.core.lighting.DepthOfFieldControll
 
 
 local MatchFeature = {}
+
+local function setResetButtonEnabled(enabled: boolean)
+	task.spawn(function()
+		local ok = false
+		local attempts = 0
+		repeat
+			ok = pcall(function()
+				StarterGui:SetCore("ResetButtonCallback", enabled)
+			end)
+			attempts += 1
+			if not ok then
+				task.wait(0.2)
+			end
+		until ok or attempts >= 20
+	end)
+end
 
 local LOCAL_VOTE_COOLDOWN = 0.3
 local JOIN_CONFIRM_TIMEOUT = 8
@@ -242,6 +259,9 @@ function MatchFeature.start(menuController: any): any
 	-- Controles táctiles por defecto (joystick): ocultos al arrancar (Lobby) y solo
 	-- visibles en partida activa. Se alternan junto al resto del estado de fase.
 	TouchControlsController.setEnabled(false)
+	-- Reset de personaje: deshabilitado en lobby/menú, habilitado en partida.
+	setResetButtonEnabled(false)
+
 	MatchState.setOnPhaseChanged(function(_prev, nextPhase)
 		local inMenu = nextPhase == "Lobby" or nextPhase == "ReturningToMenu"
 		DepthOfFieldController.setEnabled(inMenu)
@@ -253,15 +273,17 @@ function MatchFeature.start(menuController: any): any
 			applyMapLighting()
 		end
 
-		-- El joystick solo en gameplay controlable (InMatch/Dying); en
-		-- Joining/ShowingResults/ReturningToMenu/Lobby no hay personaje que mover.
-		TouchControlsController.setEnabled(nextPhase == "InMatch" or nextPhase == "Dying")
+		-- El joystick y el reset de personaje solo en gameplay activo (InMatch/Dying).
+		local inGameplay = nextPhase == "InMatch" or nextPhase == "Dying"
+		TouchControlsController.setEnabled(inGameplay)
+		setResetButtonEnabled(inGameplay)
 	end)
 	janitor:Add(function()
 		MatchState.setOnPhaseChanged(nil)
 		DepthOfFieldController.setEnabled(false)
 		-- Restaurar el comportamiento por defecto de Roblox al desmontar el feature.
 		TouchControlsController.setEnabled(true)
+		setResetButtonEnabled(true)
 	end, true)
 
 	local matchMenu = MatchMenu.new(menuController, playerGui, menuGui, MatchState.shouldKeepMenuHidden)

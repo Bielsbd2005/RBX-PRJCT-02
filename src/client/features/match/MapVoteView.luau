@@ -56,6 +56,7 @@ type SlotRefs = {
 	mapNameLabel: TextLabel?,
 	mapNameDefaultColor: Color3?,
 	percentageLabel: TextLabel?,
+	percentageDefaultColor: Color3?,
 	imageNode: (ImageLabel | ImageButton)?,
 	stroke: UIStroke?,
 	shadow: GuiObject?,
@@ -149,14 +150,18 @@ local function _resolveClickable(container: GuiObject): GuiButton?
 	return container:FindFirstChildWhichIsA("GuiButton")
 end
 
--- Nodo de imagen opcional para la miniatura del mapa. Solo lo usamos si existe
--- un hijo dedicado — no pintamos el fondo del botón por accidente.
+-- Nodo de imagen para la miniatura del mapa. Si existe un hijo dedicado
+-- ("Image", "Thumbnail", "Map") lo usa; de lo contrario, si el propio contenedor
+-- es un ImageButton o ImageLabel, se usa el contenedor directamente.
 local function _resolveImageNode(container: GuiObject): (ImageLabel | ImageButton)?
 	for _, name in { "Image", "Thumbnail", "Map" } do
 		local node = container:FindFirstChild(name)
 		if node and (node:IsA("ImageLabel") or node:IsA("ImageButton")) then
 			return node :: any
 		end
+	end
+	if container:IsA("ImageButton") or container:IsA("ImageLabel") then
+		return container :: any
 	end
 	return nil
 end
@@ -205,10 +210,10 @@ local function _resolveSlots(frame: GuiObject): { SlotRefs }
 		-- "Shadow": overlay negro semitransparente que se muestra al perder.
 		local shadowNode = container:FindFirstChild("Shadow")
 		local shadow = if shadowNode and shadowNode:IsA("GuiObject") then shadowNode else nil
-		-- MapName se resuelve para todos los slots (incluido Random, si lo tiene)
-		-- porque su color también cambia al estar seleccionado.
 		local mapNameNode = container:FindFirstChild("MapName")
 		local mapNameLabel = if mapNameNode and mapNameNode:IsA("TextLabel") then mapNameNode else nil
+		local percentageNode = container:FindFirstChild("Percentage")
+		local percentageLabel = if percentageNode and percentageNode:IsA("TextLabel") then percentageNode else nil
 
 		table.insert(slots, {
 			dataKey = spec.dataKey,
@@ -217,7 +222,8 @@ local function _resolveSlots(frame: GuiObject): { SlotRefs }
 			clickable = clickable,
 			mapNameLabel = mapNameLabel,
 			mapNameDefaultColor = if mapNameLabel then mapNameLabel.TextColor3 else nil,
-			percentageLabel = container:FindFirstChild("Percentage") :: TextLabel?,
+			percentageLabel = percentageLabel,
+			percentageDefaultColor = if percentageLabel then percentageLabel.TextColor3 else nil,
 			imageNode = _resolveImageNode(container),
 			stroke = _resolveStroke(container, clickable),
 			shadow = shadow,
@@ -349,7 +355,12 @@ function MapVoteView:show(options: { option1: OptionModel, option2: OptionModel,
 		_applySlotSelection(slot, false)
 		_setShadow(slot, false)
 		_hideVoteIcons(slot)
-		if slot.percentageLabel then slot.percentageLabel.Text = "0%" end
+		if slot.percentageLabel then
+			slot.percentageLabel.Text = "0%"
+			if slot.percentageDefaultColor then
+				slot.percentageLabel.TextColor3 = slot.percentageDefaultColor
+			end
+		end
 
 		if not slot.isRandom then
 			local model = options[slot.dataKey :: any] :: OptionModel?
@@ -382,7 +393,12 @@ function MapVoteView:hide()
 		_ensureScale(slot.container).Scale = 1
 		_applySlotSelection(slot, false)
 		_setShadow(slot, false)
-		if slot.percentageLabel then slot.percentageLabel.Text = "0%" end
+		if slot.percentageLabel then
+			slot.percentageLabel.Text = "0%"
+			if slot.percentageDefaultColor then
+				slot.percentageLabel.TextColor3 = slot.percentageDefaultColor
+			end
+		end
 		_hideVoteIcons(slot)
 	end
 end
@@ -401,21 +417,30 @@ end
 -- Render puro de votos/% (sin guard ni cache). showWinner lo reusa para restaurar
 -- el estado final si el snapshot se limpió en la transición de fase.
 function MapVoteView:_renderVotes(voterData: VoterData)
-	-- Conteos por slot y total, para los porcentajes.
+	-- Conteos por slot, total y voto máximo para saber cuál va ganando.
 	local countsByKey: { [string]: number } = {}
 	local total = 0
+	local maxCount = 0
 	for _, slot in self._slots do
 		local n = #_parseVoterIds(voterData[slot.dataKey :: any] or "")
 		countsByKey[slot.dataKey] = n
 		total += n
+		if n > maxCount then
+			maxCount = n
+		end
 	end
 
 	for _, slot in self._slots do
-		-- Porcentaje.
+		local count = countsByKey[slot.dataKey] or 0
+		local isLeading = maxCount > 0 and count == maxCount
+
+		-- Porcentaje: se resalta con el color de seleccionado si va ganando.
 		if slot.percentageLabel then
-			local count = countsByKey[slot.dataKey] or 0
 			local pct = if total > 0 then math.floor((count / total) * 100 + 0.5) else 0
 			slot.percentageLabel.Text = tostring(pct) .. "%"
+			slot.percentageLabel.TextColor3 = if isLeading
+				then SELECTED_HIGHLIGHT
+				else (slot.percentageDefaultColor or slot.percentageLabel.TextColor3)
 		end
 
 		-- Avatares de los votantes.
@@ -488,6 +513,9 @@ function MapVoteView:showWinner(winnerMapName: string, onDone: (() -> ())?)
 			continue
 		end
 		_applySlotSelection(slot, false)
+		if slot.percentageLabel and slot.percentageDefaultColor then
+			slot.percentageLabel.TextColor3 = slot.percentageDefaultColor
+		end
 		local scale = _ensureScale(slot.container)
 		scale.Scale = 1
 		local delaySec = loserIndex * LOSER_STAGGER
@@ -499,11 +527,14 @@ function MapVoteView:showWinner(winnerMapName: string, onDone: (() -> ())?)
 		end)
 	end
 
-	-- Ganador: sin sombra, resalte (stroke + MapName) y pop con rebote.
+	-- Ganador: sin sombra, resalte (stroke + MapName + Percentage) y pop con rebote.
 	if winnerSlot then
 		local w = winnerSlot :: SlotRefs
 		_setShadow(w, false)
 		_applySlotSelection(w, true)
+		if w.percentageLabel then
+			w.percentageLabel.TextColor3 = SELECTED_HIGHLIGHT
+		end
 		local scale = _ensureScale(w.container)
 		scale.Scale = 1
 		task.delay(WINNER_POP_DELAY, function()
@@ -531,7 +562,10 @@ end
 
 function MapVoteView:updateTimer(timeLeft: number)
 	if self._timerLabel then
-		self._timerLabel.Text = tostring(math.max(0, timeLeft))
+		local totalSeconds = math.max(0, math.floor(timeLeft))
+		local minutes = math.floor(totalSeconds / 60)
+		local seconds = totalSeconds % 60
+		self._timerLabel.Text = string.format("%02d:%02d", minutes, seconds)
 	end
 end
 

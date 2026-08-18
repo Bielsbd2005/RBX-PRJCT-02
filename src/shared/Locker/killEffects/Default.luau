@@ -60,6 +60,10 @@ function RagdollModule.apply(char: Model): boolean
 		part.Anchored = false
 	end
 
+	-- Servidor simula el ragdoll (evita el congelamiento por network-ownership;
+	-- ver Utils.setServerOwnership). No-op en el preview del Locker (cliente).
+	Utils.setServerOwnership(allBaseParts)
+
 	for _, part in parts do
 		if part.Name ~= "HumanoidRootPart" then
 			part.CanCollide = true

@@ -1,51 +1,50 @@
 --!strict
 --[[
 	CaseUnboxing.luau
-	Animación slot-machine del unboxing de wrap cases sobre
-	UserInterface.Unboxing.Roll.WeaponLane/WrapLane (reel HORIZONTAL) +
-	Unboxing.Roll.RollBtn (dispara el roll real). Unboxing.Reveal es el panel
-	de resultado (Frame.Name/Rarity + Equip/Collect); Roll y Reveal son dos
-	estados excluyentes del mismo Unboxing (uno visible, el otro oculto).
+	Unboxing LOCAL y físico. Al abrir el detalle de una case, `showIdleChest`
+	clona ReplicatedStorage.ChestModel arriba y lo deja CAER (squash & stretch,
+	motor de resortes) hasta asentarse sobre Workspace.Cases.FallPosition: un cofre
+	que cae a la vista al destaparse la transición y luego queda idle esperando la
+	compra. Ese MISMO cofre persiste entre plays y se destruye al cerrar el detalle
+	(`hideIdleChest`).
 
-	Reel con REVEAL ESCALONADO + confetti, cronometrado para maximizar la
-	anticipación (la dopamina pica en la espera, no en el premio):
+	Al comprar, `play` reutiliza el cofre: enciende el BillboardGui
+	ChestModel.Box.RollBillboard y el reel de rareza gira dentro de
+	RollBillboard.RollFrame, clonando el Template que hay dentro
+	(Template.Container.ViewportFrame = render 3D del wrap; Template.Container.Value =
+	% de drop de ese wrap en la case). El "juice" va coreografiado: wind-up
+	(anticipación + agachado) → barrido con la VIBRACIÓN DEL COFRE ACOPLADA al reel
+	(intensidad ∝ velocidad, un "ka-chunk" por item que cruza el centro, impacto al
+	clavar el ganador) → reveal. Al terminar, el cofre calma la vibración y vuelve
+	a idle (billboard apagado, quieto en FallPosition).
 
-	  0. Attract: ambos lanes hacen un drift lento en bucle hasta pulsar
-	     RollBtn; al pulsar, una rampa de aceleración lleva el ciclo a
-	     velocidad de crucero y arranca el roll real.
-	  1. Crucero: ambas lanes giran rápido (blur = hype inicial).
-	  2. El ARMA frena primero (deceleración geométrica → "casi para… casi para")
-	     y se revela con un glow del color de su RAREZA. El WrapLane sigue
-	     girando de fondo → el ojo salta a la lane sin resolver.
-	  3. Hueco de anticipación (~0.55s): el wrap aún gira, "¿qué wrap le tocó?!".
-	  4. El WRAP frena (clímax final): glow dorado, pulso mayor y CONFETTI.
-	  5. Hold para leer el combo completo.
+	Además, el reel EMITE BEATS DE CÁMARA (onReelTick por item que cruza el centro,
+	con strength ∝ lentitud; onReelLand al clavar el ganador) que el Store mapea a
+	kicks de cámara: rumble mientras vuela → jolts secos al frenar → golpe al land →
+	boom del reveal. Este módulo no toca la cámara; solo señala los beats.
 
-	El resultado viene ROLEADO DEL SERVER (nunca una combinación ya poseída);
-	aquí solo se anima. Cada parada usa un schedule de ciclos conocido de
-	antemano, así el item que recicla cuando quedan CENTER_STATE-1 ciclos
-	aterriza en el centro — ahí se inyecta el resultado, invisible (entra por la
-	izquierda con alpha 1), y el swap nunca se ve. La relación recycle→centro es
-	válida desde cualquier estado de entrada, por eso el WrapLane puede crucear
-	un tiempo indefinido de fondo y luego frenar amañado con su cola de decel.
+	El resultado llega ROLEADO DEL SERVER (nunca un duplicado); aquí solo se anima.
+	Ya NO hay cámara de reveal propia: la cámara se queda en la de 'cases' todo el
+	rato (es la que encuadra el RevealSpawn). Tras el reel (reveal pop en el
+	billboard), el cofre se OCULTA, el arma con el wrap ganador se planta en
+	Workspace.Locker.RevealSpawn (con bob orgánico) y se avisa al Store, que resalta
+	la card ganadora en CaseContent.Main y cambia la barra Nav a Equip/Collect;
+	BLOQUEA hasta que el jugador lo descarta.
 
-	Los 5 items por lane ciclan 5 estados horizontales SIMÉTRICOS alrededor de
-	X=0.5; el 3 es el centro (escala grande). Los bordes (1 y 5) van con alpha 1
-	para entrar/salir en fundido.
-
-	Cada item es un clon del ItemTemplate, que ES un CanvasGroup (dentro lleva un
-	Container con UIGradient de rareza, ViewportFrame, Glow, Footer, Item,
-	Pattern). El CanvasGroup permite mover/escalar la celda y fundir/oscurecer
-	TODO de golpe con GroupTransparency/GroupColor3 — el ViewportFrame del wrap SÍ
-	renderiza dentro de un CanvasGroup (soportado por Roblox), así que no hace
-	falta sacarlo ni tratarlo aparte. El wrap se muestra en el ViewportFrame; el
-	arma en el ImageLabel Item.
+	El reel es un flujo INFINITO de wraps que se desplaza en horizontal y decelera
+	con ease-out hasta dejar al ganador clavado en el centro. La escala y la
+	opacidad de cada celda se calculan cada frame en función de su distancia al
+	centro (una "lente" gaussiana): el item que pasa por el centro crece — ese es
+	el gancho. Con object pooling: un puñado de celdas se reciclan generando wraps
+	random a medida que entran por la derecha, salvo el índice final (targetIndex),
+	que siempre lleva el resultado roleado por el server.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
+local Players = game:GetService("Players")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Packages = ReplicatedStorage:WaitForChild("Packages")
@@ -53,11 +52,9 @@ local Packages = ReplicatedStorage:WaitForChild("Packages")
 local Janitor = require(Packages.janitor) :: any
 local ItemsConfig = require(Shared.constants.ItemsConfig)
 local WrapCasesConfig = require(Shared.constants.WrapCasesConfig)
-local LockerCategory = require(Shared.constants.LockerCategory)
-local Network = require(Shared.networking.Network)
+local Notify = require(script.Parent.Parent.Parent.core.ui.NotificationController)
 local UITheme = require(script.Parent.Parent.Parent.core.ui.UITheme)
 local Confetti = require(script.Parent.Parent.Parent.core.ui.Confetti)
-local BlurController = require(script.Parent.Parent.Parent.core.ui.BlurController)
 local WeaponWrapPreviewer = require(script.Parent.Parent.locker.Previewers.WeaponWrapPreviewer)
 
 export type OwnedWeaponRef = {
@@ -72,299 +69,245 @@ export type PlayParams = {
 	resultWeaponCategory: string,
 	resultWeaponId: string,
 	ownedWeapons: { OwnedWeaponRef },
+	-- Se dispara al entrar en el reveal (cofre ya oculto). El Store lo usa para
+	-- cambiar la barra Nav de CaseContent a los botones Equip/Collect.
+	onRevealShown: (() -> ())?,
+	-- Bloqueante: el reveal espera aquí hasta que el jugador lo descarta
+	-- (Equip/Collect). Sin él, el reveal se mantiene RESULT_HOLD s y sigue solo.
+	awaitDismiss: (() -> ())?,
+	-- Beats del reel para ACOPLAR la cámara (los conduce el Store). onReelTick se
+	-- dispara una vez por item que cruza el centro durante la deceleración, con
+	-- `strength` 0→1 según lo lento que vaya el tick (rápido≈0, casi parado≈1) →
+	-- rumble de cámara que se vuelve jolts secos al frenar. onReelLand se dispara al
+	-- clavar el ganador (golpe seco, un beat antes del boom del reveal). Opcionales:
+	-- sin ellos el reel anima igual, solo que la cámara no reacciona al giro.
+	onReelTick: ((strength: number) -> ())?,
+	onReelLand: (() -> ())?,
 	onFinished: () -> (),
 }
 
 export type CaseUnboxing = {
 	play: (self: CaseUnboxing, params: PlayParams) -> boolean,
 	isPlaying: (self: CaseUnboxing) -> boolean,
+	showIdleChest: (self: CaseUnboxing) -> (),
+	hideIdleChest: (self: CaseUnboxing) -> (),
 }
 
--- ── Tuning del giro (perfil del prototipo original) ──────────
--- Antes de pulsar RollBtn ambos lanes hacen un drift lento en bucle (attract);
--- al pulsar, una rampa de aceleración lleva el ciclo de IDLE_SPEED a CRUISE_SPEED
--- y arranca el roll real.
-local IDLE_SPEED = 0.7 -- duración de ciclo del drift lento (pre-RollBtn)
-local ACCEL_MULT = 0.65 -- cada ciclo de la rampa dura *mult (0<mult<1 → acelera)
-local CRUISE_SPEED = 0.09 -- duración de ciclo a velocidad de crucero (blur)
--- Deceleración: cada ciclo dura *mult más, hasta el umbral (ese último ciclo NO
--- se ejecuta, como en el original). Más ticks lentos = más anticipación.
--- Orden del roll: PRIMERO el arma (frena con schedule fijo), LUEGO el wrap
--- (crucea de fondo mientras el arma se resuelve y es el clímax final).
-local FIRST_CRUISE_DURATION = 0.8 -- s de crucero del arma antes de frenar
-local FIRST_DECEL_MULT = 1.1
-local FIRST_STOP_THRESHOLD = 0.40
--- El WrapLane es el clímax: crucea de fondo mientras el arma se resuelve y
--- luego frena con su propia cola de decel (un pelín más larga → más agónica).
-local CLIMAX_DECEL_MULT = 1.1
-local CLIMAX_STOP_THRESHOLD = 0.50
+--============================================================
+-- SPRING: oscilador armónico amortiguado (motor del "juice").
+-- Da continuidad de velocidad → movimiento mantequilla, sin los "cortes" de
+-- encadenar tweens que frenan a 0 en cada paso.
+--============================================================
+local Spring = {}
+Spring.__index = Spring
 
--- ── Tuning de la revelación ──────────────────────────────────
--- Squash de anticipación del ganador antes del pop (fracción de su escala). El
--- agrandado pivota en 0.5,0.5 (AnchorPoint del container), sin mover el item.
+function Spring.new(frequency: number, damping: number, initial: number)
+	return setmetatable({
+		f = frequency,
+		d = damping,
+		p = initial,
+		v = 0,
+		target = initial,
+	}, Spring)
+end
+
+function Spring:setInstant(value: number) -- coloca el resorte "cargado" para que rebote
+	self.p = value
+	self.v = 0
+end
+
+function Spring:impulse(force: number)
+	self.v += force
+end
+
+function Spring:update(dt: number): number
+	local w = self.f * 2 * math.pi
+	local damper = 2 * self.d * w
+	local k = w * w
+	local a = k * (self.target - self.p) - damper * self.v
+	self.v += a * dt
+	self.p += self.v * dt
+	return self.p
+end
+
+-- ── Tuning de la caída (drop-in al abrir el detalle) ─────────
+local CHEST_FALL_HEIGHT = 38 -- studs por encima de FallPosition donde arranca
+local CHEST_TILT_X, CHEST_TILT_Z = 20, -16 -- inclinación inicial (grados)
+
+-- ── Tuning del "juice" del roll (vibración ACOPLADA al reel) ──
+-- La vibración ya no es random e independiente del reel (se veía desincronizada):
+-- ahora sale de la propia velocidad del reel y de cada item que cruza el centro,
+-- así el temblor "tiene sentido" con lo que se ve girar.
+local CHARGE_TIME = 0.5 -- s de anticipación (rumble creciente) antes de soltar el spin
+local CHARGE_RUMBLE = 0.7 -- intensidad de vibración al final de la carga
+local CHARGE_CROUCH = 0.28 -- pre-squash (agachado) al arrancar el spin → se libera hacia arriba
+local SPIN_REF_SPEED = 11 -- units/s del reel que mapean a vibración máxima (1)
+local SPIN_STRUGGLE_MIN = 0.12 -- vibración mínima mientras el reel rueda (nunca del todo quieto)
+-- Ratchet: cada item que cruza el centro pega un "ka-chunk". Los ticks lentos
+-- (al final del barrido) pegan MÁS fuerte → tensión de máquina tragaperras.
+local TICK_SQUASH = 0.11 -- squash base por tick
+local TICK_LUNGE_DEG = 20 -- tirón lateral base por tick (grados)
+-- Impacto al clavar el ganador en el centro: el clímax, sincronizado con el land.
+local LAND_SQUASH = 0.6
+local LAND_LUNGE_DEG = 42
+
+-- ── Tuning del reel (scroll continuo con lente de magnificación) ──
+-- El reel es un flujo INFINITO de celdas que se desplaza horizontalmente y
+-- decelera con ease-out hasta dejar al ganador clavado en el centro. La escala y
+-- la opacidad de cada celda NO son estados discretos: se calculan cada frame en
+-- función de su distancia al centro (una "lente" gaussiana) — eso es lo que hace
+-- que el item que pasa por el centro crezca y sea adictivo.
+local ITEM_SPACING = 0.14 -- separación entre celdas (fracción del ancho de RollFrame)
+local VISIBLE_RADIUS = 3 -- celdas a cada lado del centro que se renderizan (pooling)
+local SPIN_ITEMS = 28 -- nº de items que pasan por el centro antes de parar (más = más largo)
+local SPIN_DURATION = 5.0 -- s del barrido; ease-out Quint → deceleración "casi para…"
+local START_INDEX = VISIBLE_RADIUS + 1 -- arranque desde un índice >0 → reel lleno desde el frame 1
+
+-- Lente: escala por distancia al centro (en "item units"). En el centro
+-- SCALE_CENTER; hacia los lados cae suavemente hacia SCALE_EDGE (campana). Campana
+-- estrecha + pico alto = el item del centro "bulge-ea" con fuerza y los vecinos se
+-- encogen → el ojo se pega al centro (el gancho del reel).
+local SCALE_CENTER = 1.24
+local SCALE_EDGE = 0.78
+local LENS_SIGMA = 0.82 -- ancho de la campana (item units)
+-- Opacidad: totalmente visible en la banda central; se desvanece al acercarse a
+-- los bordes del RollFrame (entradas/salidas en fundido).
+local FADE_START = 1.6 -- dxUnits donde empieza a desvanecer
+local FADE_END = 2.6 -- dxUnits donde ya es invisible
+
+-- Squash de anticipación del ganador antes del pop (fracción de su escala).
 local TEASE_SQUASH = 0.9
-local COLOR_FLASH = Color3.fromRGB(255, 215, 0) -- glow dorado del clímax (wrap)
-local COLOR_DARKEN = Color3.fromRGB(40, 40, 40) -- perdedores oscurecidos
--- ItemTemplate comparte estructura con el del locker (Glow + UIGradient
--- coloreados por rareza); mismo set de colores que LockerGrid._applyRarityVisuals.
-local RARITY_GLOW = UITheme.LockerRarityGlow
-local RARITY_GRADIENTS = UITheme.LockerRarityGradients
+
+-- Reveal: tras el land, el ganador hace un tease (squash), un pop elástico y un
+-- burst de glow (clon de su propio render, coloreado por rareza) — el toque AAA.
+local REVEAL_TEASE = 0.4
+local REVEAL_PULSE = 1.25
+local REVEAL_SNAPBACK = 0.4
+local REVEAL_GLOW_DURATION = 0.6
+local REVEAL_GLOW_SCALE = 2.0 -- tamaño final del burst (múltiplo del tamaño del wrap)
 local RARITY_FALLBACK = "Common"
--- Hueco entre reveals: el arma ya está fijada y el wrap sigue girando. ~0.55s
--- basta para registrar el primer premio y disparar el "¿qué wrap le tocó?!".
-local ANTICIPATION_GAP = 0.8
--- Tiempo que el combo final se mantiene en pantalla antes de cerrar.
-local REVEAL_HOLD = 2.0
+local GLOW_FALLBACK_COLOR = Color3.fromRGB(255, 215, 0)
+-- Confetti (fullscreen) solo en las rarezas altas: el drop se siente especial.
+local CONFETTI_RARITIES = { Epic = true, Legendary = true }
 
--- Fade a negro que tapa el corte CaseContent → Unboxing (in y out).
-local BLACK_FADE_DURATION = 0.25
+-- ColorSequence para el Template.UIGradient de cada celda del reel, derivada del
+-- color de rareza (bordes oscurecidos, centro brillante) para dar ese shimmer.
+-- Memoizada por rareza: el render corre por cada celda reciclada, varias veces
+-- por segundo durante el spin, y las ColorSequences son inmutables.
+local rarityGradientCache = {} :: { [string]: ColorSequence }
+local function gradientForRarity(rarity: string): ColorSequence
+	local cached = rarityGradientCache[rarity]
+	if cached then
+		return cached
+	end
+	local base = UITheme.RarityColors[rarity] or UITheme.RarityColors[RARITY_FALLBACK]
+	local dark = base:Lerp(Color3.new(0, 0, 0), 0.4)
+	local bright = base:Lerp(Color3.new(1, 1, 1), 0.25)
+	local seq = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, dark),
+		ColorSequenceKeypoint.new(0.5, bright),
+		ColorSequenceKeypoint.new(1, dark),
+	})
+	rarityGradientCache[rarity] = seq
+	return seq
+end
 
--- ── Motion del reveal final ──────────────────────────────────
--- El arma flota (bob) con dos senoides desfasadas para un vaivén orgánico (no
--- un sube-baja mecánico).
+-- Tiempo que el cofre se queda con el resultado antes de ocultarse (fallback si
+-- no se pasa awaitDismiss).
+local RESULT_HOLD = 3.0
+
+-- ── Motion del arma+wrap ganador plantado en RevealSpawn ─────
+-- El arma flota (bob) con dos senoides desfasadas para un vaivén orgánico (no un
+-- sube-baja mecánico).
 local REVEAL_BOB_SPEED = 1.9 -- rad/s de la senoide principal del bob
 local REVEAL_BOB_AMPLITUDE = 0.35 -- studs de amplitud vertical del bob
--- Confetti continuo (bursts periódicos, no un solo Rain) mientras dura la
--- pantalla de reveal, para que se sienta como que sigue cayendo de fondo.
-local REVEAL_CONFETTI_INTERVAL = 0.8 -- s entre bursts
-local REVEAL_CONFETTI_BURST_COUNT = 36 -- piezas por burst (el Rain del climax usa 80)
-local REVEAL_CONFETTI_SPAWN_DURATION = 0.3 -- escalonado del burst (menos "pop" que el climax)
+-- El arma del reveal va a 1.5× su tamaño de gameplay.
+local REVEAL_MODEL_SCALE = 1.5
 
--- Perfiles de reveal (tiempos + intensidad). El primero (arma) es más ágil; el
--- clímax final (wrap) tiene tease/pulso mayores y confetti.
-type RevealProfile = { tease: number, hang: number, snapback: number, pulse: number, confetti: boolean }
-local FIRST_REVEAL: RevealProfile = { tease = 0.4, hang = 0.3, snapback = 0.3, pulse = 1.15, confetti = false }
-local CLIMAX_REVEAL: RevealProfile = { tease = 0.5, hang = 0.4, snapback = 0.4, pulse = 1.25, confetti = true }
-
--- Carrusel HORIZONTAL de 5 estados, SIMÉTRICO alrededor de X=0.5: 3 visibles
--- (2/3/4) + 2 bordes en fade (1 = entrando por la izquierda, 5 = saliendo por la
--- derecha). Nº impar de estados → el estado central (3) tiene los mismos vecinos
--- a cada lado, así el ganador aterriza CLAVADO en el centro (X=0.5) y el grupo
--- queda balanceado. El item avanza 1→5 (X creciente → derecha); el que llega al
--- estado 5 recicla fuera de pantalla por la izquierda (pre-estado 0 → 1).
-local STATES = {
-	{ X = 0.06, Scale = 0.85, Alpha = 1 },
-	{ X = 0.28, Scale = 0.95, Alpha = 0.45 },
-	{ X = 0.50, Scale = 1.15, Alpha = 0 },
-	{ X = 0.72, Scale = 0.95, Alpha = 0.45 },
-	{ X = 0.94, Scale = 0.85, Alpha = 1 },
-}
-local CENTER_STATE = 3
-local ITEM_COUNT = #STATES
-local RECYCLE_OFFSCREEN_X = -0.2
-
-type LaneItem = {
-	-- El ItemTemplate ES un CanvasGroup: se clona tal cual como celda. Se
-	-- mueve/escala cada ciclo (Position + UIScale) y se funde entero (incluido el
-	-- ViewportFrame, que SÍ renderiza dentro de un CanvasGroup) vía
-	-- GroupTransparency/GroupColor3.
-	container: CanvasGroup,
+type Cell = {
+	container: GuiObject, -- clon del Template (celda que se mueve/escala/funde)
 	scale: UIScale,
-	-- ImageLabel (weapon) o ViewportFrame (wrap): la fuente de contenido visual.
-	visual: GuiObject?,
-	-- Nodos del ItemTemplate clonado (bajo Container); el lane usa uno u otro.
-	slotImage: ImageLabel?,
-	slotViewport: ViewportFrame?,
-	-- Glow (resplandor) y UIGradient de rareza — misma estructura que el
-	-- ItemTemplate del locker.
-	glowNode: GuiObject?,
-	rarityGradientNode: UIGradient?,
-	appliedRarity: string?,
-	state: number,
+	viewport: ViewportFrame?, -- Container.ViewportFrame: render 3D del wrap
+	value: TextLabel?, -- Container.Value: % de drop del wrap
+	gradient: UIGradient?, -- Template.UIGradient: teñido por la rareza del wrap
+	appliedRarity: string?, -- rareza ya aplicada al gradiente (evita re-teñir)
+	renderJanitor: any?, -- limpia el render 3D anterior al reasignar la celda
+	index: number?, -- índice lógico asignado en el flujo (nil = libre en el pool)
 }
 
-type Lane = {
-	items: { LaneItem },
-	-- Asigna contenido a un item (arma o wrap) según la key del pool.
-	setContent: (item: LaneItem, key: any) -> (),
-	randomKey: () -> any,
-	targetKey: any,
+type Reel = {
+	cells: { Cell }, -- pool fijo de celdas (object pooling)
+	free: { Cell }, -- celdas libres del pool
+	active: { [number]: Cell }, -- índice del flujo → celda que lo muestra
+	folder: GuiObject,
+	render: (cell: Cell, wrapId: string) -> (),
+	contentForIndex: (index: number) -> string, -- ganador en targetIndex, random el resto
+	targetIndex: number, -- índice del flujo donde vive el ganador (final del scroll)
 }
 
--- Duración de cada ciclo de la cola de deceleración: *mult hasta el umbral (el
--- ciclo que cruza el umbral NO se incluye, como el `break` del prototipo).
-local function buildDecelTail(startCycleTime: number, multiplier: number, threshold: number): { number }
-	local schedule = {} :: { number }
-	local cycleTime = startCycleTime
-	while true do
-		cycleTime *= multiplier
-		if cycleTime >= threshold then
-			break
-		end
-		table.insert(schedule, cycleTime)
+-- ── Helpers de reel ──────────────────────────────────────────
+
+-- Funde la celda entera (incluido el ViewportFrame) si el Template es un
+-- CanvasGroup; si no, la degradación es no fundir (el reel gira igual).
+local function setCellAlpha(cell: GuiObject, alpha: number)
+	if cell:IsA("CanvasGroup") then
+		(cell :: CanvasGroup).GroupTransparency = alpha
 	end
-	return schedule
 end
 
--- Schedule completo: crucero a velocidad constante durante `cruiseDuration`,
--- seguido de la cola de deceleración.
-local function buildSpinSchedule(cruiseDuration: number, multiplier: number, threshold: number): { number }
-	local schedule = {} :: { number }
-	local constantCycles = math.max(1, math.floor(cruiseDuration / CRUISE_SPEED + 0.5))
-	for _ = 1, constantCycles do
-		table.insert(schedule, CRUISE_SPEED)
-	end
-	for _, cycleTime in buildDecelTail(CRUISE_SPEED, multiplier, threshold) do
-		table.insert(schedule, cycleTime)
-	end
-	return schedule
+-- Lente de magnificación: campana gaussiana centrada en dxUnits=0.
+local function lensScale(dxUnits: number): number
+	local t = dxUnits / LENS_SIGMA
+	return SCALE_EDGE + (SCALE_CENTER - SCALE_EDGE) * math.exp(-(t * t))
 end
 
--- Rampa de aceleración (attract → roll): cicla de fromTime hacia toTime
--- multiplicando por `mult` (<1) cada ciclo. El ciclo que baja del objetivo NO se
--- incluye (empalma con el crucero constante que viene después).
-local function buildAccelRamp(fromTime: number, toTime: number, mult: number): { number }
-	local schedule = {} :: { number }
-	local cycleTime = fromTime * mult
-	while cycleTime > toTime do
-		table.insert(schedule, cycleTime)
-		cycleTime *= mult
-	end
-	return schedule
+-- Opacidad (GroupTransparency): 0 en la banda central, 1 pasado el borde.
+local function lensTransparency(dxUnits: number): number
+	return math.clamp((dxUnits - FADE_START) / (FADE_END - FADE_START), 0, 1)
 end
 
-local function setItemAlpha(item: LaneItem, alpha: number)
-	-- Funde la celda entera (incluido el ViewportFrame) vía el CanvasGroup.
-	item.container.GroupTransparency = alpha
-end
-
-local function findCenterItem(lane: Lane): LaneItem?
-	for _, item in lane.items do
-		if item.state == CENTER_STATE then
-			return item
-		end
-	end
-	return nil
+-- true si las celdas del reel fueron destruidas (teardown a mitad de animación):
+-- las corrutinas abortan sin tocar instancias muertas.
+local function reelTornDown(reel: Reel): boolean
+	return reel.cells[1].container.Parent == nil
 end
 
 local CaseUnboxing = {}
 CaseUnboxing.__index = CaseUnboxing
 
--- Localiza el ItemTemplate (Frame plantilla con ViewportFrame + Item) dentro de
--- un lane. Se oculta al encontrarlo; los items del reel se clonan de él.
-local function findLaneTemplate(laneNode: Instance): GuiObject?
-	local template = laneNode:FindFirstChild("ItemTemplate")
-	if template and template:IsA("GuiObject") then
-		template.Visible = false
-		return template
-	end
-	return nil
-end
-
 function CaseUnboxing.new(uiGui: ScreenGui, parentJanitor: any): CaseUnboxing?
-	-- Estructura nueva: Unboxing.Roll agrupa el reel (WeaponLane/WrapLane +
-	-- RollBtn) y ES el fondo (se tinta por rareza); Unboxing.Reveal agrupa el
-	-- panel de resultado (Frame.Name/Rarity + Equip/Collect). Roll/Reveal se
-	-- muestran/ocultan como dos estados excluyentes del mismo Unboxing.
-	local frameNode = uiGui:FindFirstChild("Unboxing")
-	local rollNode = if frameNode then frameNode:FindFirstChild("Roll") else nil
-	local revealNode = if frameNode then frameNode:FindFirstChild("Reveal") else nil
-	local weaponLaneNode = if rollNode then rollNode:FindFirstChild("WeaponLane") else nil
-	local wrapLaneNode = if rollNode then rollNode:FindFirstChild("WrapLane") else nil
-	local rollBtnNode = if rollNode then rollNode:FindFirstChild("RollBtn") else nil
-
-	if not (frameNode and frameNode:IsA("GuiObject"))
-		or not (rollNode and rollNode:IsA("GuiObject"))
-		or not (weaponLaneNode and weaponLaneNode:IsA("GuiObject"))
-		or not (wrapLaneNode and wrapLaneNode:IsA("GuiObject")) then
-		warn("[CaseUnboxing] Falta UserInterface.Unboxing.Roll.WeaponLane/WrapLane; unboxing sin animación.")
+	local chestTemplate = ReplicatedStorage:FindFirstChild("ChestModel")
+	if not (chestTemplate and chestTemplate:IsA("Model")) then
+		warn("[CaseUnboxing] Falta ReplicatedStorage.ChestModel (Model); unboxing sin animación.")
 		return nil
 	end
-
-	local weaponTemplate = findLaneTemplate(weaponLaneNode)
-	local wrapTemplate = findLaneTemplate(wrapLaneNode)
-	if not weaponTemplate or not wrapTemplate then
-		warn("[CaseUnboxing] Falta ItemTemplate en WeaponLane/WrapLane; unboxing sin animación.")
-		return nil
-	end
-
-	local revealCardNode = if revealNode then revealNode:FindFirstChild("Frame") else nil
-	local revealNameNode = if revealCardNode then revealCardNode:FindFirstChild("Name") else nil
-	local revealRarityNode = if revealCardNode then revealCardNode:FindFirstChild("Rarity") else nil
-	local equipBtnNode = if revealNode then revealNode:FindFirstChild("Equip") else nil
-	local collectBtnNode = if revealNode then revealNode:FindFirstChild("Collect") else nil
 
 	local self = setmetatable({}, CaseUnboxing) :: any
-	self._frame = frameNode :: GuiObject
-	self._rollNode = rollNode :: GuiObject
-	-- El propio Roll es el fondo: se tinta por rareza durante el giro.
-	self._backgroundNode = rollNode :: GuiObject
-	self._baseBackgroundColor = rollNode.BackgroundColor3
-	self._weaponLaneFolder = weaponLaneNode :: GuiObject
-	self._wrapLaneFolder = wrapLaneNode :: GuiObject
-	self._weaponTemplate = weaponTemplate
-	self._wrapTemplate = wrapTemplate
-	self._rollBtn = if rollBtnNode and rollBtnNode:IsA("GuiButton") then rollBtnNode :: GuiButton else nil
-	if not self._rollBtn then
-		warn("[CaseUnboxing] Falta Unboxing.Roll.RollBtn; el roll arrancará automáticamente.")
-	end
-
-	self._revealNode = if revealNode and revealNode:IsA("GuiObject") then revealNode :: GuiObject else nil
-	self._revealNameLabel = if revealNameNode and revealNameNode:IsA("TextLabel") then revealNameNode :: TextLabel else nil
-	self._revealRarityLabel = if revealRarityNode and revealRarityNode:IsA("TextLabel") then revealRarityNode :: TextLabel else nil
-	self._equipBtn = if equipBtnNode and equipBtnNode:IsA("GuiButton") then equipBtnNode :: GuiButton else nil
-	self._collectBtn = if collectBtnNode and collectBtnNode:IsA("GuiButton") then collectBtnNode :: GuiButton else nil
-	if not self._revealNode then
-		warn("[CaseUnboxing] Falta Unboxing.Reveal; el reveal final no tendrá panel de resultado.")
-	end
-
-	-- Roll y Reveal son estados excluyentes: se arranca en Roll (Reveal oculto);
-	-- el toggle real ocurre en _revealResult.
-	self._rollNode.Visible = true
-	if self._revealNode then
-		self._revealNode.Visible = false
-	end
-
+	self._chestTemplate = chestTemplate :: Model
+	self._uiGui = uiGui -- fullscreen host para el confetti del reveal (rarezas altas)
 	self._playing = false
 	self._rng = Random.new()
 	self._janitor = Janitor.new()
 	parentJanitor:Add(self._janitor, "Destroy")
-	-- Janitor por-play: items dinámicos, pool de viewports y tweens del run activo.
+	-- Janitor por-play: items del reel, renders 3D y tweens del run activo (NO el
+	-- cofre: ese vive en _chestJanitor y persiste entre plays).
 	self._playJanitor = Janitor.new()
 	self._janitor:Add(self._playJanitor, "Destroy")
-
-	self._frame.Visible = false
-
-	-- Overlay negro full-screen que tapa el corte CaseContent → Unboxing.
-	-- Hermano del frame de Unboxing en el mismo ScreenGui, por encima de todo.
-	local fadeOverlay = Instance.new("Frame")
-	fadeOverlay.Name = "UnboxingFade"
-	fadeOverlay.Size = UDim2.fromScale(1, 1)
-	fadeOverlay.BackgroundColor3 = Color3.new(0, 0, 0)
-	fadeOverlay.BackgroundTransparency = 1
-	fadeOverlay.BorderSizePixel = 0
-	fadeOverlay.ZIndex = 1000
-	fadeOverlay.Visible = false
-	fadeOverlay.Parent = uiGui
-	self._janitor:Add(fadeOverlay, "Destroy")
-	self._fadeOverlay = fadeOverlay
-
+	-- Janitor del cofre idle: cofre + billboard (en PlayerGui) + motor de pose.
+	-- Vive desde showIdleChest hasta hideIdleChest, cruzando varios plays.
+	self._chestJanitor = Janitor.new()
+	self._janitor:Add(self._chestJanitor, "Destroy")
+	-- Estado del cofre idle (nil hasta showIdleChest).
+	self._chest = nil :: Model?
+	self._motion = nil :: any
+	self._rollBillboard = nil :: BillboardGui?
+	self._rollFrameGui = nil :: GuiObject?
+	self._reelTemplate = nil :: GuiObject?
 	return self
-end
-
--- Tapa la pantalla en negro (fade in) o la destapa (fade out). Bloqueante:
--- espera a que el tween termine antes de continuar la orquestación.
-function CaseUnboxing:_fadeScreen(toOpaque: boolean)
-	local overlay = self._fadeOverlay
-	overlay.Visible = true
-	local tween = self:_playTween(overlay, TweenInfo.new(BLACK_FADE_DURATION, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-		BackgroundTransparency = if toOpaque then 0 else 1,
-	})
-	task.wait(BLACK_FADE_DURATION)
-	if not toOpaque then
-		overlay.Visible = false
-	end
-	return tween
 end
 
 function CaseUnboxing:isPlaying(): boolean
 	return self._playing
-end
-
--- true si los items del run fueron destruidos (teardown del feature a mitad de
--- animación) — las corrutinas abortan sin tocar instancias muertas.
-local function laneTornDown(lane: Lane): boolean
-	return lane.items[1].container.Parent == nil
 end
 
 -- Registra un tween en el janitor del play (se cancela si el feature muere a
@@ -376,15 +319,332 @@ function CaseUnboxing:_playTween(instance: Instance, tweenInfo: TweenInfo, goals
 	return tween
 end
 
--- ── Construcción de lanes ────────────────────────────────────
+-- Tween registrado en el janitor DEL COFRE (no del play): la caída de entrada y
+-- el asentado del cofre viven en su propio ciclo de vida, no en el del play.
+function CaseUnboxing:_chestTween(instance: Instance, tweenInfo: TweenInfo, goals: { [string]: any }): Tween
+	local tween = TweenService:Create(instance, tweenInfo, goals)
+	self._chestJanitor:Add(tween, "Cancel")
+	tween:Play()
+	return tween
+end
 
-function CaseUnboxing:_createLaneItem(template: GuiObject, laneFolder: GuiObject, initialState: number): LaneItem
-	-- El ItemTemplate ES un CanvasGroup: se clona tal cual como celda. Se posiciona
-	-- horizontalmente por X y se funde entero (incluido el ViewportFrame, que SÍ
-	-- renderiza dentro de un CanvasGroup) con GroupTransparency.
-	local container = template:Clone() :: CanvasGroup
+-- Tween BLOQUEANTE de la trayectoria rígida del cofre (pathValue).
+function CaseUnboxing:_tweenChestPath(motion: any, target: CFrame, time: number, style: Enum.EasingStyle, direction: Enum.EasingDirection)
+	local tween = self:_chestTween(motion.pathValue, TweenInfo.new(time, style, direction), { Value = target })
+	tween.Completed:Wait()
+end
+
+-- ── Cofre físico (idle en FallPosition + squash & stretch) ───
+
+-- Resuelve el CFrame de mundo de FallPosition (Attachment o BasePart).
+local function nodeWorldCFrame(node: Instance): CFrame?
+	if node:IsA("Attachment") then
+		return node.WorldCFrame
+	elseif node:IsA("BasePart") then
+		return node.CFrame
+	end
+	return nil
+end
+
+-- Igual que nodeWorldCFrame pero también acepta un Model: el marcador RevealSpawn
+-- puede ser Attachment, BasePart o Model.
+local function markerWorldCFrame(node: Instance): CFrame?
+	if node:IsA("Model") then
+		return node:GetPivot()
+	end
+	return nodeWorldCFrame(node)
+end
+
+-- Monta el motor de pose del cofre EN REPOSO sobre `endCFrame` (FallPosition):
+-- captura piezas para squash & stretch no uniforme y arranca un Heartbeat que
+-- compone stretch por velocidad + impacto (squash) + forcejeo (ruido Perlin).
+-- Devuelve un `motion` con el pathValue (trayectoria rígida) y los resortes para
+-- que `_run` lo coreografíe. En idle el forcejeo está apagado, así que el cofre
+-- solo se asienta quieto en FallPosition.
+-- `stablePart`, si se pasa (la parte que hostea el RollBillboard), se EXCLUYE
+-- del squash/forcejeo: solo sigue la trayectoria limpia (`pathCF`, sin
+-- `struggleCF` ni escala). Así el cofre puede forcejear todo el rato sin que
+-- el billboard (y el reel dentro) tiemble o se desplace con él — el resto de
+-- piezas sigue temblando normalmente (más vivo, más AAA).
+-- El motor vive en `_chestJanitor` (ciclo de vida del cofre idle), no en el play.
+-- El cofre NACE arriba (CHEST_FALL_HEIGHT + tilt) para caer con `_dropInChest`;
+-- `endCFrame` es el reposo sobre FallPosition. `motion.settled` pasa a true
+-- cuando termina la caída (play espera a que aterrice antes de rolar).
+function CaseUnboxing:_buildChestMotion(chest: Model, endCFrame: CFrame, stablePart: BasePart?): any
+	local startCFrame = endCFrame
+		* CFrame.new(0, CHEST_FALL_HEIGHT, 0)
+		* CFrame.Angles(math.rad(CHEST_TILT_X), 0, math.rad(CHEST_TILT_Z))
+	chest:PivotTo(startCFrame)
+
+	-- Captura de piezas: tamaño original + transform relativo al pivote para
+	-- escalar (squash/stretch) alrededor del pivote sin deformar la jerarquía.
+	-- `stablePart` se captura aparte (mismo cálculo de `rel`) y NO entra en
+	-- `pieces`, así `applyPose` (squash/forcejeo) nunca la toca.
+	local basePivot = chest:GetPivot()
+	local pieces = {} :: { { part: BasePart, size: Vector3, rel: CFrame } }
+	local stableRel: CFrame? = nil
+	for _, d in chest:GetDescendants() do
+		if d:IsA("BasePart") then
+			d.Anchored = true -- controlamos la pose manualmente
+			local rel = basePivot:ToObjectSpace(d.CFrame)
+			if stablePart and d == stablePart then
+				stableRel = rel
+			else
+				table.insert(pieces, {
+					part = d,
+					size = d.Size,
+					rel = rel,
+				})
+			end
+		end
+	end
+
+	local function applyPose(pivotCF: CFrame, scale: Vector3)
+		for _, info in pieces do
+			local rel = info.rel
+			local pos = rel.Position
+			local scaledPos = Vector3.new(pos.X * scale.X, pos.Y * scale.Y, pos.Z * scale.Z)
+			info.part.CFrame = pivotCF * (CFrame.new(scaledPos) * rel.Rotation)
+			info.part.Size = info.size * scale
+		end
+	end
+
+	local pathValue = Instance.new("CFrameValue")
+	pathValue.Value = startCFrame
+	self._chestJanitor:Add(pathValue, "Destroy")
+
+	local motion = {
+		pathValue = pathValue,
+		startCFrame = startCFrame,
+		endCFrame = endCFrame,
+		applyPose = applyPose,
+		squashSpring = Spring.new(10, 0.30, 0), -- subamortiguado → pop elástico
+		lungeX = Spring.new(6, 0.40, 0), -- tirones internos (radianes)
+		lungeZ = Spring.new(6, 0.40, 0),
+		struggleIntensity = 0,
+		settled = false, -- true cuando la caída de entrada termina
+		seed = math.random() * 1000,
+		lastY = startCFrame.Position.Y,
+	}
+
+	local connection = RunService.Heartbeat:Connect(function(dt)
+		if not chest.Parent then
+			return
+		end
+		dt = math.min(dt, 1 / 45) -- estabilidad del resorte ante lag spikes
+
+		local pathCF = motion.pathValue.Value
+
+		-- Stretch automático por velocidad vertical.
+		local y = pathCF.Position.Y
+		local vy = (y - motion.lastY) / math.max(dt, 1e-4)
+		motion.lastY = y
+		local speedStretch = math.clamp(math.abs(vy) * 0.006, 0, 0.55)
+		if vy > 0 then
+			speedStretch *= 0.6 -- estira menos al subir que al caer
+		end
+
+		-- Squash por impacto.
+		local squash = motion.squashSpring:update(dt)
+
+		-- Forcejeo orgánico (ruido Perlin + tirones), con rampa de intensidad.
+		local lx = motion.lungeX:update(dt)
+		local lz = motion.lungeZ:update(dt)
+		local struggleCF = CFrame.identity
+		if motion.struggleIntensity > 0.001 then
+			local t = os.clock()
+			local maxTilt = math.rad(9)
+			local n1 = math.noise(t * 5.5, motion.seed, 0.0)
+			local n2 = math.noise(motion.seed, t * 6.1, 0.0)
+			local n3 = math.noise(t * 9.0, motion.seed, 5.0)
+			local rx = (n1 * maxTilt + lx) * motion.struggleIntensity
+			local rz = (n2 * maxTilt + lz) * motion.struggleIntensity
+			local lift = math.abs(n3) * 0.35 * motion.struggleIntensity
+			struggleCF = CFrame.new(0, lift, 0) * CFrame.Angles(rx, 0, rz)
+		end
+
+		-- Composición de escala (conserva volumen aprox.).
+		local sy = math.max(1 + speedStretch - squash, 0.25)
+		local sxz = math.max(1 - speedStretch * 0.42 + squash * 0.58, 0.25)
+
+		applyPose(pathCF * struggleCF, Vector3.new(sxz, sy, sxz))
+
+		-- La parte estable sigue SOLO el path limpio (sin forcejeo ni escala).
+		if stablePart and stableRel then
+			stablePart.CFrame = pathCF * stableRel
+		end
+	end)
+	self._chestJanitor:Add(connection, "Disconnect")
+
+	motion.dispose = function()
+		connection:Disconnect()
+		pcall(function()
+			pathValue:Destroy()
+		end)
+	end
+
+	return motion
+end
+
+-- Coreografía de la caída de entrada (al abrir el detalle): anticipación
+-- (overshoot arriba) → caída acelerada → rebotes con squash decreciente. Corre en
+-- su propia corrutina (no bloquea showIdleChest) y marca `motion.settled` al
+-- terminar. Bloquea vía _tweenChestPath entre pasos.
+function CaseUnboxing:_dropInChest(chest: Model, motion: any)
+	-- 1. Anticipación (overshoot hacia arriba desde el punto de spawn).
+	local anticipation = motion.startCFrame
+		* CFrame.new(0, 2.5, 0)
+		* CFrame.Angles(math.rad(-10), 0, math.rad(10))
+	self:_tweenChestPath(motion, anticipation, 0.28, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+	if not chest.Parent then return end
+
+	-- 2. Caída (acelerada como gravedad) → impacto (squash fuerte → rebote).
+	self:_tweenChestPath(motion, motion.endCFrame, 0.32, Enum.EasingStyle.Quart, Enum.EasingDirection.In)
+	motion.squashSpring:setInstant(0.5)
+	if not chest.Parent then return end
+
+	-- 3. Rebotes con squash/stretch decreciente.
+	local bounces = {
+		{ height = 3.4, up = 0.18, down = 0.16, squash = 0.32 },
+		{ height = 1.2, up = 0.13, down = 0.12, squash = 0.18 },
+		{ height = 0.35, up = 0.09, down = 0.08, squash = 0.09 },
+	}
+	for _, b in bounces do
+		if not chest.Parent then return end
+		self:_tweenChestPath(motion, motion.endCFrame * CFrame.new(0, b.height, 0), b.up, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
+		self:_tweenChestPath(motion, motion.endCFrame, b.down, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+		motion.squashSpring:setInstant(b.squash)
+	end
+end
+
+-- Genera el cofre en lo alto sobre Workspace.Cases.FallPosition y lo deja CAER
+-- (drop-in) hasta asentarse; luego queda idle hasta que `play` lo reutiliza.
+-- Idempotente: si ya hay un cofre vivo, no hace nada. Sin FallPosition/ChestModel/
+-- estructura del billboard, degrada dejando el estado sin cofre (play hará el
+-- reveal sin reel).
+--
+-- El BillboardGui se mueve YA a PlayerGui (apagado, con Adornee = Box) porque un
+-- BillboardGui SOLO rasteriza el contenido 3D de un ViewportFrame si vive en
+-- PlayerGui y apunta a la parte del mundo vía Adornee; colgado del cofre en
+-- Workspace el viewport del reel saldría en blanco. Queda "pegado" al cofre (Box
+-- va por la trayectoria limpia, sin forcejeo). Se registra en _chestJanitor: al
+-- moverlo fuera del cofre ya no lo destruye chest:Destroy().
+function CaseUnboxing:showIdleChest()
+	if self._chest and (self._chest :: Model).Parent then
+		return -- ya hay un cofre idle en escena
+	end
+
+	local casesFolder = Workspace:FindFirstChild("Cases")
+	local fallNode = if casesFolder then casesFolder:FindFirstChild("FallPosition") else nil
+	local endCFrame = if fallNode then nodeWorldCFrame(fallNode) else nil
+	if not endCFrame then
+		warn("[CaseUnboxing] Falta Workspace.Cases.FallPosition (Attachment/BasePart); sin cofre idle.")
+		return
+	end
+
+	local chest = self._chestTemplate:Clone()
+	self._chestJanitor:Add(chest, "Destroy")
+
+	local box = chest:FindFirstChild("Box")
+	local rollBillboard = if box then box:FindFirstChild("RollBillboard") else nil
+	local rollFrame = if rollBillboard then rollBillboard:FindFirstChild("RollFrame") else nil
+	local templateNode = if rollFrame then rollFrame:FindFirstChild("Template") else nil
+	local rollFrameGui = if rollFrame and rollFrame:IsA("GuiObject") then rollFrame :: GuiObject else nil
+	local template = if templateNode and templateNode:IsA("GuiObject") then templateNode :: GuiObject else nil
+
+	-- Billboard apagado en idle; el Template es solo la plantilla del reel.
+	if rollBillboard and rollBillboard:IsA("BillboardGui") then
+		rollBillboard.Enabled = false
+	end
+	if template then
+		template.Visible = false
+	end
+
+	-- Motor de pose. Nace arriba (para caer). `box` (si es BasePart) se excluye
+	-- del squash/forcejeo → el billboard nunca tiembla con el cofre.
+	local motion = self:_buildChestMotion(chest, endCFrame, if box and box:IsA("BasePart") then box :: BasePart else nil)
+	chest.Parent = casesFolder or Workspace
+
+	-- Billboard → PlayerGui (apagado, Adornee = Box) listo para renderizar el reel
+	-- cuando se encienda en `play`.
+	if rollBillboard and rollBillboard:IsA("BillboardGui") and box and box:IsA("BasePart") then
+		local playerGui = if self._uiGui then self._uiGui.Parent else Players.LocalPlayer:FindFirstChild("PlayerGui")
+		if playerGui then
+			rollBillboard.Adornee = box :: BasePart
+			rollBillboard.Parent = playerGui
+			self._chestJanitor:Add(rollBillboard, "Destroy")
+		end
+	end
+
+	self._chest = chest
+	self._motion = motion
+	self._rollBillboard = if rollBillboard and rollBillboard:IsA("BillboardGui") then rollBillboard :: BillboardGui else nil
+	self._rollFrameGui = rollFrameGui
+	self._reelTemplate = template
+
+	-- Drop-in ASÍNCRONO: showIdleChest se llama con la pantalla en negro (fade de
+	-- la transición del CaseContent); la caída corre en su corrutina para que la
+	-- transición no se bloquee y el cofre caiga a la vista justo al destaparse.
+	task.spawn(function()
+		self:_dropInChest(chest, motion)
+		motion.settled = true
+	end)
+end
+
+-- Destruye el cofre idle (y su billboard/motor). Se llama al cerrar el detalle
+-- de la case. Idempotente.
+function CaseUnboxing:hideIdleChest()
+	self._chestJanitor:Cleanup()
+	self._chest = nil
+	self._motion = nil
+	self._rollBillboard = nil
+	self._rollFrameGui = nil
+	self._reelTemplate = nil
+end
+
+-- Anticipación antes de soltar el spin (BLOQUEANTE, ~CHARGE_TIME): la vibración
+-- sube (rumble creciente) y termina con un pre-squash (agachado) que se libera
+-- hacia arriba justo cuando arranca el reel — el "wind up" que le da sentido al
+-- roll. La vibración del propio barrido la conduce _runReel (acoplada al reel),
+-- así que aquí solo cargamos la tensión.
+function CaseUnboxing:_chargeUpChest(chest: Model, motion: any)
+	local t0 = os.clock()
+	while os.clock() - t0 < CHARGE_TIME and chest.Parent do
+		local a = (os.clock() - t0) / CHARGE_TIME
+		-- Curva acelerada: el rumble crece más rápido al final (a²) → tensión.
+		motion.struggleIntensity = a * a * CHARGE_RUMBLE
+		-- Micro-golpes esporádicos que se aceleran al acercarse el disparo.
+		if self._rng:NextNumber() < a * 0.35 then
+			local dir = if self._rng:NextNumber() < 0.5 then 1 else -1
+			motion.lungeZ:impulse(math.rad(self._rng:NextInteger(8, 18)) * dir)
+		end
+		RunService.Heartbeat:Wait()
+	end
+	-- Pre-squash (agachado) → al soltarse, el resorte lo lanza hacia arriba a la
+	-- vez que el reel arranca a máxima velocidad.
+	motion.squashSpring:setInstant(CHARGE_CROUCH)
+end
+
+-- ── Reel de wraps (dentro del BillboardGui) ──────────────────
+
+-- El reel posiciona cada celda A MANO (Position por distancia al centro). Un
+-- UIListLayout/UIGridLayout/UITableLayout en RollFrame (patrón habitual en
+-- plantillas de "reel") pelearía con eso: reordena los hijos en fila por
+-- LayoutOrder e IGNORA el Position que le pongamos, así que todo se ve
+-- apilado a la izquierda y nunca "para" en el centro. Se desactiva (no se
+-- destruye, por si el diseñador lo reutiliza) al montar el reel.
+local function disableConflictingLayouts(folder: GuiObject)
+	for _, child in folder:GetChildren() do
+		if child:IsA("UIListLayout") or child:IsA("UIGridLayout") or child:IsA("UITableLayout") or child:IsA("UIPageLayout") then
+			(child :: any).Enabled = false
+		end
+	end
+end
+
+function CaseUnboxing:_createCell(template: GuiObject, folder: GuiObject): Cell
+	local container = template:Clone()
 	container.Name = "ReelItem"
-	container.Visible = true
+	container.Visible = false -- las celdas libres del pool quedan ocultas
 	container.AnchorPoint = Vector2.new(0.5, 0.5)
 
 	local existingScale = container:FindFirstChildOfClass("UIScale")
@@ -394,100 +654,33 @@ function CaseUnboxing:_createLaneItem(template: GuiObject, laneFolder: GuiObject
 		scale.Parent = container
 	end
 
-	-- Contenido bajo ItemTemplate.Container (fallback al propio container legacy).
+	-- Contenido bajo Template.Container (fallback al propio container).
 	local contentNode = container:FindFirstChild("Container") or container
-	local slotImageNode = contentNode:FindFirstChild("Item")
-	local slotViewportNode = contentNode:FindFirstChild("ViewportFrame")
-	local glowNode = contentNode:FindFirstChild("Glow")
-	-- UIGradient de rareza: el que cuelga directo de Container (el de Glow es nieto).
-	local rarityGradient = contentNode:FindFirstChildOfClass("UIGradient")
+	local viewportNode = contentNode:FindFirstChild("ViewportFrame")
+	local valueNode = contentNode:FindFirstChild("Value")
+	-- Template.UIGradient (directo en la celda): se tiñe por rareza en render.
+	local gradientNode = container:FindFirstChildOfClass("UIGradient")
 
-	local state = STATES[initialState]
-	container.Position = UDim2.fromScale(state.X, 0.5)
-	scale.Scale = state.Scale
-	container.GroupTransparency = state.Alpha
-	container.Parent = laneFolder
+	container.Parent = folder
 	self._playJanitor:Add(container, "Destroy")
 
 	return {
 		container = container,
 		scale = scale,
-		visual = nil,
-		slotImage = if slotImageNode and slotImageNode:IsA("ImageLabel") then slotImageNode else nil,
-		slotViewport = if slotViewportNode and slotViewportNode:IsA("ViewportFrame") then slotViewportNode else nil,
-		glowNode = if glowNode and glowNode:IsA("GuiObject") then glowNode else nil,
-		rarityGradientNode = rarityGradient,
-		state = initialState,
+		viewport = if viewportNode and viewportNode:IsA("ViewportFrame") then viewportNode else nil,
+		value = if valueNode and valueNode:IsA("TextLabel") then valueNode else nil,
+		gradient = gradientNode,
+		appliedRarity = nil,
+		renderJanitor = nil,
+		index = nil,
 	}
 end
 
--- Colorea Glow + UIGradient de la celda según rareza — igual que
--- LockerGrid._applyRarityVisuals. Cachea la última rareza aplicada para no
--- re-teñir en cada reciclo si el item mantiene la misma rareza.
-local function applyRarityVisuals(item: LaneItem, rarity: string)
-	if item.appliedRarity == rarity then
-		return
-	end
-	item.appliedRarity = rarity
+function CaseUnboxing:_buildContinuousReel(params: PlayParams, folder: GuiObject, template: GuiObject): Reel?
+	local caseDefinition = params.caseDefinition
+	local resultWrapId = params.resultWrapId
 
-	local glowColor = RARITY_GLOW[rarity] or RARITY_GLOW[RARITY_FALLBACK]
-	local glowNode = item.glowNode
-	if glowNode and glowColor then
-		if glowNode:IsA("ImageLabel") or glowNode:IsA("ImageButton") then
-			glowNode.ImageColor3 = glowColor
-		elseif glowNode:IsA("Frame") then
-			glowNode.BackgroundColor3 = glowColor
-		end
-	end
-
-	local gradient = RARITY_GRADIENTS[rarity] or RARITY_GRADIENTS[RARITY_FALLBACK]
-	if item.rarityGradientNode and gradient then
-		item.rarityGradientNode.Color = gradient
-	end
-end
-
--- WeaponLane: pool de armas poseídas → el ImageLabel `Item` del template.
-function CaseUnboxing:_buildWeaponLane(ownedWeapons: { OwnedWeaponRef }, targetWeapon: OwnedWeaponRef): Lane
-	local items = {} :: { LaneItem }
-	for index = 1, ITEM_COUNT do
-		local item = self:_createLaneItem(self._weaponTemplate, self._weaponLaneFolder, index)
-		-- Arma: se muestra la imagen (Item); el ViewportFrame del template no se usa.
-		if item.slotViewport then
-			item.slotViewport.Visible = false
-		end
-		if item.slotImage then
-			item.slotImage.Visible = true
-			item.visual = item.slotImage
-		end
-		table.insert(items, item)
-	end
-
-	local rng = self._rng
-	local lane: Lane = {
-		items = items,
-		setContent = function(item: LaneItem, key: any)
-			local weapon = key :: OwnedWeaponRef
-			local icon = item.slotImage
-			if icon then
-				icon.Image = weapon.image
-				icon.ImageColor3 = Color3.fromRGB(255, 255, 255)
-			end
-			local categoryConfig = (ItemsConfig :: any)[weapon.category]
-			local weaponDefinition = if type(categoryConfig) == "table" then categoryConfig[weapon.weaponId] else nil
-			local rarity = tostring(if type(weaponDefinition) == "table" then weaponDefinition.Rarity or "Common" else "Common")
-			applyRarityVisuals(item, rarity)
-		end,
-		randomKey = function()
-			return ownedWeapons[rng:NextInteger(1, #ownedWeapons)]
-		end,
-		targetKey = targetWeapon,
-	}
-	return lane
-end
-
-function CaseUnboxing:_buildWrapLane(caseDefinition: WrapCasesConfig.WrapCaseDefinition, resultWrapId: string): Lane?
-	-- IDs de wrap posibles (items de la case + el resultado), solo los que tienen
-	-- definición válida en ItemsConfig.
+	-- IDs de wrap posibles (items de la case + el resultado) con definición válida.
 	local wrapIdSet = {} :: { [string]: boolean }
 	for _, caseItem in caseDefinition.Items do
 		if type(ItemsConfig.WeaponWraps[caseItem.WrapId]) == "table" then
@@ -498,8 +691,7 @@ function CaseUnboxing:_buildWrapLane(caseDefinition: WrapCasesConfig.WrapCaseDef
 		wrapIdSet[resultWrapId] = true
 	end
 	if not wrapIdSet[resultWrapId] then
-		-- Sin definición del wrap resultado no hay nada que animar.
-		return nil
+		return nil -- sin definición del resultado no hay nada que animar
 	end
 
 	local wrapIds = {} :: { string }
@@ -508,580 +700,494 @@ function CaseUnboxing:_buildWrapLane(caseDefinition: WrapCasesConfig.WrapCaseDef
 	end
 	table.sort(wrapIds) -- orden estable para el rng
 
-	local items = {} :: { LaneItem }
-	for index = 1, ITEM_COUNT do
-		local item = self:_createLaneItem(self._wrapTemplate, self._wrapLaneFolder, index)
-		-- Wrap: se muestra el ViewportFrame 3D; la imagen (Item) del template no se usa.
-		if item.slotImage then
-			item.slotImage.Visible = false
-		end
-		if item.slotViewport then
-			item.slotViewport.Visible = true
-			item.visual = item.slotViewport
-		end
-		table.insert(items, item)
+	-- Pool fijo: basta con cubrir la ventana visible (VISIBLE_RADIUS a cada lado)
+	-- más un colchón para las celdas que entran/salen por los bordes.
+	local cellCount = VISIBLE_RADIUS * 2 + 3
+	local cells = {} :: { Cell }
+	local free = {} :: { Cell }
+	for _ = 1, cellCount do
+		local cell = self:_createCell(template, folder)
+		table.insert(cells, cell)
+		table.insert(free, cell)
 	end
-
-	-- Janitor por item: limpia el render 3D anterior antes de renderizar el
-	-- siguiente wrap (cada reciclo cambia de wrap).
-	local renderJanitors = {} :: { [LaneItem]: any }
 
 	local rng = self._rng
-	local lane: Lane = {
-		items = items,
-		setContent = function(item: LaneItem, key: any)
-			local wrapId = key :: string
-			local target = item.slotViewport
-			local wrapDefinition = ItemsConfig.WeaponWraps[wrapId]
-			if not target or type(wrapDefinition) ~= "table" then
-				return
-			end
+	local targetIndex = START_INDEX + SPIN_ITEMS
 
-			-- Render DIRECTO en el ViewportFrame del item, como el locker
-			-- (WeaponWrapPreviewer.Render). El enfoque master+copy (clonar un
-			-- WorldModel ya parenteado entre viewports) deja el viewport en blanco:
-			-- Roblox no re-renderiza contenido 3D clonado entre ViewportFrames.
-			local jan = renderJanitors[item]
-			if jan then
-				jan:Cleanup() -- destruye el WorldModel/Camera/texturas del wrap anterior
-			else
-				jan = Janitor.new()
-				renderJanitors[item] = jan
-				self._playJanitor:Add(jan, "Destroy")
-			end
-
-			local ok = WeaponWrapPreviewer.Render(target, {
-				TextureID = wrapDefinition.TextureID,
-				BaseColor = wrapDefinition.BaseColor,
-				Material = wrapDefinition.Material,
-				isAnimated = wrapDefinition.isAnimated,
-				StudsPerTile = wrapDefinition.StudsPerTile,
-			}, jan)
-			if ok then
-				WeaponWrapPreviewer.reframeCentered(target)
-			end
-			target.ImageColor3 = Color3.fromRGB(255, 255, 255)
-			item.visual = target
-
-			applyRarityVisuals(item, tostring(wrapDefinition.Rarity or "Common"))
-		end,
-		randomKey = function()
-			return wrapIds[rng:NextInteger(1, #wrapIds)]
-		end,
-		targetKey = resultWrapId,
-	}
-	return lane
-end
-
--- ── Giro ─────────────────────────────────────────────────────
-
-function CaseUnboxing:_updateBackground(color: Color3, duration: number)
-	if not self._backgroundNode then return end
-	self:_playTween(self._backgroundNode, TweenInfo.new(duration, Enum.EasingStyle.Sine), { BackgroundColor3 = color })
-end
-
--- Avanza una lane UN ciclo. El item que estaba en el último estado recicla por la
--- izquierda: recibe el resultado (targetKey) si `landTarget`, o contenido random.
-function CaseUnboxing:_advanceLane(lane: Lane, duration: number, landTarget: boolean, driveBackground: boolean)
-	local motionInfo = TweenInfo.new(duration, Enum.EasingStyle.Linear)
-	local visualInfo = TweenInfo.new(duration * 1.5, Enum.EasingStyle.Sine)
-	for _, item in lane.items do
-		if item.state == ITEM_COUNT then
-			item.state = 0
-			item.container.Position = UDim2.fromScale(RECYCLE_OFFSCREEN_X, 0.5)
-			item.scale.Scale = STATES[1].Scale
-			lane.setContent(item, if landTarget then lane.targetKey else lane.randomKey())
-			setItemAlpha(item, STATES[1].Alpha)
+	-- Contenido por índice del flujo: cacheado (estable) — el ganador vive
+	-- SIEMPRE en targetIndex; el resto es un wrap aleatorio del pool de la case.
+	local contentCache = {} :: { [number]: string }
+	local function contentForIndex(index: number): string
+		if index == targetIndex then
+			return resultWrapId
 		end
-
-		item.state += 1
-		local target = STATES[item.state]
-		self:_playTween(item.container, motionInfo, { Position = UDim2.fromScale(target.X, 0.5) })
-		self:_playTween(item.scale, visualInfo, { Scale = target.Scale })
-		-- Fade de entrada/salida de la celda entera (simétrico en ambos bordes).
-		self:_playTween(item.container, visualInfo, { GroupTransparency = target.Alpha })
-		
-		if item.state == CENTER_STATE and driveBackground then
-			local rarity = item.appliedRarity or RARITY_FALLBACK
-			local glowColor = RARITY_GLOW[rarity] or RARITY_GLOW[RARITY_FALLBACK] or Color3.fromRGB(0,0,0)
-			self:_updateBackground(glowColor, duration)
+		local cached = contentCache[index]
+		if cached then
+			return cached
 		end
+		local wrapId = wrapIds[rng:NextInteger(1, #wrapIds)]
+		contentCache[index] = wrapId
+		return wrapId
 	end
-end
 
--- Recorre un schedule frenando la lane. El item que recicla cuando quedan
--- exactamente CENTER_STATE-1 ciclos aterriza en el centro → recibe el resultado
--- (tras reciclar necesita CENTER_STATE-1 avances para llegar al estado central).
-function CaseUnboxing:_spinSchedule(lane: Lane, schedule: { number }, driveBackground: boolean)
-	local totalCycles = #schedule
-	for cycleIndex, duration in ipairs(schedule) do
-		if laneTornDown(lane) then
+	-- Solo avisamos UNA vez por motivo (evita spamear el Output: esto corre por
+	-- cada celda reciclada, varias veces por segundo durante el spin).
+	local warnedNoDefinition = false
+	local warnedNoViewport = false
+	local warnedRenderFailed = false
+
+	local function render(cell: Cell, wrapId: string)
+		local wrapDefinition = ItemsConfig.WeaponWraps[wrapId]
+		if type(wrapDefinition) ~= "table" then
+			if not warnedNoDefinition then
+				warnedNoDefinition = true
+				warn("[CaseUnboxing] wrapId sin definición en ItemsConfig.WeaponWraps:", wrapId)
+			end
 			return
 		end
-		self:_advanceLane(lane, duration, (totalCycles - cycleIndex) == (CENTER_STATE - 1), driveBackground)
-		task.wait(duration)
+
+		-- % de drop de este wrap en la case → Container.Value.
+		if cell.value then
+			local chance = WrapCasesConfig.GetChancePercent(caseDefinition, wrapId)
+			cell.value.Text = string.format("%d%%", math.floor(chance + 0.5))
+		end
+
+		-- Template.UIGradient teñido por la rareza del wrap. Guard por rareza ya
+		-- aplicada: al reciclar la celda casi siempre repite rareza (evita reasignar
+		-- la ColorSequence en cada frame del spin).
+		if cell.gradient then
+			local rarity = tostring(wrapDefinition.Rarity or RARITY_FALLBACK)
+			if cell.appliedRarity ~= rarity then
+				cell.appliedRarity = rarity
+				cell.gradient.Color = gradientForRarity(rarity)
+			end
+		end
+
+		local target = cell.viewport
+		if not target then
+			if not warnedNoViewport then
+				warnedNoViewport = true
+				warn("[CaseUnboxing] La celda clonada del reel no tiene Container.ViewportFrame; revisa la jerarquía de ChestModel.Box.RollBillboard.RollFrame.Template.")
+			end
+			return
+		end
+
+		-- Render DIRECTO en el ViewportFrame de la celda (como el locker). El
+		-- janitor por celda destruye el WorldModel del wrap anterior al reasignar.
+		local jan = cell.renderJanitor
+		if jan then
+			jan:Cleanup()
+		else
+			jan = Janitor.new()
+			cell.renderJanitor = jan
+			self._playJanitor:Add(jan, "Destroy")
+		end
+
+		local ok = WeaponWrapPreviewer.Render(target, {
+			TextureID = wrapDefinition.TextureID,
+			BaseColor = wrapDefinition.BaseColor,
+			Material = wrapDefinition.Material,
+			isAnimated = wrapDefinition.isAnimated,
+			StudsPerTile = wrapDefinition.StudsPerTile,
+		}, jan)
+		if ok then
+			WeaponWrapPreviewer.reframeCentered(target)
+		elseif not warnedRenderFailed then
+			warnedRenderFailed = true
+			warn("[CaseUnboxing] WeaponWrapPreviewer.Render no encontró primaryPart al renderizar", wrapId, "— revisa ReplicatedStorage.Wrap (o el modelo del arma).")
+		end
+		target.ImageColor3 = Color3.fromRGB(255, 255, 255)
+	end
+
+	local reel: Reel = {
+		cells = cells,
+		free = free,
+		active = {},
+		folder = folder,
+		render = render,
+		contentForIndex = contentForIndex,
+		targetIndex = targetIndex,
+	}
+	return reel
+end
+
+-- Reposiciona el flujo para una posición de scroll dada (en "item units": el
+-- índice que queda clavado en el centro es floor/frac de scrollPos). Recicla las
+-- celdas fuera de la ventana (generación infinita) y aplica la lente de escala/
+-- opacidad por distancia al centro. `applyLens` permite congelar la escala
+-- durante el reveal (el pop del ganador la controla a mano).
+function CaseUnboxing:_layoutReel(reel: Reel, scrollPos: number, applyLens: boolean)
+	local base = math.floor(scrollPos)
+	local lo = base - VISIBLE_RADIUS
+	local hi = base + VISIBLE_RADIUS + 1
+
+	-- Liberar celdas que salieron de la ventana → vuelven al pool (ocultas).
+	for index, cell in reel.active do
+		if index < lo or index > hi then
+			cell.container.Visible = false
+			cell.index = nil
+			reel.active[index] = nil
+			table.insert(reel.free, cell)
+		end
+	end
+
+	-- Asignar celda a cada índice visible que aún no la tenga → render + mostrar.
+	for index = lo, hi do
+		if index >= 0 and not reel.active[index] then
+			local cell = table.remove(reel.free)
+			if cell then
+				cell.index = index
+				reel.active[index] = cell
+				reel.render(cell, reel.contentForIndex(index))
+				cell.container.Visible = true
+			end
+		end
+	end
+
+	-- Posición + lente de cada celda activa por su distancia al centro.
+	for index, cell in reel.active do
+		local dxUnits = index - scrollPos
+		cell.container.Position = UDim2.fromScale(0.5 + dxUnits * ITEM_SPACING, 0.5)
+		local adx = math.abs(dxUnits)
+		-- El más cercano al centro pinta por encima de sus vecinos (solape natural).
+		cell.container.ZIndex = math.max(1, math.floor(100 - adx * 10 + 0.5))
+		if applyLens then
+			cell.scale.Scale = lensScale(adx)
+			setCellAlpha(cell.container, lensTransparency(adx))
+		end
 	end
 end
 
--- ── Revelación (una lane; se llama escalonada por lane) ──────
+-- Barrido con deceleración: scroll continuo de START_INDEX a targetIndex con
+-- ease-out Quint (el clásico "casi para… casi para"). La lente se recalcula cada
+-- frame → los items crecen al pasar por el centro. Bloqueante hasta parar; NO
+-- dispara el reveal (eso lo hace `_run`, después de aquietar el cofre — ver nota
+-- ahí sobre por qué el reveal no puede ir pegado al spin).
+--
+-- Si se pasa `motion`, la vibración del cofre se ACOPLA al reel en el mismo loop:
+--   • intensidad de temblor ∝ velocidad del reel (rápido = tiembla fuerte; al
+--     frenar, se calma) → nunca se ve desincronizado;
+--   • cada item que cruza el centro dispara un "ka-chunk" (squash + tirón),
+--     y los ticks lentos del final pegan más fuerte (tensión de tragaperras);
+--   • al clavar el ganador, un IMPACTO fuerte sincronizado con el land.
+function CaseUnboxing:_runReel(reel: Reel, motion: any?, onTick: ((strength: number) -> ())?, onLand: (() -> ())?)
+	local scrollValue = Instance.new("NumberValue")
+	scrollValue.Value = START_INDEX
+	self._playJanitor:Add(scrollValue, "Destroy")
 
-function CaseUnboxing:_revealLane(lane: Lane, glowColor: Color3, profile: RevealProfile)
-	if laneTornDown(lane) then
+	local lastScroll = START_INDEX
+	local lastTickIndex = math.floor(START_INDEX)
+
+	-- Layout + vibración acoplada, dirigidos por el valor de scroll (cada frame).
+	local layoutConn = RunService.RenderStepped:Connect(function(dt)
+		if reelTornDown(reel) then
+			return
+		end
+		local pos = scrollValue.Value
+		self:_layoutReel(reel, pos, true)
+
+		if motion then
+			-- Velocidad del reel (item units/s) → intensidad de temblor.
+			local speed = math.abs(pos - lastScroll) / math.max(dt, 1e-4)
+			motion.struggleIntensity = math.clamp(speed / SPIN_REF_SPEED, SPIN_STRUGGLE_MIN, 1)
+
+			-- Ratchet: un "ka-chunk" por cada item que cruza el centro. Cuanto más
+			-- lento va (menor speed), más fuerte el chunk → los últimos ticks pegan.
+			local idx = math.floor(pos)
+			if idx ~= lastTickIndex then
+				lastTickIndex = idx
+				local slow = math.clamp(1.25 - speed / SPIN_REF_SPEED, 0.3, 1.25)
+				motion.squashSpring:impulse(TICK_SQUASH * slow)
+				local dir = if self._rng:NextNumber() < 0.5 then 1 else -1
+				motion.lungeZ:impulse(math.rad(TICK_LUNGE_DEG) * slow * dir)
+				-- Beat de cámara acoplado al mismo tick: strength ∝ lentitud (0.3→1.25
+				-- normalizado a 0→1). Rápido = base pequeña (rumble del barrido); al
+				-- frenar los ticks se espacian y pegan más → jolts secos de tensión.
+				if onTick then
+					onTick(math.clamp((slow - 0.3) / 0.95, 0, 1))
+				end
+			end
+			lastScroll = pos
+		end
+	end)
+	self._playJanitor:Add(layoutConn, "Disconnect")
+
+	-- Frame inicial poblado antes del primer render.
+	self:_layoutReel(reel, START_INDEX, true)
+
+	local tween = self:_playTween(scrollValue, TweenInfo.new(SPIN_DURATION, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+		Value = reel.targetIndex,
+	})
+	tween.Completed:Wait()
+	if reelTornDown(reel) then
 		return
 	end
 
-	-- Eleva el item ganador por encima de sus vecinos de lane durante el reveal.
-	local center = findCenterItem(lane)
-	if center then
-		center.container.ZIndex = 10
-		if center.visual then
-			center.visual.ZIndex = 10
-		end
+	-- Fijar la parada exacta y congelar el layout: a partir de aquí el reveal
+	-- controla la escala del ganador a mano (si no, este loop la sobrescribiría
+	-- cada frame) y su posición ya no se toca — queda clavado en X=0.5.
+	self:_layoutReel(reel, reel.targetIndex, true)
+	layoutConn:Disconnect()
+
+	-- IMPACTO del land: el clímax, sincronizado con el ganador clavado en el
+	-- centro. Squash fuerte (el cofre "acusa" el golpe) + tirón + temblor a tope.
+	if motion then
+		motion.squashSpring:setInstant(LAND_SQUASH)
+		local dir = if self._rng:NextNumber() < 0.5 then 1 else -1
+		motion.lungeX:impulse(math.rad(LAND_LUNGE_DEG) * dir)
+		motion.struggleIntensity = 1
 	end
-
-	-- Tease: anticipación de ESCALA del ganador (squash) sin desplazamiento — el
-	-- item se queda centrado y el agrandado pivota en 0.5,0.5 (el reel es
-	-- horizontal, un dip vertical se leía como que el ganador "baja").
-	local teaseInfo = TweenInfo.new(profile.tease, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out)
-	if center then
-		self:_playTween(center.scale, teaseInfo, { Scale = STATES[center.state].Scale * TEASE_SQUASH })
+	-- Golpe de cámara sincronizado con el impacto del land (un beat antes del boom
+	-- del reveal): el ganador se clava y la cámara lo acusa.
+	if onLand then
+		onLand()
 	end
-	task.wait(profile.tease)
-
-	-- Hang: los no-ganadores se oscurecen (celda entera vía GroupColor3 del
-	-- CanvasGroup — tiñe el compuesto ya renderizado, viewport incluido).
-	local darkenInfo = TweenInfo.new(profile.hang, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-	for _, item in lane.items do
-		if item ~= center then
-			self:_playTween(item.container, darkenInfo, { GroupColor3 = COLOR_DARKEN })
-		end
-	end
-	task.wait(profile.hang)
-
-	-- Glow (clon del visual que se expande y disuelve) + pulso del ganador. El
-	-- pulso escala el UIScale del container (AnchorPoint 0.5,0.5 → crece centrado).
-	if center then
-		local visual = center.visual
-		if visual then
-			local glow = visual:Clone()
-			glow.Name = "GlowEffect"
-			-- Clon de ViewportFrame: re-mapear su cámara al clon.
-			if glow:IsA("ViewportFrame") then
-				local camera = glow:FindFirstChildOfClass("Camera")
-				if camera then
-					glow.CurrentCamera = camera
-				end
-			end
-			(glow :: any).ImageColor3 = glowColor
-			glow.ZIndex = visual.ZIndex - 1
-			-- Mismo padre que el visual para que el ZIndex compare contra sus hermanos.
-			glow.Parent = visual.Parent
-			self._playJanitor:Add(glow, "Destroy")
-
-			self:_playTween(glow, TweenInfo.new(0.6, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out), {
-				Size = UDim2.fromScale(1.5, 1.5),
-				Position = UDim2.fromScale(-0.25, -0.25),
-				ImageTransparency = 1,
-			})
-		end
-
-		local targetScale = STATES[center.state].Scale
-		center.scale.Scale = targetScale * profile.pulse
-		self:_playTween(center.scale, TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = targetScale })
-	end
-
-	if profile.confetti then
-		Confetti.Rain(self._frame)
-	end
-
-	task.wait(profile.snapback)
 end
 
--- ── Reveal final (arma+wrap en el mundo) ─────────────────────
+-- Reveal del ganador: tease (squash) + pop elástico centrado (AnchorPoint 0.5,0.5).
+function CaseUnboxing:_revealReel(reel: Reel, glowColor: Color3, doConfetti: boolean)
+	if reelTornDown(reel) then
+		return
+	end
+	local center = reel.active[reel.targetIndex]
+	if not center then
+		return
+	end
 
--- CFrame de mundo de un marcador del reveal, que puede ser un Attachment (marcador
--- ligero sin render/colisión — lo preferido), un BasePart o un Model.
-local function markerWorldCFrame(node: Instance): CFrame?
-	if node:IsA("Attachment") then
-		return node.WorldCFrame
-	elseif node:IsA("BasePart") then
-		return node.CFrame
-	elseif node:IsA("Model") then
-		return node:GetPivot()
+	center.container.ZIndex = 200
+
+	local teaseInfo = TweenInfo.new(REVEAL_TEASE, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out)
+	self:_playTween(center.scale, teaseInfo, { Scale = SCALE_CENTER * TEASE_SQUASH })
+	task.wait(REVEAL_TEASE)
+
+	-- Burst de glow: clon del propio render del wrap, coloreado por rareza, que
+	-- se expande y disuelve por detrás del ganador — el "pop" de premio AAA.
+	local visual = center.viewport
+	if visual then
+		local glow = visual:Clone()
+		glow.Name = "GlowBurst"
+		local camera = glow:FindFirstChildOfClass("Camera")
+		if camera then
+			glow.CurrentCamera = camera
+		end
+		(glow :: any).ImageColor3 = glowColor
+		glow.ZIndex = math.max(1, visual.ZIndex - 1)
+		glow.Parent = visual.Parent
+		self._playJanitor:Add(glow, "Destroy")
+		self:_playTween(glow, TweenInfo.new(REVEAL_GLOW_DURATION, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out), {
+			Size = UDim2.fromScale(REVEAL_GLOW_SCALE, REVEAL_GLOW_SCALE),
+			Position = UDim2.fromScale(-(REVEAL_GLOW_SCALE - 1) / 2, -(REVEAL_GLOW_SCALE - 1) / 2),
+			ImageTransparency = 1,
+		})
+	end
+
+	center.scale.Scale = SCALE_CENTER * REVEAL_PULSE
+	self:_playTween(center.scale, TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = SCALE_CENTER })
+
+	if doConfetti and self._uiGui then
+		Confetti.Rain(self._uiGui)
+	end
+
+	task.wait(REVEAL_SNAPBACK)
+end
+
+-- ── Resultado ────────────────────────────────────────────────
+
+function CaseUnboxing:_notifyResult(params: PlayParams)
+	local wrapDefinition = ItemsConfig.WeaponWraps[params.resultWrapId]
+	local wrapName = tostring(if type(wrapDefinition) == "table" then wrapDefinition.Name or params.resultWrapId else params.resultWrapId)
+	local weaponCategoryConfig = (ItemsConfig :: any)[params.resultWeaponCategory]
+	local weaponDefinition = if type(weaponCategoryConfig) == "table" then weaponCategoryConfig[params.resultWeaponId] else nil
+	local weaponName = tostring(if type(weaponDefinition) == "table" then weaponDefinition.Name or params.resultWeaponId else params.resultWeaponId)
+	Notify.success(("Unboxed %s for %s!"):format(wrapName, weaponName))
+end
+
+-- Oculta el cofre (y apaga su billboard) al entrar en el reveal. Sacarlo del árbol
+-- basta para que deje de renderizarse; el motor de pose (Heartbeat) se auto-frena
+-- al ver chest.Parent == nil, y hideIdleChest lo destruye igual al cerrar el detalle.
+function CaseUnboxing:_hideChest()
+	if self._rollBillboard then
+		self._rollBillboard.Enabled = false
+	end
+	local chest = self._chest
+	if chest then
+		chest.Parent = nil
+	end
+end
+
+-- Resuelve el marcador de mundo donde se planta el arma+wrap ganador
+-- (Workspace.Locker.RevealSpawn; Attachment/BasePart/Model). FindFirstChild (no
+-- WaitForChild) para degradar con gracia si el mapa no lo tiene.
+function CaseUnboxing:_resolveRevealSpawn(): Instance?
+	local lockerFolder = Workspace:FindFirstChild("Locker")
+	local spawnNode = if lockerFolder then lockerFolder:FindFirstChild("RevealSpawn") else nil
+	if spawnNode and (spawnNode:IsA("Attachment") or spawnNode:IsA("BasePart") or spawnNode:IsA("Model")) then
+		return spawnNode
 	end
 	return nil
 end
 
--- Resuelve los nodos de mundo del reveal (cámara + spawn + cámara de vuelta al
--- Locker). FindFirstChild (no WaitForChild) para degradar con gracia si el mapa
--- no los tiene: sin ellos el reveal salta la parte 3D pero mantiene el swap del
--- botón para volver a la Store. cameraTarget/spawnTarget aceptan Attachment/
--- BasePart (el spawn además Model) — el diseñador puede marcarlos con
--- Attachments, más limpios que Parts invisibles. lockerCameraTarget es el mismo
--- Workspace.Cameras.locker que usa LockerCameraController.
-function CaseUnboxing:_resolveRevealNodes(): (Instance?, Instance?, BasePart?)
-	local camerasFolder = Workspace:FindFirstChild("Cameras")
-	local lockerFolder = Workspace:FindFirstChild("Locker")
-	local cameraNode = if camerasFolder then camerasFolder:FindFirstChild("reveal") else nil
-	local spawnNode = if lockerFolder then lockerFolder:FindFirstChild("RevealSpawn") else nil
-	local lockerCameraNode = if camerasFolder then camerasFolder:FindFirstChild("locker") else nil
-	local cameraTarget = if cameraNode and (cameraNode:IsA("Attachment") or cameraNode:IsA("BasePart")) then cameraNode else nil
-	local spawnTarget = if spawnNode and (spawnNode:IsA("Attachment") or spawnNode:IsA("BasePart") or spawnNode:IsA("Model")) then spawnNode else nil
-	local lockerCameraTarget = if lockerCameraNode and lockerCameraNode:IsA("BasePart") then lockerCameraNode :: BasePart else nil
-	return cameraTarget, spawnTarget, lockerCameraTarget
-end
-
--- Entra a la escena del reveal (cámara + sin blur) DESDE el arranque del Roll,
--- no solo en el reveal final: todo el unboxing (giro + reveal) transcurre en
--- Workspace.Cameras.reveal, sin el blur del Store. Al terminar (Equip/Collect,
--- o teardown a mitad) volvemos SIEMPRE a Workspace.Cameras.locker (la misma
--- que usa LockerCameraController) — pase o no por la escena 3D de
--- Workspace.Cameras.reveal (que puede no existir aún en el mapa); sin esa
--- parte, degradamos al estado previo a abrir la Store.
-function CaseUnboxing:_enterRevealCamera()
-	local cameraTarget, _spawnTarget, lockerCameraTarget = self:_resolveRevealNodes()
-
-	-- La escena 3D del reveal ocupa toda la pantalla: quitamos el blur del Store
-	-- (queda tapado por el negro del fade) y lo restauramos en el cleanup del play.
-	BlurController.suppress("Unboxing")
-	self._playJanitor:Add(function()
-		BlurController.unsuppress("Unboxing")
-	end, true)
-
-	local camera = Workspace.CurrentCamera
-	if not camera then
-		return
-	end
-
-	local savedType = camera.CameraType
-	local savedCFrame = camera.CFrame
-	local savedSubject = camera.CameraSubject
-	self._playJanitor:Add(function()
-		-- Preferimos la cámara del Locker si existe; si no, volvemos al estado
-		-- previo (la vista de donde se abrió la Store).
-		if lockerCameraTarget then
-			camera.CameraType = Enum.CameraType.Scriptable
-			camera.CFrame = lockerCameraTarget.CFrame
-			return
-		end
-		camera.CameraType = savedType
-		if savedSubject and savedSubject.Parent then
-			camera.CameraSubject = savedSubject
-		end
-		-- Reponer SIEMPRE el CFrame guardado: en este juego la cámara del
-		-- lobby/locker es Scriptable, así que sin esto la cámara se quedaría
-		-- clavada en la posición del reveal (restaurar solo el CameraType es
-		-- no-op si ya era Scriptable). En una cámara Custom el set es inocuo
-		-- (se recalcula al siguiente frame).
-		if savedCFrame then
-			camera.CFrame = savedCFrame
-		end
-	end, true)
-
-	-- Cámara → Workspace.Cameras.reveal, si el mapa la tiene. Fija, sin parallax.
-	local cameraCFrame = if cameraTarget then markerWorldCFrame(cameraTarget) else nil
-	if cameraCFrame then
-		camera.CameraType = Enum.CameraType.Scriptable
-		camera.CFrame = cameraCFrame
-	end
-end
-
--- Tras el hold del combo: arma+wrap aplicados en Workspace.Locker.RevealSpawn,
--- se oculta Roll (lanes + fondo + RollBtn) y se muestra Reveal con el
--- Name/Rarity del wrap resultado. Bloquea hasta que el jugador pulsa Equip o
--- Collect (o el feature se destruye) — al volver, el cleanup del play
--- restaura cámara/blur, Roll/Reveal, y `onFinished` devuelve a la Store.
-function CaseUnboxing:_revealResult(params: PlayParams, teardownSentinel: Lane)
-	local _cameraTarget, spawnTarget = self:_resolveRevealNodes()
-
-	-- Fade a negro: tapa el corte reel → escena 3D del reveal final.
-	self:_fadeScreen(true)
-
-	-- Arma + wrap aplicados en Workspace.Locker.RevealSpawn.
-	local revealModel: PVInstance? = nil
-	local revealModelBase: CFrame? = nil
+-- Planta el arma con el wrap ganador en Workspace.Locker.RevealSpawn, con un bob
+-- orgánico. NO toca la cámara: la vista sigue siendo la de 'cases' (que es la que
+-- encuadra el RevealSpawn). El modelo vive en el janitor del play, así que se
+-- destruye al terminar el unboxing. Degrada avisando si falta el marcador.
+function CaseUnboxing:_buildRevealScene(params: PlayParams): boolean
+	local spawnTarget = self:_resolveRevealSpawn()
 	local spawnCFrame = if spawnTarget then markerWorldCFrame(spawnTarget) else nil
-	if spawnTarget and spawnCFrame then
-		local wrapDefinition = ItemsConfig.WeaponWraps[params.resultWrapId]
-		local validDef = type(wrapDefinition) == "table"
-		local model = WeaponWrapPreviewer.buildWeaponModelWithWrap({
-			TextureID = if validDef then wrapDefinition.TextureID else nil,
-			BaseColor = if validDef then wrapDefinition.BaseColor else nil,
-			Material = if validDef then wrapDefinition.Material else nil,
-			isAnimated = if validDef then wrapDefinition.isAnimated else nil,
-			StudsPerTile = if validDef then wrapDefinition.StudsPerTile else nil,
-			PreviewWeaponCategory = params.resultWeaponCategory,
-			PreviewWeaponId = params.resultWeaponId,
-		}, self._playJanitor)
-		if model and model:IsA("PVInstance") then
-			model:PivotTo(spawnCFrame)
-			-- Un Model no puede colgar de un Attachment: se parenta a la parte que
-			-- lo contiene (Attachment.Parent), o al propio nodo si es Part/Model.
-			model.Parent = if spawnTarget:IsA("Attachment") then spawnTarget.Parent else spawnTarget
-			revealModel = model
-			revealModelBase = spawnCFrame
-		end
+	if not (spawnTarget and spawnCFrame) then
+		warn("[CaseUnboxing] Falta Workspace.Locker.RevealSpawn (Attachment/BasePart/Model); el arma ganadora no se planta.")
+		return false
 	end
 
-	-- Motion loop: el arma flota (bob orgánico). La cámara del reveal se queda
-	-- FIJA (los efectos de cámara van en el roll, no aquí). RenderStepped para que
-	-- vaya suave; se limpia con el janitor del play.
-	if revealModel then
-		local elapsed = 0
-		self._playJanitor:Add(RunService.RenderStepped:Connect(function(dt)
-			elapsed += dt
-
-			-- Bob orgánico: senoide principal + una armónica lenta desfasada.
-			if (revealModel :: any).Parent and revealModelBase then
-				local y = math.sin(elapsed * REVEAL_BOB_SPEED) * REVEAL_BOB_AMPLITUDE
-					+ math.sin(elapsed * REVEAL_BOB_SPEED * 0.5 + 1.3) * REVEAL_BOB_AMPLITUDE * 0.3
-				revealModel:PivotTo(revealModelBase * CFrame.new(0, y, 0))
-			end
-		end), "Disconnect")
-	end
-
-	-- Roll → Reveal: se ocultan lanes+fondo+RollBtn (todo cuelga de Roll) y se
-	-- muestra el panel de resultado. Se restauran al limpiar el play para el
-	-- siguiente open.
-	self._rollNode.Visible = false
-	self._playJanitor:Add(function()
-		self._rollNode.Visible = true
-	end, true)
-
-	-- Rellena Name/Rarity del wrap resultado (coloreado por rareza, mismo
-	-- patrón que CaseContentPanel).
 	local wrapDefinition = ItemsConfig.WeaponWraps[params.resultWrapId]
 	local validDef = type(wrapDefinition) == "table"
-	local wrapRarity = tostring(if validDef then wrapDefinition.Rarity or RARITY_FALLBACK else RARITY_FALLBACK)
-	if self._revealNameLabel then
-		self._revealNameLabel.Text = tostring(if validDef then wrapDefinition.Name or params.resultWrapId else params.resultWrapId)
-	end
-	if self._revealRarityLabel then
-		self._revealRarityLabel.Text = wrapRarity
-		local rarityColor = UITheme.RarityColors[wrapRarity]
-		if rarityColor then
-			self._revealRarityLabel.TextColor3 = rarityColor
-		end
-	end
+	local model = WeaponWrapPreviewer.buildWeaponModelWithWrap({
+		TextureID = if validDef then wrapDefinition.TextureID else nil,
+		BaseColor = if validDef then wrapDefinition.BaseColor else nil,
+		Material = if validDef then wrapDefinition.Material else nil,
+		isAnimated = if validDef then wrapDefinition.isAnimated else nil,
+		StudsPerTile = if validDef then wrapDefinition.StudsPerTile else nil,
+		PreviewWeaponCategory = params.resultWeaponCategory,
+		PreviewWeaponId = params.resultWeaponId,
+	}, self._playJanitor)
 
-	if self._revealNode then
-		self._revealNode.Visible = true
-		self._playJanitor:Add(function()
-			(self._revealNode :: GuiObject).Visible = false
-		end, true)
+	if not (model and model:IsA("PVInstance")) then
+		warn("[CaseUnboxing] No se pudo construir el arma+wrap del reveal:", params.resultWeaponCategory, params.resultWeaponId, params.resultWrapId)
+		return false
 	end
 
-	-- Destapar la pantalla ya con la escena de reveal montada.
-	self:_fadeScreen(false)
+	local pvModel = model :: PVInstance
+	-- Escalado alrededor del pivote (ScaleTo lo conserva), ANTES de colocarlo: así el
+	-- arma crece "desde su sitio" y sigue centrada en el RevealSpawn.
+	if model:IsA("Model") then
+		(model :: Model):ScaleTo(REVEAL_MODEL_SCALE)
+	end
+	pvModel:PivotTo(spawnCFrame :: CFrame)
+	-- Un Model no puede colgar de un Attachment: se parenta a la parte que lo
+	-- contiene (Attachment.Parent), o al propio nodo si es Part/Model.
+	model.Parent = if spawnTarget:IsA("Attachment") then spawnTarget.Parent else spawnTarget
 
-	-- Confetti continuo (bursts periódicos) mientras dura la pantalla de reveal.
-	-- Se detiene con el flag al limpiar el play (COLLECT/EQUIP o teardown).
-	local confettiStopped = false
-	self._playJanitor:Add(function()
-		confettiStopped = true
-	end, true)
-	task.spawn(function()
-		while not confettiStopped do
-			if laneTornDown(teardownSentinel) then
-				return
-			end
-			Confetti.Rain(self._frame, {
-				count = REVEAL_CONFETTI_BURST_COUNT,
-				spawnDuration = REVEAL_CONFETTI_SPAWN_DURATION,
-			})
-			task.wait(REVEAL_CONFETTI_INTERVAL)
+	-- Bob orgánico: senoide principal + una armónica lenta desfasada.
+	local elapsed = 0
+	self._playJanitor:Add(RunService.RenderStepped:Connect(function(dt)
+		elapsed += dt
+		if model.Parent then
+			local y = math.sin(elapsed * REVEAL_BOB_SPEED) * REVEAL_BOB_AMPLITUDE
+				+ math.sin(elapsed * REVEAL_BOB_SPEED * 0.5 + 1.3) * REVEAL_BOB_AMPLITUDE * 0.3
+			pvModel:PivotTo((spawnCFrame :: CFrame) * CFrame.new(0, y, 0))
 		end
-	end)
+	end), "Disconnect")
+	return true
+end
 
-	-- Esperar Equip o Collect (o teardown del feature → los items del reel se
-	-- destruyen). Equip además dispara la red para equipar el wrap ganado.
-	local equipBtn = self._equipBtn
-	local collectBtn = self._collectBtn
-	if equipBtn or collectBtn then
-		local finished = false
-		if equipBtn then
-			equipBtn.Active = true
-			self._playJanitor:Add(equipBtn.Activated:Connect(function()
-				Network.Shop.EquipItem.Send({
-					category = LockerCategory.WEAPON_WRAPS,
-					itemId = params.resultWrapId,
-					weaponCategory = params.resultWeaponCategory,
-					weaponId = params.resultWeaponId,
-				})
-				finished = true
-			end), "Disconnect")
-		end
-		if collectBtn then
-			collectBtn.Active = true
-			self._playJanitor:Add(collectBtn.Activated:Connect(function()
-				finished = true
-			end), "Disconnect")
-		end
-		while not finished do
-			if laneTornDown(teardownSentinel) then
-				return
-			end
-			task.wait()
-		end
+-- Reveal final. La cámara se queda en la de 'cases': el reveal es el arma+wrap
+-- ganador plantado en RevealSpawn + la card resaltada en CaseContent.Main + la barra
+-- Nav (Equip/Collect), que el Store muestra en onRevealShown. Aquí ocultamos el
+-- cofre, plantamos el arma, notificamos y BLOQUEAMOS hasta que el jugador descarta
+-- (awaitDismiss); sin él, se mantiene RESULT_HOLD s y sigue solo.
+function CaseUnboxing:_revealResult(params: PlayParams)
+	self:_hideChest()
+	self:_buildRevealScene(params)
+	self:_notifyResult(params)
+
+	if params.onRevealShown then
+		params.onRevealShown()
+	end
+
+	if params.awaitDismiss then
+		params.awaitDismiss()
 	else
-		-- Sin botones: auto-collect tras un breve hold para leer el reveal.
-		task.wait(1.5)
+		task.wait(RESULT_HOLD)
 	end
 end
 
 -- ── Orquestación ─────────────────────────────────────────────
 
 function CaseUnboxing:_run(params: PlayParams)
-	local targetWeapon: OwnedWeaponRef? = nil
-	for _, weapon in params.ownedWeapons do
-		if weapon.category == params.resultWeaponCategory and weapon.weaponId == params.resultWeaponId then
-			targetWeapon = weapon
-			break
-		end
-	end
+	-- Reutiliza el cofre idle (lo genera en FallPosition si aún no está; p. ej. si
+	-- el unboxing arranca sin haber abierto el detalle). El cofre NO se destruye
+	-- al terminar: vuelve a idle y lo limpia hideIdleChest al cerrar el detalle.
+	self:showIdleChest()
+	local chest = self._chest :: Model?
+	local motion = self._motion
+	local rollBillboard = self._rollBillboard
+	local rollFrameGui = self._rollFrameGui
+	local template = self._reelTemplate
 
-	-- Defensa: el server garantiza que el arma es del inventario; si el estado
-	-- local aún no lo refleja, construimos la ref desde el catálogo.
-	if not targetWeapon then
-		local categoryConfig = (ItemsConfig :: any)[params.resultWeaponCategory]
-		local weaponDefinition = if type(categoryConfig) == "table" then categoryConfig[params.resultWeaponId] else nil
-		targetWeapon = {
-			category = params.resultWeaponCategory,
-			weaponId = params.resultWeaponId,
-			image = tostring(if type(weaponDefinition) == "table" then weaponDefinition.Image or "" else ""),
-		}
+	if not (chest and motion) then
+		-- Sin cofre (falta FallPosition/ChestModel/estructura): reveal sin reel.
+		self:_revealResult(params)
+		return
 	end
+	local chestModel = chest :: Model
 
-	local weaponLane = self:_buildWeaponLane(params.ownedWeapons, targetWeapon :: OwnedWeaponRef)
-	local wrapLane = self:_buildWrapLane(params.caseDefinition, params.resultWrapId)
-	if not wrapLane then
-		warn("[CaseUnboxing] No se pudo renderizar el wrap del resultado:", params.resultWrapId)
+	-- 1. Esperar a que el cofre aterrice (la caída de entrada puede seguir en curso
+	-- si el jugador compró nada más abrir el detalle): no se rola en el aire.
+	while not motion.settled and chestModel.Parent do
+		task.wait()
+	end
+	if not chestModel.Parent then
 		return
 	end
 
-	-- Contenido inicial de los 5 items de cada lane (aleatorio del pool) con el
-	-- alpha de su estado — sin esto, el primer frame mostraría items vacíos.
-	for _, lane in { weaponLane, wrapLane :: Lane } do
-		for _, item in lane.items do
-			lane.setContent(item, lane.randomKey())
-			setItemAlpha(item, STATES[item.state].Alpha)
-		end
+	-- 2. Encender el billboard (ya vive en PlayerGui con Adornee = Box) y montar
+	-- el reel dentro de RollFrame.
+	if rollBillboard then
+		rollBillboard.Enabled = true
 	end
 
-	-- Fade a negro: tapa el corte CaseContent → Unboxing, el salto de cámara a
-	-- Workspace.Cameras.reveal y la supresión del blur. El frame se activa
-	-- mientras la pantalla está en negro y se destapa ya con el reel montado —
-	-- el Roll (giro) transcurre en la misma cámara/sin blur que el reveal final.
-	self:_fadeScreen(true)
-	self:_enterRevealCamera()
-	self._frame.Visible = true
-	self:_fadeScreen(false)
-
-	-- Attract: ambos lanes hacen un drift lento en bucle hasta que el jugador
-	-- pulsa RollBtn; entonces una rampa los acelera hasta el crucero real.
-	local rollStarted = false
-	local rollBtn = self._rollBtn
-	if rollBtn then
-		rollBtn.Visible = true
-		rollBtn.Active = true
-		self._playJanitor:Add(rollBtn.Activated:Connect(function()
-			rollStarted = true
-		end), "Disconnect")
+	local reel: Reel? = nil
+	if rollFrameGui and template then
+		-- ClipsDescendants: el flujo entra/sale por los bordes del RollFrame.
+		rollFrameGui.ClipsDescendants = true
+		disableConflictingLayouts(rollFrameGui)
+		reel = self:_buildContinuousReel(params, rollFrameGui, template)
+		if not reel then
+			warn("[CaseUnboxing] No se pudo renderizar el wrap resultado:", params.resultWrapId)
+		end
 	else
-		-- Sin botón: arranca solo tras un breve drift.
-		task.delay(1.0, function()
-			rollStarted = true
-		end)
+		warn("[CaseUnboxing] Falta ChestModel.Box.RollBillboard.RollFrame.Template; roll sin reel.")
 	end
 
-	while not rollStarted do
-		if laneTornDown(weaponLane) or laneTornDown(wrapLane) then
-			return
-		end
-		self:_advanceLane(weaponLane, IDLE_SPEED, false, true)
-		self:_advanceLane(wrapLane, IDLE_SPEED, false, false)
-		task.wait(IDLE_SPEED)
+	-- 3. Wind-up: anticipación (rumble creciente + agachado) → el cofre "carga"
+	-- justo antes de soltar el barrido. Poblar el reel primero para que se vea el
+	-- flujo quieto durante la carga.
+	if reel then
+		self:_layoutReel(reel, START_INDEX, true)
+	end
+	self:_chargeUpChest(chestModel, motion)
+
+	-- 4. Barrido: el reel gira y la vibración del cofre va ACOPLADA a él (velocidad
+	-- + ratchet por item + impacto al clavar) → el temblor "tiene sentido" con lo
+	-- que se ve girar, en vez del forcejeo random y desincronizado de antes.
+	if reel then
+		self:_runReel(reel, motion, params.onReelTick, params.onReelLand)
+	else
+		task.wait(1.0)
 	end
 
-	-- Pulsado: ocultar el botón y acelerar (rampa IDLE_SPEED → CRUISE_SPEED).
-	if rollBtn then
-		rollBtn.Visible = false
-		rollBtn.Active = false
-	end
-	for _, duration in buildAccelRamp(IDLE_SPEED, CRUISE_SPEED, ACCEL_MULT) do
-		if laneTornDown(weaponLane) or laneTornDown(wrapLane) then
-			return
-		end
-		self:_advanceLane(weaponLane, duration, false, true)
-		self:_advanceLane(wrapLane, duration, false, false)
-		task.wait(duration)
+	-- 5. Reveal del ganador en el billboard (tease + pop elástico + glow por
+	-- rareza; confetti en rarezas altas) — llega pegado al impacto del land.
+	local wrapDefinition = ItemsConfig.WeaponWraps[params.resultWrapId]
+	local wrapRarity = tostring(if type(wrapDefinition) == "table" then wrapDefinition.Rarity or RARITY_FALLBACK else RARITY_FALLBACK)
+	local glowColor = UITheme.RarityColors[wrapRarity] or GLOW_FALLBACK_COLOR
+	local doConfetti = CONFETTI_RARITIES[wrapRarity] == true
+	if reel then
+		self:_revealReel(reel, glowColor, doConfetti)
 	end
 
-	-- El WrapLane crucea de fondo (contenido aleatorio) hasta que le pedimos
-	-- frenar; entonces recorre su cola de decel amañada. `finished` es monótono
-	-- (sin race de BindableEvent): el flujo principal lo poll-ea.
-	local wrapControl = { beginStop = false, finished = false, driveBackground = false }
-	local wrapStopSchedule = buildDecelTail(CRUISE_SPEED, CLIMAX_DECEL_MULT, CLIMAX_STOP_THRESHOLD)
-	task.spawn(function()
-		pcall(function()
-			while not wrapControl.beginStop do
-				if laneTornDown(wrapLane) then
-					return
-				end
-				self:_advanceLane(wrapLane, CRUISE_SPEED, false, wrapControl.driveBackground)
-				task.wait(CRUISE_SPEED)
-			end
-			self:_spinSchedule(wrapLane, wrapStopSchedule, true)
-		end)
-		wrapControl.finished = true
-	end)
-
-	-- 1) El ARMA gira (crucero + decel) y se revela con el glow de su rareza.
-	self:_spinSchedule(weaponLane, buildSpinSchedule(FIRST_CRUISE_DURATION, FIRST_DECEL_MULT, FIRST_STOP_THRESHOLD), true)
-	local weaponCategoryConfig = (ItemsConfig :: any)[params.resultWeaponCategory]
-	local weaponDefinition = if type(weaponCategoryConfig) == "table" then weaponCategoryConfig[params.resultWeaponId] else nil
-	local weaponRarity = tostring(if type(weaponDefinition) == "table" then weaponDefinition.Rarity or "Common" else "Common")
-	local weaponGlow = UITheme.RarityColors[weaponRarity] or COLOR_FLASH
-	self:_revealLane(weaponLane, weaponGlow, FIRST_REVEAL)
-
-	-- El arma ha terminado su roll. Ahora el Wrap toma el control del fondo.
-	wrapControl.driveBackground = true
-
-	-- 2) Hueco de anticipación: el arma ya está; el wrap sigue girando.
-	task.wait(ANTICIPATION_GAP)
-
-	-- 3) Frenar el wrap y esperar a que fije (polling del flag monótono).
-	wrapControl.beginStop = true
-	while not wrapControl.finished do
-		if laneTornDown(wrapLane) then
-			break
-		end
-		task.wait()
-	end
-
-	-- 4) Reveal del wrap: clímax (glow dorado + pulso mayor + confetti).
-	self:_revealLane(wrapLane, COLOR_FLASH, CLIMAX_REVEAL)
-	-- Opcional: el fondo final se puede forzar al COLOR_FLASH o la rareza final.
-	self:_updateBackground(COLOR_FLASH, 0.5)
-
-	-- 5) Hold (~2s) para leer el combo completo antes del reveal.
-	task.wait(REVEAL_HOLD)
-
-	-- 6) Reveal final: fade a negro, arma+wrap en Workspace.Locker.RevealSpawn,
-	--    se oculta Roll y se muestra el panel Reveal (Equip/Collect) — al pulsar
-	--    cualquiera se vuelve a la Store.
-	self:_revealResult(params, weaponLane)
+	-- 6. Reveal final: la cámara se queda en 'cases'; se OCULTA el cofre, se planta
+	-- el arma+wrap ganador en RevealSpawn y se avisa al Store para que resalte la
+	-- card ganadora y muestre Equip/Collect en Nav. BLOQUEA hasta que el jugador lo
+	-- descarta (o RESULT_HOLD s sin awaitDismiss). Tras descartar, onFinished cierra
+	-- el detalle y hideIdleChest destruye el cofre.
+	self:_revealResult(params)
 end
 
 -- Lanza la animación (no bloquea). Devuelve false si ya hay una en curso.
 function CaseUnboxing:play(params: PlayParams): boolean
 	if self._playing then
 		return false
-	end
-	if #params.ownedWeapons == 0 then
-		-- Sin pool de armas no hay reel que girar; termina directo.
-		params.onFinished()
-		return true
 	end
 
 	self._playing = true
@@ -1092,12 +1198,8 @@ function CaseUnboxing:play(params: PlayParams): boolean
 		if not ok then
 			warn("[CaseUnboxing] Animación abortada:", err)
 		end
-		-- Cleanup del run: items, pool de viewports, tweens.
+		-- Cleanup del run: cofre, items del reel, renders 3D, tweens.
 		self._playJanitor:Cleanup()
-		self._frame.Visible = false
-		if self._backgroundNode and self._baseBackgroundColor then
-			self._backgroundNode.BackgroundColor3 = self._baseBackgroundColor
-		end
 		self._playing = false
 		params.onFinished()
 	end)

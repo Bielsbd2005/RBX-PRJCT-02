@@ -12,6 +12,7 @@
 local CollectionService = game:GetService("CollectionService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local TeamUtils = require(Shared.utils.TeamUtils)
@@ -30,11 +31,22 @@ type AliveTarget = {
 	hum: Humanoid?,
 	root: BasePart?,
 }
-local NavMetrics = require(script.Parent:WaitForChild("telemetry"):WaitForChild("NavMetrics"))
 local RaycastViz = require(script.Parent:WaitForChild("debug"):WaitForChild("RaycastViz"))
 local DetectRangeViz = require(script.Parent:WaitForChild("debug"):WaitForChild("DetectRangeViz"))
 
 local WEAPON_TAG = "WeaponsSystemWeapon"
+
+-- Diagnóstico sin prints: en Studio cada bot publica en qué fase de navegación
+-- está como attribute del modelo, visible en vivo desde el Explorer
+-- (seleccioná el bot → Properties → Attributes → NavPhase). Sirve para ver qué
+-- hace exactamente un bot mientras está parado, sin llenar el Output.
+-- Fuera de Studio no se escribe nada.
+local IS_STUDIO = RunService:IsStudio()
+local NAV_PHASE_ATTR = "NavPhase"
+
+-- Tope del gate de aterrizaje al spawnear. Si el bot cae al vacío o queda
+-- suspendido, el FSM arranca igual pasado este tiempo en vez de colgarse.
+local SPAWN_GROUND_TIMEOUT = 1.5
 
 local _weaponDataRemote: RemoteEvent? = nil
 local _weaponFiredRemote: RemoteEvent? = nil
@@ -266,6 +278,7 @@ export type BotAIInstance = typeof(setmetatable({} :: {
 	_lastAimPos: Vector3,
 	_navigator: Navigator.Navigator?,
 	_stuckDetector: StuckDetector.StuckDetector?,
+	_navPhase: string,
 	_roamGraph: RoamGraph.RoamGraph?,
 	_animTracks: { [string]: AnimationTrack }?,
 	_combat: ResolvedCombatProfile,
@@ -354,6 +367,7 @@ function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?, wrapId
 		_lastAimPos = Vector3.zero,
 		_navigator = nil,
 		_stuckDetector = nil,
+		_navPhase = "",
 		_roamGraph = nil,
 		_animTracks = nil,
 		_combat = _resolveCombatProfile(combatOverrides),
@@ -474,6 +488,10 @@ function BotAI:_setupRotationConstraint(): AlignOrientation?
 		attachment.Parent = self._rootPart
 	end
 
+	-- Constraint de APUNTADO: gira el HRP entero hacia el objetivo en combate.
+	-- El FSM lo togglea (Enabled + CFrame por tick). Controla los 3 ejes, pero su
+	-- CFrame objetivo siempre es vertical (lookAt horizontal), así que coincide
+	-- con el constraint de verticalidad de abajo — no se pelean.
 	local align = Instance.new("AlignOrientation")
 	align.Mode = Enum.OrientationAlignmentMode.OneAttachment
 	align.Attachment0 = attachment
@@ -483,6 +501,45 @@ function BotAI:_setupRotationConstraint(): AlignOrientation?
 	align.Responsiveness = 30
 	align.Enabled = false
 	align.Parent = self._dummy
+
+	-- Constraint de VERTICALIDAD (fix "el bot se cae al suelo y no se levanta"):
+	-- los NPC vivos tienen FallingDown/Ragdoll/GettingUp deshabilitados (ver
+	-- AIService por rendimiento), así que un vuelco físico (choque entre bots,
+	-- aterrizaje del spawn 4-studs, giro brusco del apuntado) los dejaba tumbados
+	-- SIN vía de recuperación. Este AlignOrientation fija SOLO el eje "arriba" del
+	-- HRP al "arriba" del mundo (PrimaryAxisOnly), dejando el yaw libre para
+	-- AutoRotate/apuntado. Siempre Enabled: corrige pitch/roll de forma continua
+	-- antes de que el cuerpo llegue a caerse. Coste: 1 constraint nativo por bot
+	-- (lo resuelve el motor de física en C++, no la state-machine que evitábamos).
+	--
+	-- Ejes: con PrimaryAxisOnly, AlignOrientation alinea el eje X del attachment
+	-- (Attachment.Axis) con el RightVector del CFrame objetivo. Rotamos el
+	-- attachment 90° en Z para que su X local apunte al +Y del HRP (arriba), y
+	-- damos como objetivo un CFrame cuyo RightVector es el +Y del mundo. Ambos son
+	-- CFrame.Angles(0, 0, π/2) → RightVector (0, 1, 0).
+	local existingUpright = self._rootPart:FindFirstChild("UprightAttachment")
+	local uprightAttachment: Attachment
+	if existingUpright and existingUpright:IsA("Attachment") then
+		uprightAttachment = existingUpright
+	else
+		uprightAttachment = Instance.new("Attachment")
+		uprightAttachment.Name = "UprightAttachment"
+		uprightAttachment.CFrame = CFrame.Angles(0, 0, math.pi / 2)
+		uprightAttachment.Parent = self._rootPart
+	end
+
+	local upright = Instance.new("AlignOrientation")
+	upright.Name = "UprightConstraint"
+	upright.Mode = Enum.OrientationAlignmentMode.OneAttachment
+	upright.Attachment0 = uprightAttachment
+	upright.PrimaryAxisOnly = true
+	upright.CFrame = CFrame.Angles(0, 0, math.pi / 2)
+	upright.RigidityEnabled = false
+	upright.MaxTorque = 1e6
+	upright.MaxAngularVelocity = 20
+	upright.Responsiveness = 25
+	upright.Enabled = true
+	upright.Parent = self._dummy
 
 	return align
 end
@@ -846,6 +903,16 @@ end
 @param stopCondition () -> boolean Condición de cancelación temprana.
 @return boolean true si la navegación falló (onFailed) — PATROL usa esto para backoff.
 ]]
+-- Gate por cambio: ATTACK y CHASE iteran a 20Hz, así que sin el guard serían
+-- ~320 SetAttribute/seg con 16 bots, todos con el mismo valor.
+function BotAI:_setNavPhase(phase: string)
+	if not IS_STUDIO or self._navPhase == phase then
+		return
+	end
+	self._navPhase = phase
+	self._dummy:SetAttribute(NAV_PHASE_ATTR, phase)
+end
+
 function BotAI:_moveToLocation(location: Vector3, stopCondition: () -> boolean): boolean
 	local navigator = self._navigator
 	if not navigator then
@@ -854,6 +921,7 @@ function BotAI:_moveToLocation(location: Vector3, stopCondition: () -> boolean):
 
 	local done = false
 	local failed = false
+	local walking = false
 	navigator:goTo(location, {
 		onArrived = function()
 			done = true
@@ -864,11 +932,20 @@ function BotAI:_moveToLocation(location: Vector3, stopCondition: () -> boolean):
 		end,
 	})
 
+	-- "path-wait" cubre desde el enqueue hasta que el walk loop arranca: cola
+	-- de ComputeAsync + el propio compute. Si un bot pasa aquí sus segundos
+	-- de quietud, el cuello de botella es el pathfinding, no el movimiento.
+	self:_setNavPhase("path-wait")
+
 	-- B3: 10Hz wait instead of every-frame polling. The stop condition's
 	-- inputs (target acquisition, death) are produced by the 10Hz eval loop,
 	-- so waking faster than the source gains no latency — it only multiplied
 	-- scheduler wakeups per walking bot (60/s → 10/s).
 	while not done and not stopCondition() do
+		if not walking and navigator:isMoving() then
+			walking = true
+			self:_setNavPhase("walking")
+		end
 		task.wait(0.1)
 	end
 
@@ -926,9 +1003,7 @@ function BotAI:Start(
 		humanoid,
 		self._navigator :: any,
 		self._roamGraph :: any,
-		NavMetrics,
-		self._dummy.Name,
-		if mapRoot then mapRoot.Name else "?"
+		self._dummy.Name
 	)
 	task.spawn(function()
 		task.wait(math.random() * 0.1)
@@ -1001,6 +1076,21 @@ function BotAI:Start(
 		local lastAppliedMoveDir: Vector3 = Vector3.new(math.huge, 0, 0)
 		local previousState: string = STATES.PATROL
 
+		-- El rig entra al Workspace por encima del pad de spawn y cae. Pedir el
+		-- primer path desde un origen en el aire hace que ComputeAsync devuelva
+		-- NoPath: el punto de partida no está sobre el navmesh. Cada NoPath
+		-- cuesta el backoff de PATROL (0.3-0.5s) antes de reintentar, y el
+		-- StuckDetector no lo ve porque el Navigator nunca llegó a moving.
+		-- Esperar al contacto con el suelo es más barato que fallar y reintentar.
+		self:_setNavPhase("spawn-grounding")
+		local groundDeadline = os.clock() + SPAWN_GROUND_TIMEOUT
+		while self._isAlive
+			and humanoid.Health > 0
+			and humanoid.FloorMaterial == Enum.Material.Air
+			and os.clock() < groundDeadline do
+			task.wait(0.05)
+		end
+
 		while self._isAlive and humanoid.Health > 0 do
 			local potentialTarget = self._currentTarget
 			local isVisible = self._isCurrentTargetVisible
@@ -1052,6 +1142,7 @@ function BotAI:Start(
 				if self._navigator and self._navigator:isMoving() then
 					self._navigator:cancel()
 				end
+				self:_setNavPhase("attack")
 
 				local now = os.clock()
 				if now >= self._combatCycleEndAt then
@@ -1183,6 +1274,7 @@ function BotAI:Start(
 				task.wait(0.05)
 
 			elseif currentState == STATES.CHASE and currentTarget and targetRoot then
+				self:_setNavPhase(if isVisible then "chase-direct" else "chase-path")
 				if isVisible then
 					if self._navigator and self._navigator:isMoving() then
 						self._navigator:cancel()
@@ -1217,6 +1309,28 @@ function BotAI:Start(
 			else
 				local dest: Vector3?
 
+				-- Salida de ATTACK/CHASE-direct: ambas ramas escriben
+				-- `humanoid:Move` directo, y Move es STICKY — la dirección
+				-- persiste hasta que alguien escriba otra. Sin cortarla acá el
+				-- bot entra a PATROL trotando con el último rumbo de combate y
+				-- sigue así durante todo el `path-wait` (cola de ComputeAsync)
+				-- y durante cada `path-failed-backoff`. Como el rumbo solo
+				-- cambia cuando una goTo consigue path, y PATROL elige destino
+				-- aleatorio nuevo en cada reintento, el resultado visible es un
+				-- bot corriendo en círculos unos segundos "hasta que encuentra
+				-- ruta".
+				if previousState ~= STATES.PATROL then
+					humanoid:Move(Vector3.zero, false)
+					lastAppliedMoveDir = Vector3.new(math.huge, 0, 0)
+					lastChaseMoveDir = Vector3.new(math.huge, 0, 0)
+				end
+
+				-- "roam-pick-fallback" delata un mapa sin AINav/RoamPoints
+				-- usable: los destinos pasan a ser puntos aleatorios del
+				-- WanderRadius, que caen fuera del navmesh a menudo y hacen
+				-- fallar el compute una y otra vez.
+				self:_setNavPhase("roam-pick")
+
 				if self._roamGraph then
 					dest = self._roamGraph:pickRandomNavigablePoint(
 						rootPart.Position,
@@ -1226,6 +1340,7 @@ function BotAI:Start(
 				end
 
 				if not dest then
+					self:_setNavPhase("roam-pick-fallback")
 					local randomVec = Vector3.new(
 						math.random(-BotConfig.Movement.WanderRadius, BotConfig.Movement.WanderRadius),
 						0,
@@ -1235,10 +1350,6 @@ function BotAI:Start(
 				end
 
 				dest = (dest :: Vector3) + Vector3.new(math.random(-4, 4), 0, math.random(-4, 4))
-
-				if NavMetrics.ENABLED then
-					NavMetrics.record("roam_pick_count", { bot = self._dummy.Name })
-				end
 
 				local moveFailed = self:_moveToLocation(dest :: Vector3, function()
 					return self._currentTarget ~= nil or not self._isAlive
@@ -1250,6 +1361,7 @@ function BotAI:Start(
 				-- an O(roam-points) pick per iteration on maps where the
 				-- chosen destinations keep failing.
 				if moveFailed and self._isAlive and self._currentTarget == nil then
+					self:_setNavPhase("path-failed-backoff")
 					task.wait(0.3 + math.random() * 0.2)
 				end
 

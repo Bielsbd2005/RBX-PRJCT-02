@@ -35,7 +35,6 @@ local PathfindingQueue = {}
 local _queue: { Entry } = {}
 local _head = 1
 local _tail = 0
-local _onEnqueue: ((depth: number) -> ())? = nil
 -- Semáforo de in-flight: el budget per-Heartbeat sólo limita enqueues. Sin
 -- tope concurrente, un repath storm spawnea N coroutines paralelas que ceden
 -- mid-ComputeAsync y el spike se acumula en lugar de diluirse.
@@ -57,18 +56,10 @@ function PathfindingQueue.enqueue(path: Path, origin: Vector3, dest: Vector3, ca
 		dest = dest,
 		callback = callback,
 	}
-	if _onEnqueue then
-		_onEnqueue(_tail - _head + 1)
-	end
 end
 
 function PathfindingQueue.getDepth(): number
 	return _tail - _head + 1
-end
-
--- Hook usado por NavMetrics (commit 2). En commit 1 queda como no-op.
-function PathfindingQueue.setOnEnqueue(hook: ((depth: number) -> ())?)
-	_onEnqueue = hook
 end
 
 -- Purga la cola al OnRoundEnd. Las callbacks pendientes verifican

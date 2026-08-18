@@ -8,6 +8,7 @@ local Players = game:GetService("Players")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local GameConfig = require(Shared:WaitForChild("GameConfig"))
 local KillEffectsRegistry = require(Shared.Locker.killEffects.KillEffectsRegistry)
+local RagdollCleanup = require(Shared.Locker.killEffects.RagdollCleanup)
 local CollisionGroups = require(Shared:WaitForChild("CollisionGroups"))
 local BotNames = require(Shared.constants.BotNames)
 local BotConfig = require(Shared.constants.BotConfig)
@@ -17,9 +18,9 @@ local LastAttackerStore = require(ReplicatedStorage:WaitForChild("WeaponsSystem"
 local BotAI = require(script:WaitForChild("BotAI"))
 local BotAppearance = require(script:WaitForChild("BotAppearance"))
 local BotPersonality = require(script:WaitForChild("BotPersonality"))
-local NavMetrics = require(script:WaitForChild("telemetry"):WaitForChild("NavMetrics"))
 local RoamGraph = require(script:WaitForChild("nav"):WaitForChild("RoamGraph"))
 local PathfindingQueue = require(script:WaitForChild("nav"):WaitForChild("PathfindingQueue"))
+local StuckViz = require(script:WaitForChild("debug"):WaitForChild("StuckViz"))
 
 local DataServiceMod = require(script.Parent.core.data.DataService)
 type DataService = DataServiceMod.DataServiceModule
@@ -111,7 +112,6 @@ local _onBotDied: ((string, string, Humanoid, number) -> ())? = nil
 -- completes; the broadcast made at that point misses the pending spawns).
 local _onRosterChanged: (() -> ())? = nil
 local _botsByName: { [string]: BotRecord } = {}
-local _activeBotCount = 0
 -- D3: earliest os.clock() at which each team may spawn a REPLACEMENT for a
 -- dead bot. Armed by the death handler when Lifecycle.RespawnDelay > 0
 -- (default 0 = instant, historical behavior); the spawn pump skips a held
@@ -307,7 +307,6 @@ local function _refreshAliveLists()
 	table.clear(listA)
 	table.clear(listB)
 
-	local count = 0
 	local deadUnreported: { BotRecord }? = nil
 	for name, bot in _botsByName do
 		if bot.model.Parent == nil then
@@ -328,7 +327,6 @@ local function _refreshAliveLists()
 				table.insert(deadUnreported, bot)
 			end
 		else
-			count += 1
 			if bot.team == "A" then
 				table.insert(listA, name)
 			else
@@ -336,7 +334,6 @@ local function _refreshAliveLists()
 			end
 		end
 	end
-	_activeBotCount = count
 
 	-- Fallback de limpieza: bots con Health<=0 cuyo Humanoid.Died no llegó a correr.
 	-- El guard hasDeathBeenReported evita doble ejecución si Died sí dispara luego.
@@ -595,10 +592,6 @@ end
 
 _prewarmRigPools()
 
-local function _notifyActiveBotCount()
-	NavMetrics.SetActiveBotCount(_activeBotCount)
-end
-
 local function _removeBotByName(botName: string, skipRefresh: boolean?)
 	local bot = _botsByName[botName]
 	if not bot then
@@ -628,10 +621,8 @@ local function _removeBotByName(botName: string, skipRefresh: boolean?)
 	end
 
 	_botsByName[botName] = nil
-	_activeBotCount = math.max(0, _activeBotCount - 1)
 	if not skipRefresh then
 		_refreshAliveLists()
-		_notifyActiveBotCount()
 	end
 end
 
@@ -764,10 +755,13 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 	humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
 	humanoid:SetStateEnabled(Enum.HumanoidStateType.GettingUp, false)
 
-	-- Mismo tratamiento que los jugadores: CHARACTERS group para que players
-	-- vivos no choquen con cadáveres. Al morir, el kill effect migra al grupo
-	-- RAGDOLL. Watcher cubre tools/accesorios que se parenten después.
-	CollisionGroups.setGroupForCharacter(botModel, CollisionGroups.CHARACTERS)
+	-- Grupo BOTS: choca con el mundo y con jugadores vivos, pero no con otros
+	-- bots ni con cadáveres. Bot↔bot OFF es deliberado — dos NPCs empujándose
+	-- contra la geometría se leen como "moving sin progreso" y disparan la
+	-- escalada del StuckDetector (repaths en cadena, pasos a tirones). Al
+	-- morir, el kill effect migra al grupo RAGDOLL. El watcher cubre
+	-- tools/accesorios que se parenten después.
+	CollisionGroups.setGroupForCharacter(botModel, CollisionGroups.BOTS)
 	-- Audit mobile: guardar la conexión para desconectarla en el Died handler
 	-- antes del kill effect. El ragdoll/VFX parentea ~10 nuevos BaseParts y
 	-- el listener se dispararía para cada uno (se ejecuta el switch
@@ -837,13 +831,19 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 			record.descendantConn = nil
 		end
 
-		-- 0a. Destrucción programada SIEMPRE. Aunque todo lo demás falle, el
-		-- bot eventualmente desaparece.
-		task.delay(BotConfig.Lifecycle.RagdollCleanupDelay, function()
-			if botModel.Parent ~= nil then
-				botModel:Destroy()
-			end
-		end)
+		-- 0a. Destrucción programada SIEMPRE. Aunque todo lo demás falle, el bot
+		-- eventualmente desaparece. RagdollCleanup lo mantiene en pantalla el mínimo
+		-- pedido (4s) para que la caída ragdoll se vea COMPLETA — con la propiedad de
+		-- red en el servidor (ver KillEffectUtils.setServerOwnership) el cuerpo ya no
+		-- se congela tieso a ~1s. Al pasar el mínimo se destruye con un fundido suave
+		-- (no corte seco) para que la desaparición no sea brusca. `maxTime` es el tope
+		-- duro. Nota perf: 4s mantiene más cadáveres vivos que los 1.8-3s previos;
+		-- el fundido y el tope de 5s acotan la población en móvil.
+		RagdollCleanup.scheduleDestroy(botModel, {
+			minTime = 4,
+			maxTime = 5,
+			fadeTime = 0.4,
+		})
 
 		-- 0b. Parar IA + animaciones. Antes sin pcall: si throwea, las
 		-- animaciones de correr siguen jugando aunque haya ragdoll.
@@ -867,8 +867,7 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 		-- fallback after OnRoundEnd, or after the next round already started),
 		-- skip ALL round-scoped bookkeeping. Recycling into the cleared pools
 		-- would leak a stale identity whose fakeUserId collides after the
-		-- counter resets; decrementing _activeBotCount would corrupt the new
-		-- round's count; _onBotDied would credit a kill in the wrong round.
+		-- counter resets; _onBotDied would credit a kill in the wrong round.
 		-- Visual cleanup above already ran regardless.
 		if _roundGeneration ~= spawnGeneration then
 			return
@@ -888,12 +887,9 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 			-- B6: clear el index — el nuevo bot se asignará en _spawnOneBot.
 			_botModelByFakeUserId[fakeUserId] = nil
 			_botsByName[botName] = nil
-			_activeBotCount = math.max(0, _activeBotCount - 1)
 			_botIdentityByName[botName] = nil
 			_botFakeUserIdByName[botName] = nil
 			_refreshAliveLists()
-			_notifyActiveBotCount()
-			NavMetrics.RecordBotDied()
 		end)
 
 		-- 2. Callback externo de juego (persistencia, streak, remotes). Ya
@@ -910,10 +906,7 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 	record.deathConnection = humanoid.Died:Connect(handleBotDeath)
 
 	_botsByName[botName] = record
-	_activeBotCount += 1
 	table.insert(_botNamesByTeam[team], botName)
-	_notifyActiveBotCount()
-	NavMetrics.RecordBotSpawned()
 	return true
 end
 
@@ -1024,6 +1017,9 @@ function AIService:OnRoundStart(config: RoundStartConfig)
 	_isRoundActive = true
 	_mapRoot = config.mapRoot
 	_spawnPoints = table.clone(config.spawnPoints or {})
+	-- Los markers de debug ignoran los atascos alrededor de los spawns (los
+	-- bots se empujan en el pad al aparecer; no es geometría a arreglar).
+	StuckViz.setSpawnPoints(_spawnPoints)
 	_selectSpawnPoint = config.selectSpawnPoint
 	_onBotDied = config.onBotDied
 	_onRosterChanged = config.onRosterChanged
@@ -1036,8 +1032,6 @@ function AIService:OnRoundStart(config: RoundStartConfig)
 	table.clear(_recycledByTeam.B)
 	table.clear(_identityByFakeUserId)
 	table.clear(_teamByFakeUserId)
-	NavMetrics.ResetCounts()
-	NavMetrics.SetActiveBotCount(0)
 	-- RoamGraph cacheado por mapRoot. Si el mapa es el mismo del round
 	-- anterior, reusa el pool ya construido (cero coste). Si es distinto,
 	-- construye uno nuevo en el primer pickRandomNavigablePoint.

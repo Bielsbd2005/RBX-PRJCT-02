@@ -95,46 +95,6 @@ local CATEGORY_LABEL: { [string]: string } = {
 
 local BattlePassFeature = {}
 
--- Formatea segundos restantes como "Ends in 6 weeks, 2 days" (máx 2 unidades).
-local function _formatTimeLeft(seconds: number): string
-	if seconds <= 0 then return "" end
-
-	local function unit(n: number, singular: string): string
-		return tostring(n) .. " " .. (if n == 1 then singular else singular .. "s")
-	end
-
-	local minutes = math.floor(seconds / 60)
-	local hours = math.floor(minutes / 60)
-	local days = math.floor(hours / 24)
-	local weeks = math.floor(days / 7)
-
-	if weeks >= 1 then
-		local remDays = days - weeks * 7
-		if remDays > 0 then
-			return ("Ends in %s, %s"):format(unit(weeks, "week"), unit(remDays, "day"))
-		end
-		return ("Ends in %s"):format(unit(weeks, "week"))
-	end
-	if days >= 1 then
-		local remHours = hours - days * 24
-		if remHours > 0 then
-			return ("Ends in %s, %s"):format(unit(days, "day"), unit(remHours, "hour"))
-		end
-		return ("Ends in %s"):format(unit(days, "day"))
-	end
-	if hours >= 1 then
-		local remMinutes = minutes - hours * 60
-		if remMinutes > 0 then
-			return ("Ends in %s, %s"):format(unit(hours, "hour"), unit(remMinutes, "minute"))
-		end
-		return ("Ends in %s"):format(unit(hours, "hour"))
-	end
-	if minutes >= 1 then
-		return ("Ends in %s"):format(unit(minutes, "minute"))
-	end
-	return "Ending soon"
-end
-
 local function _isWrapReward(reward: BattlePassConfig.Reward): boolean
 	return reward.Kind == "Item" and reward.Category == "WeaponWraps" and reward.ItemId ~= nil
 end
@@ -233,17 +193,18 @@ function BattlePassFeature.start(menuController: any): any
 	local frame = frameNode :: GuiObject
 	local main = frame:WaitForChild("Main")
 
-	-- Botón de apertura opcional en Menu.Nav.BattlePass.
-	local navMenu = menuGui:FindFirstChild("Nav")
-	local btnInstance = navMenu and navMenu:FindFirstChild("BattlePass")
-	local menuBtn: GuiButton? = if btnInstance and btnInstance:IsA("GuiButton") then btnInstance else nil
+	-- Botón de apertura en Menu.Container.FamePass
+	local container = menuGui:FindFirstChild("Container")
+	local btnInstance = container and container:FindFirstChild("FamePass")
+	local menuBtn: GuiButton? = if btnInstance and btnInstance:IsA("GuiButton")
+		then btnInstance
+		else (btnInstance and btnInstance:FindFirstChildWhichIsA("GuiButton"))
 
-	-- Menu.Nav.BattlePass.Icon.Value → nivel del Battle Pass.
-	-- Menu.Nav.BattlePass.Indicator  → visible si hay alguna recompensa reclamable.
-	local navIconValueNode = menuBtn and menuBtn:FindFirstChild("Icon")
+	local navTarget = btnInstance or menuBtn
+	local navIconValueNode = navTarget and navTarget:FindFirstChild("Icon")
 	local navValueNode = navIconValueNode and navIconValueNode:FindFirstChild("Value")
 	local navIconValue: TextLabel? = if navValueNode and navValueNode:IsA("TextLabel") then navValueNode else nil
-	local navIndicatorNode = menuBtn and menuBtn:FindFirstChild("Indicator")
+	local navIndicatorNode = navTarget and navTarget:FindFirstChild("Indicator")
 	local navIndicator: GuiObject? = if navIndicatorNode and navIndicatorNode:IsA("GuiObject") then navIndicatorNode else nil
 
 	-- Header.
@@ -535,7 +496,7 @@ function BattlePassFeature.start(menuController: any): any
 			return TIMER_POLL_SLOW
 		end
 		local remaining = season.EndsAt - os.time()
-		local text = _formatTimeLeft(remaining)
+		local text = UIUtils.formatTimeLeft(remaining)
 		if text == "" then
 			timerLabel.Visible = false
 			return TIMER_POLL_SLOW
@@ -855,6 +816,14 @@ function BattlePassFeature.start(menuController: any): any
 		end,
 	})
 	janitor:Add(panel, "Destroy")
+
+	if btnInstance and not menuBtn and btnInstance:IsA("GuiObject") then
+		janitor:Add(btnInstance.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				panel:open()
+			end
+		end), "Disconnect")
+	end
 
 	-- ── Navegación / Skip / Purchase ──────────────────────────
 	if nextBtn and nextBtn:IsA("GuiButton") then

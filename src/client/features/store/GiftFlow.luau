@@ -7,22 +7,24 @@
 	<Pack>.Gift): el Store se oculta y este frame toma el relevo. CloseBtn vuelve
 	al Store.
 
-	Estructura GUI esperada:
+	Estructura GUI:
 		UserInterface.Gifting
 		  Container
 		    Friends
-		      Header.CloseBtn                ← vuelve al Store
-		      ScrollingFrame                 ← canvas automático según contenido
-		        Template                     ← fila de amigo: Icon/Username/DisplayName/Status
-		        Search.TextBox               ← filtro en vivo (oculta filas que no matchean)
+		      Container
+		        Header
+		          CloseBtn                   ← vuelve al Store
+		        Search
+		          TextBox                    ← filtro en vivo
+		        ScrollingFrame               ← canvas automático según contenido
+		          Template                   ← fila de amigo: Icon/Username/DisplayName/Status
 		    Action                           ← visible SOLO con un amigo seleccionado
-		      Contents
-		        Gift.Name / Gift.Price       ← qué se regala y su precio
-		        Friend                       ← amigo elegido (misma estructura que Template)
-		      GiftBtn                        ← valida y lanza el envío
-
-	La lista muestra SIEMPRE los amigos del jugador (no hay pestaña de lobby) y el
-	regalo ya no lleva mensaje adjunto.
+		      Container
+		        Contents
+		          Gift
+		            Name / Price             ← qué se regala y su precio
+		          Friend                     ← amigo elegido: Icon/Username/DisplayName
+		        Gift                         ← botón: valida y lanza el envío
 
 	Flujo de red (Network.Gifting):
 	  SendGift → SendResponse (validación server-side; success ⇒ el server lanza
@@ -50,30 +52,19 @@ local StaggerReveal = require(Client.core.ui.animators.StaggerReveal)
 
 type StoreProductDefinition = StoreProducts.StoreProductDefinition
 
-local AVATAR_THUMB_FORMAT = "rbxthumb://type=AvatarHeadShot&id=%d&w=150&h=150"
+local AVATAR_THUMB_FORMAT = "rbxthumb://type=AvatarHeadShot&id=%d&w=48&h=48"
 local STATUS_ONLINE_TEXT = "· Online"
 local STATUS_OFFLINE_TEXT = "· Offline"
 local STATUS_ONLINE_COLOR = Color3.fromRGB(114, 255, 114)
 local STATUS_OFFLINE_COLOR = Color3.fromRGB(255, 255, 255)
 local GIFT_NAME_FORMAT = "%s Cash"
--- Precio con el glifo de Robux de la fuente de Roblox (\u{E002}) + la cifra,
--- todo en el mismo TextLabel (Gift.Price no tiene icono de Robux aparte).
 local PRICE_FORMAT = "\u{E002}%d"
--- Si el servidor no responde la validación en este tiempo, liberamos el GiftBtn
--- para que una respuesta perdida no deje el flujo bloqueado.
 local RESPONSE_TIMEOUT = 5
--- El receipt puede tardar unos segundos tras el prompt; pasado esto soltamos
--- el guard de compra-en-vuelo (el GiftDelivered tardío se maneja igual).
 local DELIVERY_TIMEOUT = 15
--- Cache de amigos: la API pagina y yielda; no re-pedimos en cada apertura.
 local FRIENDS_CACHE_TTL = 60
 
--- Reveal escalonado de las filas (mismas curvas que los packs del Store, con un
--- stagger más corto por ser más items). Solo en (re)poblados por acción del
--- usuario (abrir el flujo), no en refrescos vivos de status.
 local ROW_REVEAL_STAGGER = 0.03
 local ROW_REVEAL_TWEEN = TweenInfo.new(0.26, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
--- Pop de feedback al seleccionar: la fila clicada y la tarjeta del receptor.
 local ROW_SELECT_TWEEN = TweenInfo.new(0.18, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 local ROW_SELECT_FROM = 0.9
 local CARD_SELECT_TWEEN = TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
@@ -82,8 +73,6 @@ local CARD_SELECT_FROM = 0.82
 export type GiftFlowConfig = {
 	menuController: any,
 	storeFrame: GuiObject,
-	-- Se dispara al confirmarse la entrega (receipt procesado): el Store lo usa
-	-- para cualquier limpieza posterior.
 	onDelivered: (() -> ())?,
 }
 
@@ -97,30 +86,6 @@ type UserEntry = {
 local GiftFlow = {}
 GiftFlow.__index = GiftFlow
 
--- Resuelve un TextLabel por nombre dentro de un nodo: hijo directo primero,
--- luego descendientes (tolera un nivel extra de contenedor en la GUI).
-local function findLabel(parent: Instance?, name: string): TextLabel?
-	if not parent then
-		return nil
-	end
-	local node = parent:FindFirstChild(name) or parent:FindFirstChild(name, true)
-	return if node and node:IsA("TextLabel") then node else nil
-end
-
-local function findImage(parent: Instance?, name: string): (ImageLabel | ImageButton)?
-	if not parent then
-		return nil
-	end
-	local node = parent:FindFirstChild(name) or parent:FindFirstChild(name, true)
-	if node and (node:IsA("ImageLabel") or node:IsA("ImageButton")) then
-		return node :: any
-	end
-	return nil
-end
-
--- Click unificado sobre una fila: la propia fila si es botón, o su primer
--- GuiButton descendiente (p. ej. un HitArea transparente); último recurso,
--- InputBegan sobre el frame.
 local function bindRowClick(row: GuiObject, janitor: any, callback: () -> ()): ()
 	if row:IsA("GuiButton") then
 		janitor:Add(row.Activated:Connect(callback), "Disconnect")
@@ -140,17 +105,14 @@ local function bindRowClick(row: GuiObject, janitor: any, callback: () -> ()): (
 	end), "Disconnect")
 end
 
--- Resuelve/crea la UIScale de un nodo reutilizando el nombre "InteractiveScale"
--- que usa StaggerReveal: Roblox aplica una sola UIScale por instancia, así que
--- el reveal y el pop de selección comparten el mismo nodo sin pelearse.
 local function ensureScale(node: GuiObject): UIScale
 	local named = node:FindFirstChild("InteractiveScale")
 	if named and named:IsA("UIScale") then
 		return named
 	end
-	local any = node:FindFirstChildOfClass("UIScale")
-	if any then
-		return any
+	local anyClass = node:FindFirstChildOfClass("UIScale")
+	if anyClass then
+		return anyClass
 	end
 	local created = Instance.new("UIScale")
 	created.Name = "InteractiveScale"
@@ -159,9 +121,6 @@ local function ensureScale(node: GuiObject): UIScale
 	return created
 end
 
--- Pop desde `from` (<1) hasta 1 con overshoot (Back/Out). Devuelve el tween para
--- poder cancelarlo. Un Play posterior sobre la misma propiedad cancela el
--- anterior, así que clicks rápidos no se solapan.
 local function popScale(node: GuiObject, info: TweenInfo, from: number): Tween
 	local scale = ensureScale(node)
 	scale.Scale = from
@@ -170,17 +129,9 @@ local function popScale(node: GuiObject, info: TweenInfo, from: number): Tween
 	return tween
 end
 
--- `isStale` corta la paginación cuando el resultado ya no interesa (re-fetch):
--- sin esto, reabrir el flujo durante un fetch lento lanzaba paginaciones
--- completas concurrentes cuyo resultado se descartaba.
 local function fetchFriendEntries(userId: number, isStale: () -> boolean): { UserEntry }
 	local entries: { UserEntry } = {}
 
-	-- Presencia fiable de quien está en ESTE servidor: item.IsOnline de
-	-- GetFriendsAsync es presencia de plataforma (puede ir con retraso y en
-	-- Studio suele venir en false aunque el amigo esté conectado). Un amigo que
-	-- está jugando aquí mismo es online con certeza, así que lo cruzamos con la
-	-- lista de jugadores del servidor y forzamos online en ese caso.
 	local inServer: { [number]: boolean } = {}
 	for _, other in Players:GetPlayers() do
 		inServer[other.UserId] = true
@@ -213,7 +164,6 @@ local function fetchFriendEntries(userId: number, isStale: () -> boolean): { Use
 		end
 	end
 
-	-- Online primero; dentro de cada grupo, alfabético por nombre visible.
 	table.sort(entries, function(a, b)
 		if a.online ~= b.online then
 			return a.online
@@ -228,7 +178,6 @@ function GiftFlow.new(config: GiftFlowConfig, janitor: any)
 	self._janitor = janitor
 	self._storeFrame = config.storeFrame
 	self._onDelivered = config.onDelivered
-	self._inert = true
 
 	self._receiver = nil :: UserEntry?
 	self._product = nil :: StoreProductDefinition?
@@ -240,7 +189,6 @@ function GiftFlow.new(config: GiftFlowConfig, janitor: any)
 	self._friendsFetchedAt = 0
 	self._friendsFetchToken = 0
 
-	-- Reveal escalonado de la lista + pop de la tarjeta al seleccionar.
 	self._reveal = StaggerReveal.new({
 		staggerDelay = ROW_REVEAL_STAGGER,
 		tweenInfo = ROW_REVEAL_TWEEN,
@@ -257,135 +205,74 @@ function GiftFlow.new(config: GiftFlowConfig, janitor: any)
 
 	local player = Players.LocalPlayer
 	local playerGui = player:WaitForChild("PlayerGui")
-	local uiGui = playerGui:WaitForChild("UserInterface")
+	local uiGui = playerGui:WaitForChild("UserInterface") :: ScreenGui
 
-	local frameNode = uiGui:FindFirstChild("Gifting")
-	if not (frameNode and frameNode:IsA("GuiObject")) then
-		warn("[GiftFlow] Falta UserInterface.Gifting; el flujo de regalo queda inactivo.")
-		return self
-	end
-	local frame = frameNode :: GuiObject
+	local frame = uiGui:WaitForChild("Gifting") :: Frame
 	self._frame = frame
 
-	-- Resolución TOLERANTE de la estructura: cada nodo se busca por nombre —
-	-- hijo directo primero, descendientes después — para aguantar niveles extra
-	-- de contenedor en la GUI. Sin los nodos críticos (lista, GiftBtn, CloseBtn)
-	-- el flujo queda inerte con un warn que enumera qué falta, sin colgar el Store.
-	local function findNamed(name: string, predicate: ((Instance) -> boolean)?): Instance?
-		local direct = frame:FindFirstChild(name)
-		if direct and (predicate == nil or predicate(direct)) then
-			return direct
-		end
-		for _, descendant in frame:GetDescendants() do
-			if descendant.Name == name and (predicate == nil or predicate(descendant)) then
-				return descendant
-			end
-		end
-		return nil
-	end
-	local function isButton(node: Instance): boolean
-		return node:IsA("GuiButton")
-	end
+	local container = frame:WaitForChild("Container") :: Frame
 
-	local scrollingNode = findNamed("ScrollingFrame", function(node)
-		return node:IsA("ScrollingFrame")
-	end)
-	local templateNode = scrollingNode and scrollingNode:FindFirstChild("Template")
-	local closeNode = findNamed("CloseBtn", isButton)
-	local giftBtnNode = findNamed("GiftBtn", isButton)
+	-- Friends
+	local friends = container:WaitForChild("Friends") :: Frame
+	local friendsContainer = friends:WaitForChild("Container") :: Frame
 
-	if not (scrollingNode
-		and templateNode and templateNode:IsA("GuiObject")
-		and closeNode
-		and giftBtnNode)
-	then
-		warn(("[GiftFlow] UserInterface.Gifting: faltan nodos (ScrollingFrame=%s Template=%s CloseBtn=%s GiftBtn=%s); flujo inactivo."):format(
-			tostring(scrollingNode ~= nil),
-			tostring(templateNode ~= nil),
-			tostring(closeNode ~= nil),
-			tostring(giftBtnNode ~= nil)
-		))
-		return self
-	end
+	local header = friendsContainer:WaitForChild("Header")
+	local closeBtn = header:WaitForChild("CloseBtn") :: GuiButton
 
-	local scrolling = scrollingNode :: ScrollingFrame
-	local template = templateNode :: GuiObject
+	local search = friendsContainer:WaitForChild("Search")
+	self._searchBox = (if search:IsA("TextBox") then search else search:WaitForChild("TextBox")) :: TextBox
+
+	local scrolling = friendsContainer:WaitForChild("ScrollingFrame") :: ScrollingFrame
+	local template = scrolling:WaitForChild("Template") :: GuiObject
 	self._scrolling = scrolling
 	self._template = template
 
-	-- Canvas automático según la cantidad de filas.
 	scrolling.AutomaticCanvasSize = Enum.AutomaticSize.Y
 	scrolling.CanvasSize = UDim2.new(0, 0, 0, 0)
 	template.Visible = false
 
-	-- Nodos opcionales (si faltan, esa parte del flujo se omite sin romper). El
-	-- TextBox de búsqueda se busca DENTRO de su contenedor "Search".
-	local searchRoot = findNamed("Search")
-	self._searchBox = if searchRoot
-		then (if searchRoot:IsA("TextBox") then searchRoot else searchRoot:FindFirstChildWhichIsA("TextBox", true))
-		else nil
+	-- Action
+	local action = container:WaitForChild("Action") :: Frame
+	self._actionFrame = action
 
-	-- El panel Action solo se muestra con un receptor elegido; dentro cuelgan la
-	-- tarjeta del amigo (Friend, misma estructura que Template) y los labels del
-	-- regalo (Gift.Name / Gift.Price).
-	local actionRoot = findNamed("Action")
-	self._actionFrame = if actionRoot and actionRoot:IsA("GuiObject") then actionRoot else nil
+	local actionContainer = action:WaitForChild("Container") :: Frame
+	local contents = actionContainer:WaitForChild("Contents") :: Frame
 
-	local friendNode = findNamed("Friend")
-	self._card = if friendNode and friendNode:IsA("GuiObject") then friendNode else nil
+	local friendCard = contents:WaitForChild("Friend") :: GuiObject
+	self._card = friendCard
 
-	local giftRoot = findNamed("Gift")
-	self._giftName = findLabel(giftRoot, "Name")
-	self._giftPrice = findLabel(giftRoot, "Price")
+	local giftCard = contents:WaitForChild("Gift") :: GuiObject
+	self._giftName = giftCard:WaitForChild("Name") :: TextLabel
+	self._giftPrice = giftCard:WaitForChild("Price") :: TextLabel
+
+	local giftBtn = (actionContainer:FindFirstChild("Gift") or actionContainer:WaitForChild("Gift")) :: GuiButton
 
 	frame.Visible = false
-	if self._actionFrame then
-		self._actionFrame.Visible = false
-	end
-	self._inert = false
+	action.Visible = false
 
-	-- Mientras el flujo está visible cuenta como "panel abierto" (el Store se
-	-- oculta debajo): así el menú no reaparece y el GiftAlert no se cuela.
 	config.menuController:registerPanel(frame)
 	janitor:Add(function()
 		config.menuController:unregisterPanel(frame)
 	end, true)
 
-	-- Las filas clonadas viven fuera del janitor del feature (se crean y
-	-- destruyen por refresh): limpiarlas también al teardown, o quedarían
-	-- clones con conexiones vivas apuntando a un controlador muerto.
 	janitor:Add(function()
 		self:_clearRows()
 	end, true)
 
 	-- ── Wiring ───────────────────────────────────────────────
-	janitor:Add((closeNode :: GuiButton).Activated:Connect(function()
+	janitor:Add(closeBtn.Activated:Connect(function()
 		self:close()
 	end), "Disconnect")
 
-	janitor:Add((giftBtnNode :: GuiButton).Activated:Connect(function()
+	janitor:Add(giftBtn.Activated:Connect(function()
 		self:_onSend()
 	end), "Disconnect")
 
-	if self._searchBox then
-		janitor:Add(self._searchBox:GetPropertyChangedSignal("Text"):Connect(function()
-			self:_applyFilter()
-		end), "Disconnect")
-	end
-
-	-- Si el amigo elegido se va del servidor, sigue pudiendo recibir el regalo
-	-- (entrega offline): solo actualizamos su status visual en la tarjeta.
-	janitor:Add(Players.PlayerRemoving:Connect(function(leaving: Player)
-		local receiver = self._receiver
-		if receiver and receiver.userId == leaving.UserId and receiver.online then
-			receiver.online = false
-			self:_updateCard()
-		end
+	janitor:Add(self._searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+		self:_applyFilter()
 	end), "Disconnect")
 
 	-- ── Red ──────────────────────────────────────────────────
-	-- ByteNet es broadcast por namespace: solo procesamos respuestas que
-	-- nosotros pedimos (guards _sendPending/_awaitingPurchase).
 	janitor:Add(Network.Gifting.SendResponse.Listen(function(data: any)
 		if not self._sendPending then
 			return
@@ -393,7 +280,6 @@ function GiftFlow.new(config: GiftFlowConfig, janitor: any)
 		self._sendPending = false
 		self._pendingToken += 1
 		if data.success then
-			-- El server está lanzando el prompt de compra.
 			self._awaitingPurchase = true
 		else
 			local message = if data.message ~= "" then data.message else "That gift couldn't be sent."
@@ -402,11 +288,6 @@ function GiftFlow.new(config: GiftFlowConfig, janitor: any)
 	end), true)
 
 	janitor:Add(Network.Gifting.GiftDelivered.Listen(function(_data: any)
-		-- Solo cierra el flujo si ESTE cliente está esperando esa entrega. Un
-		-- receipt reintentado de una sesión anterior puede llegar en cualquier
-		-- momento (incluso componiendo OTRO regalo): en ese caso avisamos sin
-		-- tocar el estado — cerrar aquí abortaría una composición ajena y el
-		-- toast nombraría al receptor equivocado.
 		if not self._awaitingPurchase then
 			Notify.success("Your gift was delivered!")
 			return
@@ -424,7 +305,6 @@ function GiftFlow.new(config: GiftFlowConfig, janitor: any)
 		end
 	end), true)
 
-	-- Prompt cerrado sin comprar → liberar el guard para poder reintentar.
 	janitor:Add(MarketplaceService.PromptProductPurchaseFinished:Connect(function(userId: number, productId: number, purchased: boolean)
 		if userId ~= player.UserId or not self._awaitingPurchase then
 			return
@@ -434,10 +314,6 @@ function GiftFlow.new(config: GiftFlowConfig, janitor: any)
 			return
 		end
 		if purchased then
-			-- Falta el receipt (GiftDelivered). Timeout de cortesía por si el
-			-- packet se pierde: no dejar el GiftBtn bloqueado para siempre. Con
-			-- token: un timer viejo no debe soltarle el guard a un envío
-			-- posterior (double-send).
 			self._pendingToken += 1
 			local token = self._pendingToken
 			task.delay(DELIVERY_TIMEOUT, function()
@@ -465,25 +341,18 @@ function GiftFlow:_clearRows()
 	table.clear(self._rows)
 end
 
--- Pinta Icon/Username/DisplayName/Status de un nodo (fila o tarjeta Friend).
 function GiftFlow:_applyEntryToNode(node: GuiObject, entry: UserEntry)
-	local icon = findImage(node, "Icon")
-	if icon then
-		icon.Image = string.format(AVATAR_THUMB_FORMAT, entry.userId)
-	end
-	local username = findLabel(node, "Username")
-	if username then
-		username.Text = "@" .. entry.username
-	end
-	local displayName = findLabel(node, "DisplayName")
-	if displayName then
-		displayName.Text = entry.displayName
-	end
-	local status = findLabel(node, "Status")
-	if status then
-		-- Presencia efectiva: la del fetch (plataforma / en-servidor al poblar) O
-		-- una comprobación EN VIVO del roster, por si el amigo se conectó a este
-		-- servidor después de cachear la lista.
+	local icon = node:WaitForChild("Icon") :: ImageLabel
+	icon.Image = string.format(AVATAR_THUMB_FORMAT, entry.userId)
+
+	local username = node:WaitForChild("Username") :: TextLabel
+	username.Text = "@" .. entry.username
+
+	local displayName = node:WaitForChild("DisplayName") :: TextLabel
+	displayName.Text = entry.displayName
+
+	local status = node:FindFirstChild("Status")
+	if status and status:IsA("TextLabel") then
 		local online = entry.online or Players:GetPlayerByUserId(entry.userId) ~= nil
 		status.Text = if online then STATUS_ONLINE_TEXT else STATUS_OFFLINE_TEXT
 		status.TextColor3 = if online then STATUS_ONLINE_COLOR else STATUS_OFFLINE_COLOR
@@ -511,8 +380,6 @@ function GiftFlow:_populate(entries: { UserEntry }, animate: boolean?)
 
 	self:_applyFilter()
 
-	-- Reveal solo de las filas realmente visibles (respeta un filtro activo) y en
-	-- orden. Sin animate, aparecen sin escala (scale 1).
 	local visibleRows: { GuiObject } = {}
 	for _, record in self._rows do
 		if record.row.Visible then
@@ -526,10 +393,7 @@ function GiftFlow:_populate(entries: { UserEntry }, animate: boolean?)
 end
 
 function GiftFlow:_applyFilter()
-	local query = ""
-	if self._searchBox then
-		query = self._searchBox.Text:gsub("^%s+", ""):gsub("%s+$", ""):lower()
-	end
+	local query = self._searchBox.Text:gsub("^%s+", ""):gsub("%s+$", ""):lower()
 	for _, record in self._rows do
 		local entry = record.entry
 		record.row.Visible = query == ""
@@ -538,15 +402,7 @@ function GiftFlow:_applyFilter()
 	end
 end
 
--- `animate` revela las filas con pop escalonado. true en la apertura del flujo y
--- en la llegada del fetch de amigos; false en refrescos vivos de status.
 function GiftFlow:_refreshList(animate: boolean?)
-	if self._inert then
-		return
-	end
-
-	-- Cache fresco → directo; si no, fetch async (pagina + yielda) con token para
-	-- descartar resultados de un fetch obsoleto.
 	local now = os.clock()
 	if self._friendsCache and now - self._friendsFetchedAt < FRIENDS_CACHE_TTL then
 		self:_populate(self._friendsCache, animate)
@@ -561,7 +417,7 @@ function GiftFlow:_refreshList(animate: boolean?)
 			return token ~= self._friendsFetchToken
 		end)
 		if token ~= self._friendsFetchToken then
-			return -- fetch obsoleto (se relanzó)
+			return
 		end
 		self._friendsCache = entries
 		self._friendsFetchedAt = os.clock()
@@ -575,8 +431,6 @@ end
 -- RECEPTOR + ENVÍO
 -- ────────────────────────────────────────────────────────────
 
--- `row` es la fila clicada (opcional): se le da un pop de feedback junto con la
--- tarjeta del receptor. Sin row (selección por código) solo anima la tarjeta.
 function GiftFlow:_select(entry: UserEntry, row: GuiObject?)
 	self._receiver = entry
 	self:_updateCard()
@@ -585,8 +439,6 @@ function GiftFlow:_select(entry: UserEntry, row: GuiObject?)
 		popScale(row, ROW_SELECT_TWEEN, ROW_SELECT_FROM)
 	end
 
-	-- Pop de la tarjeta al "aterrizar" la selección. Cancela el anterior para
-	-- que selecciones rápidas no se peleen por la misma UIScale.
 	local card = self._card
 	if card and card.Visible then
 		if self._cardTween then
@@ -596,31 +448,24 @@ function GiftFlow:_select(entry: UserEntry, row: GuiObject?)
 	end
 end
 
--- Contenido + visibilidad del panel Action (sin animación): lo usan _select y
--- los refrescos de status (PlayerRemoving). El pop de selección vive en _select.
--- El panel Action solo aparece con un receptor elegido.
 function GiftFlow:_updateCard()
 	local receiver = self._receiver
-	local card = self._card
-	if card then
-		if receiver then
-			self:_applyEntryToNode(card, receiver)
-			card.Visible = true
-		else
-			card.Visible = false
-		end
-	end
-	if self._actionFrame then
-		self._actionFrame.Visible = receiver ~= nil
+	if receiver then
+		self:_applyEntryToNode(self._card, receiver)
+		self._card.Visible = true
+		self._actionFrame.Visible = true
+	else
+		self._card.Visible = false
+		self._actionFrame.Visible = false
 	end
 end
 
 function GiftFlow:_onSend()
-	if self._inert or not self._product then
+	if not self._product then
 		return
 	end
 	if self._sendPending or self._awaitingPurchase then
-		return -- ya hay un envío/compra en vuelo
+		return
 	end
 	local receiver = self._receiver
 	if not receiver then
@@ -632,8 +477,6 @@ function GiftFlow:_onSend()
 	self._pendingToken += 1
 	local token = self._pendingToken
 	task.delay(RESPONSE_TIMEOUT, function()
-		-- Solo libera si seguimos esperando ESTA validación (no una posterior ni
-		-- una ya respondida): una respuesta perdida no debe bloquear el GiftBtn.
 		if self._sendPending and self._pendingToken == token then
 			self._sendPending = false
 			Notify.warning("No response from the server. Try again.")
@@ -643,8 +486,6 @@ function GiftFlow:_onSend()
 	Network.Gifting.SendGift.Send({
 		receiverUserId = tostring(receiver.userId),
 		productId = (self._product :: StoreProductDefinition).ProductId,
-		-- El regalo ya no lleva mensaje adjunto (el server acepta cadena vacía).
-		message = "",
 	})
 end
 
@@ -652,56 +493,30 @@ end
 -- APERTURA / CIERRE
 -- ────────────────────────────────────────────────────────────
 
---[[
-	Abre el flujo para un producto concreto (el pack cuyo botón "Gift" se pulsó).
-	Arranca sin receptor: el panel Action queda oculto hasta elegir un amigo.
-]]
 function GiftFlow:openForProduct(product: StoreProductDefinition)
-	if self._inert then
-		return
-	end
-
 	self._product = product
 	self._receiver = nil
-	-- Apertura = flujo fresco: suelta guards colgados de un intento anterior
-	-- (respuesta perdida, prompt zombie). Un prompt de compra real es modal,
-	-- así que no se puede llegar aquí con una compra legítima en vuelo.
 	self._sendPending = false
 	self._awaitingPurchase = false
 	self._pendingToken += 1
 	self:_updateCard()
 
-	if self._giftName then
-		self._giftName.Text = string.format(GIFT_NAME_FORMAT, UIUtils.formatCashAmount(product.CashAmount))
-	end
-	if self._giftPrice then
-		self._giftPrice.Text = string.format(PRICE_FORMAT, product.RobuxPrice)
-	end
-	if self._searchBox then
-		self._searchBox.Text = ""
-	end
+	self._giftName.Text = string.format(GIFT_NAME_FORMAT, UIUtils.formatCashAmount(product.CashAmount))
+	self._giftPrice.Text = string.format(PRICE_FORMAT, product.RobuxPrice)
+	self._searchBox.Text = ""
 
-	self:_refreshList(true) -- apertura del flujo → reveal escalonado de la lista
+	self:_refreshList(true)
 
 	self._storeFrame.Visible = false
 	self._frame.Visible = true
 end
 
--- Cierra el flujo y devuelve el Store (CloseBtn / entrega confirmada).
 function GiftFlow:close()
-	if self._inert then
-		return
-	end
 	self._frame.Visible = false
 	self._storeFrame.Visible = true
 end
 
--- Cierre silencioso: oculta sin re-mostrar el Store. Lo usa el Store en su
--- onClose para no dejar el flujo colgado si el panel entero se cierra.
 function GiftFlow:reset()
-	if self._inert then
-		return
-	end
 	self._frame.Visible = false
 	self._sendPending = false
 	self._pendingToken += 1

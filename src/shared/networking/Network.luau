@@ -392,7 +392,6 @@ local GiftingNamespace = ByteNet.DefineNamespace("Gifting", function()
 			Value = ByteNet.Struct({
 				receiverUserId = ByteNet.String,
 				productId      = ByteNet.Float64,
-				message        = ByteNet.String,
 			}),
 			ReliabilityType = "Reliable",
 		}),

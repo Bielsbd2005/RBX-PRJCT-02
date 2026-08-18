@@ -1,20 +1,22 @@
 --!strict
 --[[
 	rewards/init.luau (Client Feature)
-	Panel de recompensas. Estructura de la GUI nueva (UserInterface.Rewards):
+	Panel de recompensas (UserInterface.Rewards):
 
 		Rewards
-		  Header
-		    CloseBtn
-		  LikeAndJoin
-		    ClaimBtn        ← unirse al grupo y reclamar
-		  Redeem
+		  Action
 		    Container
-		      RedeemBtn     ← canjear código
-		      TextBox       ← input del código
+		      ClaimBtn      ← unirse al grupo y reclamar
+		  Redeem
+		    Content
+		      Header
+		        CloseBtn
+		      Container
+		        RedeemBtn   ← canjear código
+		        TextBox     ← input del código
 
-	Like&Join: la fuente de verdad es Rewards.GroupClaimed (server). Una vez
-	reclamado, el frame LikeAndJoin se oculta para siempre (al cargar y tras un
+	Action: la fuente de verdad es Rewards.GroupClaimed (server). Una vez
+	reclamado, el frame Action se oculta para siempre (al cargar y tras un
 	claim exitoso). El grupo a unirse es el de la experiencia (game.CreatorId),
 	que es justo el que el server comprueba con player:IsInGroup.
 ]]
@@ -52,33 +54,29 @@ function RewardsFeature.start(menuController: any): any
 	local player = Players.LocalPlayer
 	local playerGui = player:WaitForChild("PlayerGui")
 
-	-- Botón de apertura opcional (Menu.TopFrame.Rewards). Resolvemos prefiriendo
-	-- TopFrame y cayendo al hijo directo de Menu (compat. con disposición antigua).
+	-- Botón de apertura en Menu.Container.TopFrame.RightContainer.Rewards
 	local menuGui = menuController:getGui()
-	local topFrame = menuGui:FindFirstChild("TopFrame")
-	local menuBtnInstance = (topFrame and topFrame:FindFirstChild("Rewards"))
-		or menuGui:FindFirstChild("Rewards")
-	local menuBtn: GuiButton? = if menuBtnInstance and menuBtnInstance:IsA("GuiButton")
-		then menuBtnInstance
-		else nil
+	local container = menuGui:WaitForChild("Container")
+	local topFrame = container:WaitForChild("TopFrame")
+	local rightContainer = topFrame:WaitForChild("RightContainer")
+	local menuBtn = rightContainer:WaitForChild("Rewards") :: GuiButton
 
 	local uiGui = playerGui:WaitForChild("UserInterface") :: ScreenGui
 	local frame = uiGui:WaitForChild("Rewards") :: Frame
 
-	local likeAndJoin = frame:WaitForChild("LikeAndJoin") :: Frame
-	local likeClaimBtn = likeAndJoin:WaitForChild("ClaimBtn") :: GuiButton
+	local action = frame:WaitForChild("Action") :: Frame
+	local actionContainer = action:WaitForChild("Container")
+	local likeClaimBtn = actionContainer:WaitForChild("ClaimBtn") :: GuiButton
 
 	local redeem = frame:WaitForChild("Redeem")
-	local redeemContainer = redeem:WaitForChild("Container")
+	local redeemContent = redeem:WaitForChild("Content")
+
+	local redeemHeader = redeemContent:WaitForChild("Header")
+	local closeBtn = redeemHeader:WaitForChild("CloseBtn") :: GuiButton
+
+	local redeemContainer = redeemContent:WaitForChild("Container")
 	local redeemBtn = redeemContainer:WaitForChild("RedeemBtn") :: GuiButton
 	local codeTextBox = redeemContainer:WaitForChild("TextBox") :: TextBox
-
-	-- CloseBtn en Rewards.Redeem.Header.CloseBtn (defensivo/opcional por migración).
-	local redeemHeader = redeem:FindFirstChild("Header")
-	local closeInstance = redeemHeader and redeemHeader:FindFirstChild("CloseBtn")
-	local closeBtn: GuiButton? = if closeInstance and closeInstance:IsA("GuiButton")
-		then closeInstance
-		else nil
 
 	local fovEffect = CameraFovEffect.new()
 	janitor:Add(fovEffect, "Destroy")
@@ -117,8 +115,8 @@ function RewardsFeature.start(menuController: any): any
 	end
 
 	-- Reclamado → ocultar para siempre (persistido en GroupClaimed server-side).
-	local function hideLikeAndJoin()
-		likeAndJoin.Visible = false
+	local function hideAction()
+		action.Visible = false
 	end
 
 	janitor:Add(likeClaimBtn.MouseButton1Click:Connect(function()
@@ -189,7 +187,7 @@ function RewardsFeature.start(menuController: any): any
 			likeToken += 1
 			setLikePending(false)
 			if data.success then
-				hideLikeAndJoin()
+				hideAction()
 			end
 		elseif data.claimType == "Code" then
 			codeToken += 1
@@ -203,7 +201,7 @@ function RewardsFeature.start(menuController: any): any
 	DataController:WhenReady():andThen(function()
 		local rewardsData = Fusion.peek(DataController.Rewards)
 		if rewardsData.GroupClaimed == true then
-			hideLikeAndJoin()
+			hideAction()
 		end
 	end)
 

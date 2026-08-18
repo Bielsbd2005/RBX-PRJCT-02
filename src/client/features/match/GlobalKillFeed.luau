@@ -58,23 +58,10 @@ function GlobalKillFeed.new(matchHudGui: ScreenGui, matchHudInstance: any): any
 	self._matchHudInstance = matchHudInstance
 	self._activeItems = {} :: { GlobalKillFeedItem }
 	self._destroyed = false
-
-	-- Buscar el contenedor pre-creado en la interfaz
-	local container = matchHudGui:FindFirstChild("GlobalKillFeedContainer", true)
-	if not container then
-		warn("[GlobalKillFeed] No se encontro GlobalKillFeedContainer en la GUI!")
-		return self
-	end
+	local container = matchHudGui:WaitForChild("Container"):WaitForChild("GlobalKillFeedContainer") :: GuiObject
 	self._container = container
 
-	-- Buscar la plantilla "Template". Aceptamos cualquier GuiObject porque el
-	-- diseño usa un CanvasGroup (para poder hacer fade del grupo completo via
-	-- GroupTransparency), no necesariamente un Frame.
-	local template = container:FindFirstChild("Template")
-	if not template or not template:IsA("GuiObject") then
-		warn("[GlobalKillFeed] No se encontro la plantilla 'Template' dentro de GlobalKillFeedContainer!")
-		return self
-	end
+	local template = container:WaitForChild("Template") :: GuiObject
 	self._template = template
 	template.Visible = false
 

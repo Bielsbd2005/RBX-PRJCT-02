@@ -10,9 +10,9 @@
 	     lee su perfil en memoria; si no, un snapshot read-only del DataStore.
 	     El check offline es best-effort: solo bloquea un `false` leído con
 	     éxito — una API caída no frena el regalo (el default es aceptar).
-	  2. Filtra el mensaje adjunto (TextService) y persiste la INTENCIÓN en el
-	     perfil del comprador (GiftIntent). Al vivir en el perfil y no en memoria,
-	     sobrevive reintentos del receipt aunque lleguen en otro servidor.
+	  2. Persiste la INTENCIÓN en el perfil del comprador (GiftIntent). Al
+	     vivir en el perfil y no en memoria, sobrevive reintentos del receipt
+	     aunque lleguen en otro servidor.
 	  3. Responde SendResponse y lanza el prompt de compra del developer product.
 
 	Entrega (ProcessReceipt — delegado desde ServerBootstrap ANTES del grant de
@@ -42,7 +42,6 @@
 
 local Players = game:GetService("Players")
 local MarketplaceService = game:GetService("MarketplaceService")
-local TextService = game:GetService("TextService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
@@ -56,8 +55,8 @@ type DataService = DataServiceMod.DataServiceModule
 
 local M = NetGuards.MAX
 
--- SendGift hace web-calls (view de perfil offline + filtro de texto); Claim es
--- barato pero igualmente spameable. Cooldowns separados por acción.
+-- SendGift hace web-calls (view de perfil offline); Claim es barato pero
+-- igualmente spameable. Cooldowns separados por acción.
 local SEND_COOLDOWN = 1
 local CLAIM_COOLDOWN = 0.3
 -- TTL de una intención persistida. Pasado esto, un receipt del mismo producto
@@ -95,11 +94,6 @@ local function _checkCooldown(map: { [number]: number }, player: Player, cooldow
 	return true
 end
 
--- Recorta espacios al inicio/fin sin tocar el medio.
-local function _trim(s: string): string
-	return (s:gsub("^%s+", ""):gsub("%s+$", ""))
-end
-
 local function _respondSend(player: Player, success: boolean, message: string): ()
 	Network.Gifting.SendResponse.SendTo({
 		success = success,
@@ -116,32 +110,12 @@ local function _respondClaim(player: Player, success: boolean, giftId: string, m
 	}, player)
 end
 
--- Filtra el mensaje del regalo para mostrarlo en la UI de OTRO jugador
--- (broadcast). Ante cualquier fallo de la API devolvemos el texto original —
--- defensa en profundidad, no gate del flujo.
-local function _filterForDisplay(player: Player, text: string): string
-	local ok, result = pcall(function()
-		return TextService:FilterStringAsync(text, player.UserId)
-	end)
-	if not ok or not result then
-		return text
-	end
-	local broadcastOk, broadcast = pcall(function()
-		return result:GetNonChatStringForBroadcastAsync()
-	end)
-	if broadcastOk and broadcast then
-		return broadcast
-	end
-	return text
-end
-
 -- Entradas de BatchUpdate que dejan GiftIntent en "sin intención". Única
 -- fuente del campo: las usan _clearIntent y el bookkeeping de ProcessReceipt.
 local function _intentClearEntries(): { { path: { string }, value: any } }
 	return {
 		{ path = { "GiftIntent", "ReceiverUserId" }, value = 0 },
 		{ path = { "GiftIntent", "ProductId" }, value = 0 },
-		{ path = { "GiftIntent", "Message" }, value = "" },
 		{ path = { "GiftIntent", "CreatedAt" }, value = 0 },
 	}
 end
@@ -157,7 +131,6 @@ local function _giftMessagePayload(giftId: string, gift: any): any
 		Id = giftId,
 		SenderUserId = gift.SenderUserId,
 		SenderName = gift.SenderName,
-		Message = gift.Message,
 		CashAmount = gift.CashAmount,
 		ProductId = gift.ProductId,
 		SentAt = gift.SentAt,
@@ -226,8 +199,8 @@ end
 -- ENVÍO
 -- ────────────────────────────────────────────────────────────
 
--- Corre en thread propio (yielda: view offline + filtro de texto).
-function GiftingService:_handleSendGift(player: Player, data: { receiverUserId: string, productId: number, message: string }): ()
+-- Corre en thread propio (yielda: view offline).
+function GiftingService:_handleSendGift(player: Player, data: { receiverUserId: string, productId: number }): ()
 	local product = StoreProducts.ProductsByProductId[data.productId]
 	if not product or product.ProductId <= 0 then
 		_respondSend(player, false, "That item can't be gifted.")
@@ -250,12 +223,7 @@ function GiftingService:_handleSendGift(player: Player, data: { receiverUserId: 
 		return
 	end
 
-	local message = _trim(data.message)
-	if message ~= "" then
-		message = _filterForDisplay(player, message)
-	end
-
-	-- El jugador pudo irse durante los yields de arriba.
+	-- El jugador pudo irse durante el yield de arriba.
 	if player.Parent ~= Players then
 		return
 	end
@@ -266,7 +234,6 @@ function GiftingService:_handleSendGift(player: Player, data: { receiverUserId: 
 	local ok = _dataService:BatchUpdate(player, {
 		{ path = { "GiftIntent", "ReceiverUserId" }, value = receiverUserId },
 		{ path = { "GiftIntent", "ProductId" }, value = product.ProductId },
-		{ path = { "GiftIntent", "Message" }, value = message },
 		{ path = { "GiftIntent", "CreatedAt" }, value = os.time() },
 	})
 	if not ok then
@@ -379,7 +346,6 @@ function GiftingService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchaseDe
 	local gift = {
 		SenderUserId = buyer.UserId,
 		SenderName = buyer.Name,
-		Message = if type(intent.Message) == "string" then intent.Message else "",
 		CashAmount = product.CashAmount,
 		ProductId = product.ProductId,
 		SentAt = os.time(),
@@ -455,7 +421,6 @@ function GiftingService:_ingestGiftMessage(player: Player, message: any, process
 	local gift = {
 		SenderUserId = math.floor(tonumber(message.SenderUserId) or 0),
 		SenderName = tostring(message.SenderName or "???"),
-		Message = tostring(message.Message or ""),
 		CashAmount = cashAmount,
 		ProductId = math.floor(tonumber(message.ProductId) or 0),
 		SentAt = math.floor(tonumber(message.SentAt) or os.time()),
@@ -551,7 +516,6 @@ function GiftingService:Start(dataService: DataService): ()
 	Network.Gifting.SendGift.Listen(function(data: any, player: Player)
 		if not NetGuards.validate(data, {
 			receiverUserId = M.UserIdString,
-			message = M.GiftMessage,
 			productId = { kind = "number", integer = true, min = 1 },
 		}) then
 			return
@@ -559,8 +523,7 @@ function GiftingService:Start(dataService: DataService): ()
 		if not _checkCooldown(_sendCooldowns, player, SEND_COOLDOWN) then
 			return
 		end
-		-- Yielda (view offline + filtro de texto): thread aparte para no
-		-- congelar el dispatcher de ByteNet.
+		-- Yielda (view offline): thread aparte para no congelar el dispatcher de ByteNet.
 		task.spawn(function()
 			GiftingService:_handleSendGift(player, data)
 		end)
