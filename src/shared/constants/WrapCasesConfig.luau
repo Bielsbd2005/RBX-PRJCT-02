@@ -34,10 +34,16 @@ local CASES: { WrapCaseDefinition } = table.freeze({
 		Name = "Starter Case",
 		Price = 500,
 		ButtonName = "WrapCase1",
+		-- Mismas probabilidades por rareza que antes (Common 60 / Rare 30 / Epic 10),
+		-- repartidas entre más wraps de relleno para dar variedad visual al reel.
 		Items = table.freeze({
-			table.freeze({ WrapId = "Wrap_Case_Amber", Weight = 60 }),
-			table.freeze({ WrapId = "Wrap_Case_Aqua", Weight = 30 }),
-			table.freeze({ WrapId = "Wrap_Case_Frost", Weight = 10 }),
+			table.freeze({ WrapId = "Wrap_Case_Amber", Weight = 20 }), -- Common
+			table.freeze({ WrapId = "Wrap_Case_Moss", Weight = 20 }), -- Common
+			table.freeze({ WrapId = "Wrap_Case_Slate", Weight = 20 }), -- Common
+			table.freeze({ WrapId = "Wrap_Case_Aqua", Weight = 15 }), -- Rare
+			table.freeze({ WrapId = "Wrap_Case_Lilac", Weight = 15 }), -- Rare
+			table.freeze({ WrapId = "Wrap_Case_Frost", Weight = 5 }), -- Epic
+			table.freeze({ WrapId = "Wrap_Case_Ember", Weight = 5 }), -- Epic
 		}),
 	}),
 	table.freeze({
@@ -45,10 +51,15 @@ local CASES: { WrapCaseDefinition } = table.freeze({
 		Name = "Mythic Case",
 		Price = 1500,
 		ButtonName = "WrapCase2",
+		-- Mismas probabilidades por rareza que antes (Rare 60 / Epic 30 / Legendary 10),
+		-- repartidas entre más wraps de relleno para dar variedad visual al reel.
 		Items = table.freeze({
-			table.freeze({ WrapId = "Wrap_Case_Inferno", Weight = 60 }),
-			table.freeze({ WrapId = "Wrap_Case_Venom", Weight = 30 }),
-			table.freeze({ WrapId = "Wrap_Case_Void", Weight = 10 }),
+			table.freeze({ WrapId = "Wrap_Case_Inferno", Weight = 30 }), -- Rare
+			table.freeze({ WrapId = "Wrap_Case_Magma", Weight = 30 }), -- Rare
+			table.freeze({ WrapId = "Wrap_Case_Venom", Weight = 15 }), -- Epic
+			table.freeze({ WrapId = "Wrap_Case_Toxic", Weight = 15 }), -- Epic
+			table.freeze({ WrapId = "Wrap_Case_Void", Weight = 5 }), -- Legendary
+			table.freeze({ WrapId = "Wrap_Case_Celestial", Weight = 5 }), -- Legendary
 		}),
 	}),
 })

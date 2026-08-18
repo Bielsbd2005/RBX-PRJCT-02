@@ -1,21 +1,19 @@
 --!strict
 --[[
 	settings/init.luau (Client Feature)
-	Panel de ajustes. La GUI nueva vive en UserInterface.Settings:
+	Panel de ajustes (UserInterface.Settings):
 
 		Settings
-		  Header
-		    CloseBtn
-		  Content
-		    MusicVolume   (slider) → SliderFrame { Slider, Value }
-		    Sensitivity   (slider)
-		    Vibration     (toggle) → ToggleContainer { Knob, HitArea } + Title
-		    AutoShoot     (toggle)
-		    Gifts         (toggle) → aceptar o no regalos de otros jugadores
-		    CreditsBtn    (sin acción por ahora)
-
-	Toda la mecánica de slider/toggle vive en SliderController/ToggleController;
-	aquí solo cableamos: onChange aplica el efecto inmediato y onCommit persiste.
+		  Container
+		    Header
+		      CloseBtn
+		    Content
+		      MusicVolume   (slider) → SliderFrame { Slider, Value }
+		      Sensitivity   (slider)
+		      Vibration     (toggle) → ToggleContainer { Knob, HitArea } + Title
+		      AutoShoot     (toggle)
+		      Gifts         (toggle) → aceptar o no regalos de otros jugadores
+		      CreditsBtn    (opcional)
 ]]
 
 local Players = game:GetService("Players")
@@ -35,11 +33,11 @@ local BlurController = require(Client.core.ui.BlurController)
 local CameraFovEffect = require(Client.core.ui.CameraFovEffect)
 local SliderController = require(Client.core.ui.SliderController)
 local ToggleController = require(Client.core.ui.ToggleController)
+local MenuHover = require(Client.core.ui.MenuHover)
 
 local BLUR_KEY = "Settings"
 local CREDITS_BLUR_KEY = "Credits"
 
--- Defaults espejados de DataTemplate.Settings (fallback si el perfil no trae valor).
 local SLIDER_DEFAULTS: { [string]: number } = {
 	MusicVolume = 0.5,
 	SFXVolume = 0.8,
@@ -73,29 +71,20 @@ function SettingsFeature.start(menuController: any): any
 	local player = Players.LocalPlayer
 	local playerGui = player:WaitForChild("PlayerGui")
 
-	-- Botón de apertura opcional (Menu.TopFrame.Settings). Si no existe, Settings se
-	-- configura igual, solo sin abrirse desde el menú. Resolvemos prefiriendo
-	-- TopFrame y cayendo al hijo directo de Menu (compat. con disposición antigua).
+	-- Botón de apertura en Menu.Container.TopFrame.RightContainer.Settings
 	local menuGui = menuController:getGui()
-	local topFrame = menuGui:FindFirstChild("TopFrame")
-	local settingsBtnInstance = (topFrame and topFrame:FindFirstChild("Settings"))
-		or menuGui:FindFirstChild("Settings")
-		or menuGui:FindFirstChild("settings")
-	local settingsBtn: GuiButton? = if settingsBtnInstance and settingsBtnInstance:IsA("GuiButton")
-		then settingsBtnInstance
-		else nil
+	local container = menuGui:WaitForChild("Container")
+	local topFrame = container:WaitForChild("TopFrame")
+	local rightContainer = topFrame:WaitForChild("RightContainer")
+	local settingsBtn = rightContainer:WaitForChild("Settings") :: GuiButton
 
 	local uiGui = playerGui:WaitForChild("UserInterface") :: ScreenGui
 	local frame = uiGui:WaitForChild("Settings") :: Frame
-	local content = frame:WaitForChild("Content") :: Frame
+	local settingsContainer = frame:WaitForChild("Container") :: Frame
+	local content = settingsContainer:WaitForChild("Content") :: Frame
 
-	-- CloseBtn en Settings.Header.CloseBtn. Se resuelve de forma defensiva por si
-	-- el Header aún no está durante la migración (opcional, sin colgar el feature).
-	local header = frame:FindFirstChild("Header")
-	local closeInstance = header and header:FindFirstChild("CloseBtn")
-	local closeBtn: GuiButton? = if closeInstance and closeInstance:IsA("GuiButton")
-		then closeInstance
-		else nil
+	local header = settingsContainer:WaitForChild("Header")
+	local closeBtn = header:WaitForChild("CloseBtn") :: GuiButton
 
 	local fovEffect = CameraFovEffect.new()
 	janitor:Add(fovEffect, "Destroy")
@@ -112,23 +101,20 @@ function SettingsFeature.start(menuController: any): any
 	})
 	janitor:Add(panel, "Destroy")
 
-	-- Credits: panel hermano abierto desde Settings.Content.CreditsBtn. Abrirlo
-	-- cierra Settings; cerrar Credits (Credits.Header.CloseBtn) lleva al Menu.
+	-- Credits: panel hermano abierto desde Settings.Container.Content.CreditsBtn.
+	-- Abrirlo cierra Settings; cerrar Credits (Credits.Container.CloseBtn) regresa a Settings.
 	local creditsBtnInstance = content:FindFirstChild("CreditsBtn")
 	if creditsBtnInstance and creditsBtnInstance:IsA("GuiButton") then
 		local creditsFrame = uiGui:WaitForChild("Credits") :: Frame
-		local creditsHeader = creditsFrame:FindFirstChild("Header")
-		local creditsCloseInstance = creditsHeader and creditsHeader:FindFirstChild("CloseBtn")
-		local creditsCloseBtn: GuiButton? = if creditsCloseInstance and creditsCloseInstance:IsA("GuiButton")
-			then creditsCloseInstance
-			else nil
+		local creditsContainer = creditsFrame:WaitForChild("Container") :: Frame
+		local creditsCloseBtn = creditsContainer:WaitForChild("CloseBtn") :: GuiButton
 
 		local creditsFov = CameraFovEffect.new()
 		janitor:Add(creditsFov, "Destroy")
 
-		-- menuBtn = nil: la apertura se cablea a mano para cerrar Settings antes
-		-- (el toggle del Menu de ambos pasos se cancela en el mismo frame).
-		local creditsPanel = PanelController.new(menuController, creditsFrame, nil, creditsCloseBtn, {
+		local resetCreditsClose = MenuHover.bindButton(creditsCloseBtn, janitor)
+
+		local creditsPanel = PanelController.new(menuController, creditsFrame, nil, nil, {
 			onOpen = function()
 				BlurController.acquire(CREDITS_BLUR_KEY)
 				creditsFov:expand()
@@ -140,9 +126,15 @@ function SettingsFeature.start(menuController: any): any
 		})
 		janitor:Add(creditsPanel, "Destroy")
 
-		janitor:Add((creditsBtnInstance :: GuiButton).MouseButton1Click:Connect(function()
+		janitor:Add(creditsBtnInstance.MouseButton1Click:Connect(function()
 			panel:close()
 			creditsPanel:open()
+		end), "Disconnect")
+
+		janitor:Add(creditsCloseBtn.MouseButton1Click:Connect(function()
+			resetCreditsClose()
+			creditsPanel:close()
+			panel:open()
 		end), "Disconnect")
 	end
 
@@ -200,24 +192,13 @@ function SettingsFeature.start(menuController: any): any
 	})
 	janitor:Add(autoShootToggle, "Destroy")
 
-	-- Aceptar regalos de otros jugadores. Solo persiste: el enforcement es
-	-- server-side (GiftingService lee Settings.GiftsEnabled del receptor).
-	-- Con timeout y opcional: si la GUI publicada aún no trae el frame Gifts,
-	-- el resto de settings debe seguir cargando igual (un WaitForChild
-	-- infinito aquí bloqueaba TODA la aplicación de valores guardados).
-	local giftsToggle: any = nil
-	local giftsNode = content:WaitForChild("Gifts", 5)
-	if giftsNode then
-		giftsToggle = ToggleController.new({
-			root = giftsNode,
-			onCommit = function(state)
-				saveToggle("GiftsEnabled", state)
-			end,
-		})
-		janitor:Add(giftsToggle, "Destroy")
-	else
-		warn("[SettingsFeature] Falta Settings.Content.Gifts; toggle de regalos omitido.")
-	end
+	local giftsToggle = ToggleController.new({
+		root = content:WaitForChild("Gifts"),
+		onCommit = function(state)
+			saveToggle("GiftsEnabled", state)
+		end,
+	})
+	janitor:Add(giftsToggle, "Destroy")
 
 	-- Carga inicial: aplica los valores guardados (onChange) sin re-persistir.
 	DataController:WhenReady():andThen(function()
@@ -236,12 +217,9 @@ function SettingsFeature.start(menuController: any): any
 		sensSlider:set(num("CameraSensitivity"))
 		vibrationToggle:set(bool("Vibration"))
 		autoShootToggle:set(bool("AutoShoot"))
-		if giftsToggle then
-			giftsToggle:set(bool("GiftsEnabled"))
-		end
+		giftsToggle:set(bool("GiftsEnabled"))
 
-		-- El slider de SFX se quitó de la GUI, pero el valor guardado sigue
-		-- aplicándose como atributo para los sistemas de sonido que lo lean.
+		-- El valor de SFX se aplica como atributo para sistemas de sonido.
 		player:SetAttribute("SFXVolume", num("SFXVolume"))
 	end)
 

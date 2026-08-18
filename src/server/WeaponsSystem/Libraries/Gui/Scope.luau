@@ -4,6 +4,7 @@
 
 local VIGNETTE_DAMAGE_COLOR = Color3.fromRGB(255, 0, 0) -- rojo, vida baja
 local VIGNETTE_HEAL_COLOR = Color3.fromRGB(0, 255, 128) -- verde, curación
+local VIGNETTE_KILL_COLOR = Color3.fromRGB(40, 130, 255) -- azul, flash de baja propia
 
 type VignetteNode = {
 	instance: GuiObject,
@@ -76,9 +77,11 @@ function Scope.new(weaponsGui: any)
 	self.vignetteHealthAlphaDriver = nil -- rojo, vida baja (peligro continuo)
 	self.vignetteHealAlphaDriver = nil -- verde, curación
 	self.vignetteDamageAlphaDriver = nil -- rojo, flash al recibir daño
+	self.vignetteKillAlphaDriver = nil -- azul, flash de baja propia
 	self.vignetteHealthConn = nil
 	self.vignetteHealConn = nil
 	self.vignetteDamageConn = nil
+	self.vignetteKillConn = nil
 
 	return self
 end
@@ -123,27 +126,48 @@ function Scope:setup(gui: ScreenGui)
 		end
 		self.vignetteDamageAlphaDriver.Value = self.vignetteDamageAlphaDriver.Value or 0
 
+		self.vignetteKillAlphaDriver = self.vignette:FindFirstChild("KillAlphaDriver") :: NumberValue?
+		if not self.vignetteKillAlphaDriver then
+			local val = Instance.new("NumberValue")
+			val.Name = "KillAlphaDriver"
+			val.Value = 0
+			val.Parent = self.vignette
+			self.vignetteKillAlphaDriver = val
+		end
+		self.vignetteKillAlphaDriver.Value = self.vignetteKillAlphaDriver.Value or 0
+
 		self._vignetteNodes = buildVignetteNodeList(self.vignette)
 
-		-- Combina los dos efectos: gana el de mayor alpha y su color tiñe el
-		-- vignette. Prioridad en empate: daño (rojo) > heal (verde).
+		-- Combina los efectos: gana el de mayor alpha y su color tiñe el vignette.
+		-- Prioridad en empate: daño (rojo) > heal (verde) > baja (azul). El azul es
+		-- el de menor prioridad — el flash de baja solo se dispara cuando no hay
+		-- daño ni curación en pantalla (gateado en HealthBarController), pero si uno
+		-- de esos aparece mientras el azul está en flight, el rojo/verde manda.
 		local function refreshVignette()
 			if not self.vignette or not self._vignetteNodes then
 				return
 			end
-			-- Rojo = max(peligro vida baja, flash de daño); verde = curación.
+			-- Rojo = max(peligro vida baja, flash de daño); verde = curación; azul = baja.
 			local healthAlpha = if self.vignetteHealthAlphaDriver then self.vignetteHealthAlphaDriver.Value else 0
 			local damageAlpha = if self.vignetteDamageAlphaDriver then self.vignetteDamageAlphaDriver.Value else 0
 			local redAlpha = math.max(healthAlpha, damageAlpha)
 			local healAlpha = if self.vignetteHealAlphaDriver then self.vignetteHealAlphaDriver.Value else 0
-			local visibleAlpha = math.max(redAlpha, healAlpha)
+			local killAlpha = if self.vignetteKillAlphaDriver then self.vignetteKillAlphaDriver.Value else 0
+			local visibleAlpha = math.max(redAlpha, healAlpha, killAlpha)
 			if visibleAlpha <= 0 then
 				applyVignetteAlpha(self._vignetteNodes, 1)
 				self.vignette.Visible = false
 				return
 			end
 
-			local color = if redAlpha >= healAlpha then VIGNETTE_DAMAGE_COLOR else VIGNETTE_HEAL_COLOR
+			local color: Color3
+			if redAlpha >= healAlpha and redAlpha >= killAlpha then
+				color = VIGNETTE_DAMAGE_COLOR
+			elseif healAlpha >= killAlpha then
+				color = VIGNETTE_HEAL_COLOR
+			else
+				color = VIGNETTE_KILL_COLOR
+			end
 			applyVignetteColor(self._vignetteNodes, color)
 			applyVignetteAlpha(self._vignetteNodes, 1 - math.clamp(visibleAlpha, 0, 1))
 			self.vignette.Visible = true
@@ -152,6 +176,7 @@ function Scope:setup(gui: ScreenGui)
 		self.vignetteHealthConn = self.vignetteHealthAlphaDriver.Changed:Connect(refreshVignette)
 		self.vignetteHealConn = self.vignetteHealAlphaDriver.Changed:Connect(refreshVignette)
 		self.vignetteDamageConn = self.vignetteDamageAlphaDriver.Changed:Connect(refreshVignette)
+		self.vignetteKillConn = self.vignetteKillAlphaDriver.Changed:Connect(refreshVignette)
 		refreshVignette()
 	end
 end
@@ -175,6 +200,10 @@ function Scope:Destroy()
 	if self.vignetteDamageConn then
 		self.vignetteDamageConn:Disconnect()
 		self.vignetteDamageConn = nil
+	end
+	if self.vignetteKillConn then
+		self.vignetteKillConn:Disconnect()
+		self.vignetteKillConn = nil
 	end
 end
 

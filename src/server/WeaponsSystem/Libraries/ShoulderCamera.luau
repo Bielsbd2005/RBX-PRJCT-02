@@ -182,9 +182,19 @@ function ShoulderCamera.new(weaponsSystem)
 	self.sprintingWalkSpeed = 32
 	self.sprintFOV = 82 -- Field of view when sprinting
 	self.sprintCrosshairScale = 1.5 -- Crosshair scale when sprinting
-	self.killFOVKick = 5
-	self.headshotFOVKick = 7
+	self.killFOVKick = 11
+	self.headshotFOVKick = 14
 	self.fovKickDecay = 6
+	-- Shake por disparo (temblor "traumático" estilo Perlin). addCameraShake
+	-- acumula trauma [0,1]; el offset angular escala con trauma² (punch nítido
+	-- que se suaviza al decaer) y el trauma cae linealmente a shakeDecay/seg.
+	-- pitch/yaw se mantienen pequeños porque desplazan la mira; el roll (tilt)
+	-- es el que más se ve sin arruinar la puntería, así que va más alto.
+	self.shakeDecay = 3.4 -- unidades de trauma por segundo (más alto = se sostiene menos en full-auto)
+	self.shakeFrequency = 24 -- velocidad del scrub de ruido (~Hz)
+	self.maxShakePitch = math.rad(0.9)
+	self.maxShakeYaw = math.rad(0.8)
+	self.maxShakeRoll = math.rad(1.6)
 
 	-- Current state
 	self.enabled = false
@@ -312,10 +322,19 @@ function ShoulderCamera:_setupCameraState()
 	end
 	self._cameraStateReady = true
 
-	-- Make transition to shouldercamera smooth by facing in same direction as previous camera
-	local cameraLook = self.currentCamera.CFrame.lookVector
-	self.yaw = math.atan2(-cameraLook.X, -cameraLook.Z)
-	self.pitch = math.asin(cameraLook.Y)
+	-- Facing inicial de la cámara al hombro. Si ya hay un cuerpo spawneado, alinear
+	-- con la orientación de la part de spawn (coherente con onCurrentCharacterChanged:
+	-- rotar la part controla hacia dónde mira el jugador). Si no, usar el look de la
+	-- cámara previa para una transición suave.
+	local spawnYaw = self:_yawFromSpawn(self.currentCharacter)
+	if spawnYaw then
+		self.yaw = spawnYaw
+		self.pitch = 0
+	else
+		local cameraLook = self.currentCamera.CFrame.lookVector
+		self.yaw = math.atan2(-cameraLook.X, -cameraLook.Z)
+		self.pitch = math.asin(cameraLook.Y)
+	end
 	self.lastYaw = self.yaw
 	self.lastLookYaw = self.yaw
 	self.lastLookPitch = self.pitch
@@ -480,15 +499,37 @@ function ShoulderCamera:updateLookLag(dt)
 end
 
 function ShoulderCamera:updateCameraShake(dt)
-	if self.fovKick <= 1e-4 then
+	-- FOV kick (punch de zoom en kills / disparo). Decae independiente del trauma.
+	local fovKick = self.fovKick
+	if fovKick <= 1e-4 then
+		fovKick = 0
 		self.fovKick = 0
-		return CFrame.new(), 0
+	else
+		self.fovKick = math.max(self.fovKick - (dt * self.fovKickDecay), 0)
 	end
 
-	local fovKick = self.fovKick
-	self.fovKick = math.max(self.fovKick - (dt * self.fovKickDecay), 0)
+	-- Temblor traumático. Sin trauma no hay offset angular: devolvemos identidad.
+	if self.shakeTrauma <= 1e-4 then
+		self.shakeTrauma = 0
+		return CFrame.new(), fovKick
+	end
 
-	return CFrame.new(), fovKick
+	self.shakeTime = self.shakeTime + dt
+	-- trauma² → el temblor pega fuerte al disparar y se desvanece suave.
+	local shake = self.shakeTrauma * self.shakeTrauma
+	-- Al apuntar (ADS) reducimos el temblor hasta la mitad para no romper la mira.
+	shake = shake * (1 - self.zoomAlpha * 0.5)
+
+	local t = self.shakeTime * self.shakeFrequency
+	-- math.noise es Perlin (~[-0.5, 0.5]); una semilla distinta por eje evita
+	-- que pitch/yaw/roll se muevan sincronizados y se sienta orgánico.
+	local pitch = self.maxShakePitch * shake * math.noise(t, 0, self.shakeSeed)
+	local yaw = self.maxShakeYaw * shake * math.noise(t, 0, self.shakeSeed + 100)
+	local roll = self.maxShakeRoll * shake * math.noise(t, 0, self.shakeSeed + 200)
+
+	self.shakeTrauma = math.max(self.shakeTrauma - (dt * self.shakeDecay), 0)
+
+	return CFrame.Angles(pitch, yaw, roll), fovKick
 end
 
 function ShoulderCamera:onRenderStep(dt)
@@ -797,6 +838,23 @@ function ShoulderCamera:sprintFromGamepadInput()
 	return self.movementPan.Magnitude > 0.9
 end
 
+-- Devuelve el yaw (rad) con el que debe aparecer mirando el jugador: el de la part
+-- de spawn del mapa. El servidor (SpawnService._teleportCharacterToSpawn) estampa el
+-- atributo SpawnYaw con el yaw exacto del punto; si aún no replicó, caemos al
+-- LookVector del root (que el servidor ya colocó en el spawn). nil si no hay dato.
+function ShoulderCamera:_yawFromSpawn(character)
+	local yaw = character and character:GetAttribute("SpawnYaw")
+	if typeof(yaw) == "number" then
+		return yaw
+	end
+	local root = self.currentRootPart
+	if root then
+		local look = root.CFrame.LookVector
+		return math.atan2(-look.X, -look.Z)
+	end
+	return nil
+end
+
 function ShoulderCamera:onCurrentCharacterChanged(character)
 	self.currentCharacter = character
 	-- Resetear listeners de transparencia para el character nuevo
@@ -860,6 +918,14 @@ function ShoulderCamera:onCurrentCharacterChanged(character)
 		self.lastVerticalVelocity = 0
 		self.wasGrounded = true
 		self.landingAlpha = 0
+		-- Orientar la cámara hacia la dirección del spawn al (re)aparecer: rotar la
+		-- part de spawn en el mapa controla hacia dónde mira el jugador, igual que
+		-- los bots. Antes se heredaba el yaw de la vida anterior (ignoraba el spawn).
+		local spawnYaw = self:_yawFromSpawn(character)
+		if spawnYaw then
+			self.yaw = spawnYaw
+			self.pitch = 0
+		end
 		self.lastYaw = self.yaw
 		self.lastLookYaw = self.yaw
 		self.lastLookPitch = self.pitch
@@ -1350,27 +1416,29 @@ function ShoulderCamera:isTouchPositionForCamera(pos)
 end
 
 function ShoulderCamera:onInputBegan(inputObj, wasProcessed)
-	if self.touchObj then
-		-- Desconectar el listener del touch que abandonamos. Sin esto, un segundo
-		-- dedo sobreescribía eventConnections.touchChanged dejando el del primer
-		-- touch conectado: dos listeners aplicando input a la vez (cámara errática
-		-- con dos dedos) y la conexión vieja filtrada — onInputEnded del primer
-		-- touch ya no la limpiaba porque touchObj apuntaba al nuevo.
-		if self.eventConnections.touchChanged then
-			self.eventConnections.touchChanged:Disconnect()
-			self.eventConnections.touchChanged = nil
-		end
-		self.touchObj = nil
-		wasProcessed = false
-	end
-
 	if inputObj.KeyCode == Enum.KeyCode.Thumbstick2 then
 		self.gamepadPan = Vector2.new(inputObj.Position.X, inputObj.Position.Y)
 	elseif inputObj.KeyCode == Enum.KeyCode.Thumbstick1 then
 		self.movementPan = Vector2.new(inputObj.Position.X, inputObj.Position.Y)
 	elseif inputObj.UserInputType == Enum.UserInputType.Touch then
 		local touchStartPos = Vector2.new(inputObj.Position.X, inputObj.Position.Y)
-		if not wasProcessed and self:isTouchPositionForCamera(touchStartPos) and not self.touchObj then
+		-- Solo reclamamos un touch para la cámara si NO fue consumido por la GUI
+		-- (los botones Fire/Aim/Reload/Jump llegan con wasProcessed=true) y no cae
+		-- sobre el thumbstick de movimiento. Antes el guard de abajo forzaba
+		-- wasProcessed=false en CUALQUIER InputBegan nuevo, así que tocar el botón
+		-- de disparo secuestraba el touchObj de la cámara (o dejaba el dedo de
+		-- arrastre desconectado) → la cámara se bloqueaba al disparar en táctil.
+		if not wasProcessed and self:isTouchPositionForCamera(touchStartPos) then
+			-- Si ya había un dedo controlando la cámara (un segundo dedo de cámara
+			-- legítimo), soltamos el anterior y dejamos que este lo reemplace. Sin
+			-- esto se filtraban dos listeners aplicando input a la vez (cámara
+			-- errática con dos dedos) y la conexión vieja quedaba colgada. Clave:
+			-- esto solo ocurre para un touch de cámara real — un toque en un botón
+			-- ya no mata el dedo de cámara activo.
+			if self.touchObj and self.eventConnections.touchChanged then
+				self.eventConnections.touchChanged:Disconnect()
+				self.eventConnections.touchChanged = nil
+			end
 			self.touchObj = inputObj
 			self.touchStartTime = os.clock()
 			self.eventConnections.touchChanged = inputObj.Changed:Connect(function(prop)

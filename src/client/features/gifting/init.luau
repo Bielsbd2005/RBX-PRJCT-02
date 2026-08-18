@@ -27,12 +27,11 @@
 
 	Estructura GUI:
 		UserInterface.GiftAlert
-		  Claim     ← botón: reclama (el server concede el cash) y cierra
-		  Product   ← imagen del pack regalado (copiada del botón del Store)
-		  Rays      ← imagen decorativa girando en loop
-		  Message   ← mensaje del remitente (ya filtrado server-side)
-		  Subtitle  ← "@Sender gifted you 3.000" (RichText: @sender y regalo
-		              en color, el resto conserva el blanco de la GUI)
+		  Container
+		    Claim        ← botón: reclama (el server concede el cash) y cierra
+		    Product      ← imagen del pack regalado (copiada del botón del Store)
+		    Description  ← "<font color="#FF3A54">@Usuario</font> just gifted you <font color="#FFC850">X</font>! What an absolute legend, claim it right now! 🎉🔥"
+		    Value        ← cantidad de cash del pack ("3.000", etc.)
 
 	Los regalos se muestran de uno en uno (el más antiguo primero). Al reclamar,
 	PendingGifts se re-replica y el observer encadena el siguiente.
@@ -55,27 +54,18 @@ local Notify = require(Client.core.ui.NotificationController)
 local UIUtils = require(Client.core.ui.UIUtils)
 local InteractiveScaleTween = require(Client.core.ui.animators.InteractiveScaleTween)
 local UITheme = require(Client.core.ui.UITheme)
--- Fuente de verdad de la fase de partida (singleton compartido con el feature
--- de match). Es la señal "en lobby" independiente de quién ocultó el menú.
 local MatchState = require(Client.features.match.MatchState)
 
--- Colores del Subtitle (RichText). El acento del remitente es el mismo del
--- modo regalo del Store (255, 58, 84); el regalo va en dorado.
 local SENDER_COLOR_HEX = "#FF3A54"
 local GIFT_COLOR_HEX = "#FFC850"
-local SUBTITLE_FORMAT = `<font color="{SENDER_COLOR_HEX}">@%s</font> gifted you <font color="{GIFT_COLOR_HEX}">%s</font>`
+local DESCRIPTION_FORMAT = `<font color="{SENDER_COLOR_HEX}">@%s</font> just gifted you <font color="{GIFT_COLOR_HEX}">%s</font>! What an absolute legend, claim it right now! 🎉🔥`
 
-local RAYS_ROTATION_SECONDS = 8
 local SHOW_TWEEN_INFO = TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
--- Si el server no responde el claim, liberamos el botón para reintentar.
 local CLAIM_TIMEOUT = 5
--- Ignora clicks de Claim recién mostrado el alert (> cooldown server de 0.3s).
 local CLAIM_CLICK_GUARD = 0.4
 
 local GiftingFeature = {}
 
--- Escapes mínimos de RichText: un nombre no debería traerlos, pero un `<`
--- sin escapar rompería el parseo del label entero.
 local function escapeRichText(text: string): string
 	local escaped = text:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
 	return escaped
@@ -87,67 +77,31 @@ function GiftingFeature.start(menuController: any): any
 	local playerGui = player:WaitForChild("PlayerGui")
 	local uiGui = playerGui:WaitForChild("UserInterface") :: ScreenGui
 
-	-- Sin timeout, como el resto de features con GUI propia: en clientes lentos
-	-- la GUI puede tardar >10s en replicar y un timeout dejaba la recepción de
-	-- regalos muerta para toda la sesión.
-	local alertNode = uiGui:WaitForChild("GiftAlert")
-	if not alertNode:IsA("GuiObject") then
-		warn("[GiftingFeature] UserInterface.GiftAlert no es un GuiObject; recepción de regalos sin UI.")
-		return janitor
-	end
-	local alertFrame = alertNode :: GuiObject
+	local alertFrame = uiGui:WaitForChild("GiftAlert") :: GuiObject
+	local container = alertFrame:WaitForChild("Container") :: Frame
 
-	local claimNode = alertFrame:FindFirstChild("Claim")
-	local claimBtn: GuiButton? = if claimNode and claimNode:IsA("GuiButton") then claimNode else nil
-	if not claimBtn then
-		warn("[GiftingFeature] Falta GiftAlert.Claim; recepción de regalos sin UI.")
-		return janitor
-	end
+	local claimBtn = container:WaitForChild("Claim") :: GuiButton
+	local productImage = container:WaitForChild("Product") :: ImageLabel
+	local descriptionLabel = container:WaitForChild("Description") :: TextLabel
+	local valueLabel = container:WaitForChild("Value") :: TextLabel
 
-	local productNode = alertFrame:FindFirstChild("Product")
-	local productImage: ImageLabel? = if productNode and productNode:IsA("ImageLabel") then productNode else nil
-	local raysNode = alertFrame:FindFirstChild("Rays")
-	local raysImage: GuiObject? = if raysNode and raysNode:IsA("GuiObject") then raysNode else nil
-	local messageNode = alertFrame:FindFirstChild("Message")
-	local messageLabel: TextLabel? = if messageNode and messageNode:IsA("TextLabel") then messageNode else nil
-	local subtitleNode = alertFrame:FindFirstChild("Subtitle")
-	local subtitleLabel: TextLabel? = if subtitleNode and subtitleNode:IsA("TextLabel") then subtitleNode else nil
-	if subtitleLabel then
-		subtitleLabel.RichText = true
-	end
-	if messageLabel then
-		-- El mensaje es texto plano de OTRO jugador: nunca RichText. El filtro
-		-- del server sustituye caracteres pero no quita '<...>'; con RichText
-		-- activado en la GUI, un remitente podría inyectar markup.
-		messageLabel.RichText = false
-	end
+	descriptionLabel.RichText = true
 
 	alertFrame.Visible = false
-	-- El Shade detrás del alert lo gestiona el ShadeController por atributos: se
-	-- espera que GiftAlert lleve el atributo `Shade=true` (y ShadeColor opcional)
-	-- puesto en Studio, como el resto de paneles. Aquí no se toca — al mostrar el
-	-- frame (Visible=true) el overlay aparece solo; no acoplamos los dos módulos.
 
 	-- ── Estado ───────────────────────────────────────────────
 	local menuGui = menuController:getGui() :: ScreenGui
 	local dataReady = false
-	-- El alert está presentándose Y nosotros ocultamos el menú por ello. 1:1 con
-	-- "tenemos tomado el menú": present() lo pone, retract() lo suelta.
 	local presenting = false
 	local currentGiftId: string? = nil
 	local claiming = false
 	local claimingGiftId: string? = nil
 	local claimToken = 0
 	local lastShownAt = 0
-	-- Regalos ya reclamados en esta sesión: el ClaimResponse puede llegar antes
-	-- que la re-replicación de PendingGifts, y sin esto el evaluate re-mostraría
-	-- el regalo recién reclamado durante ese hueco.
 	local claimedIds: { [string]: boolean } = {}
-	-- Se resuelve en la sección de señales (watchLoadingScreen).
 	local loadingDone = false
 
 	-- ── Animaciones ──────────────────────────────────────────
-	local raysTween: Tween? = nil
 	local showTween: Tween? = nil
 
 	local function getAlertScale(): UIScale
@@ -162,10 +116,6 @@ function GiftingFeature.start(menuController: any): any
 	end
 
 	local function stopAnimations()
-		if raysTween then
-			raysTween:Cancel()
-			raysTween = nil
-		end
 		if showTween then
 			showTween:Cancel()
 			showTween = nil
@@ -175,8 +125,6 @@ function GiftingFeature.start(menuController: any): any
 
 	-- ── Presentación ─────────────────────────────────────────
 
-	-- Imagen del pack regalado: se copia del botón correspondiente del Store
-	-- (misma GUI en todos los clientes; StoreProducts no lleva asset ids).
 	local function findProductImage(productId: number): string?
 		local product = StoreProducts.ProductsByProductId[productId]
 		if not product then
@@ -186,54 +134,50 @@ function GiftingFeature.start(menuController: any): any
 		if not storeNode then
 			return nil
 		end
-		for _, descendant in storeNode:GetDescendants() do
-			if descendant.Name == product.ButtonName and descendant:IsA("GuiButton") then
-				if descendant:IsA("ImageButton") and descendant.Image ~= "" then
-					return descendant.Image
-				end
-				local image = descendant:FindFirstChildWhichIsA("ImageLabel", true)
-				return if image then image.Image else nil
+		local cashPage = storeNode:FindFirstChild("CashPage") or storeNode:FindFirstChild("Cash")
+		local rowContainer = if cashPage then cashPage:FindFirstChild(product.Row) else nil
+		local button = if rowContainer then rowContainer:FindFirstChild(product.ButtonName) else nil
+		if not button and cashPage then
+			button = cashPage:FindFirstChild(product.ButtonName)
+		end
+		if button then
+			if button:IsA("ImageButton") and button.Image ~= "" then
+				return button.Image
 			end
+			local image = button:FindFirstChild("Icon") or button:FindFirstChildWhichIsA("ImageLabel")
+			return if image and image:IsA("ImageLabel") then image.Image else nil
 		end
 		return nil
 	end
 
 	local function show(giftId: string, gift: any)
 		if currentGiftId == giftId and alertFrame.Visible then
-			return -- ya está en pantalla; no re-animar
+			return
 		end
 		currentGiftId = giftId
 
-		if productImage then
-			local image = findProductImage(tonumber(gift.ProductId) or 0)
-			if image and image ~= "" then
-				productImage.Image = image
+		local image = findProductImage(tonumber(gift.ProductId) or 0)
+		if image and image ~= "" then
+			productImage.Image = image
+		end
+
+		local cashAmount = tonumber(gift.CashAmount) or 0
+		if cashAmount <= 0 then
+			local product = StoreProducts.ProductsByProductId[tonumber(gift.ProductId) or 0]
+			if product then
+				cashAmount = product.CashAmount
 			end
 		end
-		if messageLabel then
-			local text = tostring(gift.Message or "")
-			messageLabel.Text = text
-			messageLabel.Visible = text ~= ""
-		end
-		if subtitleLabel then
-			subtitleLabel.Text = string.format(
-				SUBTITLE_FORMAT,
-				escapeRichText(tostring(gift.SenderName or "???")),
-				UIUtils.formatCashAmount(tonumber(gift.CashAmount) or 0)
-			)
-		end
+
+		local formattedCash = UIUtils.formatCashAmount(cashAmount)
+		valueLabel.Text = formattedCash
+		descriptionLabel.Text = string.format(
+			DESCRIPTION_FORMAT,
+			escapeRichText(tostring(gift.SenderName or "???")),
+			formattedCash .. " Cash"
+		)
 
 		stopAnimations()
-
-		if raysImage then
-			raysImage.Rotation = 0
-			raysTween = TweenService:Create(
-				raysImage,
-				TweenInfo.new(RAYS_ROTATION_SECONDS, Enum.EasingStyle.Linear, Enum.EasingDirection.Out, -1),
-				{ Rotation = 360 }
-			)
-			raysTween:Play()
-		end
 
 		local scale = getAlertScale()
 		scale.Scale = 0
@@ -252,10 +196,6 @@ function GiftingFeature.start(menuController: any): any
 		currentGiftId = nil
 	end
 
-	-- Presenta un regalo Y toma el menú: al mostrarse el alert, el menú se oculta
-	-- y el Shade aparece (atributo). `presenting` se fija ANTES de hide() porque
-	-- menuController:hide() dispara evaluate() de forma reentrante — con el flag
-	-- ya puesto, esa reentrada no vuelve a ocultar el menú ni retrae.
 	local function present(giftId: string, gift: any)
 		show(giftId, gift)
 		if not presenting then

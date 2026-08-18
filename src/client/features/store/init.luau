@@ -5,6 +5,7 @@ local MarketplaceService = game:GetService("MarketplaceService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 
 local Client = script.Parent.Parent
@@ -28,6 +29,7 @@ local StoreProducts = require(Shared.constants.StoreProducts)
 local ItemsConfig = require(Shared.constants.ItemsConfig)
 local ItemDefaults = require(Shared.constants.ItemDefaults)
 local WrapCasesConfig = require(Shared.constants.WrapCasesConfig)
+local LockerCategory = require(Shared.constants.LockerCategory)
 local Network = require(Shared.networking.Network)
 local Notify = require(Client.core.ui.NotificationController)
 local GiftFlow = require(script.GiftFlow)
@@ -38,6 +40,54 @@ local BLUR_KEY = "Store"
 -- Supresor de blur mientras CaseContent está abierto: su vista es una escena de
 -- cámara (Workspace.Cameras.cases), no debe ir borrosa aunque el Store siga abierto.
 local CASE_BLUR_SUPPRESS_KEY = "CaseContent"
+-- ── Cámara cinemática del unboxing ───────────────────────────────────────────
+-- Al comprar, la cámara hace un travelling de Workspace.Cameras.cases a
+-- Workspace.Cameras.unboxing y SE QUEDA ahí (el reveal ocurre en esa misma toma).
+-- Carácter buscado: AGRESIVO y LIMPIO — golpes duros y precisos, sin bamboleo. El
+-- movimiento se compone de tres capas:
+--   1. SLAM: travelling corto con ease Exponential Out — cubre casi toda la distancia
+--      de golpe y frena en seco en la pose exacta (agresivo, pero sin rebote sucio);
+--   2. KICK + PUSH de FOV: al clavar la pose, un golpe corto de apertura (como un
+--      retroceso) y acto seguido el push-in del 20% con Quint In, que repta y se
+--      abalanza al final — la tensión sube justo cuando el reel frena hacia el ganador;
+--   3. un hilo de sway (ruido Perlin) casi imperceptible: lo justo para que la toma no
+--      se vea muerta, sin llegar a "cámara en mano" (eso ensuciaría el plano).
+local UNBOXING_TRAVEL_TIME = 0.45
+local UNBOXING_TRAVEL_INFO =
+	TweenInfo.new(UNBOXING_TRAVEL_TIME, Enum.EasingStyle.Exponential, Enum.EasingDirection.Out)
+local UNBOXING_ZOOM_FACTOR = 0.80 -- push-in final (FOV 20% más estrecho)
+local UNBOXING_ZOOM_ANTICIPATION = 1.08 -- golpe de apertura al llegar (retroceso)
+local UNBOXING_ZOOM_ANTICIPATION_INFO = TweenInfo.new(0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+-- Quad In (no Quint): con Quint el push-in era invisible los primeros segundos y la
+-- cámara parecía parada. Quad reparte mejor el recorrido y se percibe movimiento.
+local UNBOXING_ZOOM_IN_INFO = TweenInfo.new(1.9, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+local UNBOXING_SWAY_POS = 0.1 -- studs de deriva del sway (un hilo, no cámara en mano)
+local UNBOXING_SWAY_ROT = 0.3 -- grados de balanceo del sway
+local UNBOXING_SWAY_SPEED = 0.18 -- velocidad del ruido (bajo = deriva lenta)
+local UNBOXING_SWAY_RAMP = 0.5 -- s de entrada/salida de la intensidad del sway
+
+-- ── Explosión de cámara del reveal ───────────────────────────────────────────
+-- Al revelarse el resultado, la cámara "encaja" una onda expansiva: sacudida seca de
+-- alta frecuencia que se amortigua sola + un golpe de FOV hacia fuera que vuelve al
+-- valor zoomeado. La sacudida se compone sobre la pose base igual que el sway.
+local UNBOXING_SHAKE_POS = 1.1 -- studs de sacudida en el pico
+local UNBOXING_SHAKE_ROT = 3.2 -- grados de sacudida en el pico
+local UNBOXING_SHAKE_FREQ = 34 -- frecuencia del ruido (alto = temblor seco, no vaivén)
+local UNBOXING_SHAKE_DECAY = 6.5 -- rapidez del amortiguado (mayor = se apaga antes)
+local UNBOXING_SHAKE_FOV_PUNCH = 1.12 -- apertura de FOV de la onda expansiva
+local UNBOXING_SHAKE_FOV_OUT_INFO = TweenInfo.new(0.07, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local UNBOXING_SHAKE_FOV_BACK_INFO = TweenInfo.new(0.55, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+
+-- ── Kicks de cámara ACOPLADOS al reel ────────────────────────────────────────
+-- El reel emite un beat por item que cruza el centro (onReelTick, strength ∝ lo
+-- lento que va) y otro al clavar el ganador (onReelLand). Se mapean a la MISMA
+-- sacudida de la explosión (caseShakeIntensity), pero por MÁXIMO (no acumulan): un
+-- rumble bajo y constante mientras el reel vuela → jolts secos y espaciados al
+-- frenar → golpe al land → boom del reveal. Sin FOV en los ticks: el push-in del
+-- zoom sigue su curva sin que lo pisemos.
+local UNBOXING_TICK_SHAKE_BASE = 0.015 -- sacudida mínima por tick (rumble casi inexistente)
+local UNBOXING_TICK_SHAKE_RANGE = 0.15 -- extra por lentitud del tick (0→1) → jolt suave del final
+local UNBOXING_LAND_SHAKE = 0.32 -- golpe al clavar el ganador (antes del boom del reveal)
 
 local StoreFeature = {}
 
@@ -49,10 +99,9 @@ function StoreFeature.start(menuController: any): any
 	local playerGui = player:WaitForChild("PlayerGui")
 	local menuGui = menuController:getGui()
 
-	-- Botón de apertura opcional en Menu.Nav.Store. Si no existe, el Store se
-	-- configura igual, solo sin abrirse desde el menú.
-	local navContainer = menuGui:FindFirstChild("Nav")
-	local storeButtonInstance = navContainer and navContainer:FindFirstChild("Store")
+	-- Botón de apertura en Menu.Container.Store
+	local container = menuGui:FindFirstChild("Container")
+	local storeButtonInstance = container and container:FindFirstChild("Store")
 	local storeButton: GuiButton? = if storeButtonInstance and storeButtonInstance:IsA("GuiButton")
 		then storeButtonInstance
 		else nil
@@ -257,6 +306,237 @@ function StoreFeature.start(menuController: any): any
 	local caseSavedCameraType: Enum.CameraType? = nil
 	local caseSavedCameraCFrame: CFrame? = nil
 	local caseSavedCameraSubject: Instance? = nil
+	local caseSavedCameraFOV: number? = nil
+	-- Travelling en vuelo (unboxing). Se cancela antes de cualquier salto instantáneo
+	-- o restauración, si no seguiría moviendo la cámara por encima.
+	local caseCameraTween: Tween? = nil
+	local function cancelCaseCameraTween()
+		if caseCameraTween then
+			caseCameraTween:Cancel()
+			caseCameraTween = nil
+		end
+	end
+	-- Zoom (FOV) en vuelo, independiente del travelling: uno mueve CFrame y el otro
+	-- FieldOfView, así que pueden solaparse sin pelearse.
+	local caseCameraZoomTween: Tween? = nil
+	local function cancelCaseCameraZoom()
+		if caseCameraZoomTween then
+			caseCameraZoomTween:Cancel()
+			caseCameraZoomTween = nil
+		end
+	end
+	-- Lanza un tween de FOV hacia `targetFOV`. Sin FOV base guardado (cámara de case
+	-- no aplicada) no hacemos nada: no queremos tocar el FOV fuera de esta vista.
+	local function tweenCameraFOV(targetFOV: number, info: TweenInfo)
+		local camera = Workspace.CurrentCamera
+		if not camera then
+			return
+		end
+		cancelCaseCameraZoom()
+		local tween = TweenService:Create(camera, info, { FieldOfView = targetFOV })
+		caseCameraZoomTween = tween
+		tween:Play()
+	end
+
+	-- Marcador de cámara bajo Workspace.Cameras (debe ser BasePart).
+	local function resolveCameraNode(name: string): BasePart?
+		local camerasFolder = Workspace:FindFirstChild("Cameras")
+		local node = if camerasFolder then camerasFolder:FindFirstChild(name) else nil
+		if node and node:IsA("BasePart") then
+			return node :: BasePart
+		end
+		return nil
+	end
+
+	-- Pose BASE de la cámara cinemática (lo que se tweenea) separada del sway (lo que
+	-- se compone encima cada frame). Sin esta separación, travelling y balanceo se
+	-- pisarían el CFrame el uno al otro.
+	local caseCameraBaseValue = Instance.new("CFrameValue")
+	janitor:Add(caseCameraBaseValue, "Destroy")
+	local caseSwayConn: RBXScriptConnection? = nil
+	local caseSwayIntensity = 0 -- 0..1 actual (rampa)
+	local caseSwayTarget = 0 -- 0..1 objetivo
+	local caseSwaySeed = math.random() * 1000
+	local caseShakeIntensity = 0 -- 0..1, impulso de la explosión; se amortigua solo
+
+	local function stopCinematicCamera()
+		if caseSwayConn then
+			caseSwayConn:Disconnect()
+			caseSwayConn = nil
+		end
+		caseSwayIntensity = 0
+		caseSwayTarget = 0
+		caseShakeIntensity = 0
+	end
+	janitor:Add(stopCinematicCamera, true)
+
+	local function setCameraSway(enabled: boolean)
+		caseSwayTarget = if enabled then 1 else 0
+	end
+
+	-- Render loop de la cámara cinemática: pose base tweeneada + sway de cámara en
+	-- mano (ruido Perlin en deriva y balanceo, con rampa de intensidad para que
+	-- entre y salga sin saltos).
+	local function startCinematicCamera()
+		if caseSwayConn then
+			return
+		end
+		caseSwayConn = RunService.RenderStepped:Connect(function(dt)
+			local camera = Workspace.CurrentCamera
+			if not camera then
+				return
+			end
+			caseSwayIntensity += (caseSwayTarget - caseSwayIntensity) * math.min(dt / UNBOXING_SWAY_RAMP, 1)
+			local k = caseSwayIntensity
+			local t = os.clock() * UNBOXING_SWAY_SPEED
+			local nx = math.noise(t, caseSwaySeed, 0)
+			local ny = math.noise(caseSwaySeed, t, 0)
+			local nz = math.noise(t, 0, caseSwaySeed)
+			local sway = CFrame.new(nx * UNBOXING_SWAY_POS * k, ny * UNBOXING_SWAY_POS * k, 0)
+				* CFrame.Angles(
+					ny * math.rad(UNBOXING_SWAY_ROT) * k,
+					nx * math.rad(UNBOXING_SWAY_ROT) * k,
+					nz * math.rad(UNBOXING_SWAY_ROT) * k
+				)
+
+			-- Onda expansiva del reveal: ruido de alta frecuencia amortiguado. Se
+			-- compone encima del sway, así que ambos conviven sin pisarse.
+			local shake = CFrame.identity
+			if caseShakeIntensity > 0.001 then
+				caseShakeIntensity *= math.exp(-UNBOXING_SHAKE_DECAY * dt)
+				local s = caseShakeIntensity
+				local st = os.clock() * UNBOXING_SHAKE_FREQ
+				local sx = math.noise(st, caseSwaySeed + 11, 0)
+				local sy = math.noise(caseSwaySeed + 11, st, 0)
+				local sz = math.noise(st, 0, caseSwaySeed + 11)
+				shake = CFrame.new(
+					sx * UNBOXING_SHAKE_POS * s,
+					sy * UNBOXING_SHAKE_POS * s,
+					sz * UNBOXING_SHAKE_POS * s * 0.5
+				) * CFrame.Angles(
+					sy * math.rad(UNBOXING_SHAKE_ROT) * s,
+					sx * math.rad(UNBOXING_SHAKE_ROT) * s,
+					sz * math.rad(UNBOXING_SHAKE_ROT) * s
+				)
+			end
+
+			camera.CFrame = caseCameraBaseValue.Value * sway * shake
+		end)
+	end
+
+	-- Travelling SUAVE hasta Workspace.Cameras.<name>: tweenea la POSE BASE (el loop
+	-- la aplica con el sway encima). Al contrario que el salto instantáneo de
+	-- applyCaseCamera, aquí el movimiento se ve.
+	local function tweenCameraTo(name: string): Tween?
+		local node = resolveCameraNode(name)
+		local camera = Workspace.CurrentCamera
+		if not node then
+			warn("[StoreFeature] Falta Workspace.Cameras." .. name .. " (BasePart); la cámara no viajará.")
+			return nil
+		end
+		if not camera then
+			return nil
+		end
+		cancelCaseCameraTween()
+		camera.CameraType = Enum.CameraType.Scriptable
+		-- Arrancar la base donde está la cámara AHORA para no dar un salto. Solo si el
+		-- loop no corría ya: si corre, la base ya es la buena (y camera.CFrame lleva
+		-- sway sumado, que no queremos hornear dentro de la base).
+		if not caseSwayConn then
+			caseCameraBaseValue.Value = camera.CFrame
+		end
+		startCinematicCamera()
+		local tween = TweenService:Create(caseCameraBaseValue, UNBOXING_TRAVEL_INFO, { Value = node.CFrame })
+		caseCameraTween = tween
+		tween:Play()
+		return tween
+	end
+
+	-- Entrada al unboxing: travelling hasta Cameras.unboxing y, AL LLEGAR, la
+	-- respiración de FOV (apertura corta de anticipación → push-in lento del 5%). Si
+	-- el travelling se cancela (panel cerrado a media animación) el zoom no arranca.
+	-- Sin marcador de cámara, hacemos solo el zoom sobre la vista actual.
+	local function enterUnboxingCamera()
+		local baseFOV = caseSavedCameraFOV
+		setCameraSway(true)
+		local function startZoom()
+			if not baseFOV then
+				return
+			end
+			tweenCameraFOV(baseFOV * UNBOXING_ZOOM_ANTICIPATION, UNBOXING_ZOOM_ANTICIPATION_INFO)
+			local breath = caseCameraZoomTween
+			if breath then
+				breath.Completed:Once(function(state)
+					if state == Enum.PlaybackState.Completed then
+						tweenCameraFOV(baseFOV * UNBOXING_ZOOM_FACTOR, UNBOXING_ZOOM_IN_INFO)
+					end
+				end)
+			end
+		end
+		local travel = tweenCameraTo("unboxing")
+		if not travel then
+			startZoom()
+			return
+		end
+		travel.Completed:Once(function(state)
+			if state == Enum.PlaybackState.Completed then
+				startZoom()
+			end
+		end)
+	end
+
+	-- Explosión del reveal: impulso de sacudida (lo amortigua el render loop) + golpe
+	-- seco de FOV hacia fuera que vuelve al valor zoomeado. La cámara NO se mueve de
+	-- sitio: la onda expansiva se compone sobre la pose base.
+	local function explodeCamera()
+		caseShakeIntensity = 1
+		local baseFOV = caseSavedCameraFOV
+		if not baseFOV then
+			return
+		end
+		local zoomedFOV = baseFOV * UNBOXING_ZOOM_FACTOR
+		tweenCameraFOV(zoomedFOV * UNBOXING_SHAKE_FOV_PUNCH, UNBOXING_SHAKE_FOV_OUT_INFO)
+		local punch = caseCameraZoomTween
+		if punch then
+			punch.Completed:Once(function(state)
+				if state == Enum.PlaybackState.Completed then
+					tweenCameraFOV(zoomedFOV, UNBOXING_SHAKE_FOV_BACK_INFO)
+				end
+			end)
+		end
+	end
+
+	-- Beat de cámara por item que cruza el centro del reel (lo dispara CaseUnboxing
+	-- vía onReelTick). Sube la sacudida por MÁXIMO, no acumula: rápido = base pequeña
+	-- (rumble constante del barrido); al frenar strength→1 y los ticks se espacian →
+	-- cada uno pega un jolt seco que se amortigua antes del siguiente. Sin FOV: el
+	-- push-in del zoom sigue su curva sin que lo pisemos.
+	local function kickCamera(strength: number)
+		local kick = UNBOXING_TICK_SHAKE_BASE + UNBOXING_TICK_SHAKE_RANGE * math.clamp(strength, 0, 1)
+		if kick > caseShakeIntensity then
+			caseShakeIntensity = kick
+		end
+	end
+
+	-- Golpe al clavar el ganador (onReelLand): sacudida fuerte sincronizada con el
+	-- impacto del cofre, un beat antes de la onda expansiva del reveal. El FOV se
+	-- reserva para ese boom (explodeCamera), así el land pega solo con sacudida.
+	local function landCamera()
+		if UNBOXING_LAND_SHAKE > caseShakeIntensity then
+			caseShakeIntensity = UNBOXING_LAND_SHAKE
+		end
+	end
+
+	-- Deshace la entrada al unboxing (solo hace falta si la animación no llegó a
+	-- arrancar): vuelve a 'cases', suelta el zoom y apaga el sway.
+	local function exitUnboxingCamera()
+		tweenCameraTo("cases")
+		setCameraSway(false)
+		if caseSavedCameraFOV then
+			tweenCameraFOV(caseSavedCameraFOV, UNBOXING_TRAVEL_INFO)
+		end
+	end
+
 	local function applyCaseCamera()
 		local camerasFolder = Workspace:FindFirstChild("Cameras")
 		local casesNode = if camerasFolder then camerasFolder:FindFirstChild("cases") else nil
@@ -272,10 +552,15 @@ function StoreFeature.start(menuController: any): any
 		if not camera then
 			return
 		end
+		cancelCaseCameraTween()
+		stopCinematicCamera()
 		if not caseCameraApplied then
 			caseSavedCameraType = camera.CameraType
 			caseSavedCameraCFrame = camera.CFrame
 			caseSavedCameraSubject = camera.CameraSubject
+			-- FOV base de la vista de la case: el zoom del unboxing parte de aquí y
+			-- vuelve aquí (y se repone al cerrar el detalle).
+			caseSavedCameraFOV = camera.FieldOfView
 			caseCameraApplied = true
 		end
 		-- Salto instantáneo: fijar tipo Scriptable y el CFrame de la parte `cases`.
@@ -283,6 +568,9 @@ function StoreFeature.start(menuController: any): any
 		camera.CFrame = casesNode.CFrame
 	end
 	local function restoreCaseCamera()
+		cancelCaseCameraTween()
+		cancelCaseCameraZoom()
+		stopCinematicCamera()
 		if not caseCameraApplied then
 			return
 		end
@@ -290,6 +578,10 @@ function StoreFeature.start(menuController: any): any
 		local camera = Workspace.CurrentCamera
 		if not camera then
 			return
+		end
+		-- Reponer el FOV base (el zoom del unboxing pudo dejarlo a medias).
+		if caseSavedCameraFOV then
+			camera.FieldOfView = caseSavedCameraFOV
 		end
 		-- Restauración instantánea del estado previo (tipo/subject/CFrame).
 		if caseSavedCameraType ~= nil then
@@ -304,6 +596,7 @@ function StoreFeature.start(menuController: any): any
 		caseSavedCameraType = nil
 		caseSavedCameraCFrame = nil
 		caseSavedCameraSubject = nil
+		caseSavedCameraFOV = nil
 	end
 
 	-- Lighting de la vista de la case, dirigido por atributo: si la parte
@@ -467,6 +760,10 @@ function StoreFeature.start(menuController: any): any
 			-- fade. Si el cierre vino del teardown del Store (panel cerrándose),
 			-- storePanelOpen es false: restauramos estado SIN fade (no hay Store al
 			-- que volver y un flash negro sobraría).
+			-- El cofre idle vive mientras el detalle está abierto: se destruye aquí.
+			if caseUnboxing then
+				caseUnboxing:hideIdleChest()
+			end
 			if storePanelOpen then
 				task.spawn(function()
 					runCaseTransition(function()
@@ -509,25 +806,71 @@ function StoreFeature.start(menuController: any): any
 			end
 
 			if caseDefinition and caseUnboxing then
-				-- Durante el reel solo se ve el frame de Unboxing. El Store ya
-				-- está oculto (CaseContent abierto); ocultamos también el
-				-- CaseContent y lo restauramos al terminar.
-				caseContent:setTemporarilyHidden(true)
+				-- Durante el cofre+reel la escena es 3D: ocultamos Main y la cámara viaja
+				-- (travelling, no corte) hasta Workspace.Cameras.unboxing; al llegar entra
+				-- el zoom dramático. En el reveal vuelve a 'cases' —que encuadra el
+				-- RevealSpawn—, suelta el zoom y showReveal devuelve Main con la Nav en
+				-- Equip/Collect.
+				caseContent:setMainHidden(true)
+				enterUnboxingCamera()
+				local wrapRarity = tostring(if type(wrapDefinition) == "table"
+					then wrapDefinition.Rarity or "Common"
+					else "Common")
+				-- El reveal se descarta con Equip o Collect (flag monótono que
+				-- awaitDismiss poll-ea desde la corrutina del unboxing).
+				local dismissed = false
 				local started = caseUnboxing:play({
 					caseDefinition = caseDefinition,
 					resultWrapId = response.wrapId,
 					resultWeaponCategory = response.weaponCategory,
 					resultWeaponId = response.weaponId,
 					ownedWeapons = getOwnedWeaponRefs(),
+					-- Beats del reel → kicks de cámara: rumble mientras vuela, jolts
+					-- secos al frenar (onReelTick) y un golpe al clavar el ganador
+					-- (onReelLand), un beat antes del boom del reveal (explodeCamera).
+					onReelTick = kickCamera,
+					onReelLand = landCamera,
+					onRevealShown = function()
+						-- La cámara NO cambia de sitio: el reveal ocurre en la misma toma de
+						-- 'unboxing', donde ya está el arma ganadora. Lo que sí encaja es la
+						-- onda expansiva (sacudida + golpe de FOV), y aparece el frame
+						-- CaseContent.Reveal con Equip/Collect.
+						explodeCamera()
+						caseContent:showReveal({
+							wrapName = wrapName,
+							rarity = wrapRarity,
+							onEquip = function()
+								Network.Shop.EquipItem.Send({
+									category = LockerCategory.WEAPON_WRAPS,
+									itemId = response.wrapId,
+									weaponCategory = response.weaponCategory,
+									weaponId = response.weaponId,
+								})
+								dismissed = true
+							end,
+							onCollect = function()
+								dismissed = true
+							end,
+						})
+					end,
+					awaitDismiss = function()
+						while not dismissed do
+							task.wait()
+						end
+					end,
 					onFinished = function()
-						-- El reveal termina con COLLECT: se cierra el detalle de la
-						-- case y se vuelve a la Store (onClosed re-muestra el Store).
+						-- El jugador ya descartó el reveal (Equip/Collect): se cierra
+						-- el detalle de la case y se vuelve a la Store (onClosed
+						-- re-muestra el Store) refrescando el estado de compra.
 						caseContent:close()
-						announceResult()
+						refreshCasePurchaseState()
 					end,
 				})
 				if not started then
-					caseContent:setTemporarilyHidden(false)
+					-- Ya había un unboxing en curso: deshacer el ocultado/viaje de cámara
+					-- que acabamos de aplicar y limitarnos a anunciar.
+					caseContent:setMainHidden(false)
+					exitUnboxingCamera()
 					announceResult()
 				end
 			else
@@ -574,6 +917,11 @@ function StoreFeature.start(menuController: any): any
 							caseContent:open(caseDefinition)
 							applyCaseCamera()
 							applyCaseLighting()
+							-- Cofre idle quieto en FallPosition, visible ya al abrir el
+							-- detalle (antes de comprar); el unboxing lo reutiliza.
+							if caseUnboxing then
+								caseUnboxing:showIdleChest()
+							end
 							BlurController.suppress(CASE_BLUR_SUPPRESS_KEY)
 							storeFrame.Visible = false
 							refreshCasePurchaseState()

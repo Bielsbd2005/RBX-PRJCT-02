@@ -49,9 +49,12 @@ local _started = false
 local REMOTE_RATE_LIMIT_SECONDS = 0.5
 
 -- Tras morir, el cuerpo del jugador se reubica en el LobbySpawn pasado este margen
--- (deja que el kill effect / ragdoll cosmético se vea un momento). Poner a 0 para
--- reubicar de inmediato (perdería el ragdoll visible).
-local DEATH_BODY_TO_LOBBY_DELAY = 3
+-- (deja que el kill effect / ragdoll cosmético se vea COMPLETO). Mínimo 4s pedido;
+-- con la propiedad de red en el servidor (KillEffectUtils.setServerOwnership) el
+-- ragdoll ya no se congela a ~1s, así que estos segundos muestran la caída real.
+-- Solo aplica si el jugador NO respawnea antes (el guard de deathStamp lo cancela).
+-- Poner a 0 reubica de inmediato (perdería el ragdoll visible).
+local DEATH_BODY_TO_LOBBY_DELAY = 4.5
 -- Debounce mínimo entre reapariciones de lobby por jugador (anti-bucle infinito si
 -- una muerte en lobby vuelve a disparar el respawn de lobby de inmediato).
 local LOBBY_RESPAWN_DEBOUNCE = 2

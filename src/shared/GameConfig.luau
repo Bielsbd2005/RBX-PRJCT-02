@@ -43,7 +43,7 @@ export type GameConfigType = {
 }
 
 local GameConfig: GameConfigType = {
-	VoteDuration = 4,
+	VoteDuration = 15,
 	RandomVoteKey = "__RANDOM__",
 	EndResultsDuration = 10,
 	RespawnCooldown = 1,
@@ -77,9 +77,9 @@ local GameConfig: GameConfigType = {
 	},
 
 	Maps = {
-		{ Name = "Canyon",   PlaceholderImage = "rbxassetid://138703710359327", UseIntelligentSpawning = true },
-		{ Name = "Factory",  PlaceholderImage = "rbxassetid://138703710359327", UseIntelligentSpawning = true },
-		{ Name = "Rooftops", PlaceholderImage = "rbxassetid://138703710359327", UseIntelligentSpawning = true },
+		{ Name = "Sandtrap",   PlaceholderImage = "rbxassetid://130852161248051", UseIntelligentSpawning = true },
+		{ Name = "Out of Stock",  PlaceholderImage = "rbxassetid://103886746608149", UseIntelligentSpawning = true },
+		{ Name = "Under Construction", PlaceholderImage = "rbxassetid://74492386503921", UseIntelligentSpawning = true },
 	},
 }
 

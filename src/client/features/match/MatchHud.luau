@@ -1,8 +1,17 @@
 --!strict
 --[[
 	MatchHud.luau
-	Gestión del HUD de partida: marcador, barras de equipo, filas de jugadores,
-	cash/level, y tracking de kills/deaths/bots.
+	Gestión del HUD de partida: timer, barras de equipo, indicador del equipo que
+	va ganando, fichas de jugadores, cash/level, y tracking de kills/deaths/bots.
+
+	Estructura esperada, toda bajo el frame `MatchHud.Container`:
+		Cash.Value · Level.{Value, Bar.Fill} · GlobalKillFeedContainer.Template
+		MainFrame.Timer
+		MainFrame.{ATeamBar, BTeamBar}.{Fill, Value}
+		MainFrame.{ATeamIndicator, BTeamIndicator}   (spritesheet 2x2)
+		MainFrame.{ATeamPlayers, BTeamPlayers}.Template.Value
+	Los popups (LevelUp, Maestry) los resuelve MatchNotificationsQueue, también
+	bajo Container.
 ]]
 
 local Players = game:GetService("Players")
@@ -19,11 +28,25 @@ local MatchNotificationsQueue = require(script.Parent.MatchNotificationsQueue)
 local GlobalKillFeed = require(script.Parent.GlobalKillFeed)
 
 -- ── Colores ──────────────────────────────────────────────────
-local TEAM_A_HUD_COLOR = Color3.fromRGB(0, 161, 251)
-local TEAM_B_HUD_COLOR = Color3.fromRGB(246, 82, 71)
+-- Las kills del jugador local se resaltan en dorado; el resto del roster va en
+-- blanco para que se localice de un vistazo cuál de las fichas es la suya.
+local LOCAL_PLAYER_KILLS_COLOR = Color3.fromRGB(255, 194, 0)
+local OTHER_PLAYER_KILLS_COLOR = Color3.fromRGB(255, 255, 255)
+
+-- ── Indicador de equipo ganador ──────────────────────────────
+-- ATeamIndicator/BTeamIndicator son spritesheets 2x2 de 512x512 (4 frames).
+local TEAM_INDICATOR_SHEET_SIZE = Vector2.new(512, 512)
+local TEAM_INDICATOR_COLUMNS = 2
+local TEAM_INDICATOR_ROWS = 2
+local TEAM_INDICATOR_TOTAL_FRAMES = TEAM_INDICATOR_COLUMNS * TEAM_INDICATOR_ROWS
+local TEAM_INDICATOR_TILE_SIZE = Vector2.new(
+	TEAM_INDICATOR_SHEET_SIZE.X / TEAM_INDICATOR_COLUMNS,
+	TEAM_INDICATOR_SHEET_SIZE.Y / TEAM_INDICATOR_ROWS
+)
+local TEAM_INDICATOR_FRAME_TIME = 1 / 13
 
 -- ── Timer efectos ────────────────────────────────────────────
-local TIMER_SHORT_FORMAT_THRESHOLD = 20  -- ≤ este valor: solo segundos
+local TIMER_ALERT_THRESHOLD = 20         -- ≤ este valor: naranja + escala grande
 local TIMER_CRITICAL_THRESHOLD = 10      -- ≤ este valor: rojo + blink + pulso
 local TIMER_NORMAL_COLOR = Color3.fromRGB(255, 255, 255)
 local TIMER_ALERT_COLOR = Color3.fromRGB(255, 140, 0)
@@ -44,28 +67,30 @@ local TIMER_BLINK_FLASH_COLOR = Color3.fromRGB(255, 255, 255)
 
 -- ── Tipos ────────────────────────────────────────────────────
 
+-- Una ficha de jugador clonada de `Template`: la raíz es la ImageLabel con la
+-- foto de perfil y `Value` el TextLabel con sus kills.
 type HudPlayerRowRefs = {
 	root: GuiObject,
-	stroke: UIStroke?,
 	profile: ImageLabel?,
-	totalKillsValue: TextLabel?,
+	killsValue: TextLabel?,
 }
 
 type HudRefs = {
-	scoreA: TextLabel?,
-	scoreB: TextLabel?,
 	timer: TextLabel?,
-	objectiveScoreValue: TextLabel?,
 	teamABarFill: GuiObject?,
 	teamBBarFill: GuiObject?,
+	teamABarValue: TextLabel?,
+	teamBBarValue: TextLabel?,
+	teamAIndicator: ImageLabel?,
+	teamBIndicator: ImageLabel?,
 	cashValue: TextLabel?,
 	levelValue: TextLabel?,
 	levelBarFill: GuiObject?,
 	version: TextLabel?,
 	teamAPlayersFrame: GuiObject?,
 	teamBPlayersFrame: GuiObject?,
-	teamAPlayerRows: { HudPlayerRowRefs },
-	teamBPlayerRows: { HudPlayerRowRefs },
+	teamATemplate: GuiObject?,
+	teamBTemplate: GuiObject?,
 }
 
 export type BotRosterEntry = {
@@ -101,46 +126,6 @@ export type EndResultsPlayerEntry = {
 	hatId: string,
 }
 
--- ── Helpers de resolución de GUI ─────────────────────────────
-
-local function _findChildGuiObject(parent: Instance?, childName: string): GuiObject?
-	if not parent then
-		return nil
-	end
-	local node = parent:FindFirstChild(childName)
-	if node and node:IsA("GuiObject") then
-		return node
-	end
-	return nil
-end
-
-local function _findDescendant(parent: Instance?, path: { string }): Instance?
-	local current = parent
-	for _, childName in path do
-		if not current then
-			return nil
-		end
-		current = current:FindFirstChild(childName)
-	end
-	return current
-end
-
-local function _findDescendantGuiObject(parent: Instance?, path: { string }): GuiObject?
-	local node = _findDescendant(parent, path)
-	if node and node:IsA("GuiObject") then
-		return node
-	end
-	return nil
-end
-
-local function _findDescendantTextLabel(parent: Instance?, path: { string }): TextLabel?
-	local node = _findDescendant(parent, path)
-	if node and node:IsA("TextLabel") then
-		return node
-	end
-	return nil
-end
-
 -- ── Helpers de llenado de barras ─────────────────────────────
 
 local function _setHorizontalFill(fillNode: GuiObject?, ratio: number)
@@ -165,25 +150,42 @@ local function _setHorizontalFill(fillNode: GuiObject?, ratio: number)
 	fillNode.Size = UDim2.new(nextScale, baseOffset, currentSize.Y.Scale, currentSize.Y.Offset)
 end
 
+-- "XX:XX" para el label del timer, más los segundos totales para los efectos.
 local function _formatMatchTime(timeLeft: number): (string, number)
 	local totalSeconds = math.max(0, math.floor(timeLeft))
-	if totalSeconds <= TIMER_SHORT_FORMAT_THRESHOLD then
-		-- Formato corto: solo segundos durante alerta y crítico.
-		return tostring(totalSeconds), totalSeconds
-	end
 	local minutes = math.floor(totalSeconds / 60)
 	local seconds = totalSeconds % 60
 	return string.format("%02d:%02d", minutes, seconds), totalSeconds
+end
+
+-- Value de ATeamBar/BTeamBar: puntos actuales sobre el objetivo de la partida.
+local function _setTeamBarValue(valueLabel: TextLabel?, score: number, objective: number)
+	if not valueLabel then
+		return
+	end
+	valueLabel.RichText = true
+	valueLabel.Text = UIUtils.formatProgressValue(score, objective)
 end
 
 -- Devuelve (color, isCritical) según el segundo restante.
 local function _resolveTimerColor(totalSeconds: number): (Color3, boolean)
 	if totalSeconds <= TIMER_CRITICAL_THRESHOLD then
 		return TIMER_CRITICAL_COLOR, true
-	elseif totalSeconds <= TIMER_SHORT_FORMAT_THRESHOLD then
+	elseif totalSeconds <= TIMER_ALERT_THRESHOLD then
 		return TIMER_ALERT_COLOR, false
 	end
 	return TIMER_NORMAL_COLOR, false
+end
+
+-- Deja el ImageLabel del indicador recortado al primer tile del spritesheet y
+-- oculto; el bucle de animación solo mueve el ImageRectOffset.
+local function _initTeamIndicator(indicator: ImageLabel?)
+	if not indicator then
+		return
+	end
+	indicator.ImageRectSize = TEAM_INDICATOR_TILE_SIZE
+	indicator.ImageRectOffset = Vector2.zero
+	indicator.Visible = false
 end
 
 -- Devuelve un UIScale hijo del label (creándolo si no existe).
@@ -201,70 +203,24 @@ end
 
 -- ── Resolución de filas de jugadores ─────────────────────────
 
-local function _collectHudPlayerRows(playersContainer: GuiObject?): { HudPlayerRowRefs }
-	if not playersContainer then
-		return {}
+-- Cada contenedor de equipo trae un único `Template` (la ficha) que clonamos por
+-- jugador. Lo ocultamos al resolverlo: el UIListLayout del contenedor ignora los
+-- hijos invisibles, así que la plantilla no ocupa hueco en la fila.
+local function _resolveRowTemplate(playersFrame: GuiObject?): GuiObject?
+	if not playersFrame then
+		return nil
 	end
+	local template = playersFrame:WaitForChild("Template") :: GuiObject
+	template.Visible = false
+	return template
+end
 
-	local indexedRows = {} :: { { index: number, row: HudPlayerRowRefs } }
-	for _, child in playersContainer:GetChildren() do
-		if not child:IsA("GuiObject") then
-			continue
-		end
-		local index = tonumber(child.Name)
-		if not index then
-			continue
-		end
-
-		-- Estructura actual: la fila tiene un contenedor `Frame` con la miniatura
-		-- (`Image`), el `UIStroke` (color de equipo) y `Kills` (TextLabel) dentro.
-		-- Toleramos variantes anteriores: contenedor = `Frame` o la fila misma;
-		-- miniatura = `Image` o `Profile`; stroke/Kills sueltos o anidados.
-		local card = child:FindFirstChild("Frame")
-		if not (card and card:IsA("GuiObject")) then
-			card = child
-		end
-
-		local profileNode = card:FindFirstChild("Image")
-			or card:FindFirstChild("Profile")
-			or child:FindFirstChild("Image")
-			or child:FindFirstChild("Profile")
-		local profile = if profileNode and profileNode:IsA("ImageLabel") then profileNode else nil
-
-		local strokeNode = card:FindFirstChildWhichIsA("UIStroke")
-			or (profileNode and profileNode:FindFirstChildWhichIsA("UIStroke"))
-			or child:FindFirstChildWhichIsA("UIStroke")
-
-		local totalKillsNode = card:FindFirstChild("Kills")
-			or (profileNode and profileNode:FindFirstChild("Kills"))
-			or child:FindFirstChild("Kills")
-		local totalKillsValueNode = if totalKillsNode and totalKillsNode:IsA("TextLabel")
-			then totalKillsNode
-			elseif totalKillsNode and totalKillsNode:IsA("GuiObject")
-				then totalKillsNode:FindFirstChild("Kills")
-				else nil
-		local totalKillsValue = if totalKillsValueNode and totalKillsValueNode:IsA("TextLabel") then totalKillsValueNode else nil
-
-		table.insert(indexedRows, {
-			index = index,
-			row = {
-				root = child,
-				stroke = strokeNode,
-				profile = profile,
-				totalKillsValue = totalKillsValue,
-			},
-		})
-	end
-
-	table.sort(indexedRows, function(a, b)
-		return a.index < b.index
-	end)
-
-	local rows = {} :: { HudPlayerRowRefs }
-	for _, entry in indexedRows do
-		table.insert(rows, entry.row)
-	end
-	return rows
+-- El UIListLayout ordena por Name, así que el nombre del clon codifica el puesto.
+-- En el equipo A el mejor va a la derecha (nombre más alto) y en el B a la
+-- izquierda (nombre más bajo); `rank` llega 1 = mejor.
+local function _rowSortName(side: string, rank: number, total: number): string
+	local position = if side == "A" then (total - rank + 1) else rank
+	return string.format("%02d", position)
 end
 
 -- ── Resolución de HUD refs ───────────────────────────────────
@@ -272,57 +228,49 @@ end
 local function _resolveHudRefs(matchHudGui: ScreenGui?): HudRefs
 	if not matchHudGui then
 		return {
-			scoreA = nil, scoreB = nil, timer = nil,
-			objectiveScoreValue = nil, teamABarFill = nil, teamBBarFill = nil,
+			timer = nil,
+			teamABarFill = nil, teamBBarFill = nil,
+			teamABarValue = nil, teamBBarValue = nil,
+			teamAIndicator = nil, teamBIndicator = nil,
 			cashValue = nil, levelValue = nil, levelBarFill = nil,
 			version = nil,
 			teamAPlayersFrame = nil, teamBPlayersFrame = nil,
-			teamAPlayerRows = {}, teamBPlayerRows = {},
+			teamATemplate = nil, teamBTemplate = nil,
 		}
 	end
 
-	local containerNode = _findChildGuiObject(matchHudGui, "Container")
-	-- El marcador vive ahora en Container.MainFrame (antes Container.Match).
-	local matchNode = _findChildGuiObject(containerNode, "MainFrame")
-		or _findChildGuiObject(containerNode, "Match")
-	local cashNode = _findChildGuiObject(containerNode, "Cash")
-	local levelNode = _findChildGuiObject(containerNode, "Level")
-	-- Filas de jugadores: ATeamPlayers/BTeamPlayers (antes TeamA/TeamB).
-	local teamAPlayersNode = _findDescendantGuiObject(matchNode, { "ATeamPlayers" })
-		or _findDescendantGuiObject(matchNode, { "TeamA" })
-	local teamBPlayersNode = _findDescendantGuiObject(matchNode, { "BTeamPlayers" })
-		or _findDescendantGuiObject(matchNode, { "TeamB" })
+	local container = matchHudGui:WaitForChild("Container") :: Frame
+	local mainFrame = container:WaitForChild("MainFrame") :: Frame
+	local cash = container:WaitForChild("Cash") :: Frame
+	local level = container:WaitForChild("Level") :: Frame
 
-	-- Container.Version puede ser un TextLabel directo (caso simple) o un
-	-- contenedor con un hijo `Value` que muestra el número (patrón usado por
-	-- Cash/Level). Probamos ambos para no acoplarnos al naming del asset.
-	local versionLabel = _findDescendantTextLabel(containerNode, { "Version" })
-		or _findDescendantTextLabel(containerNode, { "Version", "Value" })
+	local teamABar = mainFrame:WaitForChild("ATeamBar") :: Frame
+	local teamBBar = mainFrame:WaitForChild("BTeamBar") :: Frame
+
+	local teamAPlayers = mainFrame:WaitForChild("ATeamPlayers") :: Frame
+	local teamBPlayers = mainFrame:WaitForChild("BTeamPlayers") :: Frame
+
+	local versionNode = container:FindFirstChild("Version")
+	local versionLabel: TextLabel? = if versionNode
+		then (if versionNode:IsA("TextLabel") then versionNode else versionNode:FindFirstChild("Value") :: TextLabel?)
+		else nil
 
 	return {
-		-- Score como contenedor con hijo `Value` (ScoreA.Value); fallback a label directo.
-		scoreA = _findDescendantTextLabel(matchNode, { "ScoreA", "Value" })
-			or _findDescendantTextLabel(matchNode, { "ScoreA" }),
-		scoreB = _findDescendantTextLabel(matchNode, { "ScoreB", "Value" })
-			or _findDescendantTextLabel(matchNode, { "ScoreB" }),
-		-- El timer vive en MainFrame.Timer.Value.
-		timer = _findDescendantTextLabel(matchNode, { "Timer", "Value" })
-			or _findDescendantTextLabel(matchNode, { "Timer" }),
-		-- Objetivo (puntuación para ganar) + barras de progreso por equipo.
-		objectiveScoreValue = _findDescendantTextLabel(matchNode, { "ObjectiveScore", "Value" })
-			or _findDescendantTextLabel(matchNode, { "ObjectiveScore" }),
-		teamABarFill = _findDescendantGuiObject(matchNode, { "ATeamBar", "Fill" }),
-		teamBBarFill = _findDescendantGuiObject(matchNode, { "BTeamBar", "Fill" }),
-		cashValue = _findDescendantTextLabel(cashNode, { "Value" }),
-		levelValue = _findDescendantTextLabel(levelNode, { "Value" }),
-		-- Barra de nivel ahora en Level.Bar.Fill (antes Level.Fill).
-		levelBarFill = _findDescendantGuiObject(levelNode, { "Bar", "Fill" })
-			or _findDescendantGuiObject(levelNode, { "Fill" }),
+		timer = mainFrame:WaitForChild("Timer") :: TextLabel,
+		teamABarFill = teamABar:WaitForChild("Fill") :: GuiObject,
+		teamBBarFill = teamBBar:WaitForChild("Fill") :: GuiObject,
+		teamABarValue = teamABar:WaitForChild("Value") :: TextLabel,
+		teamBBarValue = teamBBar:WaitForChild("Value") :: TextLabel,
+		teamAIndicator = mainFrame:WaitForChild("ATeamIndicator") :: ImageLabel,
+		teamBIndicator = mainFrame:WaitForChild("BTeamIndicator") :: ImageLabel,
+		cashValue = cash:WaitForChild("Value") :: TextLabel,
+		levelValue = level:WaitForChild("Value") :: TextLabel,
+		levelBarFill = level:WaitForChild("Bar"):WaitForChild("Fill") :: GuiObject,
 		version = versionLabel,
-		teamAPlayersFrame = teamAPlayersNode,
-		teamBPlayersFrame = teamBPlayersNode,
-		teamAPlayerRows = _collectHudPlayerRows(teamAPlayersNode),
-		teamBPlayerRows = _collectHudPlayerRows(teamBPlayersNode),
+		teamAPlayersFrame = teamAPlayers,
+		teamBPlayersFrame = teamBPlayers,
+		teamATemplate = _resolveRowTemplate(teamAPlayers),
+		teamBTemplate = _resolveRowTemplate(teamBPlayers),
 	}
 end
 
@@ -335,18 +283,15 @@ function MatchHud.new(matchHudGui: ScreenGui?): any
 	local self = setmetatable({}, MatchHud)
 	self._gui = matchHudGui
 	self._hudRefs = _resolveHudRefs(matchHudGui)
-	-- Diagnóstico: si una barra de equipo resuelve y la otra no, casi seguro hay
-	-- un nombre desalineado (MainFrame.ATeamBar.Fill vs BTeamBar.Fill — sensible a
-	-- mayúsculas/espacios). Avisamos para no depurar a ciegas.
-	if matchHudGui then
-		local a, b = self._hudRefs.teamABarFill, self._hudRefs.teamBBarFill
-		if (a ~= nil) ~= (b ~= nil) then
-			warn(`[MatchHud] Barras de equipo asimétricas: ATeamBar.Fill={a ~= nil}, BTeamBar.Fill={b ~= nil}. Revisa los nombres exactos (MainFrame.BTeamBar.Fill, sensible a mayúsculas).`)
-		end
-	end
 	self._localUserId = Players.LocalPlayer.UserId
 	self._destroyed = false
 	self._janitor = Janitor.new()
+	-- Indicador del equipo que va ganando: un único bucle de spritesheet vivo
+	-- mientras hay indicador visible, invalidado por token en cada cambio.
+	_initTeamIndicator(self._hudRefs.teamAIndicator)
+	_initTeamIndicator(self._hudRefs.teamBIndicator)
+	self._indicatorSide = nil :: string?
+	self._indicatorToken = 0
 	-- Queue de animaciones in-match (level up / BP level up / challenge done).
 	-- Extraído a su propio módulo para que MatchHud no orqueste tweens y
 	-- confetti; los callers siguen usando `hud:playXxxAnimation(...)`.
@@ -419,7 +364,10 @@ function MatchHud.new(matchHudGui: ScreenGui?): any
 	self._thumbnailByUserId = {} :: { [number]: string }
 	self._thumbnailRequestInFlight = {} :: { [number]: boolean }
 
-	-- Filas del HUD
+	-- Filas del HUD: pool de clones de `Template` por equipo, creados bajo demanda
+	-- y reutilizados entre updates (el rowKey "A1"/"B2" indexa este pool, no el
+	-- orden visual, que lo decide el Name del clon).
+	self._playerRows = { A = {} :: { HudPlayerRowRefs }, B = {} :: { HudPlayerRowRefs } }
 	self._rowUserIdByKey = {} :: { [string]: number? }
 	self._updateQueued = false
 
@@ -430,14 +378,6 @@ function MatchHud.new(matchHudGui: ScreenGui?): any
 	self._timerBaseScaleTween = nil :: Tween?
 	self._timerCurrentBaseScale = TIMER_BASE_SCALE
 	self._timerScale = nil :: UIScale?
-
-	-- Inicializar filas vacías
-	for _, rowRef in self._hudRefs.teamAPlayerRows do
-		self:_setRowStats(rowRef, 0)
-	end
-	for _, rowRef in self._hudRefs.teamBPlayerRows do
-		self:_setRowStats(rowRef, 0)
-	end
 
 	if matchHudGui then
 		matchHudGui.Enabled = false
@@ -456,7 +396,50 @@ function MatchHud:setEnabled(enabled: boolean)
 	end
 	if not enabled then
 		self:_clearTimerEffects()
+		-- Corta el bucle del spritesheet mientras el HUD no está en pantalla.
+		self:_setWinningTeam(nil)
 	end
+end
+
+-- Muestra el indicador del equipo que va ganando ("A"/"B"), o ninguno si empatan.
+-- Anima el spritesheet 2x2 a 13fps con un único bucle: cada cambio invalida el
+-- anterior vía token, así que nunca hay dos corriendo a la vez.
+function MatchHud:_setWinningTeam(side: string?)
+	if side == self._indicatorSide then
+		return
+	end
+	self._indicatorSide = side
+	self._indicatorToken += 1
+
+	local refs = self._hudRefs
+	if refs.teamAIndicator then
+		refs.teamAIndicator.Visible = side == "A"
+	end
+	if refs.teamBIndicator then
+		refs.teamBIndicator.Visible = side == "B"
+	end
+
+	local indicator = if side == "A" then refs.teamAIndicator
+		elseif side == "B" then refs.teamBIndicator
+		else nil
+	if not indicator then
+		return
+	end
+
+	local token = self._indicatorToken
+	task.spawn(function()
+		local frameIndex = 0
+		while not self._destroyed and self._indicatorToken == token and indicator.Parent do
+			local column = frameIndex % TEAM_INDICATOR_COLUMNS
+			local row = math.floor(frameIndex / TEAM_INDICATOR_COLUMNS)
+			indicator.ImageRectOffset = Vector2.new(
+				column * TEAM_INDICATOR_TILE_SIZE.X,
+				row * TEAM_INDICATOR_TILE_SIZE.Y
+			)
+			frameIndex = (frameIndex + 1) % TEAM_INDICATOR_TOTAL_FRAMES
+			task.wait(TEAM_INDICATOR_FRAME_TIME)
+		end
+	end)
 end
 
 -- Cancela los tweens del timer y resetea visuals (color blanco, escala 1, sin transparencia).
@@ -511,7 +494,7 @@ function MatchHud:_updateTimerEffects(timerLabel: TextLabel, totalSeconds: numbe
 	end
 
 	-- Escala base: > 20s = 1.0; ≤ 20s = más grande.
-	local targetBaseScale = if totalSeconds <= TIMER_SHORT_FORMAT_THRESHOLD then TIMER_LARGE_SCALE else TIMER_BASE_SCALE
+	local targetBaseScale = if totalSeconds <= TIMER_ALERT_THRESHOLD then TIMER_LARGE_SCALE else TIMER_BASE_SCALE
 	local scaleNode = self._timerScale
 	if not scaleNode then
 		scaleNode = _ensureTimerScale(timerLabel)
@@ -563,22 +546,19 @@ function MatchHud:setScores(scoreA: number, scoreB: number, timeLeft: number)
 	local clampedA = math.max(0, scoreA)
 	local clampedB = math.max(0, scoreB)
 
-	if refs.scoreA then
-		refs.scoreA.Text = tostring(clampedA)
-	end
-	if refs.scoreB then
-		refs.scoreB.Text = tostring(clampedB)
-	end
+	-- Barras por equipo: el Fill avanza con el score respecto al objetivo de la
+	-- partida (WinScoreLimit) y el Value muestra "score/objetivo".
+	local objectiveScore = math.max(1, GameConfig.WinScoreLimit or 1)
+	_setHorizontalFill(refs.teamABarFill, clampedA / objectiveScore)
+	_setHorizontalFill(refs.teamBBarFill, clampedB / objectiveScore)
+	_setTeamBarValue(refs.teamABarValue, clampedA, objectiveScore)
+	_setTeamBarValue(refs.teamBBarValue, clampedB, objectiveScore)
 
-	-- Objetivo (puntuación para acabar la partida) y barras de progreso por equipo,
-	-- rellenadas con el score de cada equipo respecto al objetivo (WinScoreLimit).
-	local objectiveScore = GameConfig.WinScoreLimit or 0
-	if refs.objectiveScoreValue then
-		refs.objectiveScoreValue.Text = tostring(objectiveScore)
-	end
-	local objectiveDenominator = math.max(1, objectiveScore)
-	_setHorizontalFill(refs.teamABarFill, clampedA / objectiveDenominator)
-	_setHorizontalFill(refs.teamBBarFill, clampedB / objectiveDenominator)
+	self:_setWinningTeam(
+		if clampedA > clampedB then "A"
+		elseif clampedB > clampedA then "B"
+		else nil
+	)
 
 	if refs.timer then
 		local text, totalSeconds = _formatMatchTime(timeLeft)
@@ -589,29 +569,21 @@ end
 
 -- Tipos públicos exportados desde MatchNotificationsQueue. Se re-exportan
 -- aquí para mantener la API estable de MatchHud (callers usan estos tipos).
-export type LevelUpUnlock = MatchNotificationsQueue.LevelUpUnlock
-export type ChallengeCompletedReward = MatchNotificationsQueue.ChallengeCompletedReward
 export type MasteryProgress = MatchNotificationsQueue.MasteryProgress
 
--- Las animaciones de notificación (LevelUp / BPLevelUp / Completed + confetti
+-- Las animaciones de notificación (LevelUp / BPLevelUp / Maestry + confetti
 -- + slide context) viven en MatchNotificationsQueue. Mantenemos delegadores
 -- en MatchHud para no romper callers existentes.
 
-function MatchHud:playLevelUpAnimation(newLevel: number, unlock: LevelUpUnlock?)
+function MatchHud:playLevelUpAnimation(newLevel: number)
 	if self._notificationsQueue then
-		self._notificationsQueue:playLevelUpAnimation(newLevel, unlock)
+		self._notificationsQueue:playLevelUpAnimation(newLevel)
 	end
 end
 
 function MatchHud:playBattlePassLevelUpAnimation(newLevel: number)
 	if self._notificationsQueue then
 		self._notificationsQueue:playBattlePassLevelUpAnimation(newLevel)
-	end
-end
-
-function MatchHud:playTaskCompletedAnimation(reward: ChallengeCompletedReward)
-	if self._notificationsQueue then
-		self._notificationsQueue:playTaskCompletedAnimation(reward)
 	end
 end
 
@@ -791,22 +763,55 @@ end
 
 -- ── Player rows internos ─────────────────────────────────────
 
-function MatchHud:_setRowStats(rowRef: HudPlayerRowRefs, totalKills: number)
-	if rowRef.totalKillsValue then
-		rowRef.totalKillsValue.Text = tostring(math.max(0, totalKills))
+-- Devuelve la ficha `index` del equipo, clonando `Template` la primera vez. El
+-- clon nace invisible y con nombre neutro: el puesto real (que decide el orden
+-- del UIListLayout) lo escribe _updatePlayerRows.
+function MatchHud:_acquireRow(side: string, index: number): HudPlayerRowRefs?
+	local pool = self._playerRows[side]
+	local existing = pool[index]
+	if existing then
+		return existing
 	end
+
+	local refs = self._hudRefs
+	local template = if side == "A" then refs.teamATemplate else refs.teamBTemplate
+	local parent = if side == "A" then refs.teamAPlayersFrame else refs.teamBPlayersFrame
+	if not (template and parent) then
+		return nil
+	end
+
+	local clone = template:Clone()
+	clone.Name = "Row"
+	clone.Visible = false
+	clone.Parent = parent
+	self._janitor:Add(clone, "Destroy")
+
+	-- La ficha es la propia ImageLabel (la foto de perfil); toleramos que el
+	-- asset la anide por si el Template pasa a ser un Frame contenedor.
+	local profileNode: Instance? = if clone:IsA("ImageLabel")
+		then clone
+		else clone:FindFirstChildWhichIsA("ImageLabel", true)
+	local killsNode = clone:FindFirstChild("Value", true)
+
+	local row: HudPlayerRowRefs = {
+		root = clone,
+		profile = if profileNode and profileNode:IsA("ImageLabel") then profileNode else nil,
+		killsValue = if killsNode and killsNode:IsA("TextLabel") then killsNode else nil,
+	}
+	pool[index] = row
+	return row
 end
 
-function MatchHud:_setRowTeamColor(rowRef: HudPlayerRowRefs, teamSide: string?)
-	local color = if teamSide == "A" then TEAM_A_HUD_COLOR
-		elseif teamSide == "B" then TEAM_B_HUD_COLOR
-		else nil
-	if not color then
+-- `isLocalPlayer` nil = no tocar el color (lo usa el fast path incremental, que
+-- solo refresca el número).
+function MatchHud:_setRowStats(rowRef: HudPlayerRowRefs, totalKills: number, isLocalPlayer: boolean?)
+	local label = rowRef.killsValue
+	if not label then
 		return
 	end
-	rowRef.root.BackgroundColor3 = color
-	if rowRef.stroke then
-		rowRef.stroke.Color = color
+	label.Text = tostring(math.max(0, totalKills))
+	if isLocalPlayer ~= nil then
+		label.TextColor3 = if isLocalPlayer then LOCAL_PLAYER_KILLS_COLOR else OTHER_PLAYER_KILLS_COLOR
 	end
 end
 
@@ -855,7 +860,7 @@ function MatchHud:_applyCachedOrFetchThumbnail(rowKey: string, userId: number, p
 			return
 		end
 		local ok, content = pcall(function()
-			return Players:GetUserThumbnailAsync(userId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size100x100)
+			return Players:GetUserThumbnailAsync(userId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size48x48)
 		end)
 		if self._destroyed then
 			return
@@ -886,7 +891,6 @@ function MatchHud:_applyRowEntry(
 	end
 
 	self._rowUserIdByKey[rowKey] = entry.userId
-	self:_setRowTeamColor(rowRef, entry.team)
 	if rowRef.profile then
 		if entry.isBot then
 			rowRef.profile.Image = entry.image or ""
@@ -894,7 +898,7 @@ function MatchHud:_applyRowEntry(
 			self:_applyCachedOrFetchThumbnail(rowKey, entry.userId, rowRef.profile)
 		end
 	end
-	self:_setRowStats(rowRef, self._killsByUserId[entry.userId] or 0)
+	self:_setRowStats(rowRef, self._killsByUserId[entry.userId] or 0, entry.userId == self._localUserId)
 end
 
 -- Devuelve el team ("A"/"B") del userId si está visible en alguna fila, leyendo
@@ -908,8 +912,8 @@ function MatchHud:_findRowForUserId(userId: number): (HudPlayerRowRefs?, string?
 			if not idx then
 				return nil, nil
 			end
-			local rows = if team == "A" then self._hudRefs.teamAPlayerRows else self._hudRefs.teamBPlayerRows
-			return rows[idx], team
+			local pool = self._playerRows[team]
+			return if pool then pool[idx] else nil, team
 		end
 	end
 	return nil, nil
@@ -1000,14 +1004,25 @@ function MatchHud:_updatePlayerRows()
 	sortEntries(entriesByTeam.A)
 	sortEntries(entriesByTeam.B)
 
-	for index, rowRef in ipairs(self._hudRefs.teamAPlayerRows) do
-		self:_applyRowEntry(rowRef, string.format("A%d", index), entriesByTeam.A[index])
-	end
+	-- `entries` viene mejor-primero; el puesto visual lo pone el Name del clon
+	-- (_rowSortName), así que aquí solo emparejamos ficha ↔ jugador por ranking.
+	for _, side in { "A", "B" } do
+		local entries = entriesByTeam[side]
+		local total = #entries
+		for rank, entry in ipairs(entries) do
+			local rowRef = self:_acquireRow(side, rank)
+			if not rowRef then
+				break
+			end
+			rowRef.root.Name = _rowSortName(side, rank, total)
+			self:_applyRowEntry(rowRef, string.format("%s%d", side, rank), entry)
+		end
 
-	for index, rowRef in ipairs(self._hudRefs.teamBPlayerRows) do
-		local reverseIndex = (#entriesByTeam.B - index) + 1
-		local entry = if reverseIndex >= 1 then entriesByTeam.B[reverseIndex] else nil
-		self:_applyRowEntry(rowRef, string.format("B%d", index), entry)
+		-- Fichas sobrantes del pool: ocultas y libres para el siguiente update.
+		local pool = self._playerRows[side]
+		for index = total + 1, #pool do
+			self:_clearRow(pool[index], string.format("%s%d", side, index))
+		end
 	end
 end
 
@@ -1028,6 +1043,9 @@ function MatchHud:destroy()
 	end
 	self._destroyed = true
 	self:_clearTimerEffects()
+	-- Invalida el bucle del spritesheet del indicador (el janitor destruye las
+	-- fichas clonadas, pero el task.spawn se corta por token).
+	self._indicatorToken += 1
 	if self._notificationsQueue then
 		self._notificationsQueue:destroy()
 		self._notificationsQueue = nil

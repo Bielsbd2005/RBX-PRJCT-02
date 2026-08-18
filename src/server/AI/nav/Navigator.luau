@@ -32,6 +32,7 @@ local BotConfig = require(Shared:WaitForChild("constants"):WaitForChild("BotConf
 
 local nav = script.Parent
 local PathfindingQueue = require(nav:WaitForChild("PathfindingQueue"))
+local StuckViz = require(nav.Parent:WaitForChild("debug"):WaitForChild("StuckViz"))
 
 export type GoToOpts = {
 	onArrived: (() -> ())?,
@@ -91,6 +92,7 @@ function Navigator.new(humanoid: Humanoid, rootPart: BasePart, agentParams: { [s
 		self._postBlockedUntil = os.clock() + BotConfig.Pathfinding.PostBlockedCooldown
 		self._generation += 1
 		self._isMoving = false
+		self:_halt()
 		self._currentWaypoints = nil
 		-- Audit fix: limpiar _currentDest. Sin esto, una goTo posterior al
 		-- mismo destino cae en el throttle de same-dest tras expirar el
@@ -110,6 +112,27 @@ function Navigator.new(humanoid: Humanoid, rootPart: BasePart, agentParams: { [s
 	end))
 
 	return self
+end
+
+-- Detiene la marcha del rig.
+--
+-- `Humanoid:Move` es STICKY: la dirección aplicada persiste hasta que alguien
+-- escribe otra. Toda salida del walk loop que no pase por acá deja al bot
+-- corriendo indefinidamente en la última dirección aplicada — con AutoRotate
+-- encendido el rig sigue trotando, y como `isMoving()` ya es false el
+-- StuckDetector no acumula (solo cuenta mientras el Navigator dice "moving"),
+-- así que nada lo corrige. Ese es el bot que "corre en círculos": PATROL sigue
+-- eligiendo destinos aleatorios cada ~0.4s mientras la marcha vieja nunca se
+-- cortó, y cada goTo que arranca y muere le cambia el rumbo.
+--
+-- El guard de `_isMoving` evita pisar a un walk sucesor: si una goTo posterior
+-- ya arrancó (isMoving=true), el coroutine viejo despertando de su task.wait
+-- no debe cancelarle la dirección recién aplicada.
+function Navigator:_halt()
+	if self._isMoving then
+		return
+	end
+	self._humanoid:Move(Vector3.zero, false)
 end
 
 function Navigator:goTo(dest: Vector3, opts: GoToOpts?)
@@ -179,6 +202,10 @@ function Navigator:goTo(dest: Vector3, opts: GoToOpts?)
 			-- recompute, PATROL polling colgado en `while not done`.
 			self._lastFailureAt = os.clock()
 			self._isMoving = false
+			-- Cortar la marcha del path ANTERIOR. Sin esto el bot entra al
+			-- backoff de PATROL trotando con la dirección vieja mientras
+			-- reintenta destinos nuevos.
+			self:_halt()
 			self._currentWaypoints = nil
 			self._currentDest = nil
 			local onFailed = self._onFailed
@@ -191,6 +218,7 @@ function Navigator:goTo(dest: Vector3, opts: GoToOpts?)
 		local wps = self._path:GetWaypoints()
 		if #wps < 2 then
 			self._isMoving = false
+			self:_halt()
 			self._currentWaypoints = nil
 			local onArrived = self._onArrived
 			if onArrived then
@@ -219,7 +247,12 @@ function Navigator:_startWalk(gen: number)
 		-- setea una dirección de marcha continua y no emite eventos, así
 		-- que es seguro contra interferencia externa.
 		local arrivalRadius = BotConfig.Movement.WaypointSmoothDistance
-		local stallTimeout = 8.0 -- seg sin moverse hacia el wp: forzamos avance
+		local arrivalVertical = BotConfig.Movement.WaypointVerticalTolerance
+		-- 8.0 → 3.0. El bot recorre un tramo entre waypoints (WaypointSpacing=4)
+		-- en <0.2s, y el contador se resetea con cada 0.5 studs de progreso, así
+		-- que agotar 3s ya significa "no va a llegar". 8s eran 8 segundos de bot
+		-- visiblemente roto antes de recuperarse.
+		local stallTimeout = 3.0
 		-- Delta-gate de humanoid:Move. Cada Move replica MoveDirection al
 		-- cliente de cualquier observador (16 bots × N clientes a 60Hz).
 		-- Si la dir no cambió >~5° desde el último, no escribir. Vector3.zero
@@ -229,6 +262,10 @@ function Navigator:_startWalk(gen: number)
 
 		for i = 2, #waypoints do
 			if self._stopped or self._generation ~= gen then
+				-- Abort JUSTO entre dos waypoints. Antes salía sin cortar la
+				-- marcha (el while de abajo sí lo hacía) — ventana pequeña
+				-- pero real, y el rig quedaba corriendo para siempre.
+				self:_halt()
 				return
 			end
 
@@ -241,17 +278,52 @@ function Navigator:_startWalk(gen: number)
 			local lastProgressAt = os.clock()
 			local lastProgressDist = (self._rootPart.Position - target).Magnitude
 
+			-- Dirección XZ de aproximación, congelada al activar el waypoint.
+			-- Sirve para detectar que lo hemos PASADO de largo (ver overshoot
+			-- dentro del bucle). Con esto la corrección deja de depender de
+			-- afinar el radio de llegada contra la velocidad: aunque el bot
+			-- cruce la zona de llegada entera en un solo tick, el cambio de
+			-- signo del producto escalar lo caza igual.
+			local approach = target - self._rootPart.Position
+			local approachFlat = Vector3.new(approach.X, 0, approach.Z)
+			local approachDir = if approachFlat.Magnitude > 0.001
+				then approachFlat.Unit
+				else Vector3.zero
+
 			while true do
 				if self._stopped or self._generation ~= gen then
-					self._humanoid:Move(Vector3.zero, false)
+					-- Vía _halt (no Move directo): si una goTo posterior ya
+					-- arrancó su walk, este coroutine zombie le borraba la
+					-- dirección recién aplicada y el bot perdía un tick de
+					-- marcha en cada repath.
+					self:_halt()
 					return
 				end
 
 				local pos = self._rootPart.Position
-				local dist = (pos - target).Magnitude
+				local toTarget = target - pos
+				-- Llegada medida en XZ, con la altura acotada aparte. En 3D un
+				-- waypoint con desnivel es INALCANZABLE: si |dy| >= arrivalRadius
+				-- la distancia 3D nunca baja del umbral por mucho que el bot se
+				-- plante justo encima. El bot entonces orbita la proyección XZ
+				-- del waypoint —a 22 studs/s el rumbo se invierte cada tick al
+				-- pasar de largo— y como SÍ se está moviendo, el StuckDetector
+				-- resetea sus contadores en cada tick (solo mira velocidad neta,
+				-- no progreso hacia el destino) y no escala nunca. De ahí el bot
+				-- dando vueltas arriba de una escalera sin que salte ni un aviso.
+				local flatToTarget = Vector3.new(toTarget.X, 0, toTarget.Z)
+				local flatDist = flatToTarget.Magnitude
+				if flatDist < arrivalRadius and math.abs(toTarget.Y) < arrivalVertical then
+					break
+				end
 
-				-- Alcanzado el wp (umbral = smooth distance).
-				if dist < arrivalRadius then
+				-- Overshoot: ya hemos cruzado el plano perpendicular a la
+				-- dirección de aproximación que pasa por el waypoint, o sea que
+				-- lo dejamos atrás. Volver a por él sería dar media vuelta —
+				-- justo el bandazo que produce el orbitado. Se ignora Y a
+				-- propósito: si ya lo pasamos en horizontal, el desnivel lo
+				-- resuelve el siguiente waypoint.
+				if approachDir ~= Vector3.zero and flatToTarget:Dot(approachDir) <= 0 then
 					break
 				end
 
@@ -260,16 +332,33 @@ function Navigator:_startWalk(gen: number)
 				-- Cubre wps inalcanzables (path roto en mid-walk, otro NPC
 				-- bloqueando crónicamente). El StuckDetector externo también
 				-- escala pero esto cierra el bucle del walk loop.
+				--
+				-- El progreso se mide en 3D a propósito: acá lo que importa es
+				-- "¿me estoy acercando?", y subir una escalera acerca al bot en
+				-- Y aunque el avance en XZ sea lento.
+				local dist = toTarget.Magnitude
 				if lastProgressDist - dist > 0.5 then
 					lastProgressAt = os.clock()
 					lastProgressDist = dist
 				elseif os.clock() - lastProgressAt > stallTimeout then
+					-- Abandonar un waypoint por stall es SIEMPRE anómalo: o la
+					-- geometría del mapa no es navegable o el path se rompió en
+					-- vuelo. Antes se hacía en silencio, así que un punto malo
+					-- del mapa no dejaba rastro en ningún sitio. Ahora cae en el
+					-- mismo mapa de calor que las escaladas del StuckDetector
+					-- (ServerStorage.ShowStuckMarkers = true), agregado por celda
+					-- y con contador.
+					StuckViz.mark(
+						self._rootPart.Position,
+						2,
+						self._rootPart.Parent and self._rootPart.Parent.Name or "?",
+						StuckViz.KIND_STALL
+					)
 					break
 				end
 
 				-- Dirección plana XZ hacia el wp. Move(unit) → humanoid
 				-- camina a WalkSpeed constante.
-				local toTarget = target - pos
 				local dir = Vector3.new(toTarget.X, 0, toTarget.Z)
 				if dir.Magnitude > 0.001 then
 					local unit = dir.Unit
@@ -314,6 +403,12 @@ function Navigator:cancel(notifyFailed: boolean?)
 	end
 	self._generation += 1
 	self._isMoving = false
+	-- Cortar la marcha acá y no delegarlo al walk loop: entre el bump de
+	-- generación y el próximo despertar del coroutine (hasta 0.05s, o nunca
+	-- si estaba entre waypoints) el rig seguía corriendo. BotAI llama cancel()
+	-- en cada transición a ATTACK y en chase-direct, así que la fuga se
+	-- disparaba constantemente en combate.
+	self:_halt()
 	self._currentWaypoints = nil
 	self._currentDest = nil
 	local onFailed = self._onFailed
@@ -349,6 +444,8 @@ end
 function Navigator:Stop()
 	self._stopped = true
 	self._generation += 1
+	self._isMoving = false
+	self:_halt()
 	for _, c in self._conns do
 		c:Disconnect()
 	end

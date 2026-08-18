@@ -433,30 +433,113 @@ local function tryTrack(model: Model)
 	end
 end
 
+-- ── Scheduler robusto de tracking ───────────────────────────────
+-- Reintentos por modelo mientras su Humanoid/Head aún no ha replicado.
+local _trackRetryConns: { [Model]: { RBXScriptConnection } } = {}
+local _trackRetryThreads: { [Model]: { thread } } = {}
+
+local function _cleanupTrackRetry(model: Model)
+	local conns = _trackRetryConns[model]
+	if conns then
+		for _, c in conns do
+			c:Disconnect()
+		end
+		_trackRetryConns[model] = nil
+	end
+	local threads = _trackRetryThreads[model]
+	if threads then
+		for _, t in threads do
+			-- pcall: el thread en curso no es cancelable; los pendientes sí,
+			-- liberando la referencia al model.
+			pcall(task.cancel, t)
+		end
+		_trackRetryThreads[model] = nil
+	end
+end
+
+-- ¿El modelo llegará a ser trackeable (player char o bot) una vez replique del
+-- todo? Evita colgar watchers de reintento en props decorativos con Humanoid.
+local function isTrackCandidate(model: Model): boolean
+	if Players:GetPlayerFromCharacter(model) ~= nil then
+		return true
+	end
+	local parent = model.Parent
+	if parent ~= nil and parent.Name == "Bots" then
+		return true
+	end
+	return isBot(model)
+end
+
+-- Programa el tracking de un modelo cuyo Humanoid/Head puede no haber replicado
+-- todavía. `tryTrack` es idempotente (guard `tracked[model]`); si aún no se pudo
+-- trackear y el modelo ES candidato (player char o bot), instala reintentos:
+-- ChildAdded + reintentos temporizados a 0.1/0.5/2s.
+--
+-- Los timers son la clave del fix del bug "a veces no se muestra": ChildAdded a
+-- veces NO dispara para los hijos (Head/Humanoid) que llegan en el paquete de
+-- replicación INICIAL del Model (mismo gotcha documentado en
+-- CharacterHighlightController). El watcher anterior solo tenía ChildAdded + un
+-- timeout de 5s que se rendía (cleanup) sin reintentar, así que al perderse ese
+-- evento el billboard no aparecía nunca. Los reintentos temporizados cubren ese
+-- caso sin polling continuo (son no-ops en cuanto se logra el track).
+--
+-- `assumeCandidate` lo fuerzan los callers que ya saben que es player/bot (en
+-- mid-replicación el owner puede no resolver aún).
+local function scheduleTrack(model: Model, assumeCandidate: boolean?)
+	if not model.Parent then
+		return
+	end
+	tryTrack(model)
+	if tracked[model] or _trackRetryConns[model] then
+		return
+	end
+	if not (assumeCandidate or isTrackCandidate(model)) then
+		return
+	end
+
+	local conns: { RBXScriptConnection } = {}
+	_trackRetryConns[model] = conns
+
+	local function tryRetry()
+		if not model.Parent then
+			_cleanupTrackRetry(model)
+			return
+		end
+		tryTrack(model)
+		if tracked[model] then
+			_cleanupTrackRetry(model)
+		end
+	end
+
+	table.insert(conns, model.ChildAdded:Connect(tryRetry))
+	table.insert(conns, model.AncestryChanged:Connect(function(_, parent)
+		if parent == nil then
+			_cleanupTrackRetry(model)
+		end
+	end))
+
+	_trackRetryThreads[model] = {
+		task.delay(0.1, tryRetry),
+		task.delay(0.5, tryRetry),
+		task.delay(2.0, tryRetry),
+	}
+end
+
 -- ── Modulo publico ──────────────────────────────────────────────
 local HealthBillboardController = {}
 
--- Conexiones a nivel de módulo (PlayerAdded, DescendantAdded, etc.) y
--- watchers efímeros de bots aún sin Humanoid. Sin tracking explícito, los
--- listeners se duplicaban en cada Start() (re-entrar al menú de match) y
--- nunca se limpiaban en Stop().
+-- Conexiones a nivel de módulo (PlayerAdded, DescendantAdded, etc.). Sin tracking
+-- explícito, los listeners se duplicaban en cada Start() (re-entrar al menú de
+-- match) y nunca se limpiaban en Stop().
 local _moduleConns: { RBXScriptConnection } = {}
--- Set por función (no array) para que cada cleanup pueda auto-removerse en O(1).
--- Antes era un array al que solo se insertaba: cleanup() desconectaba las conns
--- pero no quitaba su entrada, así que la tabla crecía toda la partida.
-local _pendingWatchers: { [() -> ()]: boolean } = {}
 local _started = false
 
 local function _wireCharacterAddedFor(player: Player)
 	table.insert(_moduleConns, player.CharacterAdded:Connect(function(character)
-		-- Esperar a que Head y Humanoid existan.
-		if not character:FindFirstChild("Head") then
-			character:WaitForChild("Head", 5)
-		end
-		if not character:FindFirstChildOfClass("Humanoid") then
-			character:WaitForChild("Humanoid", 5)
-		end
-		tryTrack(character)
+		-- Player conocido → candidato seguro. scheduleTrack reintenta hasta que
+		-- Head y Humanoid replican (antes: un solo WaitForChild(...,5) + tryTrack
+		-- que se rendía al timeout, dejando al jugador sin billboard).
+		scheduleTrack(character, true)
 	end))
 end
 
@@ -472,7 +555,7 @@ function HealthBillboardController:Start(prescannedModels: { Model }?)
 	-- Jugadores existentes
 	for _, player in Players:GetPlayers() do
 		if player.Character then
-			tryTrack(player.Character)
+			scheduleTrack(player.Character, true)
 		end
 		_wireCharacterAddedFor(player)
 	end
@@ -481,7 +564,7 @@ function HealthBillboardController:Start(prescannedModels: { Model }?)
 	table.insert(_moduleConns, Players.PlayerAdded:Connect(function(player)
 		_wireCharacterAddedFor(player)
 		if player.Character then
-			tryTrack(player.Character)
+			scheduleTrack(player.Character, true)
 		end
 	end))
 
@@ -506,38 +589,10 @@ function HealthBillboardController:Start(prescannedModels: { Model }?)
 			return
 		end
 
-		local function attemptTrack()
-			if not instance.Parent then return end
-			tryTrack(instance :: Model)
-		end
-
-		if instance:FindFirstChildOfClass("Humanoid") and instance:FindFirstChild("Head") then
-			attemptTrack()
-			return
-		end
-
-		local resolved = false
-		local ancestryConn: RBXScriptConnection? = nil
-		local childConn: RBXScriptConnection? = nil
-		local cleanup
-		cleanup = function()
-			if ancestryConn then ancestryConn:Disconnect() ancestryConn = nil end
-			if childConn then childConn:Disconnect() childConn = nil end
-			_pendingWatchers[cleanup] = nil
-		end
-		_pendingWatchers[cleanup] = true
-		ancestryConn = instance.AncestryChanged:Connect(function()
-			if not instance:IsDescendantOf(game) then cleanup() end
-		end)
-		childConn = instance.ChildAdded:Connect(function()
-			if resolved then return end
-			if instance:FindFirstChildOfClass("Humanoid") and instance:FindFirstChild("Head") then
-				resolved = true
-				cleanup()
-				attemptTrack()
-			end
-		end)
-		task.delay(5, function() if not resolved then cleanup() end end)
+		-- Trackea ya si está listo; si Head/Humanoid aún no replicaron, instala
+		-- reintentos (ChildAdded + timers 0.1/0.5/2s) para no perder el billboard
+		-- cuando ChildAdded no dispara en la replicación inicial del Model.
+		scheduleTrack(instance :: Model)
 	end))
 
 	-- Cuando cambia el equipo local, refrescar todos
@@ -550,14 +605,17 @@ function HealthBillboardController:Start(prescannedModels: { Model }?)
 	-- Scan inicial: una sola pasada al arrancar. Si el caller pasa
 	-- `prescannedModels` (init.luau hace un solo scan compartido con CharacterHighlight),
 	-- lo reusamos en vez de re-escanear workspace.
+	-- scheduleTrack self-filtra: para props decorativos es un tryTrack directo (sin
+	-- reintentos); para players/bots aún replicando instala reintentos, cubriendo el
+	-- join mid-partida donde el combatiente ya existe pero su Head/Humanoid llega tarde.
 	if prescannedModels then
 		for _, model in prescannedModels do
-			tryTrack(model)
+			scheduleTrack(model)
 		end
 	else
 		for _, desc in workspace:GetDescendants() do
 			if desc:IsA("Model") then
-				tryTrack(desc)
+				scheduleTrack(desc)
 			end
 		end
 	end
@@ -577,10 +635,25 @@ function HealthBillboardController:Stop()
 	end
 	table.clear(_moduleConns)
 
-	for cleanup in _pendingWatchers do
-		pcall(cleanup)
+	-- Watchers de reintento pendientes (conns + threads temporizados).
+	for model in _trackRetryConns do
+		local conns = _trackRetryConns[model]
+		if conns then
+			for _, c in conns do
+				c:Disconnect()
+			end
+		end
 	end
-	table.clear(_pendingWatchers)
+	table.clear(_trackRetryConns)
+	for model in _trackRetryThreads do
+		local threads = _trackRetryThreads[model]
+		if threads then
+			for _, t in threads do
+				pcall(task.cancel, t)
+			end
+		end
+	end
+	table.clear(_trackRetryThreads)
 
 	for model, _ in tracked do
 		untrackModel(model)

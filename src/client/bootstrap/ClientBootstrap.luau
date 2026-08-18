@@ -42,17 +42,12 @@ local function disableDefaultCoreGui(): ()
 	end)
 end
 
--- Busca un GuiButton llamado "Locker" en cualquier parte del menú. Antes estaba
--- anclado a un contenedor "Bottom"; ese contenedor se eliminó, así que ahora la
--- búsqueda es por nombre+clase y tolera que el botón viva en otro lado (o que no
--- exista todavía).
 local function findLockerButton(menuGui: ScreenGui): GuiButton?
-	for _, descendant in menuGui:GetDescendants() do
-		if descendant.Name == "Locker" and descendant:IsA("GuiButton") then
-			return descendant
-		end
+	local container = menuGui:FindFirstChild("Container")
+	local btn = container and container:FindFirstChild("Locker")
+	if btn and btn:IsA("GuiButton") then
+		return btn
 	end
-
 	return nil
 end
 

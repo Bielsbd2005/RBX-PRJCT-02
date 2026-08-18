@@ -2,18 +2,28 @@
 --[[
 	CaseContentPanel.luau
 	Panel de detalle de una wrap case (UserInterface.CaseContent). Estructura:
-	  CaseContent.Purchase           — botón de compra (texto = precio)
-	  CaseContent.CloseBtn           — cerrar el panel
-	  CaseContent.Title              — nombre de la case
-	  CaseContent.Content.Template   — card por wrap del case:
-	    .ViewportFrame — preview 3D del wrap (WeaponWrapPreviewer)
-	    .Chance        — probabilidad ("60%")
-	    .Name          — nombre del wrap
-	    .Rarity        — rareza (coloreada con UITheme.RarityColors)
+	  CaseContent.Main               — vista de detalle de la case (compra + cards):
+	    .Content.Template  — card por wrap del case:
+	      .ViewportFrame — preview 3D del wrap (WeaponWrapPreviewer)
+	      .Chance        — probabilidad ("60%")
+	      .Name          — nombre del wrap
+	    .Nav               — barra de botones:
+	      .Purchase        — comprar (texto = precio)
+	      .CloseBtn        — cerrar el panel
+	  CaseContent.Reveal             — vista de resultado del unboxing:
+	    .Frame   — tarjeta del wrap ganado (.Name y .Rarity, ambos opcionales)
+	    .Equip   — equipar el wrap ganado
+	    .Collect — solo cerrar
 
-	El panel solo PINTA y notifica onPurchase — el flujo de compra/unboxing
-	lo orquesta store/init.luau (envía el packet y decide el estado del botón
-	vía setPurchaseState).
+	Main y Reveal son estados EXCLUYENTES. Al comprar, Main se OCULTA (setMainHidden)
+	mientras la cámara viaja a Workspace.Cameras.unboxing y rueda el cofre; al llegar
+	el reveal, `showReveal` muestra Reveal SIN mover la cámara (el arma ganadora ya está
+	plantada en el RevealSpawn, dentro de esa misma toma). Equip y Collect lo descartan.
+
+	El panel solo PINTA y notifica (onPurchase, y en el reveal los callbacks
+	onEquip/onCollect) — el flujo de compra/unboxing/red lo orquesta
+	store/init.luau (envía los packets y decide el estado del botón vía
+	setPurchaseState).
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -29,9 +39,24 @@ local UITheme = require(script.Parent.Parent.Parent.core.ui.UITheme)
 local InteractiveScaleTween = require(script.Parent.Parent.Parent.core.ui.animators.InteractiveScaleTween)
 local WeaponWrapPreviewer = require(script.Parent.Parent.locker.Previewers.WeaponWrapPreviewer)
 
+-- ColorSequence por rareza para Template.UIGradient de la card (mismo set que la
+-- card del locker); rarezas sin entrada caen al fallback Common.
+local RARITY_GRADIENTS = UITheme.LockerRarityGradients
+local RARITY_FALLBACK = "Common"
+
 export type WrapCaseDefinition = WrapCasesConfig.WrapCaseDefinition
 
 export type PurchaseState = "price" | "pending" | "completed"
+
+-- Datos del reveal: qué se ganó (para la tarjeta Reveal.Frame) + callbacks de los
+-- botones, que invoca el panel al pulsar Equip/Collect; la lógica (red, cierre) vive
+-- en store/init.luau.
+export type RevealInfo = {
+	wrapName: string,
+	rarity: string,
+	onEquip: () -> (),
+	onCollect: () -> (),
+}
 
 export type CaseContentPanel = {
 	open: (self: CaseContentPanel, caseDefinition: WrapCaseDefinition) -> (),
@@ -39,7 +64,8 @@ export type CaseContentPanel = {
 	isOpen: (self: CaseContentPanel) -> boolean,
 	getActiveCase: (self: CaseContentPanel) -> WrapCaseDefinition?,
 	setPurchaseState: (self: CaseContentPanel, state: PurchaseState) -> (),
-	setTemporarilyHidden: (self: CaseContentPanel, hidden: boolean) -> (),
+	setMainHidden: (self: CaseContentPanel, hidden: boolean) -> (),
+	showReveal: (self: CaseContentPanel, info: RevealInfo) -> (),
 }
 
 type Callbacks = {
@@ -83,22 +109,40 @@ function CaseContentPanel.new(uiGui: ScreenGui, parentJanitor: any, callbacks: C
 	end
 	local frame = frameNode :: GuiObject
 
-	local purchaseNode = frame:FindFirstChild("Purchase")
-	local closeNode = frame:FindFirstChild("CloseBtn")
-	local contentNode = frame:FindFirstChild("Content")
-	local titleNode = frame:FindFirstChild("Title")
+	-- Los controles de detalle viven bajo CaseContent.Main; si el place aún tiene
+	-- la estructura plana (sin Main), caemos al propio frame — retrocompatible.
+	local mainNode = frame:FindFirstChild("Main")
+	local mainHost: GuiObject = if mainNode and mainNode:IsA("GuiObject") then mainNode :: GuiObject else frame
+
+	-- Los botones viven bajo Main.Nav; si el place aún trae la estructura plana
+	-- (botones sueltos en Main), caemos a mainHost — retrocompatible.
+	local navNode = mainHost:FindFirstChild("Nav")
+	local navHost: GuiObject = if navNode and navNode:IsA("GuiObject") then navNode :: GuiObject else mainHost
+
+	local purchaseNode = navHost:FindFirstChild("Purchase")
+	local closeNode = navHost:FindFirstChild("CloseBtn")
+	local contentNode = mainHost:FindFirstChild("Content")
 	local templateNode = if contentNode then contentNode:FindFirstChild("Template") else nil
 
 	if not (purchaseNode and purchaseNode:IsA("GuiButton"))
 		or not (closeNode and closeNode:IsA("GuiButton"))
 		or not (contentNode and contentNode:IsA("GuiObject"))
 		or not (templateNode and templateNode:IsA("GuiObject")) then
-		warn("[CaseContentPanel] Estructura incompleta en CaseContent (Purchase/CloseBtn/Content.Template).")
+		warn("[CaseContentPanel] Estructura incompleta en CaseContent.Main (Nav.Purchase/Nav.CloseBtn/Content.Template).")
 		return nil
 	end
 
+	-- Vista de reveal (opcional): frame propio con la tarjeta del resultado (.Frame,
+	-- con .Name/.Rarity) y los botones Equip/Collect. Si falta, el unboxing degrada
+	-- (showReveal ejecuta onCollect directo).
+	local revealNode = frame:FindFirstChild("Reveal")
+	local revealCardNode = if revealNode then revealNode:FindFirstChild("Frame") else nil
+	local equipNode = if revealNode then revealNode:FindFirstChild("Equip") else nil
+	local collectNode = if revealNode then revealNode:FindFirstChild("Collect") else nil
+
 	local self = setmetatable({}, CaseContentPanel) :: any
 	self._frame = frame
+	self._mainNode = mainHost
 	self._onClosed = callbacks.onClosed
 	self._purchaseBtn = purchaseNode :: GuiButton
 	self._purchaseTextTarget = resolveButtonTextTarget(purchaseNode :: GuiButton)
@@ -106,16 +150,30 @@ function CaseContentPanel.new(uiGui: ScreenGui, parentJanitor: any, callbacks: C
 	self._closeBtn = closeNode :: GuiButton
 	self._content = contentNode :: GuiObject
 	self._template = templateNode :: GuiObject
-	self._titleLabel = if titleNode and titleNode:IsA("TextLabel") then titleNode else nil
 	self._activeCase = nil :: WrapCaseDefinition?
 	self._purchaseState = "price" :: PurchaseState
+	self._canUseHoverAnimations = callbacks.canUseHoverAnimations
+
+	-- Nodos del reveal (pueden faltar → showReveal degrada).
+	self._revealNode = if revealNode and revealNode:IsA("GuiObject") then revealNode :: GuiObject else nil
+	self._revealCardNode = if revealCardNode and revealCardNode:IsA("GuiObject") then revealCardNode :: GuiObject else nil
+	self._equipBtn = if equipNode and equipNode:IsA("GuiButton") then equipNode :: GuiButton else nil
+	self._collectBtn = if collectNode and collectNode:IsA("GuiButton") then collectNode :: GuiButton else nil
+	self._revealShown = false
+	-- Janitor por-reveal: conexiones de Equip/Collect.
+	self._revealJanitor = Janitor.new()
+
 	-- Janitor por-populate: viewports de las cards del case abierto.
 	self._cardsJanitor = Janitor.new()
 	self._janitor = Janitor.new()
 	parentJanitor:Add(self._janitor, "Destroy")
 	self._janitor:Add(self._cardsJanitor, "Destroy")
+	self._janitor:Add(self._revealJanitor, "Destroy")
 
 	self._template.Visible = false
+	if self._revealNode then
+		self._revealNode.Visible = false
+	end
 	frame.Visible = false
 
 	InteractiveScaleTween.bindButton(self._purchaseBtn, self._janitor, {
@@ -192,13 +250,16 @@ function CaseContentPanel:_populate(caseDefinition: WrapCaseDefinition)
 			chanceNode.Text = formatChance(WrapCasesConfig.GetChancePercent(caseDefinition, caseItem.WrapId))
 		end
 
-		local rarityNode = card:FindFirstChild("Rarity")
-		if rarityNode and rarityNode:IsA("TextLabel") then
-			local rarity = tostring(wrapDefinition.Rarity or "Common")
-			rarityNode.Text = rarity
-			local rarityColor = UITheme.RarityColors[rarity]
-			if rarityColor then
-				rarityNode.TextColor3 = rarityColor
+		local rarity = tostring(wrapDefinition.Rarity or RARITY_FALLBACK)
+
+		-- Gradiente de rareza en Template.UIGradient (hijo directo de la card),
+		-- mismo set y fallback Common que la card del locker
+		-- (LockerGrid._applyRarityVisuals).
+		local gradientNode = card:FindFirstChildOfClass("UIGradient")
+		if gradientNode then
+			local gradient = RARITY_GRADIENTS[rarity] or RARITY_GRADIENTS[RARITY_FALLBACK]
+			if gradient then
+				gradientNode.Color = gradient
 			end
 		end
 
@@ -223,17 +284,32 @@ end
 
 function CaseContentPanel:open(caseDefinition: WrapCaseDefinition)
 	self._activeCase = caseDefinition
-	if self._titleLabel then
-		self._titleLabel.Text = caseDefinition.Name
-	end
 	self:_populate(caseDefinition)
 	self:setPurchaseState("price")
+	-- Estado inicial: Nav en modo compra (Purchase/CloseBtn visibles, Equip/Collect
+	-- ocultos), por si se reabre justo tras un reveal.
+	self:_hideReveal()
+	self._mainNode.Visible = true
 	self._frame.Visible = true
+end
+
+-- Cierra el reveal: suelta las conexiones de Equip/Collect, oculta su frame y vuelve
+-- a mostrar Main. Idempotente.
+function CaseContentPanel:_hideReveal()
+	if self._revealShown then
+		self._revealShown = false
+		self._revealJanitor:Cleanup()
+	end
+	if self._revealNode then
+		self._revealNode.Visible = false
+	end
+	self._mainNode.Visible = true
 end
 
 function CaseContentPanel:close()
 	local wasOpen = self._activeCase ~= nil
 	self._activeCase = nil
+	self:_hideReveal()
 	self._frame.Visible = false
 	self:_clearCards()
 	if wasOpen and self._onClosed then
@@ -273,9 +349,84 @@ function CaseContentPanel:setPurchaseState(state: PurchaseState)
 		else Color3.fromRGB(120, 120, 120)
 end
 
--- Oculta el panel sin perder el case activo (durante la animación de unboxing).
-function CaseContentPanel:setTemporarilyHidden(hidden: boolean)
-	self._frame.Visible = not hidden and self._activeCase ~= nil
+-- Oculta/muestra la vista Main sin perder el case activo. Durante el unboxing el
+-- panel estorba (la cámara viaja a Cameras.unboxing y la escena es 3D), así que se
+-- oculta; showReveal lo devuelve a la vista al llegar el reveal.
+function CaseContentPanel:setMainHidden(hidden: boolean)
+	self._mainNode.Visible = not hidden and self._activeCase ~= nil
+end
+
+-- Pinta la tarjeta del resultado (Reveal.Frame): nombre y rareza del wrap ganado, con
+-- el texto de la rareza coloreado por UITheme.RarityColors. Degrada silenciosamente si
+-- falta la tarjeta o alguno de los labels.
+function CaseContentPanel:_paintRevealCard(info: RevealInfo)
+	local card = self._revealCardNode
+	if not card then
+		return
+	end
+
+	local nameNode = card:FindFirstChild("Name")
+	if nameNode and nameNode:IsA("TextLabel") then
+		nameNode.Text = info.wrapName
+	end
+
+	local rarityNode = card:FindFirstChild("Rarity")
+	if rarityNode and rarityNode:IsA("TextLabel") then
+		rarityNode.Text = info.rarity
+		local rarityColor = UITheme.RarityColors[info.rarity]
+		if rarityColor then
+			rarityNode.TextColor3 = rarityColor
+		end
+	end
+end
+
+-- Entra en modo reveal: muestra el frame CaseContent.Reveal (con Equip/Collect) sobre
+-- la toma del unboxing, que NO cambia. Main sigue oculto desde el unboxing: Reveal lo
+-- sustituye. El panel NO se cierra solo: Equip/Collect invocan el callback
+-- correspondiente de `info` (la red/cierre los orquesta store/init.luau). Sin nodos de
+-- reveal en la GUI, degrada ejecutando onCollect directo para no bloquear el flujo.
+function CaseContentPanel:showReveal(info: RevealInfo)
+	if not (self._revealNode and (self._equipBtn or self._collectBtn)) then
+		info.onCollect()
+		return
+	end
+	if self._revealShown then
+		return
+	end
+	self._revealShown = true
+
+	self:_paintRevealCard(info)
+
+	local equipBtn = self._equipBtn
+	if equipBtn then
+		InteractiveScaleTween.bindButton(equipBtn, self._revealJanitor, {
+			enableHover = self._canUseHoverAnimations,
+			hoverScale = UITheme.ButtonHoverScale,
+			clickScale = UITheme.ButtonClickScale,
+		})
+		equipBtn.Active = true
+		self._revealJanitor:Add(equipBtn.Activated:Connect(function()
+			info.onEquip()
+		end), "Disconnect")
+	end
+
+	local collectBtn = self._collectBtn
+	if collectBtn then
+		InteractiveScaleTween.bindButton(collectBtn, self._revealJanitor, {
+			enableHover = self._canUseHoverAnimations,
+			hoverScale = UITheme.ButtonHoverScale,
+			clickScale = UITheme.ButtonClickScale,
+		})
+		collectBtn.Active = true
+		self._revealJanitor:Add(collectBtn.Activated:Connect(function()
+			info.onCollect()
+		end), "Disconnect")
+	end
+
+	-- Intercambio Main → Reveal (Main ya venía oculto del unboxing).
+	self._mainNode.Visible = false
+	self._revealNode.Visible = true
+	self._frame.Visible = self._activeCase ~= nil
 end
 
 return CaseContentPanel

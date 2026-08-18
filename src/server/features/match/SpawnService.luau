@@ -278,6 +278,14 @@ local function _teleportCharacterToSpawn(player: Player, spawnPoint: BasePart): 
 
 	root.Anchored = true
 	root.CFrame = spawnPoint.CFrame + Vector3.new(0, 4, 0)
+
+	-- Yaw del spawn para la ShoulderCamera del cliente: que el jugador aparezca
+	-- mirando hacia donde apunta la part de spawn (rotar la part controla la
+	-- orientación de aparición, igual que los bots). Se estampa como atributo para
+	-- que el cliente lo lea sin carrera con la replicación del CFrame del root.
+	local spawnLook = spawnPoint.CFrame.LookVector
+	character:SetAttribute("SpawnYaw", math.atan2(-spawnLook.X, -spawnLook.Z))
+
 	task.defer(function()
 		if root.Parent then
 			root.Anchored = false

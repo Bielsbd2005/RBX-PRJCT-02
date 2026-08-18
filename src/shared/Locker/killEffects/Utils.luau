@@ -54,11 +54,61 @@ function KillEffectUtils.createWeld(p0: BasePart?, p1: BasePart?)
 	weld.Parent = p0
 end
 
+-- Lanza la parte fijando su AssemblyLinearVelocity, pero UN STEP DESPUÉS. Hacerlo
+-- en el mismo frame que el desanclado + setServerOwnership hace que el handoff de
+-- física del cambio de dueño a veces descarte la velocidad y el cuerpo se quede en
+-- el suelo (muy visible con Gravity, que debe salir volando; con Default pasa
+-- desapercibido porque cae igual). Diferir al siguiente Heartbeat garantiza que el
+-- desanclado y el ownership ya estén asentados y el empujón prenda de forma fiable.
+-- El guard de Parent evita tocar un cadáver ya destruido antes del step.
 function KillEffectUtils.applyImpulse(part: BasePart, force: Vector3)
 	if not part then
 		return
 	end
-	part.AssemblyLinearVelocity = force
+	RunService.Heartbeat:Once(function()
+		if part.Parent then
+			part.AssemblyLinearVelocity = force
+		end
+	end)
+end
+
+-- Fuerza propiedad de red del SERVIDOR sobre las partes del ragdoll. Sin esto,
+-- Roblox auto-asigna la propiedad de las partes sueltas al cliente más cercano;
+-- cuando ese cliente deja de simularlas (el jugador muerto pasa a killcam /
+-- pantalla de muerte, o se reasigna la propiedad) el cuerpo se CONGELA rígido en
+-- su pose actual para TODOS los observadores — el "cadáver tieso / de maniquí"
+-- que aparecía a ~1s. Con propiedad del servidor la caída se simula de forma
+-- autoritativa y consistente hasta que el cadáver se destruye.
+--
+-- Server-only: SetNetworkOwner es exclusivo del servidor (en el preview del
+-- Locker, que corre en cliente, es un no-op). Cada parte en pcall porque
+-- SetNetworkOwner lanza sobre partes ancladas o fuera de Workspace. Se llama
+-- DESPUÉS de desanclar y ANTES del impulso para que el empujón sea autoritativo.
+function KillEffectUtils.setServerOwnership(parts: { BasePart })
+	if not RunService:IsServer() then
+		return
+	end
+	for _, part in parts do
+		if part.Parent and not part.Anchored then
+			pcall(function()
+				part:SetNetworkOwner(nil)
+			end)
+		end
+	end
+end
+
+-- Quita el arma del personaje al ragdollear, para que el cadáver no quede
+-- sujetando el Tool en el aire. Cubre players y bots: ambos equipan la weapon como
+-- un Tool hijo directo del character (players vía loadout; bots vía BotAI). Se
+-- llama ANTES de construir el ragdoll para que las partes del Tool (Handle) no
+-- entren en el procesado de partes del cadáver. En el preview del Locker es no-op
+-- (el maniquí no lleva Tool).
+function KillEffectUtils.stripWeapons(char: Model)
+	for _, child in char:GetChildren() do
+		if child:IsA("Tool") then
+			child:Destroy()
+		end
+	end
 end
 
 -- Destroy only joint-type children of an instance (Motor6D, Weld, WeldConstraint,

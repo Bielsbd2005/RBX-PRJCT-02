@@ -5,6 +5,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local StarterGui = game:GetService("StarterGui")
 
 local Packages = ReplicatedStorage:WaitForChild("Packages")
+local Shared = ReplicatedStorage:WaitForChild("Shared")
 
 local Janitor = require(Packages.janitor) :: any
 local Fusion = require(Packages.fusion) :: any
@@ -15,6 +16,8 @@ local InteractiveScaleTween = require(script.Parent.animators.InteractiveScaleTw
 local UITheme = require(script.Parent.UITheme)
 local UIUtils = require(script.Parent.UIUtils)
 local DataController = require(script.Parent.Parent.data.DataController)
+local BattlePassConfig = require(Shared.constants.BattlePassConfig)
+
 type StatsData = {
 	Level: number,
 	XP: number,
@@ -24,9 +27,13 @@ type StatsData = {
 
 type HudRefs = {
 	cashValue: TextLabel?,
-	level: TextLabel?,
+	levelCurrent: TextLabel?,
+	levelNext: TextLabel?,
 	barFill: Frame?,
-	barValue: TextLabel?,
+	famePassSeason: TextLabel?,
+	famePassTimer: TextLabel?,
+	famePassLevel: TextLabel?,
+	famePassBarFill: Frame?,
 }
 
 export type MenuController = {
@@ -65,48 +72,55 @@ local function asFrame(inst: Instance?): Frame?
 	return if inst and inst:IsA("Frame") then inst else nil
 end
 
--- Level/Cash/Rewards/Settings viven bajo Menu.TopFrame. Resolvemos prefiriendo
--- TopFrame y cayendo al hijo directo de Menu, así la GUI funciona con la nueva
--- disposición (agrupada) o con la antigua (plana) sin tocar el código.
-local function findMenuChild(menuGui: ScreenGui, name: string): Instance?
-	local topFrame = menuGui:FindFirstChild("TopFrame")
-	local underTop = topFrame and topFrame:FindFirstChild(name)
-	if underTop then
-		return underTop
-	end
-	return menuGui:FindFirstChild(name)
-end
-
--- Estructura del HUD (bajo Menu.TopFrame):
---   TopFrame.Cash.Value       → efectivo
---   TopFrame.Level.Value      → nivel
---   TopFrame.Level.Bar.Fill   → progreso de XP hacia el siguiente nivel
---   TopFrame.Level.Bar.Value  → texto XP "actual/necesaria" (opcional)
+-- Estructura del HUD bajo Menu.Container:
+--   Container.Stats.CashFrame.Value   → efectivo actual
+--   Container.TopFrame.Level.Current  → nivel actual
+--   Container.TopFrame.Level.Next     → siguiente nivel
+--   Container.TopFrame.Level.Bar.Fill → progreso de XP hacia el siguiente nivel
+--   Container.FamePass.Season         → nombre de la season
+--   Container.FamePass.Timer          → tiempo restante ("Ends in X, Y")
+--   Container.FamePass.Level          → nivel en formato "Lv. X"
+--   Container.FamePass.Bar.Fill       → progreso de tier del BattlePass
 local function resolveHudRefs(menuGui: ScreenGui): HudRefs
-	local cashNode = findMenuChild(menuGui, "Cash")
-	local cashValue = asTextLabel(cashNode and cashNode:FindFirstChild("Value"))
+	local container = menuGui:FindFirstChild("Container")
+	local topFrame = container and container:FindFirstChild("TopFrame")
+	local statsNode = container and container:FindFirstChild("Stats")
+	local famePassNode = container and container:FindFirstChild("FamePass")
 
-	local levelNode = findMenuChild(menuGui, "Level")
-	local level = asTextLabel(levelNode and levelNode:FindFirstChild("Value"))
+	-- 1. Cash
+	local cashFrame = statsNode and statsNode:FindFirstChild("CashFrame")
+	local cashValue = asTextLabel(cashFrame and cashFrame:FindFirstChild("Value"))
 
+	-- 2. Level
+	local levelNode = topFrame and topFrame:FindFirstChild("Level")
+	local levelCurrent = asTextLabel(levelNode and levelNode:FindFirstChild("Current"))
+	local levelNext = asTextLabel(levelNode and levelNode:FindFirstChild("Next"))
 	local barNode = levelNode and levelNode:FindFirstChild("Bar")
 	local barFill = asFrame(barNode and barNode:FindFirstChild("Fill"))
-	local barValue = asTextLabel(barNode and barNode:FindFirstChild("Value"))
+
+	-- 3. FamePass
+	local famePassSeason = asTextLabel(famePassNode and famePassNode:FindFirstChild("Season"))
+	local famePassTimer = asTextLabel(famePassNode and famePassNode:FindFirstChild("Timer"))
+	local famePassLevel = asTextLabel(famePassNode and famePassNode:FindFirstChild("Level"))
+	local famePassBar = famePassNode and famePassNode:FindFirstChild("Bar")
+	local famePassBarFill = asFrame(famePassBar and famePassBar:FindFirstChild("Fill"))
 
 	return {
 		cashValue = cashValue,
-		level = level,
+		levelCurrent = levelCurrent,
+		levelNext = levelNext,
 		barFill = barFill,
-		barValue = barValue,
+		famePassSeason = famePassSeason,
+		famePassTimer = famePassTimer,
+		famePassLevel = famePassLevel,
+		famePassBarFill = famePassBarFill,
 	}
 end
 
 local function updateTopHud(hudRefs: HudRefs, stats: StatsData): ()
-	if not hudRefs.cashValue and not hudRefs.level and not hudRefs.barFill and not hudRefs.barValue then
-		return
+	if hudRefs.cashValue then
+		setText(hudRefs.cashValue, UIUtils.formatCashAmount(stats.Cash))
 	end
-
-	setText(hudRefs.cashValue, UIUtils.formatCashAmount(stats.Cash))
 
 	local currentXP = math.max(0, math.floor(stats.XP))
 	local xpToNext = math.max(0, math.floor(stats.XPToNextLevel))
@@ -116,38 +130,75 @@ local function updateTopHud(hudRefs: HudRefs, stats: StatsData): ()
 		hudRefs.barFill.Size = UDim2.new(ratio, 0, 1, 0)
 	end
 
-	setText(hudRefs.barValue, string.format("%d/%d", currentXP, xpToNext))
-	setText(hudRefs.level, "Lvl " .. tostring(stats.Level))
+	setText(hudRefs.levelCurrent, tostring(stats.Level))
+	setText(hudRefs.levelNext, tostring(stats.Level + 1))
 end
 
--- Hover animations específicas por botón. Los listados con liftOffset > 0
--- suben además de crecer; el resto solo escala. Botones no listados conservan
--- su comportamiento por defecto (solo el stroke tween de MenuHover).
+local function updateFamePassHud(hudRefs: HudRefs, bpState: any): ()
+	local season = BattlePassConfig.GetActiveSeason()
+	local maxTier = BattlePassConfig.GetMaxTier(season)
+
+	setText(hudRefs.famePassSeason, season.Name)
+
+	if hudRefs.famePassTimer then
+		if season.EndsAt <= 0 then
+			hudRefs.famePassTimer.Visible = false
+		else
+			local remaining = season.EndsAt - os.time()
+			local text = UIUtils.formatTimeLeft(remaining)
+			if text == "" then
+				hudRefs.famePassTimer.Visible = false
+			else
+				hudRefs.famePassTimer.Visible = true
+				hudRefs.famePassTimer.Text = text
+			end
+		end
+	end
+
+	local currentTier = if bpState and type(bpState.CurrentTier) == "number"
+		then math.floor(bpState.CurrentTier)
+		else 1
+	local displayTier = math.clamp(currentTier, 1, maxTier)
+	setText(hudRefs.famePassLevel, "Lv. " .. tostring(displayTier))
+
+	if hudRefs.famePassBarFill then
+		if currentTier > maxTier then
+			hudRefs.famePassBarFill.Size = UDim2.new(1, 0, 1, 0)
+		else
+			local tierDef = BattlePassConfig.GetTier(season, displayTier)
+			local xpRequired = if tierDef then tierDef.XPRequired else 0
+			local currentXP = if bpState and type(bpState.XP) == "number" then bpState.XP else 0
+			local ratio = if xpRequired > 0 then math.clamp(currentXP / xpRequired, 0, 1) else 0
+			hudRefs.famePassBarFill.Size = UDim2.new(ratio, 0, 1, 0)
+		end
+	end
+end
+
+-- Hover animations específicas por botón.
 local MENU_BUTTON_HOVER_BINDINGS: { { path: { string }, lift: number } } = {
-	{ path = { "Settings" }, lift = 0 },
-	{ path = { "Rewards" }, lift = 0 },
-	{ path = { "PlayBtn" }, lift = 0 },
-	{ path = { "Nav", "BattlePass" }, lift = 0 },
-	{ path = { "Nav", "Store" }, lift = 0 },
-	{ path = { "Nav", "Locker" }, lift = 8 },
+	{ path = { "Container", "TopFrame", "RightContainer", "Settings" }, lift = 0 },
+	{ path = { "Container", "TopFrame", "RightContainer", "Rewards" }, lift = 0 },
+	{ path = { "Container", "PlayBtn" }, lift = 0 },
+	{ path = { "Container", "Store" }, lift = 0 },
+	{ path = { "Container", "Locker" }, lift = 8 },
+	{ path = { "Container", "FamePass" }, lift = 0 },
 }
 
--- El primer segmento del path se resuelve con findMenuChild (TopFrame-aware, con
--- fallback al hijo directo de Menu); el resto desciende normal. Así Settings/Rewards
--- (ahora bajo TopFrame) y PlayBtn/Nav (directos bajo Menu) se resuelven igual.
 local function resolveMenuButton(menuGui: ScreenGui, path: { string }): Instance?
-	local node: Instance? = findMenuChild(menuGui, path[1])
-	for i = 2, #path do
+	local node: Instance? = menuGui
+	for _, segment in path do
 		if not node then return nil end
-		node = node:FindFirstChild(path[i])
+		node = node:FindFirstChild(segment)
 	end
 	return node
 end
 
 local function bindMenuButtonHovers(menuGui: ScreenGui, janitor: any): ()
+	local boundButtons: { [Instance]: boolean } = {}
 	for _, binding in MENU_BUTTON_HOVER_BINDINGS do
 		local node = resolveMenuButton(menuGui, binding.path)
-		if node and node:IsA("GuiButton") then
+		if node and node:IsA("GuiButton") and not boundButtons[node] then
+			boundButtons[node] = true
 			InteractiveScaleTween.bindButton(node, janitor, {
 				hoverScale = UITheme.ButtonHoverScale,
 				clickScale = UITheme.ButtonClickScale,
@@ -193,8 +244,48 @@ function MenuController.new(): MenuController
 			updateTopHud(self._hudRefs, stats)
 		end
 
+		local function updateBpHudFromState()
+			local bpState = Fusion.peek(DataController.BattlePass)
+			updateFamePassHud(self._hudRefs, bpState)
+		end
+
 		local statsObserver = self._fusionScope:Observer(DataController.Stats)
 		self._janitor:Add(statsObserver:onBind(updateHudFromState), true)
+
+		local bpObserver = self._fusionScope:Observer(DataController.BattlePass)
+		self._janitor:Add(bpObserver:onBind(updateBpHudFromState), true)
+
+		-- Actualización periódica del timer de temporada del FamePass (mismo esquema de UserInterface.BattlePass.Main.Timer)
+		if self._hudRefs.famePassTimer then
+			local timerRunning = true
+			task.spawn(function()
+				while timerRunning do
+					local season = BattlePassConfig.GetActiveSeason()
+					if season.EndsAt <= 0 then
+						if self._hudRefs.famePassTimer then
+							self._hudRefs.famePassTimer.Visible = false
+						end
+						task.wait(3600)
+					else
+						local remaining = season.EndsAt - os.time()
+						local text = UIUtils.formatTimeLeft(remaining)
+						if self._hudRefs.famePassTimer then
+							if text == "" then
+								self._hudRefs.famePassTimer.Visible = false
+							else
+								self._hudRefs.famePassTimer.Visible = true
+								self._hudRefs.famePassTimer.Text = text
+							end
+						end
+						local pollInterval = if remaining > 3600 then 3600 else 60
+						task.wait(pollInterval)
+					end
+				end
+			end)
+			self._janitor:Add(function()
+				timerRunning = false
+			end, true)
+		end
 	end)
 
 	return self

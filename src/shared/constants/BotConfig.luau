@@ -34,6 +34,7 @@ export type BotConfigType = {
 		JumpHeight: number,
 		WanderRadius: number,
 		WaypointSmoothDistance: number,
+		WaypointVerticalTolerance: number,
 	},
 	Combat: {
 		DetectRange: number,
@@ -71,6 +72,7 @@ export type BotConfigType = {
 		RoamMaxDist: number,
 		StuckThresholds: StuckThresholds,
 		StuckMoveEpsilon: number,
+		StuckSpawnGrace: number,
 		QueueRequestsPerHeartbeat: number,
 		MaxInFlightCompute: number,
 	},
@@ -85,7 +87,31 @@ local BotConfig: BotConfigType = {
 		WalkSpeed = 22,           -- igual que players (ShoulderCamera.normalWalkSpeed)
 		JumpHeight = 5,
 		WanderRadius = 40,
-		WaypointSmoothDistance = 4,
+		-- Radio de llegada a un waypoint, medido SOLO en XZ (ver
+		-- WaypointVerticalTolerance). 4 → 2.5, y el techo NO es arbitrario:
+		-- tiene que ser estrictamente menor que la separación XZ entre
+		-- waypoints, o cada waypoint ya cumple el criterio de llegada del
+		-- siguiente y el walk loop los consume en cadena sin visitarlos.
+		--
+		-- En un plano esa separación es WaypointSpacing (4), pero en una
+		-- pendiente de θ grados es WaypointSpacing·cos(θ): en una rampa de 35°
+		-- son 3.3 studs, y al máximo navegable (AgentMaxSlope=45°) son 2.83.
+		-- Con radio 4 el bot se saltaba la rampa entera y apuntaba a un punto
+		-- pasado el final, cortando la curva contra la geometría de al lado.
+		--
+		-- Suelo: 22 studs/s × 0.05s de tick = 1.1 studs por iteración, así que
+		-- por debajo de ~1.5 el bot puede sobrepasar el radio sin tocarlo nunca.
+		-- 2.5 cae en la ventana [1.5, 2.83].
+		WaypointSmoothDistance = 2.5,
+		-- Tolerancia vertical para dar un waypoint por alcanzado. Existe porque
+		-- `wp.Position` está a ras de navmesh mientras que `rootPart.Position`
+		-- está ~2-3 studs por encima (centro del HumanoidRootPart): incluso
+		-- parado justo encima del waypoint hay un desfase de Y constante.
+		-- Medir la llegada en 3D gastaba la mitad del presupuesto de 4 studs en
+		-- ese desfase, y en geometría vertical (escaleras) lo gastaba entero.
+		-- AgentHeight (5) es el límite natural: "dentro de un cuerpo de altura"
+		-- es el mismo nivel; un piso entero (10+) no.
+		WaypointVerticalTolerance = 5,
 	},
 
 	Combat = {
@@ -141,6 +167,7 @@ local BotConfig: BotConfigType = {
 		-- SpawnSelector scoring (same system as players), not a distance band.
 		StuckThresholds = { lateral = 1.0, repath = 2.0, jump = 4.0, teleport = 8.0 },
 		StuckMoveEpsilon = 0.5,        -- studs/seg debajo de los cuales contamos stuck
+		StuckSpawnGrace = 4,           -- seg tras spawnear sin contar stuck: el rig cae desde +4 studs, la cola de pathfinding va saturada en round-start y varios bots se empujan sobre el mismo pad. Sin esto la escalada dispara (y marca el mapa) en todos los spawns.
 		QueueRequestsPerHeartbeat = 2, -- ComputeAsync globales por Heartbeat
 		MaxInFlightCompute = 4,        -- tope de ComputeAsync simultáneos (semáforo). El budget por Heartbeat sólo regula enqueues; sin tope concurrente un repath storm puede arrancar N coroutines en paralelo.
 	},

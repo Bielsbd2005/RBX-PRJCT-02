@@ -2,9 +2,9 @@
 --[[
 	MatchProgressionObserver.luau
 	Observers de DataController para disparar las animaciones in-match de level up,
-	BattlePass tier-up, maestría de armas (completar un tier + hitos 25/50/75% de
-	progreso), y daily task claim. Extraído de `features/match/init.luau` para no
-	acumular orquestación de progresión ahí.
+	BattlePass tier-up, y maestría de armas (completar un tier + hitos 25/50/75%
+	de progreso). Extraído de `features/match/init.luau` para no acumular
+	orquestación de progresión ahí.
 
 	API:
 		MatchProgressionObserver.attach({
@@ -12,7 +12,7 @@
 		})
 
 	Internamente espera DataController:WhenReady() y wirea los observers (Stats,
-	BattlePass, Inventory→maestría completada, WeaponKills→hitos, DailyTasks).
+	BattlePass, Inventory→maestría completada, WeaponKills→hitos).
 	Cada uno usa el janitor pasado para registrar su cleanup.
 ]]
 
@@ -23,13 +23,9 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 
 local Fusion = require(Packages.fusion)
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
-local DailyTasksConfig = require(Shared.constants.DailyTasks)
-local ActionRewards = require(Shared.constants.ActionRewards)
 local LockerCategory = require(Shared.constants.LockerCategory)
 
 local DataController = require(script.Parent.Parent.Parent.core.data.DataController)
-
-local DAILY_TASK_COMPLETED_ICON = "rbxassetid://113694528712529"
 
 -- Solo se muestran hitos intermedios (25/50/75%) para tiers con objetivo grande;
 -- los tiers pequeños (p. ej. Bronze=4) solo notifican al completarse, sin spamear.
@@ -114,27 +110,6 @@ type AttachDeps = {
 	janitor: any,
 }
 
-local function _findLevelUpUnlock(level: number): any
-	for category, items in ItemsConfig do
-		if type(items) == "table" then
-			for itemId, definition in items do
-				if type(definition) == "table" and tonumber(definition.LevelRequired) == level then
-					local name = if type(definition.Name) == "string" and definition.Name ~= ""
-						then definition.Name
-						else tostring(itemId)
-					local image = if type(definition.Image) == "string" then definition.Image else nil
-					return {
-						name = name,
-						category = tostring(category),
-						image = image,
-					}
-				end
-			end
-		end
-	end
-	return nil
-end
-
 local function _isKillChallengeWrap(wrapKey: string): (boolean, any)
 	local weaponWraps = ItemsConfig.WeaponWraps
 	if type(weaponWraps) ~= "table" then
@@ -192,8 +167,7 @@ function MatchProgressionObserver.attach(deps: AttachDeps)
 
 			local currentLevel = if stats and type(stats.Level) == "number" then math.max(0, math.floor(stats.Level)) else 0
 			if lastSeenLevel ~= nil and currentLevel > lastSeenLevel then
-				local unlock = _findLevelUpUnlock(currentLevel)
-				hud:playLevelUpAnimation(currentLevel, unlock)
+				hud:playLevelUpAnimation(currentLevel)
 			end
 			lastSeenLevel = currentLevel
 		end
@@ -306,43 +280,6 @@ function MatchProgressionObserver.attach(deps: AttachDeps)
 		local weaponKillsObserver = fusionScope:Observer(DataController.WeaponKills)
 		janitor:Add(weaponKillsObserver:onBind(onWeaponKillsChanged), true)
 		onWeaponKillsChanged()
-
-		-- ── Daily tasks: detectar transición Claimed false→true ─
-		-- Solo dispara la animación de "Completed" cuando el HUD de partida
-		-- está activo (matchHudGui.Enabled). En menú no se muestra; el frame
-		-- del lobby ya pinta el fill verde como feedback.
-		local prevClaimed: { [string]: boolean } = {}
-		local claimedSeeded = false
-		local function onDailyTasksChanged()
-			local state = Fusion.peek(DataController.DailyTasks) :: any
-			local claimed = if state and type(state.Claimed) == "table" then state.Claimed else {}
-
-			if claimedSeeded and matchHudGui and matchHudGui.Enabled then
-				for _, def in DailyTasksConfig.Tasks do
-					local now = (claimed :: any)[def.Id] == true
-					local before = prevClaimed[def.Id] == true
-					if now and not before then
-						-- Description leerá "You earned Cash"; Reward.Amount
-						-- mostrará el monto otorgado por la tarea. Cash vive en
-						-- ActionRewards (clave "Daily"..Id), no en DailyTasks.luau.
-						hud:playTaskCompletedAnimation({
-							name = "Cash",
-							image = DAILY_TASK_COMPLETED_ICON,
-							cashAmount = ActionRewards.GetCash("Daily" .. def.Id),
-						})
-					end
-				end
-			end
-
-			local snapshot: { [string]: boolean } = {}
-			for _, def in DailyTasksConfig.Tasks do
-				snapshot[def.Id] = (claimed :: any)[def.Id] == true
-			end
-			prevClaimed = snapshot
-			claimedSeeded = true
-		end
-		local dailyTasksObserver = fusionScope:Observer(DataController.DailyTasks)
-		janitor:Add(dailyTasksObserver:onBind(onDailyTasksChanged), true)
 	end)
 end
 

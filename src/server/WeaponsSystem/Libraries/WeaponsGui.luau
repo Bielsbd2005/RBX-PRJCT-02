@@ -134,6 +134,10 @@ function WeaponsGui.new(weaponsSystem: any)
 
 		-- Configurar submódulos
 		self.crosshair:setup(self.scalingElementsFolder)
+		-- `Hotbar` es el layout único actual; los `_PC`/`_TouchScreen` son los dos
+		-- layouts por dispositivo del asset anterior. setupLayout ignora los que no
+		-- existan, así que registrar los tres vale para cualquiera de los dos assets.
+		self.hotbar:setupLayout(self.gui:FindFirstChild("Hotbar"))
 		self.hotbar:setupLayout(self.gui:FindFirstChild("Hotbar_PC"))
 		self.hotbar:setupLayout(self.gui:FindFirstChild("Hotbar_TouchScreen"))
 		self.hotbar:setupEvents()
@@ -219,6 +223,10 @@ function WeaponsGui:onScreenSizeChanged()
 		self.mobileControls.largeTouchscreen.Visible = UserInputService.TouchEnabled and not isSmallScreen
 	end
 
+	-- Hotbar único: se recoloca por dispositivo (derecha en PC, centrado en
+	-- táctil). Los Hotbar_PC/_TouchScreen son del asset anterior, que resolvía lo
+	-- mismo con dos layouts y visibilidad cruzada.
+	self.hotbar:applyDeviceAlignment()
 	local hotbarPC = self.gui:FindFirstChild("Hotbar_PC")
 	if hotbarPC then
 		hotbarPC.Visible = not UserInputService.TouchEnabled

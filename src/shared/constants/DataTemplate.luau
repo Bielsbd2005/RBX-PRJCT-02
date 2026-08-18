@@ -196,7 +196,6 @@ export type ProcessedReceipts = { [string]: number }
 export type PendingGift = {
 	SenderUserId: number,
 	SenderName: string,
-	Message: string,    -- ya filtrado (TextService) en el server del remitente
 	CashAmount: number,
 	ProductId: number,
 	SentAt: number,
@@ -226,7 +225,6 @@ export type ClaimedGifts = { [string]: number }
 export type GiftIntent = {
 	ReceiverUserId: number,
 	ProductId: number,
-	Message: string,
 	CreatedAt: number,
 }
 
@@ -463,7 +461,6 @@ local DEFAULT: PlayerProfile = {
 	GiftIntent = {
 		ReceiverUserId = 0,
 		ProductId = 0,
-		Message = "",
 		CreatedAt = 0,
 	},
 }

@@ -76,6 +76,7 @@ Special = {
     RPG     = { Name = "RPG",     Price = 1000, LevelRequired = 0,  Rarity = "Rare",      Image = asset(139650368086109), CanPurchase = true },
 },
 
+
 	WeaponWraps = {
 		Default   = {
 			Name = "Default",
@@ -190,6 +191,49 @@ Special = {
 			isAnimated = false,
 			StudsPerTile = 3,
 		},
+		-- Relleno del Starter Case (más variedad visual en el reel; ver
+		-- WrapCasesConfig para los pesos repartidos entre estos wraps).
+		Wrap_Case_Moss = {
+			Name = "Moss",
+			Price = 0,
+			LevelRequired = 0,
+			Rarity = "Common",
+			CanPurchase = false,
+			BaseColor = Color3.fromRGB(110, 140, 80),
+			isAnimated = false,
+			StudsPerTile = 3,
+		},
+		Wrap_Case_Slate = {
+			Name = "Slate",
+			Price = 0,
+			LevelRequired = 0,
+			Rarity = "Common",
+			CanPurchase = false,
+			BaseColor = Color3.fromRGB(100, 110, 120),
+			isAnimated = false,
+			StudsPerTile = 3,
+		},
+		Wrap_Case_Lilac = {
+			Name = "Lilac",
+			Price = 0,
+			LevelRequired = 0,
+			Rarity = "Rare",
+			CanPurchase = false,
+			BaseColor = Color3.fromRGB(190, 150, 230),
+			isAnimated = false,
+			StudsPerTile = 3,
+		},
+		Wrap_Case_Ember = {
+			Name = "Ember",
+			Price = 0,
+			LevelRequired = 0,
+			Rarity = "Epic",
+			CanPurchase = false,
+			BaseColor = Color3.fromRGB(255, 120, 40),
+			Material = Enum.Material.Neon,
+			isAnimated = false,
+			StudsPerTile = 3,
+		},
 		-- Mythic Case:
 		Wrap_Case_Inferno = {
 			Name = "Inferno",
@@ -218,6 +262,40 @@ Special = {
 			Rarity = "Legendary",
 			CanPurchase = false,
 			BaseColor = Color3.fromRGB(150, 60, 255),
+			Material = Enum.Material.Neon,
+			isAnimated = false,
+			StudsPerTile = 3,
+		},
+		-- Relleno del Mythic Case (más variedad visual en el reel; ver
+		-- WrapCasesConfig para los pesos repartidos entre estos wraps).
+		Wrap_Case_Magma = {
+			Name = "Magma",
+			Price = 0,
+			LevelRequired = 0,
+			Rarity = "Rare",
+			CanPurchase = false,
+			BaseColor = Color3.fromRGB(200, 60, 30),
+			isAnimated = false,
+			StudsPerTile = 3,
+		},
+		Wrap_Case_Toxic = {
+			Name = "Toxic",
+			Price = 0,
+			LevelRequired = 0,
+			Rarity = "Epic",
+			CanPurchase = false,
+			BaseColor = Color3.fromRGB(140, 255, 60),
+			Material = Enum.Material.Neon,
+			isAnimated = false,
+			StudsPerTile = 3,
+		},
+		Wrap_Case_Celestial = {
+			Name = "Celestial",
+			Price = 0,
+			LevelRequired = 0,
+			Rarity = "Legendary",
+			CanPurchase = false,
+			BaseColor = Color3.fromRGB(120, 180, 255),
 			Material = Enum.Material.Neon,
 			isAnimated = false,
 			StudsPerTile = 3,
@@ -270,8 +348,9 @@ Special = {
 	},
 
 	KillEffects = {
-		Default = { Name = "Default Kill",   Price = 0,    LevelRequired = 1,  Rarity = "Common", Image = "rbxassetid://130437553674754", CanPurchase = false },
-		Gravity = { Name = "Gravity Kill",   Price = 200, LevelRequired = 0, Rarity = "Rare",   Image = "rbxassetid://130437553674754", CanPurchase = false, isBPExclusive = true },
+		Default   = { Name = "Default Kill",   Price = 0,   LevelRequired = 1, Rarity = "Common", Image = "rbxassetid://130437553674754", CanPurchase = false },
+		Gravity   = { Name = "Gravity Kill",   Price = 200, LevelRequired = 0, Rarity = "Rare",   Image = "rbxassetid://130437553674754", CanPurchase = false, isBPExclusive = true },
+		Explosion = { Name = "Explosion Kill", Price = 400, LevelRequired = 0, Rarity = "Epic",   Image = "rbxassetid://130437553674754", CanPurchase = true },
 	},
 
 	Faces = {
@@ -328,3 +407,6 @@ Special = {
 }
 
 return table.freeze(ItemsConfig)
+
+
+

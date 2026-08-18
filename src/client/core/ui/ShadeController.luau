@@ -73,10 +73,12 @@ function ShadeController.start(_menuController: any?): any
 	-- Fijar el ZIndex una sola vez para que el overlay quede siempre detrás.
 	shade.ZIndex = SHADE_ZINDEX
 
-	-- Transparencias "visibles" diseñadas en Studio: se desvanece entre éstas y 1.
+	-- Transparencias y colores "visibles" diseñados en Studio: se desvanece entre éstas y 1.
 	local bgVisible = background.BackgroundTransparency
+	local defaultBgColor = background.BackgroundColor3
 	local canvasVisible = if canvas then canvas.GroupTransparency else 0
 	local shadowVisible = if shadow then shadow.BackgroundTransparency else 0
+	local defaultShadowColor = if shadow then shadow.BackgroundColor3 else nil
 
 	-- Estado inicial: oculto.
 	background.BackgroundTransparency = 1
@@ -126,11 +128,9 @@ function ShadeController.start(_menuController: any?): any
 	end
 
 	local function show(color: Color3?)
-		if color then
-			background.BackgroundColor3 = color
-			if shadow then
-				shadow.BackgroundColor3 = color
-			end
+		background.BackgroundColor3 = color or defaultBgColor
+		if shadow then
+			shadow.BackgroundColor3 = color or (defaultShadowColor :: Color3)
 		end
 		if shown then
 			return
@@ -187,10 +187,11 @@ function ShadeController.start(_menuController: any?): any
 			return
 		end
 		table.insert(tracked, frame)
-		-- Tanto un cambio de visibilidad como del atributo Shade re-evalúan el overlay,
-		-- así que activar/desactivar Shade en runtime funciona sin más cableado.
+		-- Tanto un cambio de visibilidad como de los atributos Shade / ShadeColor re-evalúan el overlay,
+		-- así que activar/desactivar Shade o cambiar su color en runtime funciona sin más cableado.
 		janitor:Add(frame:GetPropertyChangedSignal("Visible"):Connect(refresh), "Disconnect")
 		janitor:Add(frame:GetAttributeChangedSignal(SHADE_ATTRIBUTE):Connect(refresh), "Disconnect")
+		janitor:Add(frame:GetAttributeChangedSignal(COLOR_ATTRIBUTE):Connect(refresh), "Disconnect")
 	end
 
 	for _, child in uiGui:GetChildren() do
