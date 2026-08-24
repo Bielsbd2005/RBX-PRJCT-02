@@ -61,6 +61,10 @@ end
 
 function MatchCamera.setLobby()
 	_pointAtCameraPart("lobby")
+	local camera = workspace.CurrentCamera
+	if camera then
+		camera.FieldOfView = 33
+	end
 end
 
 function MatchCamera.setGameplay(character: Model?)
@@ -85,6 +89,7 @@ function MatchCamera.setGameplay(character: Model?)
 
 	currentCamera.CameraType = Enum.CameraType.Custom
 	currentCamera.CameraSubject = humanoid
+	currentCamera.FieldOfView = 70
 end
 
 --- Fuerza cámara de lobby con reintentos en delays para ganar a scripts que la sobreescriban.

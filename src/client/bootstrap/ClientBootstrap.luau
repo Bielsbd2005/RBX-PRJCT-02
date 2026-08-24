@@ -105,6 +105,7 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 	if camera and lobbyPart and lobbyPart:IsA("BasePart") then
 		camera.CameraType = Enum.CameraType.Scriptable
 		camera.CFrame = lobbyPart.CFrame
+		camera.FieldOfView = 33
 	end
 
 	_janitor:Add(game:GetService("Players").LocalPlayer.CharacterAdded:Connect(function()

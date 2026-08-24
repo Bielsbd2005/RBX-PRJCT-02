@@ -71,7 +71,7 @@ Main = {
 Special = {
     -- Secondary/Special (corto rango o alto impacto)
     Short   = { Name = "Short",   Price = 1000, LevelRequired = 0,  Rarity = "Rare",      Image = asset(118462878872416), CanPurchase = true },
-    UZI     = { Name = "UZI",     Price = 1, LevelRequired = 0,  Rarity = "Rare",      Image = asset(109948875778066), CanPurchase = true },
+    UZI     = { Name = "UZI",     Price = 1, LevelRequired = 0,  Rarity = "Rare",         Image = asset(109948875778066), CanPurchase = true },
     Laser   = { Name = "Laser",   Price = 1000, LevelRequired = 0,  Rarity = "Rare",      Image = asset(80482264427643),  CanPurchase = true },
     RPG     = { Name = "RPG",     Price = 1000, LevelRequired = 0,  Rarity = "Rare",      Image = asset(139650368086109), CanPurchase = true },
 },

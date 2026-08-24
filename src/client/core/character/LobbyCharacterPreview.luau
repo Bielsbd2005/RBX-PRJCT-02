@@ -39,7 +39,7 @@ local HatApplier = require(ClientRoot.features.locker.Appliers.HatApplier)
 local DataController = require(Core.data.DataController)
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
 
-local IDLE_ANIMATION_ID = "rbxassetid://109968216239895"
+local IDLE_ANIMATION_ID = "rbxassetid://507766388"
 local RESOLVE_TIMEOUT = 30
 
 local function getOptionalString(value: any): string?

@@ -4,14 +4,52 @@ local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
 
+local Core = script.Parent.Parent
+local DepthOfFieldController = require(Core.lighting.DepthOfFieldController)
+
 -- Travelling entre cámaras del locker (entrada, cambio de pestaña y salida): la
 -- cámara se desplaza desde su posición actual hasta el target con ease-in-out.
 local MOVE_TWEEN_INFO = TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut)
 local WRAP_ZOOM_TWEEN_INFO = TweenInfo.new(0.85, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+local LOCKER_FIELD_OF_VIEW = 70
+
+-- Configuración por target: FOV y DOF personalizados por cámara. Los targets que
+-- no aparezcan usan LOCKER_FIELD_OF_VIEW y no tocan el DOF.
+local TARGET_CONFIG: {
+	[string]: {
+		fov: number,
+		dof: DepthOfFieldController.DepthOfFieldProperties?,
+	},
+} = {
+	character = {
+		fov = 40,
+	},
+}
+
+local function getTargetFov(targetPartName: string?): number
+	if targetPartName then
+		local config = TARGET_CONFIG[targetPartName]
+		if config then
+			return config.fov
+		end
+	end
+	return LOCKER_FIELD_OF_VIEW
+end
+
+local function getTargetDof(targetPartName: string?): DepthOfFieldController.DepthOfFieldProperties?
+	if targetPartName then
+		local config = TARGET_CONFIG[targetPartName]
+		if config then
+			return config.dof
+		end
+	end
+	return nil
+end
 
 export type LockerCameraController = {
 	_camera: Camera,
 	_targetPart: BasePart,
+	_targetPartName: string,
 	_isApplied: boolean,
 	_savedCameraType: Enum.CameraType?,
 	_savedCameraSubject: Instance?,
@@ -43,9 +81,11 @@ function LockerCameraController.new(targetPartName: string?): LockerCameraContro
 	local camera = Workspace.CurrentCamera
 	assert(camera ~= nil, "CurrentCamera is not available")
 
+	local actualTargetName = targetPartName or "locker"
 	local self = setmetatable({}, LockerCameraController) :: any
 	self._camera = camera :: Camera
-	self._targetPart = resolveTargetPart(targetPartName or "locker")
+	self._targetPart = resolveTargetPart(actualTargetName)
+	self._targetPartName = actualTargetName
 	self._isApplied = false
 	self._savedCameraType = nil
 	self._savedCameraSubject = nil
@@ -79,11 +119,19 @@ end
 -- desde la posición actual hasta el nuevo target (mismo movimiento que la entrada).
 function LockerCameraController:setTargetPartName(targetPartName: string)
 	local nextTargetPart = resolveTargetPart(targetPartName)
-	if self._targetPart == nextTargetPart then
+	if self._targetPart == nextTargetPart and self._targetPartName == targetPartName then
 		return
 	end
 
+	-- Al SALIR de un target con DOF personalizado, restaurar inmediatamente para
+	-- que el blur del fondo se disipe durante el travelling (no al final de golpe).
+	local previousDof = getTargetDof(self._targetPartName)
+	if previousDof then
+		DepthOfFieldController.setProperties(nil)
+	end
+
 	self._targetPart = nextTargetPart
+	self._targetPartName = targetPartName
 
 	if self._isApplied then
 		self:apply()
@@ -105,9 +153,9 @@ function LockerCameraController:zoomOnPosition(targetPosition: Vector3)
 		CFrame = zoomCFrame
 	})
 
-	local finalFov = self._savedFieldOfView or self._camera.FieldOfView
+	local baseFov = getTargetFov(self._targetPartName)
 	self._fovTween = TweenService:Create(self._camera, WRAP_ZOOM_TWEEN_INFO, {
-		FieldOfView = math.clamp(finalFov - 6, 20, 90)
+		FieldOfView = math.clamp(baseFov - 6, 20, 90)
 	})
 
 	self._cameraApproachTween:Play()
@@ -125,9 +173,9 @@ function LockerCameraController:unzoom()
 		CFrame = targetCFrame
 	})
 
-	local finalFov = self._savedFieldOfView or 70
+	local baseFov = getTargetFov(self._targetPartName)
 	self._fovTween = TweenService:Create(self._camera, WRAP_ZOOM_TWEEN_INFO, {
-		FieldOfView = finalFov
+		FieldOfView = baseFov
 	})
 
 	self._cameraApproachTween:Play()
@@ -152,10 +200,29 @@ function LockerCameraController:apply()
 	-- la cámara podría seguir en Custom y el tween de CFrame no movería nada.
 	self._camera.CameraType = Enum.CameraType.Scriptable
 
+	local targetFov = getTargetFov(self._targetPartName)
 	self._cameraApproachTween = TweenService:Create(self._camera, MOVE_TWEEN_INFO, {
 		CFrame = self._targetPart.CFrame,
 	})
+	self._fovTween = TweenService:Create(self._camera, MOVE_TWEEN_INFO, {
+		FieldOfView = targetFov,
+	})
+
+	-- Si el target tiene DOF personalizado, aplicarlo al TERMINAR el tween para
+	-- que no haya un cambio brusco de blur mientras la cámara viaja.
+	local targetDof = getTargetDof(self._targetPartName)
+	if targetDof then
+		self._cameraApproachCompletedConnection = self._cameraApproachTween.Completed:Connect(function(playbackState)
+			if playbackState ~= Enum.PlaybackState.Completed then
+				return
+			end
+			self._cameraApproachCompletedConnection = nil
+			DepthOfFieldController.setProperties(targetDof)
+		end)
+	end
+
 	self._cameraApproachTween:Play()
+	self._fovTween:Play()
 end
 
 -- Restaura el estado de cámara previo a entrar al locker. Con `animated`, la cámara
@@ -167,6 +234,10 @@ function LockerCameraController:restore(animated: boolean?)
 	end
 
 	self:_cancelActiveTweens()
+
+	-- Restaurar DOF al inicio de la transición de salida (se disipa durante el
+	-- travelling, no de golpe al llegar).
+	DepthOfFieldController.setProperties(nil)
 
 	local savedCFrame = self._savedCFrame
 	local savedFieldOfView = self._savedFieldOfView

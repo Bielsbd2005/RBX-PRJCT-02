@@ -13,6 +13,13 @@
 local Lighting = game:GetService("Lighting")
 local UserInputService = game:GetService("UserInputService")
 
+export type DepthOfFieldProperties = {
+	FarIntensity: number?,
+	FocusDistance: number?,
+	InFocusRadius: number?,
+	NearIntensity: number?,
+}
+
 local DepthOfFieldController = {}
 
 -- Audit P5: en móviles (táctil sin mouse) no encendemos DepthOfField; es un
@@ -27,6 +34,16 @@ local _baseEnabled = false
 local _suppressors: { [string]: boolean } = {}
 local _suppressCount = 0
 
+-- Snapshot de las propiedades del DOF antes de sobreescribirlas. Se guarda al
+-- llamar setProperties(props) y se repone con setProperties(nil). Se re-captura
+-- cada vez porque ScenePresetController puede reemplazar el DepthOfFieldEffect
+-- entero al cambiar de preset, invalidando cualquier snapshot anterior.
+local _propertiesOverrideActive = false
+local _savedFarIntensity: number? = nil
+local _savedFocusDistance: number? = nil
+local _savedInFocusRadius: number? = nil
+local _savedNearIntensity: number? = nil
+
 local function _getDof(): DepthOfFieldEffect?
 	if _dof and _dof.Parent then
 		return _dof
@@ -39,6 +56,60 @@ local function _apply()
 	local dof = _getDof()
 	if dof then
 		dof.Enabled = _baseEnabled and _suppressCount == 0 and not _isMobile
+	end
+end
+
+--- Ajusta propiedades del DepthOfField (FarIntensity, FocusDistance, InFocusRadius, etc.).
+--- Guarda los valores actuales ANTES de sobreescribir, para restaurarlos al pasar nil.
+--- Re-captura el snapshot cada vez (el DepthOfFieldEffect puede haber sido reemplazado
+--- por ScenePresetController entre llamadas).
+function DepthOfFieldController.setProperties(props: DepthOfFieldProperties?)
+	local dof = _getDof()
+	if not dof then
+		return
+	end
+
+	if props then
+		-- Snapshot de los valores actuales antes de sobreescribir.
+		if not _propertiesOverrideActive then
+			_savedFarIntensity = dof.FarIntensity
+			_savedFocusDistance = dof.FocusDistance
+			_savedInFocusRadius = dof.InFocusRadius
+			_savedNearIntensity = dof.NearIntensity
+			_propertiesOverrideActive = true
+		end
+
+		if props.FarIntensity ~= nil then
+			dof.FarIntensity = props.FarIntensity
+		end
+		if props.FocusDistance ~= nil then
+			dof.FocusDistance = props.FocusDistance
+		end
+		if props.InFocusRadius ~= nil then
+			dof.InFocusRadius = props.InFocusRadius
+		end
+		if props.NearIntensity ~= nil then
+			dof.NearIntensity = props.NearIntensity
+		end
+	elseif _propertiesOverrideActive then
+		-- Restaurar valores guardados.
+		if _savedFarIntensity ~= nil then
+			dof.FarIntensity = _savedFarIntensity
+		end
+		if _savedFocusDistance ~= nil then
+			dof.FocusDistance = _savedFocusDistance
+		end
+		if _savedInFocusRadius ~= nil then
+			dof.InFocusRadius = _savedInFocusRadius
+		end
+		if _savedNearIntensity ~= nil then
+			dof.NearIntensity = _savedNearIntensity
+		end
+		_propertiesOverrideActive = false
+		_savedFarIntensity = nil
+		_savedFocusDistance = nil
+		_savedInFocusRadius = nil
+		_savedNearIntensity = nil
 	end
 end
 
