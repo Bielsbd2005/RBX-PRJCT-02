@@ -482,40 +482,6 @@ local WeaponStatsNamespace = ByteNet.DefineNamespace("WeaponStats", function()
 end)
 
 -- ────────────────────────────────────────────────────────────
--- NAMESPACE: WrapCases
--- Unboxing de cases de wraps (Store). El cliente pide abrir una case; el
--- server valida cash, rolea wrap (ponderado, WrapCasesConfig) + arma (uniforme
--- entre las armas del inventario, excluyendo combinaciones ya poseídas),
--- concede y responde con el resultado — el cliente solo ANIMA el resultado.
--- ────────────────────────────────────────────────────────────
-
-local WrapCasesNamespace = ByteNet.DefineNamespace("WrapCases", function()
-	return {
-		-- C → S: Abrir una case (compra + roll en la misma acción).
-		Open = ByteNet.DefinePacket({
-			Value = ByteNet.Struct({
-				caseId = ByteNet.String,
-			}),
-			ReliabilityType = "Reliable",
-		}),
-
-		-- S → C: Resultado del unboxing. Con success=false, los campos de roll
-		-- van vacíos y message explica el rechazo.
-		Result = ByteNet.DefinePacket({
-			Value = ByteNet.Struct({
-				success        = ByteNet.Bool,
-				message        = ByteNet.String,
-				caseId         = ByteNet.String,
-				wrapId         = ByteNet.String,
-				weaponCategory = ByteNet.String,
-				weaponId       = ByteNet.String,
-			}),
-			ReliabilityType = "Reliable",
-		}),
-	}
-end)
-
--- ────────────────────────────────────────────────────────────
 -- EXPORT
 -- ────────────────────────────────────────────────────────────
 
@@ -529,5 +495,4 @@ return {
 	BattlePass  = BattlePassNamespace,
 	Gifting     = GiftingNamespace,
 	WeaponStats = WeaponStatsNamespace,
-	WrapCases   = WrapCasesNamespace,
 }

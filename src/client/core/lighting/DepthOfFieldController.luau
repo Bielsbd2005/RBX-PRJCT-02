@@ -6,9 +6,9 @@
 -- (menú/locker → on, partida → off). Lo conduce MatchState vía setEnabled.
 --
 -- Además de la fase (base), acepta SUPRESORES: fuerzan el DoF OFF mientras al
--- menos uno esté activo, sin tocar el estado base (p. ej. el reveal del unboxing
--- muestra una escena 3D a pantalla completa que no debe llevar DoF aunque el
--- lobby lo tenga encendido). Simétrico con BlurController.
+-- menos uno esté activo, sin tocar el estado base (p. ej. una escena 3D a
+-- pantalla completa que no debe llevar DoF aunque el lobby lo tenga
+-- encendido). Simétrico con BlurController.
 
 local Lighting = game:GetService("Lighting")
 local UserInputService = game:GetService("UserInputService")
@@ -120,8 +120,8 @@ function DepthOfFieldController.setEnabled(enabled: boolean)
 end
 
 --- Fuerza el DoF OFF mientras `owner` lo suprima, sin alterar el estado base.
---- Idempotente por owner. Úsalo para escenas 3D a pantalla completa (reveal del
---- unboxing) que no deben llevar DoF aunque el lobby lo tenga encendido.
+--- Idempotente por owner. Úsalo para escenas 3D a pantalla completa que no
+--- deben llevar DoF aunque el lobby lo tenga encendido.
 function DepthOfFieldController.suppress(owner: string)
 	if type(owner) ~= "string" or owner == "" then
 		warn("[DepthOfFieldController] suppress: owner inválido")

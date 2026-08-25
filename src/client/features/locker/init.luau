@@ -86,7 +86,6 @@ type LockerCatalogItem = {
 	KillGoal: number?,
 	KillProgress: number?,
 	ChallengeUnlocked: boolean?,
-	Case: string?,
 }
 
 type PendingShopAction = {
@@ -192,7 +191,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local closeBtn = nav1:WaitForChild("CloseBtn") :: GuiButton
 	-- Nav1 pasó a ser template-driven: sus tabs se clonan de Nav1.Template según el
 	-- modo. En el locker normal son Character/Effects/Weapons (categorías internas
-	-- Style/Effects/Arsenal); en modo wraps son Collection/Maestry/Owned. El Name de
+	-- Style/Effects/Arsenal); en modo wraps son Maestry/Owned. El Name de
 	-- cada botón clonado ES la key (nav1TabController y nav1Stagger indexan por Name).
 	local nav1Template = nav1:WaitForChild("Template") :: GuiButton
 	local defaultNav1ItemSize = nav1Template.Size
@@ -299,7 +298,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local NAV1_WRAPS_VIEW_ITEMS: { { key: string, title: string } } = {
 		{ key = "owned", title = "Owned" },
 		{ key = "maestry", title = "Maestry" },
-		{ key = "collection", title = "Collection" },
 	}
 	local navButtons = {} :: { GuiButton }
 	-- Janitor de los botones clonados de Nav1 (conexiones + hover). Se limpia en cada
@@ -334,7 +332,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local nav1Stagger: NavStaggerController.NavStaggerController? = nil
 	local nav2Stagger: NavStaggerController.NavStaggerController? = nil
 	-- Forward decl de la repoblación de Nav1: setWrapsMode las invoca para reconstruir
-	-- los tabs (Character/Effects/Weapons ↔ Collection/Maestry/Owned); se asignan más
+	-- los tabs (Character/Effects/Weapons ↔ Maestry/Owned); se asignan más
 	-- abajo, cuando sus dependencias (handleMainCategoryButtonClick / showWrapsView)
 	-- ya existen.
 	local populateMainCategoryNav: () -> ()
@@ -349,10 +347,9 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 	local isWrapsMode = false
 	-- Sub-vista de la pantalla de wraps (tabs de Nav1 en modo wraps):
-	--   "collection" → wraps de lootbox (todos los no-desafío del arma)
-	--   "maestry"    → desafíos de kills del arma
-	--   "owned"      → wraps que posees en el inventario
-	local wrapsView = "collection"
+	--   "maestry" → desafíos de kills del arma
+	--   "owned"   → wraps que posees en el inventario
+	local wrapsView = "owned"
 
 	local function setWrapsMode(enabled: boolean)
 		isWrapsMode = enabled
@@ -362,7 +359,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		-- Entrar al modo wraps oculta el WeaponNav; al salir, updateActionFrameForSelected
 		-- lo vuelve a mostrar si toca.
 		if enabled then wrapsButton.Visible = false end
-		-- Reconstruir los tabs de Nav1 según el modo: wraps (Collection/Maestry/Owned)
+		-- Reconstruir los tabs de Nav1 según el modo: wraps (Maestry/Owned)
 		-- vs locker normal (Character/Effects/Weapons). Cada repoblación destruye los
 		-- botones del modo anterior y clona los nuevos desde Nav1.Template.
 		if enabled then
@@ -1449,25 +1446,13 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			local isOwned = isWrapOwnedForWeapon(targetWeaponCategory, targetWeaponId, item.id)
 			local isChallenge = item.KillGoal ~= nil and item.KillGoal > 0
 			-- Filtro por sub-vista de Nav1:
-			--   Collection → wraps de lootbox: todos los NO-desafío (poseídos o no).
-			--   Maestry    → desafíos de kills del arma (desbloqueados o no).
-			--   Owned      → sólo lo que posees en el inventario.
+			--   Maestry → desafíos de kills del arma (desbloqueados o no).
+			--   Owned   → sólo lo que posees en el inventario.
 			local include: boolean
 			if wrapsView == "maestry" then
 				include = isChallenge
-			elseif wrapsView == "owned" then
+			else -- "owned"
 				include = isOwned
-			else -- "collection"
-				-- Collection = wraps de case que AÚN no posees. Se excluyen:
-				--   · los poseídos (pestaña Owned)
-				--   · los desafíos (pestaña Maestry)
-				--   · el Default (wrap base, no de lootbox)
-				--   · los comprables con cash → irán a la tienda de rotación (pendiente)
-				local isCashShopWrap = item.CanPurchase and item.Price > 0
-				include = not isChallenge
-					and not isOwned
-					and item.id ~= ItemDefaults.ITEM_ID
-					and not isCashShopWrap
 			end
 			if include then
 				local wrapItem = table.clone(item)
@@ -1487,8 +1472,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		-- Orden dentro de la vista Wraps:
 		--   1) Default (siempre primero; sólo aparece en Owned)
 		--   2) Challenges de kill no desbloqueados (Maestry) por kills ascendente
-		--   3) Resto (wraps de Collection y poseídos) por RAREZA descendente
-		-- Collection cae íntegra en el grupo 3 → queda ordenada por rareza.
+		--   3) Resto (poseídos) por RAREZA descendente
 		local function groupRank(it: LockerCatalogItem): number
 			if it.id == ItemDefaults.ITEM_ID then
 				return 1
@@ -1583,7 +1567,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 				and not (selectedItem.CanPurchase and selectedItem.Price > 0)) then
 			-- No comprables con cash → sin ActionFrame de compra:
 			--   · wraps de desafío de kills → se desbloquean por progreso.
-			--   · wraps de case (Price 0 / CanPurchase false) → se abren desde la caja.
+			--   · wraps sin precio (Price 0 / CanPurchase false).
 			wrapsButton.Visible = false
 			hideActionFrame()
 		else
@@ -1736,7 +1720,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			local deficit = item.Price - cash
 			local bestPack: StoreProducts.StoreProductDefinition? = nil
 
-			for _, pack in StoreProducts.ProductsInOrder do
+			for _, pack in StoreProducts.Cash.InOrder do
 				if pack.CashAmount >= deficit and pack.ProductId > 0 then
 					bestPack = pack
 					break
@@ -1744,7 +1728,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			end
 
 			if not bestPack then
-				local largest = StoreProducts.ProductsInOrder[#StoreProducts.ProductsInOrder]
+				local largest = StoreProducts.Cash.InOrder[#StoreProducts.Cash.InOrder]
 				if largest and largest.ProductId > 0 then
 					bestPack = largest
 				end
@@ -1888,7 +1872,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		setupActionButton(weaponActionPanel.button)
 	end
 
-	-- Sub-pestañas dentro de wraps: Collection (lootbox) / Maestry (desafíos) / Owned.
+	-- Sub-pestañas dentro de wraps: Maestry (desafíos) / Owned.
 	local function showWrapsView(view: string)
 		if not isWrapsMode or wrapsView == view then
 			return

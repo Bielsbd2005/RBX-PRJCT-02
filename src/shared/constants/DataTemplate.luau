@@ -57,6 +57,11 @@ export type Stats = {
 	TimePlayedSeconds: number,
 	Cash: number,
 	TotalCashEarned: number,
+	-- Gems: moneda premium. NO se gana jugando — solo con recompensas del
+	-- Battle Pass o comprando packs con Robux. Por eso no hay ningún faucet
+	-- de Gems en ActionRewards: si algún día aparece uno, es un bug de diseño.
+	Gems: number,
+	TotalGemsEarned: number,
 	TotalRobuxSpent: number,
 	FriendsInvited: number,
 }
@@ -331,6 +336,9 @@ local DEFAULT: PlayerProfile = {
 		TimePlayedSeconds = 0,
 		Cash = 500,
 		TotalCashEarned = 0,
+		-- Arranca a 0: los Gems son premium, no se regalan de salida.
+		Gems = 0,
+		TotalGemsEarned = 0,
 		TotalRobuxSpent = 0,
 		FriendsInvited = 0,
 	},

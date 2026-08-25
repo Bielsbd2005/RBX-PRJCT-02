@@ -126,7 +126,7 @@ function GiftingFeature.start(menuController: any): any
 	-- ── Presentación ─────────────────────────────────────────
 
 	local function findProductImage(productId: number): string?
-		local product = StoreProducts.ProductsByProductId[productId]
+		local product = StoreProducts.Cash.ByProductId[productId]
 		if not product then
 			return nil
 		end
@@ -134,7 +134,7 @@ function GiftingFeature.start(menuController: any): any
 		if not storeNode then
 			return nil
 		end
-		local cashPage = storeNode:FindFirstChild("CashPage") or storeNode:FindFirstChild("Cash")
+		local cashPage = storeNode:FindFirstChild(StoreProducts.Cash.PageName) or storeNode:FindFirstChild("Cash")
 		local rowContainer = if cashPage then cashPage:FindFirstChild(product.Row) else nil
 		local button = if rowContainer then rowContainer:FindFirstChild(product.ButtonName) else nil
 		if not button and cashPage then
@@ -163,7 +163,7 @@ function GiftingFeature.start(menuController: any): any
 
 		local cashAmount = tonumber(gift.CashAmount) or 0
 		if cashAmount <= 0 then
-			local product = StoreProducts.ProductsByProductId[tonumber(gift.ProductId) or 0]
+			local product = StoreProducts.Cash.ByProductId[tonumber(gift.ProductId) or 0]
 			if product then
 				cashAmount = product.CashAmount
 			end

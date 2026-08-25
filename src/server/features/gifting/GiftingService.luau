@@ -50,7 +50,7 @@ local NetGuards = require(Shared.networking.NetGuards)
 local StoreProducts = require(Shared.constants.StoreProducts)
 
 local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
-local EconomyAnalytics = require(script.Parent.Parent.Parent.core.EconomyAnalytics)
+local TelemetryService = require(script.Parent.Parent.Parent.core.TelemetryService)
 type DataService = DataServiceMod.DataServiceModule
 
 local M = NetGuards.MAX
@@ -201,7 +201,7 @@ end
 
 -- Corre en thread propio (yielda: view offline).
 function GiftingService:_handleSendGift(player: Player, data: { receiverUserId: string, productId: number }): ()
-	local product = StoreProducts.ProductsByProductId[data.productId]
+	local product = StoreProducts.Cash.ByProductId[data.productId]
 	if not product or product.ProductId <= 0 then
 		_respondSend(player, false, "That item can't be gifted.")
 		return
@@ -294,7 +294,7 @@ end
 	de compra normal lo procese.
 ]]
 function GiftingService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchaseDecision?
-	local product = StoreProducts.ProductsByProductId[receiptInfo.ProductId]
+	local product = StoreProducts.Cash.ByProductId[receiptInfo.ProductId]
 	if not product then
 		return nil
 	end
@@ -394,6 +394,19 @@ function GiftingService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchaseDe
 		return Enum.ProductPurchaseDecision.NotProcessedYet
 	end
 
+	TelemetryService.RecordPurchase({
+		userId = buyer.UserId,
+		purchaseId = purchaseId,
+		productId = product.ProductId,
+		sku = product.ButtonName,
+		robuxPrice = product.RobuxPrice,
+		cashGranted = product.CashAmount,
+		kind = "Gift",
+		-- El par comprador→receptor es lo que hace medible el multiplicador
+		-- social de la vista de Gifting.
+		receiverUserId = receiverUserId,
+	})
+
 	Network.Gifting.GiftDelivered.SendTo({
 		receiverUserId = tostring(receiverUserId),
 	}, buyer)
@@ -474,8 +487,7 @@ function GiftingService:_handleClaimGift(player: Player, giftId: string): ()
 		return
 	end
 
-	local balance = profile.Data.Stats.Cash or 0
-	EconomyAnalytics.Source(player, amount, balance, "Gift", tostring(gift.ProductId))
+	TelemetryService.RecordFlow(player, "source", "Gift", amount, tostring(gift.ProductId), "Cash")
 	_respondClaim(player, true, giftId, "", amount)
 end
 

@@ -104,6 +104,11 @@ local function _rewardImage(reward: BattlePassConfig.Reward): string
 	if reward.Kind == "Cash" then
 		return reward.Icon or BattlePassConfig.RewardIcons.Cash or ""
 	end
+	if reward.Kind == "Gems" then
+		-- Sin icono propio se devuelve "" (no el de Cash): un tier de Gems
+		-- mostrando la moneda equivocada es peor que uno sin imagen.
+		return reward.Icon or BattlePassConfig.RewardIcons.Gems or ""
+	end
 	local catalog = ItemsConfig[reward.Category]
 	local def = if type(catalog) == "table" then catalog[reward.ItemId] else nil
 	return reward.Icon or (if def and type(def.Image) == "string" then def.Image else "")
@@ -113,6 +118,9 @@ end
 local function _rewardDescription(reward: BattlePassConfig.Reward): string
 	if reward.Kind == "Cash" then
 		return UIUtils.formatCashAmount(reward.Amount or 0)
+	end
+	if reward.Kind == "Gems" then
+		return UIUtils.formatCashAmount(reward.Amount or 0) .. " Gems"
 	end
 	if reward.Label then
 		return reward.Label

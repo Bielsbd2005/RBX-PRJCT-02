@@ -7,7 +7,7 @@
 	empaqueta; MatchService solo le da el contexto del jugador al terminar la ronda.
 
 	Responsabilidades:
-	  • VIP: caché por jugador del gamepass `GameConfig.VIPGamePassId` (prefetch
+	  • VIP: caché por jugador del gamepass `StoreProducts.GamePasses.VIP` (prefetch
 	    en PlayerAdded + update en GamePassPurchaseFinished). Lectura síncrona
 	    (IsVIPCached) para no bloquear el envío de RoundEnded.
 	  • Snapshot de inicio de partida (nivel + tier de BP) por jugador, para luego
@@ -26,10 +26,10 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
-local GameConfig = require(Shared:WaitForChild("GameConfig"))
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
 local BattlePassConfig = require(Shared.constants.BattlePassConfig)
 local ResultsRewards = require(Shared.constants.ResultsRewards)
+local StoreProducts = require(Shared.constants.StoreProducts)
 local RewardService = require(script.Parent.Parent.Parent.core.RewardService)
 
 local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
@@ -80,8 +80,8 @@ local _startSnapshotByUserId: { [number]: { level: number, bpTier: number } } = 
 -- ── VIP ──────────────────────────────────────────────────────
 
 local function _fetchVIP(userId: number): boolean
-	local gamePassId = GameConfig.VIPGamePassId
-	if type(gamePassId) ~= "number" or gamePassId <= 0 then
+	local gamePassId = StoreProducts.GamePasses.VIP.PassId
+	if gamePassId <= 0 then
 		return false
 	end
 	local ok, owns = pcall(function()
@@ -302,7 +302,7 @@ function MatchResultsService:Start(deps: { dataService: DataService })
 		-- Si la compra se confirma DESPUÉS de que PlayerRemoving limpió la entrada,
 		-- repoblarla la dejaría huérfana para siempre (fuga por userId). Solo
 		-- escribir si el jugador sigue conectado; un re-join repuebla vía prefetch.
-		if wasPurchased and gamePassId == GameConfig.VIPGamePassId and player:IsDescendantOf(Players) then
+		if wasPurchased and gamePassId == StoreProducts.GamePasses.VIP.PassId and player:IsDescendantOf(Players) then
 			_vipByUserId[player.UserId] = true
 		end
 	end)

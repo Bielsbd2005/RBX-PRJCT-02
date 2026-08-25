@@ -36,8 +36,8 @@ local BlurController = {}
 local _holders: { [string]: boolean } = {}
 local _activeCount = 0
 -- Supresores: fuerzan el blur OFF mientras al menos uno está activo, sin tocar
--- el refcount de holders (p. ej. el reveal del unboxing muestra una escena 3D a
--- pantalla completa que no debe ir borrosa aunque el Store siga "abierto").
+-- el refcount de holders (p. ej. una escena 3D a pantalla completa que no debe
+-- ir borrosa aunque el panel siga "abierto").
 local _suppressors: { [string]: boolean } = {}
 local _suppressCount = 0
 
@@ -102,7 +102,7 @@ end
 --[[
 	Fuerza el blur OFF mientras `owner` lo suprima, sin alterar el refcount de
 	holders. Idempotente por owner. Úsalo para escenas 3D a pantalla completa
-	(reveal del unboxing) que no deben ir borrosas aunque el panel siga abierto.
+	que no deben ir borrosas aunque el panel siga abierto.
 ]]
 function BlurController.suppress(owner: string)
 	if type(owner) ~= "string" or owner == "" then

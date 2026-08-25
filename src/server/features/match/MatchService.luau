@@ -30,7 +30,7 @@ local DailyTasksService = require(script.Parent.Parent.dailyTasks.DailyTasksServ
 
 local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
 local RewardService = require(script.Parent.Parent.Parent.core.RewardService)
-local EconomyAnalytics = require(script.Parent.Parent.Parent.core.EconomyAnalytics)
+local TelemetryService = require(script.Parent.Parent.Parent.core.TelemetryService)
 local LastAttackerStore = require(ReplicatedStorage:WaitForChild("WeaponsSystem"):WaitForChild("Libraries"):WaitForChild("LastAttackerStore"))
 type DataService = DataServiceMod.DataServiceModule
 
@@ -155,6 +155,11 @@ type CombatStats = {
 }
 
 type Round = {
+	-- os.time() del arranque de la ronda. Sólo lo usa la telemetría, para
+	-- poder distinguir una partida que acabó por marcador de una que agotó
+	-- MaxRoundDuration: la proporción entre ambas dice si la economía de
+	-- ronda está bien calibrada.
+	startedAt: number,
 	scoreA: number,
 	scoreB: number,
 	statsByUserId: { [number]: CombatStats },
@@ -184,6 +189,7 @@ local _round: Round? = nil
 
 local function _newRound(): Round
 	return {
+		startedAt = os.time(),
 		scoreA = 0,
 		scoreB = 0,
 		statsByUserId = {},
@@ -590,7 +596,7 @@ local function _grantMasteryWrapsIfEligible(player: Player, weaponCategory: stri
 	for _, update in updates do
 		local wrapKey = update.path[5]
 		if type(wrapKey) == "string" then
-			EconomyAnalytics.ItemSource(player, "MasteryWrap", weaponCategory .. "::" .. weaponId .. "::" .. wrapKey)
+			TelemetryService.RecordItem(player, "MasteryWrap", weaponCategory .. "::" .. weaponId .. "::" .. wrapKey)
 		end
 	end
 end
@@ -693,8 +699,19 @@ end
 	    pickup, rewards (Kill/Headshot), Stats lifetime, multikills y onboarding
 	    de primera kill.
 	No toca a la víctima ni resuelve la atribución — eso es del caller.
+
+	`victimIsBot` sólo se usa para telemetría: con ~25% de bots entre los
+	participantes, un K/D o un win rate por arma que los mezcle con humanos no
+	sirve para balancear. El caller ya sabe qué era la víctima (el path PvP
+	tiene un deadPlayer y el PvE un botFakeUserId), así que se pasa en vez de
+	recalcularlo aquí.
 ]]
-local function _creditKillToAttacker(attackerUserId: number, weaponId: string?, wasHeadshot: boolean)
+local function _creditKillToAttacker(
+	attackerUserId: number,
+	weaponId: string?,
+	wasHeadshot: boolean,
+	victimIsBot: boolean
+)
 	if attackerUserId < 0 then
 		local botStats = _roundStats(attackerUserId)
 		if botStats then
@@ -721,6 +738,15 @@ local function _creditKillToAttacker(attackerUserId: number, weaponId: string?, 
 
 	KillAttributionService:SendStreakBroadcast(attackerUserId)
 	_registerWeaponKillForAttacker(attackerUserId, weaponId)
+
+	-- Telemetría de combate. Va aquí y no colgada de RewardService a propósito:
+	-- las recompensas se cortan al llegar a MatchCashCap/MatchXPCap, así que
+	-- contar kills por esa vía las trunca justo para quien más mata. Sólo
+	-- escribe en memoria; el envío vive en el loop de flush.
+	local telemetryCategory, telemetryWeapon = _resolveWeaponItem(weaponId)
+	if telemetryCategory and telemetryWeapon then
+		TelemetryService.RecordCombat(attacker, telemetryCategory, telemetryWeapon, victimIsBot, wasHeadshot)
+	end
 	-- S2: una kill humana dropea un health pickup client-side; registramos el
 	-- crédito para que el RequestPickup correspondiente se valide server-side.
 	_recordPickupEligibility(attackerUserId)
@@ -795,7 +821,8 @@ local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?, a
 		return
 	end
 
-	_creditKillToAttacker(attackerUserId, attackerWeaponId, attackerWasHeadshot == true)
+	-- Víctima jugador: PvP.
+	_creditKillToAttacker(attackerUserId, attackerWeaponId, attackerWasHeadshot == true, false)
 end
 
 local function _ensureTeams()
@@ -1086,6 +1113,101 @@ local function _ensureActiveMapContainer(): BasePart
 	return container
 end
 
+--[[
+	Emite MATCH_END: una fila por ronda y una por participante.
+
+	Se llama en el desmontaje, ANTES de _clearActiveMap() y de _round = nil,
+	que es la última ventana donde el mapa, el marcador y las stats de ronda
+	siguen vivos.
+
+	Bots incluidos, con su fakeUserId negativo. No se filtran aquí: el backend
+	guarda `is_bot` como dimensión para que separar humanos sea una consulta y
+	no obligue a reinstrumentar el juego si algún día cambia el criterio.
+
+	El loadout sale del perfil (Loadout.MainWeapon/SpecialWeapon) en lugar de
+	instrumentar el equipado en vivo: es el mismo dato y evita tocar la ruta
+	crítica de spawn. Cruzarlo con el resultado es lo que produce el win rate
+	por arma — la señal que distingue un arma rota de una simplemente popular.
+]]
+local function _emitMatchEndTelemetry()
+	local round = _round
+	if not round or _activeMapName == "" then
+		return
+	end
+
+	local winningTeam = if round.scoreA > round.scoreB
+		then "A"
+		elseif round.scoreB > round.scoreA then "B"
+		else ""
+
+	local reachedLimit = round.scoreA >= GameConfig.WinScoreLimit or round.scoreB >= GameConfig.WinScoreLimit
+
+	-- Equipos de los bots: el roster es la única fuente, porque los bots no
+	-- tienen PlayerSession.
+	local botTeams: { [number]: string } = {}
+	if _AIService then
+		local ok, roster = pcall(function()
+			return _AIService:GetBotRoster()
+		end)
+		if ok and type(roster) == "table" then
+			for _, bot in roster do
+				botTeams[bot.fakeUserId] = bot.team
+			end
+		end
+	end
+
+	local players = {}
+	for participantId, stats in round.statsByUserId do
+		local isBot = participantId < 0
+		local team: string? = if isBot then botTeams[participantId] else nil
+		local mainWeapon, specialWeapon = "", ""
+
+		if not isBot then
+			local session = _sessions[participantId]
+			team = if session then session.team else nil
+
+			local player = Players:GetPlayerByUserId(participantId)
+			if player and _dataService then
+				local profile = _dataService:GetProfile(player)
+				local loadout = if profile and profile.Data then profile.Data.Loadout else nil
+				if loadout then
+					mainWeapon = loadout.MainWeapon or ""
+					specialWeapon = loadout.SpecialWeapon or ""
+				end
+			end
+		end
+
+		-- Sin equipo no hay resultado que calcular, así que la fila no aporta.
+		if team == "A" or team == "B" then
+			table.insert(players, {
+				participantId = participantId,
+				isBot = isBot,
+				team = team,
+				kills = stats.kills,
+				deaths = stats.deaths,
+				assists = stats.assists,
+				mainWeapon = mainWeapon,
+				specialWeapon = specialWeapon,
+			})
+		end
+	end
+
+	if #players == 0 then
+		return
+	end
+
+	TelemetryService.Enqueue("MATCH_END", {
+		matchId = HttpService:GenerateGUID(false),
+		mapName = _activeMapName,
+		durationSeconds = math.max(0, os.time() - round.startedAt),
+		scoreA = round.scoreA,
+		scoreB = round.scoreB,
+		winningTeam = winningTeam,
+		endReason = if reachedLimit then "score" else "timeout",
+		players = players,
+	})
+end
+
 local function _clearActiveMap()
 	if _activeMapContainer and _activeMapContainer.Parent then
 		_activeMapContainer:Destroy()
@@ -1318,6 +1440,10 @@ function _enterResults(winnerTeam: string)
 		end
 	end
 
+	-- Telemetría ANTES de desmontar: es la última ventana en la que el mapa,
+	-- el marcador y las stats de ronda siguen existiendo.
+	pcall(_emitMatchEndTelemetry)
+
 	-- Desmontar la ronda: mapa, listeners de muerte, campos de scope ronda de
 	-- las sesiones y el objeto Round entero (no hay tablas que "limpiar": la
 	-- siguiente ronda nace en un objeto nuevo).
@@ -1387,7 +1513,8 @@ local function _handleBotDied(botTeam: string, _botName: string, botHumanoid: Hu
 	end)
 
 	if attackerUserId and attackerUserId ~= botFakeUserId then
-		_creditKillToAttacker(attackerUserId, attackerWeaponId, attackerWasHeadshot)
+		-- Víctima bot: PvE.
+		_creditKillToAttacker(attackerUserId, attackerWeaponId, attackerWasHeadshot, true)
 	end
 
 	-- Los bots no usan streak: solo contabilizar kills/deaths para HUD.

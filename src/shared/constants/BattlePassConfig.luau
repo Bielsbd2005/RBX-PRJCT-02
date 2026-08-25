@@ -17,6 +17,8 @@
 
 	Convenciones:
 	  • Reward.Kind = "Cash" → usar Amount (number).
+	  • Reward.Kind = "Gems" → usar Amount (number). Moneda premium: junto con
+	    los packs de Robux es la ÚNICA forma de conseguir Gems.
 	  • Reward.Kind = "Item" → usar Category + ItemId (deben existir en ItemsConfig).
 	  • PremiumProductId = 0 indica "no configurado" (UI desactiva el botón).
 ]]
@@ -25,11 +27,11 @@
 -- TIPOS
 -- ────────────────────────────────────────────────────────────
 
-export type RewardKind = "Cash" | "Item"
+export type RewardKind = "Cash" | "Gems" | "Item"
 
 export type Reward = {
 	Kind: RewardKind,
-	Amount: number?,    -- Cash
+	Amount: number?,    -- Cash o Gems
 	Category: string?,  -- Item: "Hats" | "Faces" | "KillEffects" | "Outfits" | "Main" | "Special" | "WeaponWraps"
 	ItemId: string?,    -- Item: id en ItemsConfig
 	Icon: string?,      -- Override de UI (rbxassetid://...). Si nil, fallback a ItemsConfig.
@@ -76,6 +78,9 @@ BattlePassConfig.XPRates = {
 -- Icono por defecto para rewards Cash cuando un Reward no define Icon explícito.
 BattlePassConfig.RewardIcons = {
 	Cash = "rbxassetid://113694528712529",
+	-- TODO: subir el icono de Gems y pegar el assetId. Con 0 la UI cae al
+	-- icono de Cash, que confundiría las dos monedas: mejor dejarlo vacío.
+	Gems = "",
 }
 
 -- Curva de XP por tier. Tunear XP_BASE / XP_STEP mueve la curva entera.
@@ -87,6 +92,10 @@ end
 
 local function cash(amount: number): Reward
 	return { Kind = "Cash", Amount = amount }
+end
+
+local function gems(amount: number): Reward
+	return { Kind = "Gems", Amount = amount }
 end
 
 local function item(category: string, itemId: string): Reward
@@ -121,6 +130,19 @@ local REWARD_OVERRIDES: { [number]: Reward } = {
 	[20] = item("Hats", "Hat2"),
 	[25] = item("Faces", "Face9"),
 	[30] = item("Hats", "Hat3"),
+
+	-- Gems: repartidos por la temporada y escalando hacia el final, para que
+	-- el pase tenga tirón hasta el tier 64. Todos caen en niveles PARES, que
+	-- con `isPremiumLevel` son los de PASS: la moneda premium se reserva a
+	-- quien compró el pase. Ajustar cantidades aquí es el único sitio.
+	[8]  = gems(50),
+	[16] = gems(75),
+	[24] = gems(100),
+	[32] = gems(150),
+	[40] = gems(200),
+	[48] = gems(250),
+	[56] = gems(350),
+	[64] = gems(500),
 }
 
 -- Niveles PASS (requieren Premium). Regla por defecto: los pares son PASS, los

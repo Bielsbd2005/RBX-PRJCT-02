@@ -1,100 +1,209 @@
 --!strict
 
-export type StoreProductDefinition = {
+--[[
+	Catálogo de todo lo que se compra con Robux: los developer products de la
+	tienda (packs de Cash y de Gems) y los gamepasses.
+
+	Los packs son dos monedas con exactamente la misma forma: packs de Cash (Store.CashPage) y
+	packs de Gems (Store.GemsPage). Cada una declara una lista de datos puros y
+	`buildCatalog` deriva de ahí los índices que consumen cliente y servidor, así
+	que ambas monedas no pueden divergir por copy-paste.
+
+	Para editar el catálogo solo se tocan las listas de packs de más abajo:
+	  · el orden de la lista es el orden de aparición en la UI;
+	  · `Row` agrupa botones en Store.<PageName>.<Row>.<ButtonName>, y mover un
+	    pack de fila es cambiar ese campo (por defecto DEFAULT_ROW);
+	  · `PriceText` NO se escribe a mano: se deriva de `RobuxPrice` para que no
+	    puedan quedar desincronizados.
+
+	Cash y Gems son catálogos separados (y no una sola lista con un campo de
+	moneda) porque el binder del cliente busca cada botón bajo la página de su
+	catálogo: mezclarlos haría buscar los packs de Gems bajo CashPage y no
+	aparecerían.
+
+	ProductId = 0 significa "sin configurar" (mismo convenio que
+	`BattlePassConfig.PremiumProductId`): el pack queda fuera de `ByProductId`,
+	así que ProcessReceipt lo ignora, y el binder desactiva el botón. Hay que
+	crear los developer products reales en el panel de Roblox y pegar aquí
+	los IDs.
+]]
+
+-- Fila usada por los packs que no declaran `Row`.
+local DEFAULT_ROW = "Row1"
+
+-- El espacio inicial es la separación con el icono de Robux que la GUI dibuja
+-- a la izquierda del label.
+local PRICE_TEXT_FORMAT = " %d"
+
+-- ────────────────────────────────────────────────────────────
+-- TIPOS
+-- ────────────────────────────────────────────────────────────
+
+-- Campos comunes a todo pack, sea de la moneda que sea: es lo único que
+-- necesita el binder del cliente para localizar y cablear un botón.
+export type ProductBase = {
 	ButtonName: string,
-	-- Fila de la CashPage donde vive el botón (Store.CashPage.<Row>.<ButtonName>).
-	-- Mover un pack de fila = cambiar este campo. Default "Row1" si se omite.
+	-- Fila de la página donde vive el botón (Store.<PageName>.<Row>.<ButtonName>).
 	Row: string,
 	ProductId: number,
+	-- Precio ya formateado para el label (derivado de RobuxPrice).
 	PriceText: string,
 	RobuxPrice: number,
-	CashAmount: number,
 }
 
--- Fila lógica de la CashPage: nombre del contenedor (Store.CashPage.<RowName>) y
--- los productos que contiene, en orden de aparición.
-export type StoreRowLayout = {
+export type StoreProductDefinition = ProductBase & { CashAmount: number }
+export type GemProductDefinition = ProductBase & { GemAmount: number }
+
+-- Fila lógica de una página: nombre del contenedor (Store.<PageName>.<RowName>)
+-- y los productos que contiene, en orden de aparición.
+export type ProductRow<T> = {
 	RowName: string,
-	Products: { StoreProductDefinition },
+	Products: { T },
 }
 
-local PRODUCTS_IN_ORDER = {
-	{
-		ButtonName = "Cash1",
-		Row = "Row1",
-		ProductId = 3567132597,
-		RobuxPrice = 49,
-		PriceText = " 49",
-		CashAmount = 500,
-	},
-	{
-		ButtonName = "Cash2",
-		Row = "Row1",
-		ProductId = 3567132599,
-		RobuxPrice = 99,
-		PriceText = " 99",
-		CashAmount = 1250,
-	},
-	{
-		ButtonName = "Cash3",
-		Row = "Row1",
-		ProductId = 3567132598,
-		RobuxPrice = 199,
-		PriceText = " 199",
-		CashAmount = 3000,
-	},
-	{
-		ButtonName = "Cash4",
-		Row = "Row1",
-		ProductId = 3567132596,
-		RobuxPrice = 399,
-		PriceText = " 399",
-		CashAmount = 7000,
-	},
-	{
-		ButtonName = "Cash5",
-		Row = "Row1",
-		ProductId = 3567132595,
-		RobuxPrice = 799,
-		PriceText = " 799",
-		CashAmount = 15000,
-	},
-} :: { StoreProductDefinition }
+--[[
+	Gamepass de Roblox. Va aparte de los catálogos de packs a propósito: NO es un
+	developer product. No pasa por ProcessReceipt (no hay receipt ni PurchaseId
+	que idempotentizar), su posesión se consulta con `UserOwnsGamePassAsync` y es
+	permanente. Meterlo en un `Catalog` lo dejaría dentro de `ByProductId`, que es
+	justo el mapa con el que el dispatcher de receipts decide qué conceder: un id
+	de gamepass ahí concedería un pack de moneda por un receipt que nunca llega.
 
-local PRODUCTS_BY_BUTTON_NAME = {} :: { [string]: StoreProductDefinition }
-local PRODUCTS_BY_PRODUCT_ID = {} :: { [number]: StoreProductDefinition }
+	PassId = 0 significa "sin configurar" (mismo convenio que ProductId): nadie lo
+	posee, así que el beneficio se muestra bloqueado y no se concede.
+]]
+export type GamePassDefinition = {
+	-- Nombre legible; se usa como sku en analíticas.
+	Name: string,
+	PassId: number,
+}
 
--- Agrupación por fila, preservando el orden de primera aparición de cada Row en
--- PRODUCTS_IN_ORDER. Así el binder recorre filas en un orden estable y editar el
--- catálogo de arriba reordena la UI sin tocar código.
-local ROW_LAYOUT = {} :: { StoreRowLayout }
-local rowLayoutByName = {} :: { [string]: StoreRowLayout }
+export type Catalog<T> = {
+	-- Frame de la GUI que contiene las filas (Store.<PageName>).
+	PageName: string,
+	InOrder: { T },
+	ByButtonName: { [string]: T },
+	-- Solo packs configurados (ProductId > 0), para que un receipt jamás pueda
+	-- resolverse a un pack a medio crear.
+	ByProductId: { [number]: T },
+	-- Filas en el orden de primera aparición de cada `Row` en `InOrder`. Así el
+	-- binder recorre filas en un orden estable y reordenar la lista de packs
+	-- reordena la UI sin tocar código.
+	Rows: { ProductRow<T> },
+}
 
-for _, product in PRODUCTS_IN_ORDER do
-	PRODUCTS_BY_BUTTON_NAME[product.ButtonName] = product
-	if product.ProductId > 0 then
-		PRODUCTS_BY_PRODUCT_ID[product.ProductId] = product
+-- ────────────────────────────────────────────────────────────
+-- PACKS
+-- ────────────────────────────────────────────────────────────
+
+local CASH_PACKS = {
+	{ ButtonName = "Cash1", ProductId = 3567132597, RobuxPrice = 49, CashAmount = 500 },
+	{ ButtonName = "Cash2", ProductId = 3567132599, RobuxPrice = 99, CashAmount = 1250 },
+	{ ButtonName = "Cash3", ProductId = 3567132598, RobuxPrice = 199, CashAmount = 3000 },
+	{ ButtonName = "Cash4", ProductId = 3567132596, RobuxPrice = 399, CashAmount = 7000 },
+	{ ButtonName = "Cash5", ProductId = 3567132595, RobuxPrice = 799, CashAmount = 15000 },
+}
+
+-- Moneda premium. ProductId = 0 → pendientes de crear en el panel de Roblox.
+local GEM_PACKS = {
+	{ ButtonName = "Gems1", ProductId = 0, RobuxPrice = 49, GemAmount = 100 },
+	{ ButtonName = "Gems2", ProductId = 0, RobuxPrice = 99, GemAmount = 250 },
+	{ ButtonName = "Gems3", ProductId = 0, RobuxPrice = 199, GemAmount = 600 },
+	{ ButtonName = "Gems4", ProductId = 0, RobuxPrice = 399, GemAmount = 1400 },
+	{ ButtonName = "Gems5", ProductId = 0, RobuxPrice = 799, GemAmount = 3000 },
+}
+
+-- Gamepasses. No hay índices que derivar (son un puñado y se consultan por
+-- nombre), así que se declaran ya en su forma final.
+local GAME_PASSES = table.freeze({
+	-- Bonus de cash de fin de partida: el bonus "VIP" de ResultsRewards.
+	-- TODO: pegar el id real del gamepass VIP del panel de Roblox.
+	VIP = table.freeze({ Name = "VIP", PassId = 0 }) :: GamePassDefinition,
+})
+
+-- ────────────────────────────────────────────────────────────
+-- ÍNDICES DERIVADOS
+-- ────────────────────────────────────────────────────────────
+
+--[[
+	Convierte una lista de packs en un catálogo listo para consumir: rellena los
+	campos derivados (Row por defecto, PriceText), congela cada producto y
+	construye los índices por botón, por productId y por fila.
+
+	Los errores son de configuración (dos packs con el mismo botón o el mismo
+	developer product), así que revientan al requerir el módulo: en Studio salta
+	en cuanto se edita la lista, mucho antes de que un receipt entregue el pack
+	equivocado.
+]]
+local function buildCatalog(pageName: string, packs: { any }): Catalog<any>
+	local inOrder = {} :: { any }
+	local byButtonName = {} :: { [string]: any }
+	local byProductId = {} :: { [number]: any }
+	local rows = {} :: { ProductRow<any> }
+	local rowsByName = {} :: { [string]: ProductRow<any> }
+
+	for _, pack in packs do
+		local product = table.clone(pack)
+		product.Row = pack.Row or DEFAULT_ROW
+		product.PriceText = string.format(PRICE_TEXT_FORMAT, pack.RobuxPrice)
+		table.freeze(product)
+
+		if byButtonName[product.ButtonName] then
+			error(`[StoreProducts] {pageName}: ButtonName duplicado "{product.ButtonName}"`)
+		end
+		byButtonName[product.ButtonName] = product
+
+		if product.ProductId > 0 then
+			local clash = byProductId[product.ProductId]
+			if clash then
+				error(
+					`[StoreProducts] {pageName}: ProductId {product.ProductId} repetido en "{clash.ButtonName}" y "{product.ButtonName}"`
+				)
+			end
+			byProductId[product.ProductId] = product
+		end
+
+		local row = rowsByName[product.Row]
+		if not row then
+			row = { RowName = product.Row, Products = {} }
+			rowsByName[product.Row] = row
+			table.insert(rows, row)
+		end
+		table.insert(row.Products, product)
+		table.insert(inOrder, product)
 	end
 
-	local rowName = product.Row
-	local row = rowLayoutByName[rowName]
-	if not row then
-		row = { RowName = rowName, Products = {} }
-		rowLayoutByName[rowName] = row
-		table.insert(ROW_LAYOUT, row)
+	for _, row in rows do
+		table.freeze(row.Products)
+		table.freeze(row)
 	end
-	table.insert(row.Products, product)
+
+	return table.freeze({
+		PageName = pageName,
+		InOrder = table.freeze(inOrder),
+		ByButtonName = table.freeze(byButtonName),
+		ByProductId = table.freeze(byProductId),
+		Rows = table.freeze(rows),
+	})
 end
 
-for _, row in ROW_LAYOUT do
-	table.freeze(row.Products)
-	table.freeze(row)
+local Cash = buildCatalog("CashPage", CASH_PACKS) :: Catalog<StoreProductDefinition>
+local Gems = buildCatalog("GemsPage", GEM_PACKS) :: Catalog<GemProductDefinition>
+
+-- El dispatcher de receipts (ServerBootstrap) prueba un catálogo tras otro, así
+-- que un mismo developer product en ambos entregaría la moneda equivocada según
+-- el orden de las comprobaciones.
+for productId, gemPack in Gems.ByProductId do
+	local cashPack = Cash.ByProductId[productId]
+	if cashPack then
+		error(
+			`[StoreProducts] ProductId {productId} usado por Cash "{cashPack.ButtonName}" y Gems "{gemPack.ButtonName}"`
+		)
+	end
 end
 
 return table.freeze({
-	ProductsInOrder = table.freeze(PRODUCTS_IN_ORDER),
-	ProductsByButtonName = table.freeze(PRODUCTS_BY_BUTTON_NAME),
-	ProductsByProductId = table.freeze(PRODUCTS_BY_PRODUCT_ID),
-	-- Layout por filas para la CashPage (Row1, Row2, …), en orden.
-	RowLayout = table.freeze(ROW_LAYOUT),
+	Cash = Cash,
+	Gems = Gems,
+	GamePasses = GAME_PASSES,
 })

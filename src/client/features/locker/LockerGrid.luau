@@ -38,9 +38,6 @@ export type LockerCatalogItem = {
 	-- En la vista Maestry, marca un desafío YA desbloqueado (poseído): la tarjeta
 	-- muestra "UNLOCKED" en lugar del progreso de kills.
 	ChallengeUnlocked: boolean?,
-	-- Nombre de la case/caja de la que se obtiene el wrap (si aplica). En Collection
-	-- la tarjeta muestra este nombre como forma de obtención (en vez del precio).
-	Case: string?,
 }
 
 export type TemplateKey = "default" | "wraps"
@@ -132,7 +129,7 @@ local GRID_BUTTON_HOVER_SCALE = UITheme.ButtonHoverScale
 local GRID_BUTTON_CLICK_SCALE = UITheme.ButtonClickScale
 local GRID_ITEM_DEFAULT_COLOR = Color3.fromRGB(255, 255, 255)
 local GRID_ITEM_LOCKED_COLOR = Color3.fromRGB(24, 24, 24)
--- Wrap no desbloqueado (ni por mastery ni por case): en vez del viewport 3D se
+-- Wrap no desbloqueado (por mastery): en vez del viewport 3D se
 -- muestra esta imagen placeholder en Item.
 local WRAP_LOCKED_PLACEHOLDER_IMAGE = "rbxassetid://82849715642061"
 local STROKE_DEFAULT = UITheme.StrokeDefault
@@ -403,12 +400,8 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 			elseif isOwned then
 				refs.statusValueNode.Text = "OWNED"
 			else
-				-- Collection: wrap no poseído → cómo se obtiene. Si pertenece a una
-				-- case, el nombre de la caja; si es comprable con cash, el precio.
-				local caseName = item.Case
-				if caseName and caseName ~= "" then
-					refs.statusValueNode.Text = caseName
-				elseif item.CanPurchase and item.Price > 0 then
+				-- Wrap no poseído comprable con cash → precio.
+				if item.CanPurchase and item.Price > 0 then
 					refs.statusValueNode.Text = UIUtils.formatCashAmount(item.Price)
 				else
 					refs.statusValueNode.Text = ""
@@ -573,13 +566,13 @@ end
 -- Sincroniza viewport 3D vs. imagen placeholder de un wrap según posesión.
 -- Se llama tanto al pintar el card (_applyCatalogItemToCard) como al
 -- refrescar visual sin repoblar (_updateGridCardVisual), para que un wrap que
--- se desbloquea mientras el grid ya está abierto (case recién abierta, kill
--- challenge completado) pase de placeholder a render 3D sin necesitar Populate.
+-- se desbloquea mientras el grid ya está abierto (kill challenge completado)
+-- pase de placeholder a render 3D sin necesitar Populate.
 function LockerGrid:_syncWrapPreviewVisibility(card: GuiObject, item: LockerCatalogItem, isOwned: boolean)
 	local refs = self:_getGridCardRefs(card)
 	local isWrap = item.Category == LockerCategory.WEAPON_WRAPS
-	-- Wrap bloqueado (ni mastery ni case): no renderizar el viewport 3D, mostrar
-	-- el placeholder en Item en su lugar.
+	-- Wrap bloqueado (mastery no completada): no renderizar el viewport 3D,
+	-- mostrar el placeholder en Item en su lugar.
 	local isLockedWrap = isWrap and not isOwned
 	local needsViewport = not isLockedWrap
 		and (shouldUseWeaponWrapViewportPreview(item) or (refs.templateKey == "wraps" and isWrap))

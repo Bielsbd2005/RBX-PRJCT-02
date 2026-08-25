@@ -15,7 +15,7 @@
 	MatchService transiciona a Loading.
 ]]
 
-local AnalyticsService = game:GetService("AnalyticsService")
+local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -24,6 +24,7 @@ local Network = require(Shared.networking.Network)
 local NetGuards = require(Shared.networking.NetGuards)
 local GameConfig = require(Shared.GameConfig)
 local MatchSnapshot = require(Shared.MatchSnapshot)
+local TelemetryService = require(script.Parent.Parent.Parent.core.TelemetryService)
 
 type MapDefinition = typeof(GameConfig.Maps[1])
 
@@ -205,16 +206,41 @@ local function _finishVote(vote: ActiveVoteState)
 	for _ in vote.votesByUserId do
 		totalVoters += 1
 	end
-	local anyPlayer = Players:GetPlayers()[1]
-	if anyPlayer then
-		pcall(function()
-			AnalyticsService:LogCustomEvent(anyPlayer, "MapVoteWinner", 1, {
-				map = winner,
-				voters = tostring(totalVoters),
-				playerCount = tostring(#Players:GetPlayers()),
-			})
-		end)
+	--[[
+		Se envía el reparto COMPLETO, no sólo el ganador. Con el ganador solo
+		no se puede decidir nada: un mapa que gana siempre podría estar
+		ganando porque nunca se enfrenta a rivales fuertes. Hacen falta las
+		tres cosas — opciones ofrecidas (exposición), votos por opción
+		(preferencia) y abstención (indiferencia).
+	]]
+	local votesByMap: { [string]: number } = {}
+	local randomVotes = 0
+	for _, mapName in vote.votesByUserId do
+		if mapName == RANDOM_KEY then
+			randomVotes += 1
+		else
+			votesByMap[mapName] = (votesByMap[mapName] or 0) + 1
+		end
 	end
+
+	-- Las opciones con CERO votos se envían igual: son el denominador de
+	-- exposición. Sin ellas no se distingue un mapa querido de uno que
+	-- simplemente sale mucho.
+	local options = {}
+	for _, mapName in vote.optionNames do
+		table.insert(options, { mapName = mapName, votes = votesByMap[mapName] or 0 })
+	end
+
+	TelemetryService.Enqueue("MAP_VOTE", {
+		voteId = HttpService:GenerateGUID(false),
+		winnerMap = winner,
+		-- Elegibles frente a emitidos: con VoteDuration = 15s, no votar es una
+		-- señal real de indiferencia hacia los mapas ofrecidos.
+		eligibleVoters = #Players:GetPlayers(),
+		castVotes = totalVoters,
+		randomVotes = randomVotes,
+		options = options,
+	})
 
 	MatchSnapshot.set({
 		WinnerMapName = winner,

@@ -9,9 +9,61 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ActionRewards = require(Shared:WaitForChild("constants"):WaitForChild("ActionRewards"))
 local StoreProducts = require(Shared:WaitForChild("constants"):WaitForChild("StoreProducts"))
 
-local STORE_PRODUCTS_BY_ID = StoreProducts.ProductsByProductId :: { [number]: { CashAmount: number, ButtonName: string, RobuxPrice: number } }
+local TelemetryService = require(script.Parent.Parent.core.TelemetryService)
 
-local EconomyAnalytics = require(script.Parent.Parent.core.EconomyAnalytics)
+--[[
+	Packs de Robux que concede este dispatcher, uno por moneda. TODO lo que
+	distingue un pack de Cash de uno de Gems vive aquí como datos; el camino de
+	concesión (`grantPackPurchase`) es uno solo. Mientras fueron dos bloques
+	gemelos, cada arreglo de idempotencia o de durabilidad había que acordarse
+	de replicarlo en el otro.
+
+	Los packs sin ProductId configurado no entran en `ByProductId`, así que un
+	receipt nunca puede resolverse a un pack a medio crear.
+]]
+type PackKind = {
+	Catalog: StoreProducts.Catalog<any>,
+	GetAmount: (any) -> number,
+	-- Stats del profile: saldo y contador acumulado de la moneda.
+	BalanceStat: string,
+	TotalEarnedStat: string,
+	Currency: TelemetryService.Currency,
+	TelemetryKind: TelemetryService.PurchaseKind,
+}
+
+local PACK_KINDS: { PackKind } = {
+	{
+		Catalog = StoreProducts.Cash,
+		GetAmount = function(product: StoreProducts.StoreProductDefinition)
+			return product.CashAmount
+		end,
+		BalanceStat = "Cash",
+		TotalEarnedStat = "TotalCashEarned",
+		Currency = "Cash",
+		TelemetryKind = "CashPack",
+	},
+	{
+		Catalog = StoreProducts.Gems,
+		GetAmount = function(product: StoreProducts.GemProductDefinition)
+			return product.GemAmount
+		end,
+		BalanceStat = "Gems",
+		TotalEarnedStat = "TotalGemsEarned",
+		Currency = "Gems",
+		TelemetryKind = "GemPack",
+	},
+}
+
+-- Primer pack (de cualquier moneda) que declara este developer product.
+local function resolvePack(productId: number): (PackKind?, any)
+	for _, kind in PACK_KINDS do
+		local product = kind.Catalog.ByProductId[productId]
+		if product then
+			return kind, product
+		end
+	end
+	return nil, nil
+end
 
 local ServerBootstrap = {}
 
@@ -28,7 +80,6 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	local DataService = require(serverRoot.core.data.DataService)
 	local RewardService = require(serverRoot.core.RewardService)
 	local ShopService = require(serverRoot.features.shop.ShopService)
-	local WrapCasesService = require(serverRoot.features.shop.WrapCasesService)
 	local SettingsService = require(serverRoot.features.settings.SettingsService)
 	local RewardsService = require(serverRoot.features.rewards.RewardsService)
 	local MatchService = require(serverRoot.features.match.MatchService)
@@ -41,21 +92,126 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	local TrainingDummyService = require(serverRoot.features.testing.TrainingDummyService)
 
 	DataService:Start()
+
+	--[[
+		TelemetryService antes que RewardService por el mismo motivo que
+		RewardService va antes que el resto: quien emite eventos necesita el
+		servicio listo. Si arrancara después, los flujos de cash de la ventana
+		inicial se perderían en silencio.
+
+		El contador de bots se INYECTA en vez de requerir AI desde `core`
+		(invertiría la dependencia core → features). Se resuelve de forma lazy
+		dentro del closure porque MatchService carga AIService en su propio
+		Start, que corre más tarde que este bloque. `require` está memoizado en
+		Roblox, así que devuelve la misma instancia que usa MatchService.
+	]]
+	local _aiForTelemetry: any = nil
+	local function _botCount(): number
+		if not _aiForTelemetry then
+			local aiModule = serverRoot:FindFirstChild("AI")
+			if aiModule and aiModule:IsA("ModuleScript") then
+				local ok, result = pcall(require, aiModule)
+				if ok then
+					_aiForTelemetry = result
+				end
+			end
+		end
+
+		local service = _aiForTelemetry
+		if not service or type(service.GetBotRoster) ~= "function" then
+			return 0
+		end
+		local ok, roster = pcall(function()
+			return service:GetBotRoster()
+		end)
+		return if ok and type(roster) == "table" then #roster else 0
+	end
+
+	TelemetryService.Start(DataService, _botCount)
+
 	-- RewardService arranca justo después de DataService: cualquier service
 	-- que conceda XP o Cash (MatchService, RewardsService, DailyTasksService,
 	-- WeaponsSystem injected) lo necesita listo antes de su propio Start.
 	RewardService.Start(DataService)
 	ShopService:Start(DataService)
-	WrapCasesService:Start(DataService)
 	SettingsService:Start(DataService)
 	RewardsService:Start(DataService)
 	BattlePassService:Start(DataService)
 	GiftingService:Start(DataService)
 	DailyTasksService:Start(DataService)
 
-	-- ProcessReceipt dispatcher central: delega BattlePass primero, luego Cash
-	-- store products. Vive aquí (cross-cutting) en lugar de en una feature para
-	-- que la responsabilidad sea explícita y no quede acoplada a una sola.
+	--[[
+		Concede un pack de Robux (Cash o Gems) y devuelve la decisión del receipt,
+		o nil si el ProductId no es de ningún pack (para que el dispatcher siga
+		probando handlers).
+
+		Ambas monedas comparten el camino entero; lo único que cambia son los
+		datos de PACK_KINDS. Contrato de durabilidad: idempotencia por PurchaseId
+		+ ForceSave confirmado ANTES de conceder, porque Roblox da por consumido
+		el receipt en cuanto devolvemos PurchaseGranted.
+	]]
+	local function grantPackPurchase(receiptInfo: any): Enum.ProductPurchaseDecision?
+		local kind, product = resolvePack(receiptInfo.ProductId)
+		if not kind or not product then
+			return nil
+		end
+
+		local buyer = Players:GetPlayerByUserId(receiptInfo.PlayerId)
+		if not buyer then
+			return Enum.ProductPurchaseDecision.NotProcessedYet
+		end
+
+		-- Idempotencia: si ya procesamos este PurchaseId, no re-otorgar la moneda.
+		-- Aun así forzamos un save: si un intento anterior concedió en memoria
+		-- pero no llegó a persistir, esto lo confirma antes de devolver
+		-- PurchaseGranted (Roblox consume el receipt al concederlo).
+		local purchaseId = tostring(receiptInfo.PurchaseId)
+		if DataService:IsReceiptProcessed(buyer, purchaseId) then
+			if DataService:ForceSave(buyer) then
+				return Enum.ProductPurchaseDecision.PurchaseGranted
+			end
+			return Enum.ProductPurchaseDecision.NotProcessedYet
+		end
+
+		local amount = kind.GetAmount(product)
+
+		-- Atómico: grant de la moneda + mark receipt en el mismo BatchUpdate.
+		local ok = DataService:BatchUpdate(buyer, {
+			{ path = { "Stats", kind.BalanceStat }, delta = amount },
+			{ path = { "Stats", kind.TotalEarnedStat }, delta = amount },
+			{ path = { "Stats", "TotalRobuxSpent" }, delta = product.RobuxPrice },
+			{ path = { "ProcessedReceipts", purchaseId }, value = os.time() },
+		})
+		if not ok then
+			return Enum.ProductPurchaseDecision.NotProcessedYet
+		end
+
+		-- Roblox no espera a nuestro write: save confirmado ANTES de conceder.
+		-- Si falla, NotProcessedYet hace que reentregue el receipt (la
+		-- idempotencia de arriba evita el doble-grant).
+		if not DataService:ForceSave(buyer) then
+			return Enum.ProductPurchaseDecision.NotProcessedYet
+		end
+
+		TelemetryService.RecordFlow(buyer, "source", "RobuxPurchase", amount, product.ButtonName, kind.Currency)
+		TelemetryService.RecordPurchase({
+			userId = buyer.UserId,
+			purchaseId = purchaseId,
+			productId = receiptInfo.ProductId,
+			sku = product.ButtonName,
+			robuxPrice = product.RobuxPrice,
+			-- El payload solo tiene columna de cash: un pack de Gems reporta 0 y
+			-- se distingue por `kind`.
+			cashGranted = if kind.Currency == "Cash" then amount else 0,
+			kind = kind.TelemetryKind,
+		})
+		return Enum.ProductPurchaseDecision.PurchaseGranted
+	end
+
+	-- ProcessReceipt dispatcher central: prueba BattlePass, luego regalos y por
+	-- último los packs de moneda (Cash y Gems). Vive aquí (cross-cutting) en
+	-- lugar de en una feature para que la responsabilidad sea explícita y no
+	-- quede acoplada a una sola.
 	MarketplaceService.ProcessReceipt = function(receiptInfo: any): Enum.ProductPurchaseDecision
 		local bpDecision = BattlePassService:ProcessReceipt(receiptInfo)
 		if bpDecision ~= nil then
@@ -70,48 +226,9 @@ function ServerBootstrap.start(serverRoot: Script): ()
 			return giftDecision
 		end
 
-		local storeProduct = STORE_PRODUCTS_BY_ID[receiptInfo.ProductId]
-		if storeProduct then
-			local buyer = Players:GetPlayerByUserId(receiptInfo.PlayerId)
-			if not buyer then
-				return Enum.ProductPurchaseDecision.NotProcessedYet
-			end
-
-			-- Idempotencia: si ya procesamos este PurchaseId, no re-otorgar Cash.
-			-- Aun así forzamos un save: si un intento anterior concedió en memoria
-			-- pero no llegó a persistir, esto lo confirma antes de devolver
-			-- PurchaseGranted (Roblox consume el receipt al concederlo).
-			local purchaseId = tostring(receiptInfo.PurchaseId)
-			if DataService:IsReceiptProcessed(buyer, purchaseId) then
-				if DataService:ForceSave(buyer) then
-					return Enum.ProductPurchaseDecision.PurchaseGranted
-				end
-				return Enum.ProductPurchaseDecision.NotProcessedYet
-			end
-
-			-- Atómico: grant Cash + mark receipt en el mismo BatchUpdate.
-			local ok = DataService:BatchUpdate(buyer, {
-				{ path = { "Stats", "Cash" }, delta = storeProduct.CashAmount },
-				{ path = { "Stats", "TotalCashEarned" }, delta = storeProduct.CashAmount },
-				{ path = { "Stats", "TotalRobuxSpent" }, delta = storeProduct.RobuxPrice },
-				{ path = { "ProcessedReceipts", purchaseId }, value = os.time() },
-			})
-			if not ok then
-				return Enum.ProductPurchaseDecision.NotProcessedYet
-			end
-
-			-- Durabilidad del receipt: Roblox da por consumido el receipt al
-			-- devolver PurchaseGranted, sin esperar a nuestro write. Forzamos un
-			-- save confirmado ANTES de conceder; si falla, NotProcessedYet hace que
-			-- Roblox reentregue (la idempotencia de arriba evita doble-grant).
-			if not DataService:ForceSave(buyer) then
-				return Enum.ProductPurchaseDecision.NotProcessedYet
-			end
-
-			local profile = DataService:GetProfile(buyer)
-			local balance = if profile and profile.Data then profile.Data.Stats.Cash else 0
-			EconomyAnalytics.Source(buyer, storeProduct.CashAmount, balance, "RobuxPurchase", storeProduct.ButtonName)
-			return Enum.ProductPurchaseDecision.PurchaseGranted
+		local packDecision = grantPackPurchase(receiptInfo)
+		if packDecision ~= nil then
+			return packDecision
 		end
 
 		warn("[ServerBootstrap] Unknown ProductId:", receiptInfo.ProductId)
@@ -190,6 +307,20 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	-- ── Onboarding Funnel ──────────────────────────────────────
 	-- Track first-session players through: Joined → FirstMatch → FirstKill →
 	-- MatchCompleted → ReturnedToLobby. Only fires for JoinCount == 1.
+	--
+	-- Sin sessionId: el embudo corre UNA sola vez por jugador (el gate de
+	-- JoinCount == 1 lo garantiza), así que no hay intentos que desambiguar.
+	local ONBOARDING_STEP_NAMES: { [number]: string } = {
+		[1] = "Joined",
+		[2] = "FirstMatchStarted",
+		[3] = "FirstKill",
+		[4] = "FirstMatchCompleted",
+		[5] = "ReturnedToLobby",
+	}
+	local function onboardingStep(player: Player, step: number)
+		TelemetryService.RecordFunnelStep(player, "onboarding", step, ONBOARDING_STEP_NAMES[step])
+	end
+
 	local _onboardingPlayers: { [number]: true } = {}
 
 	DataService.ProfileLoaded:Connect(function(player: Player)
@@ -198,7 +329,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 		local joinCount = profile.Data.Metadata.JoinCount
 		if joinCount == 1 then
 			_onboardingPlayers[player.UserId] = true
-			EconomyAnalytics.OnboardingStep(player, 1)
+			onboardingStep(player, 1)
 		end
 	end)
 
@@ -208,25 +339,25 @@ function ServerBootstrap.start(serverRoot: Script): ()
 
 	MatchService.OnPlayerJoinedMatch = function(player: Player)
 		if _onboardingPlayers[player.UserId] then
-			EconomyAnalytics.OnboardingStep(player, 2)
+			onboardingStep(player, 2)
 		end
 	end
 
 	MatchService.OnPlayerFirstKill = function(player: Player)
 		if _onboardingPlayers[player.UserId] then
-			EconomyAnalytics.OnboardingStep(player, 3)
+			onboardingStep(player, 3)
 		end
 	end
 
 	MatchService.OnPlayerMatchCompleted = function(player: Player)
 		if _onboardingPlayers[player.UserId] then
-			EconomyAnalytics.OnboardingStep(player, 4)
+			onboardingStep(player, 4)
 		end
 	end
 
 	MatchService.OnPlayerReturnedToLobby = function(player: Player)
 		if _onboardingPlayers[player.UserId] then
-			EconomyAnalytics.OnboardingStep(player, 5)
+			onboardingStep(player, 5)
 			_onboardingPlayers[player.UserId] = nil
 		end
 	end

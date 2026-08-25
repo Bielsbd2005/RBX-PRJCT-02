@@ -46,6 +46,19 @@ export type PlayerProfile = DataTemplateModule.PlayerProfile
 export type Profile = { Data: PlayerProfile }
 export type Replica = { Data: PlayerProfile }
 
+--[[
+	Signal SÍNCRONO para ProfileUnloading. No es un RBXScriptSignal a propósito
+	— ver `_newProfileSignal` para el porqué.
+]]
+export type ProfileConnection = {
+	Disconnect: (self: ProfileConnection) -> (),
+}
+
+export type ProfileSignal = {
+	Connect: (self: ProfileSignal, handler: (player: Player) -> ()) -> ProfileConnection,
+	Fire: (self: ProfileSignal, player: Player) -> (),
+}
+
 -- Entry de un BatchUpdate. `value` o `delta` (no ambos) deben venir set.
 export type BatchUpdateEntry = {
 	path: { string },
@@ -75,7 +88,7 @@ export type DataServiceModule = {
 	ViewProfileAsync: (self: DataServiceModule, userId: number, timeoutSeconds: number?) -> (any, boolean),
 	Destroy: (self: DataServiceModule) -> (),
 	ProfileLoaded: RBXScriptSignal,
-	ProfileUnloading: RBXScriptSignal,
+	ProfileUnloading: ProfileSignal,
 }
 
 local AUTO_SAVE_INTERVAL_SECONDS = 30
@@ -134,8 +147,73 @@ local _serviceGeneration = 0
 
 -- Signals públicos. Otros servicios se suscriben para reaccionar a eventos
 -- del ciclo de vida del perfil sin tener que polling-ear GetProfile.
+--
+-- ProfileLoaded sigue siendo un BindableEvent (diferido): sus consumidores
+-- pueden yieldear sin peligro porque el perfil sigue cargado cuando corren.
 local _profileLoadedBindable = Instance.new("BindableEvent")
-local _profileUnloadingBindable = Instance.new("BindableEvent")
+
+--[[
+	_newProfileSignal: signal mínimo que ejecuta sus handlers EN EL ACTO.
+
+	Por qué no un BindableEvent
+	---------------------------
+	Con `SignalBehavior = Deferred` (el default de Roblox) `BindableEvent:Fire()`
+	NO ejecuta los handlers en la llamada: los encola hasta el siguiente punto
+	de reanudación. En la ruta de descarga eso los hacía correr DESPUÉS de
+	`profile:EndSession()` y de `_profiles[userId] = nil`, así que cualquier
+	consumidor que llamara a `GetProfile(player)` recibía nil y leía un perfil
+	inexistente — en silencio, porque el guard habitual es `if profile then`.
+
+	Síntoma real que motivó el cambio: los SESSION_END de TelemetryService
+	llegaban al backend sin balances, sin createdAt y sin battle pass, con lo
+	que el dashboard calculaba supply, Gini y percentiles de riqueza sobre
+	ceros. La ruta de BindToClose no estaba afectada (allí `_profiles` no se
+	limpia dentro del bucle), lo que hacía el fallo aún más difícil de ver.
+
+	CONTRATO PARA LOS CONSUMIDORES
+	------------------------------
+	Los handlers corren inline dentro de la descarga del perfil, justo antes de
+	cerrar la sesión de ProfileStore. NO deben yieldear: un yield aquí retrasa
+	el EndSession y, por tanto, el guardado. Si necesitas trabajo con yield,
+	haz el snapshot síncrono aquí y difiere el resto con task.spawn.
+
+	Cada handler va envuelto en pcall: un consumidor roto nunca puede tumbar el
+	guardado de datos del jugador, que es la razón de ser de esta ruta.
+]]
+local function _newProfileSignal(signalName: string): ProfileSignal
+	local handlers: { [number]: (player: Player) -> () } = {}
+	local nextHandlerId = 0
+
+	return {
+		Connect = function(_self, handler): ProfileConnection
+			nextHandlerId += 1
+			local id = nextHandlerId
+			handlers[id] = handler
+			return {
+				Disconnect = function(_selfConnection)
+					handlers[id] = nil
+				end,
+			}
+		end,
+
+		Fire = function(_self, player)
+			-- Snapshot antes de iterar: un handler puede desconectarse a sí
+			-- mismo (o conectar otro) durante el propio Fire.
+			local snapshot: { (player: Player) -> () } = {}
+			for _, handler in handlers do
+				table.insert(snapshot, handler)
+			end
+			for _, handler in snapshot do
+				local ok, err = pcall(handler, player)
+				if not ok then
+					warn(("[DataService] Handler de %s falló: %s"):format(signalName, tostring(err)))
+				end
+			end
+		end,
+	}
+end
+
+local _profileUnloadingSignal = _newProfileSignal("ProfileUnloading")
 
 -- ────────────────────────────────────────────────────────────
 -- HELPERS DE MUTACIÓN INMUTABLE
@@ -194,8 +272,10 @@ DataService.__index = DataService
 --                              GetReplica devuelven valores válidos.
 --   ProfileUnloading(player) — disparado ANTES de destruir la Replica y cerrar
 --                              la sesión; el perfil aún es modificable.
+--                              SÍNCRONO: el handler corre inline y NO debe
+--                              yieldear (ver _newProfileSignal).
 DataService.ProfileLoaded = _profileLoadedBindable.Event
-DataService.ProfileUnloading = _profileUnloadingBindable.Event
+DataService.ProfileUnloading = _profileUnloadingSignal
 
 local function _isGenerationActive(generation: number): boolean
 	return _started and _serviceGeneration == generation
@@ -512,8 +592,9 @@ local function _loadPlayer(player: Player): ()
 			-- 1. Acumular TimePlayedSeconds vía Increment (atómico, marca dirty,
 			--    se replica al cliente — útil si hay UI mostrándolo en tiempo
 			--    real al final de partida).
-			-- 2. Disparar ProfileUnloading (consumidores con yield NO bloquean
-			--    el TimePlayed write, ya está hecho).
+			-- 2. Disparar ProfileUnloading. El signal es síncrono, así que los
+			--    consumidores ven el perfil todavía vivo (GetProfile funciona);
+			--    a cambio no pueden yieldear sin retrasar el EndSession de (4).
 			-- 3. Destruir Replica (desreplica al cliente).
 			-- 4. Finalizar sesión de ProfileStore (guarda y libera lock).
 			local sessionStart = os.time()
@@ -526,7 +607,7 @@ local function _loadPlayer(player: Player): ()
 					DataService:Increment(player, { "Stats", "TimePlayedSeconds" }, sessionSeconds)
 				end
 
-				_profileUnloadingBindable:Fire(player)
+				_profileUnloadingSignal:Fire(player)
 
 				replica:Destroy()
 				profile:EndSession()
@@ -697,7 +778,7 @@ function DataService:Start(): ()
 				pcall(function()
 					local player = Players:GetPlayerByUserId(userId)
 					if player then
-						_profileUnloadingBindable:Fire(player)
+						_profileUnloadingSignal:Fire(player)
 					end
 				end)
 				pcall(function()

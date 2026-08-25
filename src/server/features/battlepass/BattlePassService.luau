@@ -33,7 +33,7 @@ local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
 
 local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
 type DataService = DataServiceMod.DataServiceModule
-local EconomyAnalytics = require(script.Parent.Parent.Parent.core.EconomyAnalytics)
+local TelemetryService = require(script.Parent.Parent.Parent.core.TelemetryService)
 
 local MAX_LEVELUP_ITERATIONS = 200 -- guard contra loops infinitos por XP descomunal
 
@@ -235,6 +235,9 @@ local function _rewardToOp(reward: BattlePassConfig.Reward): { path: { string },
 	if reward.Kind == "Cash" then
 		return { path = { "Stats", "Cash" }, delta = math.max(0, math.floor(reward.Amount or 0)) }
 	end
+	if reward.Kind == "Gems" then
+		return { path = { "Stats", "Gems" }, delta = math.max(0, math.floor(reward.Amount or 0)) }
+	end
 	return nil
 end
 
@@ -393,6 +396,8 @@ function BattlePassService:ClaimTier(player: Player, tierLevel: number): ()
 		table.insert(updates, rewardOp)
 		if reward.Kind == "Cash" then
 			table.insert(updates, { path = { "Stats", "TotalCashEarned" }, delta = rewardOp.delta })
+		elseif reward.Kind == "Gems" then
+			table.insert(updates, { path = { "Stats", "TotalGemsEarned" }, delta = rewardOp.delta })
 		end
 	end
 
@@ -406,12 +411,18 @@ function BattlePassService:ClaimTier(player: Player, tierLevel: number): ()
 	if reward.Kind == "Cash" then
 		local cashAmount = math.max(0, math.floor(reward.Amount or 0))
 		if cashAmount > 0 then
-			local profile2 = _dataService:GetProfile(player)
-			local balance = if profile2 and profile2.Data then profile2.Data.Stats.Cash else 0
-			EconomyAnalytics.Source(player, cashAmount, balance, "BattlePassClaim", tierSku)
+			TelemetryService.RecordFlow(player, "source", "BattlePassClaim", cashAmount, tierSku, "Cash")
+		end
+	elseif reward.Kind == "Gems" then
+		-- El grant ya lo hizo el BatchUpdate de arriba (atómico con el claim);
+		-- aquí solo se registra. Por eso NO se llama a RewardService.AwardGems:
+		-- duplicaría la concesión.
+		local gemAmount = math.max(0, math.floor(reward.Amount or 0))
+		if gemAmount > 0 then
+			TelemetryService.RecordFlow(player, "source", "BattlePassClaim", gemAmount, tierSku, "Gems")
 		end
 	elseif reward.Kind == "Item" and reward.Category and reward.ItemId then
-		EconomyAnalytics.ItemSource(player, "BattlePassItem", reward.Category .. "::" .. reward.ItemId .. "::" .. tierSku)
+		TelemetryService.RecordItem(player, "BattlePassItem", reward.Category .. "::" .. reward.ItemId .. "::" .. tierSku)
 	end
 
 	_respond(player, true, "OK", tierLevel)
@@ -423,6 +434,21 @@ end
 
 local _bpFunnelSessionByUserId: { [number]: string } = {}
 local _bpFunnelCounter = 0
+
+--[[
+	Embudo de conversión a Premium. La taxonomía vive aquí, junto al código que
+	la dispara, para que añadir un paso sea un cambio de un solo archivo.
+]]
+local BP_PREMIUM_FUNNEL = "BattlePassPremium"
+local BP_PREMIUM_STEP_NAMES: { [number]: string } = {
+	[1] = "ClickedBuyPremium",
+	[2] = "PromptShown",
+	[3] = "Purchased",
+}
+
+local function _bpPremiumStep(player: Player, step: number, sessionId: string?)
+	TelemetryService.RecordFunnelStep(player, BP_PREMIUM_FUNNEL, step, BP_PREMIUM_STEP_NAMES[step], sessionId)
+end
 
 function BattlePassService:PromptPremium(player: Player): ()
 	local season = BattlePassConfig.GetActiveSeason()
@@ -445,13 +471,13 @@ function BattlePassService:PromptPremium(player: Player): ()
 	_bpFunnelCounter += 1
 	local sessionId = tostring(player.UserId) .. "_" .. tostring(_bpFunnelCounter)
 	_bpFunnelSessionByUserId[player.UserId] = sessionId
-	EconomyAnalytics.BPPremiumStep(player, 1, sessionId)
+	_bpPremiumStep(player, 1, sessionId)
 
 	pcall(function()
 		MarketplaceService:PromptProductPurchase(player, season.PremiumProductId)
 	end)
 
-	EconomyAnalytics.BPPremiumStep(player, 2, sessionId)
+	_bpPremiumStep(player, 2, sessionId)
 end
 
 -- ────────────────────────────────────────────────────────────
@@ -608,8 +634,18 @@ function BattlePassService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchas
 			return Enum.ProductPurchaseDecision.NotProcessedYet
 		end
 		local sessionId = _bpFunnelSessionByUserId[player.UserId]
-		EconomyAnalytics.BPPremiumStep(player, 3, sessionId)
+		_bpPremiumStep(player, 3, sessionId)
 		_bpFunnelSessionByUserId[player.UserId] = nil
+
+		TelemetryService.RecordPurchase({
+			userId = player.UserId,
+			purchaseId = purchaseId,
+			productId = receiptInfo.ProductId,
+			sku = "BattlePassPremium::" .. season.Id,
+			robuxPrice = premiumRobux,
+			cashGranted = 0,
+			kind = "BattlePassPremium",
+		})
 
 		_respond(player, true, "PremiumGranted", 0)
 		return Enum.ProductPurchaseDecision.PurchaseGranted
@@ -637,6 +673,17 @@ function BattlePassService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchas
 	local newTier = if profile and profile.Data and profile.Data.BattlePass
 		then math.floor(profile.Data.BattlePass.CurrentTier or 0)
 		else 0
+
+	TelemetryService.RecordPurchase({
+		userId = player.UserId,
+		purchaseId = purchaseId,
+		productId = receiptInfo.ProductId,
+		sku = "SkipTier::" .. season.Id,
+		robuxPrice = (season.SkipRobuxPrice and season.SkipRobuxPrice > 0) and season.SkipRobuxPrice or 0,
+		cashGranted = 0,
+		kind = "SkipTier",
+	})
+
 	_respond(player, true, "SkipGranted", newTier)
 	return Enum.ProductPurchaseDecision.PurchaseGranted
 end

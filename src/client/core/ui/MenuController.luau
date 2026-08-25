@@ -23,10 +23,14 @@ type StatsData = {
 	XP: number,
 	XPToNextLevel: number,
 	Cash: number,
+	-- Opcional: un perfil cargado antes del Reconcile de esta versión puede
+	-- no traer el campo todavía.
+	Gems: number?,
 }
 
 type HudRefs = {
 	cashValue: TextLabel?,
+	gemsValue: TextLabel?,
 	levelCurrent: TextLabel?,
 	levelNext: TextLabel?,
 	barFill: Frame?,
@@ -74,6 +78,7 @@ end
 
 -- Estructura del HUD bajo Menu.Container:
 --   Container.Stats.CashFrame.Value   → efectivo actual
+--   Container.Stats.GemsFrame.Value   → gems actuales (opcional)
 --   Container.TopFrame.Level.Current  → nivel actual
 --   Container.TopFrame.Level.Next     → siguiente nivel
 --   Container.TopFrame.Level.Bar.Fill → progreso de XP hacia el siguiente nivel
@@ -91,6 +96,10 @@ local function resolveHudRefs(menuGui: ScreenGui): HudRefs
 	local cashFrame = statsNode and statsNode:FindFirstChild("CashFrame")
 	local cashValue = asTextLabel(cashFrame and cashFrame:FindFirstChild("Value"))
 
+	-- 1b. Gems (opcional: la GUI puede no tener todavía el GemsFrame).
+	local gemsFrame = statsNode and statsNode:FindFirstChild("GemsFrame")
+	local gemsValue = asTextLabel(gemsFrame and gemsFrame:FindFirstChild("Value"))
+
 	-- 2. Level
 	local levelNode = topFrame and topFrame:FindFirstChild("Level")
 	local levelCurrent = asTextLabel(levelNode and levelNode:FindFirstChild("Current"))
@@ -107,6 +116,7 @@ local function resolveHudRefs(menuGui: ScreenGui): HudRefs
 
 	return {
 		cashValue = cashValue,
+		gemsValue = gemsValue,
 		levelCurrent = levelCurrent,
 		levelNext = levelNext,
 		barFill = barFill,
@@ -120,6 +130,11 @@ end
 local function updateTopHud(hudRefs: HudRefs, stats: StatsData): ()
 	if hudRefs.cashValue then
 		setText(hudRefs.cashValue, UIUtils.formatCashAmount(stats.Cash))
+	end
+
+	if hudRefs.gemsValue then
+		-- `or 0` cubre el perfil que aún no pasó por Reconcile en esta sesión.
+		setText(hudRefs.gemsValue, UIUtils.formatCashAmount(stats.Gems or 0))
 	end
 
 	local currentXP = math.max(0, math.floor(stats.XP))

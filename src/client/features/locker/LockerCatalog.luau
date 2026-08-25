@@ -3,7 +3,6 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local BattlePassConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("BattlePassConfig"))
 local LockerConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("LockerConfig"))
-local WrapCasesConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("WrapCasesConfig"))
 
 local LockerMainCategory = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("LockerMainCategory"))
 
@@ -30,7 +29,6 @@ export type LockerCatalogItem = {
 	PreviewWeaponDisplayName: string?,
 	KillGoal: number?,
 	KillProgress: number?,
-	Case: string?,
 }
 
 type CatalogCacheEntry = {
@@ -159,8 +157,6 @@ function LockerCatalog:_getTemplateItems(categoryKey: LockerCategoryKey, navKey:
 				isAnimated = definition.isAnimated == true,
 				StudsPerTile = tonumber(definition.StudsPerTile),
 				KillGoal = killGoalValue,
-				-- Case de la que dropea (WrapCasesConfig es la source of truth).
-				Case = WrapCasesConfig.GetCaseNameForWrap(tostring(itemId)),
 			})
 		end
 	end

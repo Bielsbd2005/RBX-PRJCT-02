@@ -29,7 +29,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ActionRewards = require(Shared:WaitForChild("constants"):WaitForChild("ActionRewards"))
-local EconomyAnalytics = require(script.Parent.EconomyAnalytics)
+local TelemetryService = require(script.Parent.TelemetryService)
 
 local DataServiceMod = require(script.Parent.data.DataService)
 type DataService = DataServiceMod.DataServiceModule
@@ -130,9 +130,7 @@ function RewardService.Award(
 	end
 
 	if ok and cashAmount > 0 then
-		local profile = _dataService:GetProfile(player)
-		local balance = if profile and profile.Data then profile.Data.Stats.Cash else 0
-		EconomyAnalytics.Source(player, cashAmount, balance, actionKey, itemSku)
+		TelemetryService.RecordFlow(player, "source", actionKey, cashAmount, itemSku, "Cash")
 	end
 
 	return ok, xpAmount, cashAmount
@@ -144,7 +142,7 @@ end
 	catálogo de acciones — p. ej. los bonus de fin de partida (MatchResultsService),
 	cuyos montos viven en `shared/constants/ResultsRewards.luau`.
 
-	`sourceLabel` es el transactionType para EconomyAnalytics (p. ej.
+	`sourceLabel` es el transactionType para la telemetría (p. ej.
 	"MatchEnd::Victory"). Devuelve true si se persistió.
 ]]
 function RewardService.AwardCash(player: Player, amount: number, sourceLabel: string): boolean
@@ -172,9 +170,91 @@ function RewardService.AwardCash(player: Player, amount: number, sourceLabel: st
 		return false
 	end
 
+	TelemetryService.RecordFlow(player, "source", sourceLabel, amount, nil, "Cash")
+	return true
+end
+
+--[[
+	AwardGems: concede Gems (moneda premium).
+
+	Deliberadamente NO pasa por `ActionRewards`: ese catálogo describe lo que se
+	gana JUGANDO, y los Gems solo se obtienen por Battle Pass o comprando packs
+	con Robux. Mantenerlo fuera evita que alguien añada por descuido un faucet
+	de Gems a una kill.
+
+	Callers legítimos (los únicos dos que debería haber):
+	  • BattlePassService — recompensa de tier con Kind = "Gems".
+	  • ServerBootstrap.ProcessReceipt — compra de un pack de Gems con Robux.
+
+	`sourceLabel` es el transactionType para analytics ("BattlePassClaim",
+	"RobuxPurchase"). Devuelve true si se persistió.
+]]
+function RewardService.AwardGems(player: Player, amount: number, sourceLabel: string, itemSku: string?): boolean
+	if not _dataService or not player or type(amount) ~= "number" or amount <= 0 then
+		return false
+	end
+
+	amount = math.floor(amount)
+	if not _dataService:GetProfile(player) then
+		return false
+	end
+
+	local updates: { BatchUpdateEntry } = {
+		{ path = { "Stats", "Gems" }, delta = amount },
+		{ path = { "Stats", "TotalGemsEarned" }, delta = amount },
+	}
+
+	local batchOk, batchErr = pcall(function()
+		return _dataService:BatchUpdate(player, updates)
+	end)
+	if not batchOk then
+		warn(("[RewardService] AwardGems BatchUpdate falló para %s (%s): %s"):format(player.Name, sourceLabel, tostring(batchErr)))
+		return false
+	elseif batchErr == false then
+		return false
+	end
+
+	TelemetryService.RecordFlow(player, "source", sourceLabel, amount, itemSku, "Gems")
+	return true
+end
+
+--[[
+	SpendGems: descuenta Gems. Devuelve false si el saldo es insuficiente.
+
+	El descuento va por `delta` negativo, no por asignación: si otro flujo
+	(una compra concurrente, un claim) muta Stats.Gems entre la lectura del
+	saldo y la escritura, un `value` absoluto perdería ese cambio. Mismo
+	criterio que ya usa ShopService con el Cash.
+]]
+function RewardService.SpendGems(player: Player, amount: number, sinkLabel: string, itemSku: string?): boolean
+	if not _dataService or not player or type(amount) ~= "number" or amount <= 0 then
+		return false
+	end
+
+	amount = math.floor(amount)
 	local profile = _dataService:GetProfile(player)
-	local balance = if profile and profile.Data then profile.Data.Stats.Cash else 0
-	EconomyAnalytics.Source(player, amount, balance, sourceLabel, nil)
+	if not profile or not profile.Data then
+		return false
+	end
+
+	local current = profile.Data.Stats.Gems or 0
+	if current < amount then
+		return false
+	end
+
+	local batchOk, batchErr = pcall(function()
+		return _dataService:BatchUpdate(player, {
+			{ path = { "Stats", "Gems" }, delta = -amount },
+		})
+	end)
+	if not batchOk then
+		warn(("[RewardService] SpendGems BatchUpdate falló para %s (%s): %s"):format(player.Name, sinkLabel, tostring(batchErr)))
+		return false
+	elseif batchErr == false then
+		return false
+	end
+
+	TelemetryService.RecordFlow(player, "sink", sinkLabel, amount, itemSku, "Gems")
 	return true
 end
 

@@ -20,7 +20,7 @@
 
 	── Consumidor ───────────────────────────────────────────────
 	  Cualquier instancia con atributo `LightingPreset = "<PresetName>"`
-	  (p. ej. Workspace.Cameras.cases o una carpeta de mapa). `applyFrom(inst)`
+	  (p. ej. Workspace.Cameras.lobby o una carpeta de mapa). `applyFrom(inst)`
 	  lee el atributo; `apply(name)` aplica por nombre directo.
 
 	── Semántica ─────────────────────────────────────────────────

@@ -29,7 +29,7 @@ return table.freeze({
 	ButtonHoverScale   = 1.04,
 	ButtonClickScale   = 0.96,
 
-	-- Color por rareza (labels de rarity del CaseContent, glow del unboxing…).
+	-- Color por rareza (labels de rarity, glow de las cards del Locker…).
 	RarityColors = table.freeze({
 		Common    = Color3.fromRGB(190, 190, 190),
 		Uncommon  = Color3.fromRGB(96, 200, 96),

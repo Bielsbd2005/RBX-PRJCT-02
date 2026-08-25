@@ -28,7 +28,7 @@ local Packages = ReplicatedStorage:WaitForChild("Packages")
 local Shared   = ReplicatedStorage:WaitForChild("Shared")
 
 local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
-local EconomyAnalytics = require(script.Parent.Parent.Parent.core.EconomyAnalytics)
+local TelemetryService = require(script.Parent.Parent.Parent.core.TelemetryService)
 type DataService = DataServiceMod.DataServiceModule
 
 local Sift = require(Packages.sift) :: any
@@ -320,10 +320,11 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 	if success then
 		_markCooldown(player, "buy")
 
-		local refreshedProfile = _dataService:GetProfile(player)
-		local balance = if refreshedProfile and refreshedProfile.Data then refreshedProfile.Data.Stats.Cash else 0
-		EconomyAnalytics.Sink(player, price, balance, "Shop::" .. data.category)
-		EconomyAnalytics.ItemSource(player, "ShopItem::" .. data.category, data.itemId)
+		-- `itemId` viaja como campo propio (no concatenado al transactionType):
+		-- la vista de Shop necesita desglose por ítem, y así el backend no tiene
+		-- que parsear claves compuestas.
+		TelemetryService.RecordFlow(player, "sink", "Shop::" .. data.category, price, data.itemId, "Cash")
+		TelemetryService.RecordItem(player, "ShopItem::" .. data.category, data.itemId)
 
 		Network.Shop.Response.SendTo({
 			success = true,
