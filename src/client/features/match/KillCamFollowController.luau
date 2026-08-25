@@ -7,10 +7,21 @@
 --
 -- Funciona igual con bots y jugadores reales: la resolución del root distingue
 -- userId positivo → jugador, FakeUserId negativo → bot en mapRoot.Bots.
+--
+-- MODO ESPECTADOR: no todas las muertes tienen asesino. Caerse al vacío, pulsar
+-- reset de personaje o morir por daño de entorno llegan aquí con killerUserId
+-- vacío. En esos casos se sigue a un ENEMIGO VIVO AL AZAR. Lo que nunca se hace
+-- —y es de donde venía el bug— es salir sin tomar la cámara: si se deja en
+-- Custom sobre el propio Humanoid, el jugador acaba viendo su propio cuerpo
+-- aterrizar en el lobby cuando MatchService lo reubica allí.
 
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local TeamUtils = require(Shared.utils.TeamUtils)
 
 local KillCamFollowController = {}
 KillCamFollowController.__index = KillCamFollowController
@@ -107,6 +118,86 @@ local function resolveKillerRoot(killerUserId: number?, fallbackPosition: Vector
 	return nil, fallback
 end
 
+--[[
+	Bando del jugador local SIN pasar por su personaje. Es deliberado: en una
+	muerte por caída al vacío el modelo ya está destruido cuando llega
+	DeathScreenShow, así que `TeamUtils.getSide(character)` devolvería nil justo
+	en el caso que hay que cubrir. `Player.Team` sobrevive a la muerte del cuerpo.
+]]
+local function localSide(): string?
+	local player = Players.LocalPlayer
+	if player.Team then
+		return TeamUtils.normalize(player.Team.Name)
+	end
+	local attr = player:GetAttribute("TeamName")
+	if type(attr) == "string" then
+		return TeamUtils.normalize(attr)
+	end
+	return nil
+end
+
+-- Root de un personaje VIVO, o nil. La comprobación de salud no sobra: un
+-- ragdoll conserva su root, y encuadrarlo sería espectar a un cadáver.
+local function aliveRootOf(character: Instance?): BasePart?
+	if not character or not character.Parent then
+		return nil
+	end
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid or humanoid.Health <= 0 then
+		return nil
+	end
+	return resolveRootPartFromCharacter(character :: Model)
+end
+
+--[[
+	Un enemigo vivo al azar (jugador real o bot), o nil si no queda ninguno.
+
+	AL AZAR y no "el más cercano" a propósito: en una caída al vacío el enemigo
+	más cercano al punto de muerte suele ser precisamente quien te empujó, y
+	encuadrarlo se leería como una killcam — atribuyendo visualmente una muerte
+	accidental a alguien a quien el servidor no le ha contado la kill.
+
+	Bots y jugadores se tratan igual porque `TeamUtils.getSide` ya resuelve ambos:
+	`Player.Team` para los reales, los atributos Team/BotTeam/TeamSide que
+	AIService estampa en el modelo para los bots.
+]]
+local function pickRandomEnemyRoot(): BasePart?
+	local side = localSide()
+	if not side then
+		return nil
+	end
+
+	local candidates: { BasePart } = {}
+
+	for _, other in Players:GetPlayers() do
+		if other ~= Players.LocalPlayer then
+			local root = aliveRootOf(other.Character)
+			local otherSide = TeamUtils.getSide(other.Character)
+			if root and otherSide and otherSide ~= side then
+				table.insert(candidates, root)
+			end
+		end
+	end
+
+	local botsFolder = getBotsFolder()
+	if botsFolder then
+		for _, model in botsFolder:GetChildren() do
+			if model:IsA("Model") then
+				local root = aliveRootOf(model)
+				local botSide = TeamUtils.getSide(model)
+				if root and botSide and botSide ~= side then
+					table.insert(candidates, root)
+				end
+			end
+		end
+	end
+
+	if #candidates == 0 then
+		return nil
+	end
+	return candidates[math.random(1, #candidates)]
+end
+
 local VEC3_UP = Vector3.new(0, 1, 0)
 local VEC3_RIGHT = Vector3.new(1, 0, 0)
 
@@ -143,6 +234,11 @@ local CONFIG = {
 	resolveInterval = 0.1,
 	-- Si el killer respawnea lejos, no saltamos a su nuevo spawn de golpe.
 	maxFollowSnap = 40,
+	-- Margen antes de rendirse con un asesino que no se resuelve (se desconectó,
+	-- salió de replicación) y pasar a espectar a un enemigo vivo. Generoso frente a
+	-- resolveInterval: un respawn normal se recupera muy por debajo de este umbral,
+	-- así que no le roba su killcam a nadie.
+	spectateFallbackDelay = 1,
 	-- ── Anti-clipping / oclusión ──────────────────────────────
 	-- La cámara no atraviesa paredes: si hay geometría entre el killer y la cámara,
 	-- se acerca hasta justo delante del obstáculo. Snap-in inmediato (no clipa) y
@@ -281,14 +377,51 @@ function KillCamFollowController:start(data: StartData?)
 
 	local focusRoot, lastKnownPosition = resolveKillerRoot(killerUserId, serverFallbackPos)
 
-	-- Sin info del killer: encuadramos la posición de muerte local como respaldo.
+	--[[
+		Modo espectador: no hay asesino a quien encuadrar. Caída al vacío, reset de
+		personaje y daño de entorno llegan todos con killerUserId vacío.
+
+		Aquí vivía el bug: el camino antiguo era `self._active = false; return`, y al
+		salir sin tocar la cámara ésta se quedaba en Custom sobre el propio Humanoid.
+		Peor aún, la limpieza de armas de la death screen reafirma Custom con
+		reintentos (MatchWeapons → ShoulderCamera:setEnabled(false)), y sin el
+		render step del killcam nadie la devolvía a Scriptable. Resultado: a los 4.5s
+		MatchService reubica el cuerpo en el LobbySpawn y el jugador se veía a sí
+		mismo aterrizar en el lobby con la pantalla de muerte puesta.
+
+		Se entra de salida SÓLO si no hay asesino. Si lo hay pero ahora mismo no se
+		resuelve (está respawneando, su ragdoll acaba de desaparecer) seguimos el
+		camino normal: el bucle de re-resolución lo recupera en milisegundos y no
+		queremos perder ni su killcam ni su karma cam. Si no apareciera nunca —se
+		desconectó— es ese mismo bucle el que cae a espectador pasado un margen.
+	]]
+	local spectating = false
+	if killerUserId == nil then
+		local enemyRoot = pickRandomEnemyRoot()
+		if enemyRoot then
+			spectating = true
+			focusRoot = enemyRoot
+			lastKnownPosition = enemyRoot.Position
+		end
+	end
+
+	--[[
+		Último recurso, sin asesino y sin enemigos vivos que espectar (final de
+		ronda, todos muertos a la vez): sostenemos el punto de muerte.
+
+		Fíjate en que ya NO hay salida temprana. Pase lo que pase la cámara entra en
+		Scriptable y este controlador la conduce hasta el `stop()`: durante la muerte
+		devolverla a Custom es exactamente lo que enseñaba el lobby.
+	]]
 	if not focusRoot and lastKnownPosition == Vector3.zero then
 		local localRoot = resolveRootPartFromCharacter(self._player.Character)
 		if localRoot then
 			lastKnownPosition = localRoot.Position
 		else
-			self._active = false
-			return
+			-- Ni cuerpo queda (el motor destruye las partes al pasar
+			-- FallenPartsDestroyHeight). Anclamos delante de donde miraba la cámara.
+			local current = camera.CFrame
+			lastKnownPosition = current.Position + current.LookVector * CONFIG.endDistance
 		end
 	end
 
@@ -307,6 +440,9 @@ function KillCamFollowController:start(data: StartData?)
 
 	local startAt = time()
 	local lastResolveAt = 0
+	-- Instante del primer intento fallido de resolver al asesino (0 = ninguno en
+	-- curso). Alimenta el fallback a espectador de CONFIG.spectateFallbackDelay.
+	local unresolvedSince = 0
 
 	-- Estado de la "karma cam": se activa si el killer seguido muere.
 	local killerHumanoid: Humanoid? = if focusRoot and focusRoot.Parent
@@ -363,6 +499,18 @@ function KillCamFollowController:start(data: StartData?)
 			camera.CameraType = Enum.CameraType.Scriptable
 		end
 
+		-- Espectando: si el enemigo seguido muere o desaparece, soltamos su root para
+		-- que el bloque de abajo elija otro. Con un asesino real esto NO se hace —
+		-- allí su muerte es justo lo que dispara la karma cam.
+		if spectating and focusRoot then
+			local targetHumanoid = if focusRoot.Parent
+				then focusRoot.Parent:FindFirstChildOfClass("Humanoid") :: Humanoid?
+				else nil
+			if not targetHumanoid or targetHumanoid.Health <= 0 then
+				focusRoot = nil
+			end
+		end
+
 		-- Mantener vivo el root: seguir su posición real, o re-resolver si el ragdoll
 		-- fue destruido / el killer respawneó (a 10 Hz, no cada frame).
 		-- Tras la muerte (karma cam) NO leemos el root: el cuerpo entra en ragdoll y
@@ -380,23 +528,87 @@ function KillCamFollowController:start(data: StartData?)
 			-- aguantamos sobre el sitio de la muerte y NO saltamos a su respawn.
 			focusRoot = nil
 			local now = time()
-			if killerUserId and now - lastResolveAt >= CONFIG.resolveInterval then
+			if now - lastResolveAt >= CONFIG.resolveInterval then
 				lastResolveAt = now
-				local newRoot = resolveKillerRoot(killerUserId, nil)
-				if newRoot and (newRoot.Position - lastKnownPosition).Magnitude < CONFIG.maxFollowSnap then
+
+				--[[
+					`hunting` = el objetivo es un enemigo cualquiera, no un asesino
+					concreto. Incluye `killerUserId == nil` y no sólo `spectating`
+					porque al morir podía no quedar ningún enemigo vivo que espectar
+					(todos caídos a la vez): sin esto la cámara se quedaría clavada en
+					el punto de muerte durante toda la death screen en vez de engancharse
+					al primero que respawnee.
+				]]
+				local hunting = spectating or killerUserId == nil
+
+				local newRoot: BasePart? = nil
+				if hunting then
+					newRoot = pickRandomEnemyRoot()
+				else
+					newRoot = resolveKillerRoot(killerUserId, nil)
+				end
+
+				-- maxFollowSnap existe para no teleportar la cámara al spawn del
+				-- asesino cuando respawnea lejos. Cambiar de objetivo espectado es un
+				-- CORTE deliberado, no un salto indeseado, así que ahí no aplica — y
+				-- con él puesto casi ningún enemigo del otro extremo del mapa pasaría
+				-- el filtro y la cámara se quedaría congelada sobre un cadáver.
+				local accept = newRoot ~= nil
+					and (hunting or (newRoot.Position - lastKnownPosition).Magnitude < CONFIG.maxFollowSnap)
+
+				if accept and newRoot then
+					unresolvedSince = 0
+					-- Enganchado un enemigo, el modo queda fijado en espectador (hunting
+					-- ya incluye el `spectating` previo, así que esto no lo revierte).
+					spectating = hunting
 					focusRoot = newRoot
 					lastKnownPosition = newRoot.Position
 					killerHumanoid = if newRoot.Parent
 						then newRoot.Parent:FindFirstChildOfClass("Humanoid") :: Humanoid?
 						else nil
 					_refreshOcclusionFilter(newRoot.Parent)
+
+					-- Corte limpio al nuevo objetivo: reencuadramos de golpe en vez de
+					-- dejar que el lerp arrastre la cámara por medio mapa.
+					if hunting then
+						smoothedDir = _flatLook(newRoot)
+						camPos = _computeCameraPos(lastKnownPosition, smoothedDir, lastDistance, lastHeight)
+						lookAtPos = lastKnownPosition + Vector3.new(0, CONFIG.lookHeight, 0)
+					end
+				elseif not hunting then
+					--[[
+						El asesino no aparece. Puede haberse desconectado o quedado fuera
+						de replicación; en cualquier caso sostener el plano sobre un vacío
+						durante toda la death screen es peor que espectar. Pasado el
+						margen, cambiamos a un enemigo vivo — la red de seguridad para
+						"cualquier otro problema" con la cámara de muerte.
+					]]
+					if unresolvedSince == 0 then
+						unresolvedSince = now
+					elseif now - unresolvedSince >= CONFIG.spectateFallbackDelay then
+						local enemyRoot = pickRandomEnemyRoot()
+						if enemyRoot then
+							spectating = true
+							focusRoot = enemyRoot
+							lastKnownPosition = enemyRoot.Position
+							killerHumanoid = if enemyRoot.Parent
+								then enemyRoot.Parent:FindFirstChildOfClass("Humanoid") :: Humanoid?
+								else nil
+							_refreshOcclusionFilter(enemyRoot.Parent)
+							smoothedDir = _flatLook(enemyRoot)
+							camPos = _computeCameraPos(lastKnownPosition, smoothedDir, lastDistance, lastHeight)
+							lookAtPos = lastKnownPosition + Vector3.new(0, CONFIG.lookHeight, 0)
+						end
+					end
 				end
 			end
 		end
 
 		-- Karma cam: el asesino al que seguimos acaba de morir → enganchamos el
-		-- push-in dramático desde el encuadre actual.
-		if not killerDead and killerHumanoid and killerHumanoid.Health <= 0 then
+		-- push-in dramático desde el encuadre actual. Sólo con un asesino real: la
+		-- muerte de un enemigo espectado al azar no es el karma de nadie, y ahí lo
+		-- correcto (arriba) es saltar a otro enemigo vivo.
+		if not spectating and not killerDead and killerHumanoid and killerHumanoid.Health <= 0 then
 			killerDead = true
 			karmaStartAt = time()
 			karmaFromDistance = lastDistance

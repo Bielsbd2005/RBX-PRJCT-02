@@ -894,13 +894,18 @@ function MatchFeature.start(menuController: any): any
 			weaponId = data.weaponId,
 		})
 
-		local killerCharacter = _resolveKillerCharacter(data.killerUserId)
-		deathView:show(data.respawnCooldown, {
-			name = data.killerName,
-			kills = data.killerKills,
-			level = data.killerLevel,
-			character = killerCharacter,
-		})
+		-- Sin asesino (caída al vacío, reset de personaje, daño de entorno) la tarjeta
+		-- va a nil, no con el nombre vacío: `_populateCard` ya distingue los dos casos
+		-- y con la tabla puesta rotulaba un "Eliminated by " colgando.
+		local killer = if data.killerName ~= ""
+			then {
+				name = data.killerName,
+				kills = data.killerKills,
+				level = data.killerLevel,
+				character = _resolveKillerCharacter(data.killerUserId),
+			}
+			else nil
+		deathView:show(data.respawnCooldown, killer)
 	end), true)
 
 	-- ── Network: DeathScreenHide ─────────────────────────────

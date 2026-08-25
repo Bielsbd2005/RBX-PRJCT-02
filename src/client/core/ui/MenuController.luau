@@ -17,6 +17,8 @@ local UITheme = require(script.Parent.UITheme)
 local UIUtils = require(script.Parent.UIUtils)
 local DataController = require(script.Parent.Parent.data.DataController)
 local BattlePassConfig = require(Shared.constants.BattlePassConfig)
+local DailyTasks = require(Shared.constants.DailyTasks)
+local ActionRewards = require(Shared.constants.ActionRewards)
 
 type StatsData = {
 	Level: number,
@@ -26,6 +28,15 @@ type StatsData = {
 	-- Opcional: un perfil cargado antes del Reconcile de esta versión puede
 	-- no traer el campo todavía.
 	Gems: number?,
+}
+
+type MissionSlot = {
+	id: string,
+	titleLabel: TextLabel?,
+	valueLabel: TextLabel?,
+	barFill: GuiObject?,
+	rewardLabel: TextLabel?,
+	originalFillColor: Color3?,
 }
 
 type HudRefs = {
@@ -47,6 +58,7 @@ export type MenuController = {
 	_janitor: any,
 	_fusionScope: any,
 	_hudRefs: HudRefs,
+	_missionSlots: { MissionSlot },
 	_openPanels: { [Instance]: boolean },
 	getGui: (self: MenuController) -> ScreenGui,
 	hide: (self: MenuController) -> (),
@@ -77,7 +89,7 @@ local function asFrame(inst: Instance?): Frame?
 end
 
 -- Estructura del HUD bajo Menu.Container:
---   Container.Stats.CashFrame.Value   → efectivo actual
+--   Container.Stats.CoinsFrame.Value  → efectivo actual (coins/cash)
 --   Container.Stats.GemsFrame.Value   → gems actuales (opcional)
 --   Container.TopFrame.Level.Current  → nivel actual
 --   Container.TopFrame.Level.Next     → siguiente nivel
@@ -92,8 +104,8 @@ local function resolveHudRefs(menuGui: ScreenGui): HudRefs
 	local statsNode = container and container:FindFirstChild("Stats")
 	local famePassNode = container and container:FindFirstChild("FamePass")
 
-	-- 1. Cash
-	local cashFrame = statsNode and statsNode:FindFirstChild("CashFrame")
+	-- 1. Cash (el frame en el GUI se llama "CoinsFrame")
+	local cashFrame = statsNode and statsNode:FindFirstChild("CoinsFrame")
 	local cashValue = asTextLabel(cashFrame and cashFrame:FindFirstChild("Value"))
 
 	-- 1b. Gems (opcional: la GUI puede no tener todavía el GemsFrame).
@@ -189,6 +201,79 @@ local function updateFamePassHud(hudRefs: HudRefs, bpState: any): ()
 	end
 end
 
+-- Mapea el Id de DailyTasks ("Task1"/"Task2"/"Task3") al nombre del slot en
+-- Menu.Container.Missions ("1"/"2"/"3").
+local MISSION_SLOT_NAMES: { [string]: string } = {
+	Task1 = "1",
+	Task2 = "2",
+	Task3 = "3",
+}
+
+-- Estructura esperada por slot bajo Menu.Container.Missions:
+--   Missions.<N>.Title      → nombre de la misión
+--   Missions.<N>.Value      → progreso "p/o"
+--   Missions.<N>.Bar.Fill   → Frame escalado X = progreso/objetivo
+--   Missions.<N>.Reward     → TextLabel con el cash otorgado
+local function resolveMissionSlots(menuGui: ScreenGui): { MissionSlot }
+	local container = menuGui:FindFirstChild("Container")
+	local missionsNode = container and container:FindFirstChild("Missions")
+	local slots: { MissionSlot } = {}
+	if not missionsNode then
+		return slots
+	end
+
+	for _, def in DailyTasks.Tasks do
+		local slotName = MISSION_SLOT_NAMES[def.Id]
+		local node = slotName and missionsNode:FindFirstChild(slotName)
+		if node then
+			local bar = node:FindFirstChild("Bar")
+			table.insert(slots, {
+				id = def.Id,
+				titleLabel = asTextLabel(node:FindFirstChild("Title")),
+				valueLabel = asTextLabel(node:FindFirstChild("Value")),
+				barFill = if bar then bar:FindFirstChild("Fill") :: GuiObject? else nil,
+				rewardLabel = asTextLabel(node:FindFirstChild("Reward")),
+			})
+		end
+	end
+
+	return slots
+end
+
+local MISSION_COMPLETED_COLOR = Color3.fromRGB(60, 200, 90)
+
+local function updateMissionsHud(slots: { MissionSlot }, dailyTasksState: any): ()
+	local progress = dailyTasksState and dailyTasksState.Progress or {}
+	local claimed = dailyTasksState and dailyTasksState.Claimed or {}
+
+	for _, slot in slots do
+		local def = DailyTasks.GetById(slot.id)
+		if not def then continue end
+
+		local objective = math.max(1, def.Objective)
+		local current = math.clamp(math.floor((progress :: any)[def.Kind] or 0), 0, objective)
+		local isClaimed = (claimed :: any)[def.Id] == true
+		local ratio = current / objective
+
+		setText(slot.titleLabel, def.Title)
+		setText(slot.valueLabel, string.format("%d/%d", current, objective))
+		setText(slot.rewardLabel, UIUtils.formatCashAmount(ActionRewards.GetCash("Daily" .. def.Id)))
+
+		if slot.barFill then
+			local fillRatio = if isClaimed then 1 else ratio
+			local size = slot.barFill.Size
+			slot.barFill.Size = UDim2.new(fillRatio, 0, size.Y.Scale, size.Y.Offset)
+
+			if slot.originalFillColor == nil then
+				slot.originalFillColor = slot.barFill.BackgroundColor3
+			end
+			slot.barFill.BackgroundColor3 = if isClaimed
+				then MISSION_COMPLETED_COLOR
+				else slot.originalFillColor :: Color3
+		end
+	end
+end
+
 -- Hover animations específicas por botón.
 local MENU_BUTTON_HOVER_BINDINGS: { { path: { string }, lift: number } } = {
 	{ path = { "Container", "TopFrame", "RightContainer", "Settings" }, lift = 0 },
@@ -242,6 +327,7 @@ function MenuController.new(): MenuController
 	self._animator = MenuAnimator.new(menuGui)
 	self._hover = MenuHover.new(menuGui)
 	self._hudRefs = resolveHudRefs(menuGui)
+	self._missionSlots = resolveMissionSlots(menuGui)
 	self._openPanels = {}
 	self._stateChangeListeners = {} :: { () -> () }
 
@@ -269,6 +355,17 @@ function MenuController.new(): MenuController
 
 		local bpObserver = self._fusionScope:Observer(DataController.BattlePass)
 		self._janitor:Add(bpObserver:onBind(updateBpHudFromState), true)
+
+		if #self._missionSlots > 0 then
+			local function updateMissionsFromState()
+				local dailyTasksState = Fusion.peek(DataController.DailyTasks)
+				updateMissionsHud(self._missionSlots, dailyTasksState)
+			end
+
+			local missionsObserver = self._fusionScope:Observer(DataController.DailyTasks)
+			self._janitor:Add(missionsObserver:onBind(updateMissionsFromState), true)
+			updateMissionsFromState()
+		end
 
 		-- Actualización periódica del timer de temporada del FamePass (mismo esquema de UserInterface.BattlePass.Main.Timer)
 		if self._hudRefs.famePassTimer then
