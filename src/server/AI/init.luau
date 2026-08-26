@@ -253,13 +253,29 @@ game:BindToClose(function()
 	end
 end)
 
+-- Las identidades del pool son usuarios reales de Roblox (el headshot sale de
+-- su UserId). Si uno de ellos entra al servidor, un bot con esa identidad
+-- compartiría nombre y foto con él, así que queda descartada.
+local function _isIdentityTakenByRealPlayer(source: BotNames.BotIdentity): boolean
+	for _, player in Players:GetPlayers() do
+		if player.UserId == source.userId then
+			return true
+		end
+		if player.Name:lower() == source.name:lower()
+			or player.DisplayName:lower() == source.name:lower() then
+			return true
+		end
+	end
+	return false
+end
+
 local function _assignIdentity(): (BotIdentity, number)
 	_fakeUserIdCounter -= 1
 	local fakeUserId = _fakeUserIdCounter
 	-- Pick an unused identity from the pool
 	local available = {}
-	for i, _ in BotNames do
-		if not _usedIdentityIndices[i] then
+	for i, source in BotNames do
+		if not _usedIdentityIndices[i] and not _isIdentityTakenByRealPlayer(source) then
 			table.insert(available, i)
 		end
 	end
@@ -927,6 +943,93 @@ local function _notifyRosterChanged()
 		pcall(cb)
 	end
 end
+
+-- ── Colisión de identidad con un jugador real ───────────────────
+-- _assignIdentity ya descarta las identidades de jugadores presentes, pero un
+-- jugador puede entrar a mitad de ronda cuando un bot ya lleva su nombre/foto.
+-- En ese caso el bot cambia de identidad en caliente en vez de duplicarlo.
+
+local _poolIndexByName: { [string]: number } = {}
+for index, source in BotNames do
+	_poolIndexByName[source.name:lower()] = index
+end
+
+local function _identityCollidesWith(identity: BotIdentity, player: Player): boolean
+	local name = identity.name:lower()
+	return name == player.Name:lower() or name == player.DisplayName:lower()
+end
+
+-- Toma la primera identidad libre que no choque con nadie del servidor y la
+-- vuelca sobre `identity` (misma tabla: se propaga a _identityByFakeUserId y a
+-- las entradas recicladas que la comparten). Devuelve true si hubo cambio.
+local function _swapIdentityInPlace(identity: BotIdentity): boolean
+	local replacementIndex: number? = nil
+	for index, source in BotNames do
+		if not _usedIdentityIndices[index] and not _isIdentityTakenByRealPlayer(source) then
+			replacementIndex = index
+			break
+		end
+	end
+	if not replacementIndex then
+		return false
+	end
+
+	local previousIndex = _poolIndexByName[identity.name:lower()]
+	if previousIndex then
+		_usedIdentityIndices[previousIndex] = nil
+	end
+	_usedIdentityIndices[replacementIndex] = true
+
+	local source = BotNames[replacementIndex]
+	identity.name = source.name
+	identity.image = source.image
+	return true
+end
+
+local function _reassignIdentitiesTakenBy(player: Player)
+	if not _isRoundActive then
+		return
+	end
+	local swapped = false
+
+	-- Bots vivos: además de la identidad hay que repintar el modelo.
+	for botName, identity in _botIdentityByName do
+		if not _identityCollidesWith(identity, player) then
+			continue
+		end
+		if not _swapIdentityInPlace(identity) then
+			continue
+		end
+		swapped = true
+
+		local fakeUserId = _botFakeUserIdByName[botName]
+		local model = if fakeUserId then _botModelByFakeUserId[fakeUserId] else nil
+		if model then
+			model:SetAttribute("DisplayName", identity.name)
+			model:SetAttribute("ProfileImage", identity.image)
+			local humanoid = model:FindFirstChildOfClass("Humanoid")
+			if humanoid then
+				humanoid.DisplayName = identity.name
+			end
+		end
+	end
+
+	-- Identidades recicladas (bot muerto pendiente de respawn): no tienen modelo,
+	-- pero volverían a entrar con el nombre del jugador si no se cambian ahora.
+	for _, list in { _recycledByTeam.A, _recycledByTeam.B } do
+		for _, entry in list do
+			if _identityCollidesWith(entry.identity, player) and _swapIdentityInPlace(entry.identity) then
+				swapped = true
+			end
+		end
+	end
+
+	if swapped then
+		_notifyRosterChanged()
+	end
+end
+
+Players.PlayerAdded:Connect(_reassignIdentitiesTakenBy)
 
 -- Synchronous half of the reconciliation: removals + recycled-identity trim.
 local function _trimTeamToTarget(team: "A" | "B", target: number)

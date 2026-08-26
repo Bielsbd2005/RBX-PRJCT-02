@@ -4,13 +4,18 @@
 export type BotIdentity = {
 	name: string,
 	image: string,
+	-- UserId real del que sale el headshot. Se deriva de `image` al construir la
+	-- tabla y sirve para detectar cuando ese usuario entra de verdad al servidor:
+	-- en ese caso la identidad no puede asignarse a un bot (compartirían nombre
+	-- y foto de perfil con un jugador real).
+	userId: number,
 }
 
 local function headshot(userId: number): string
 	return `rbxthumb://type=AvatarHeadShot&id={userId}&w=48&h=48`
 end
 
-local BotNames: { BotIdentity } = {
+local RawBotNames: { { name: string, image: string } } = {
 	{ name = "Camposobb",              image = headshot(1377418389) },
 	{ name = "Cooliz55",               image = headshot(7837306735) },
 	{ name = "byjunhee",               image = headshot(9008670433) },
@@ -234,5 +239,16 @@ local BotNames: { BotIdentity } = {
 	{ name = "Raptormunk",             image = headshot(1264155583) },
 	{ name = "valelin24680",           image = headshot(11316926510) },
 }
+
+local BotNames: { BotIdentity } = table.create(#RawBotNames)
+for _, entry in RawBotNames do
+	table.insert(BotNames, {
+		name = entry.name,
+		image = entry.image,
+		-- El formato lo produce `headshot` justo arriba, así que el match nunca
+		-- falla; el `or 0` solo cubre una edición manual malformada.
+		userId = tonumber(entry.image:match("id=(%d+)")) or 0,
+	})
+end
 
 return table.freeze(BotNames)

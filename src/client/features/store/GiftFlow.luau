@@ -4,27 +4,24 @@
 
 	Flujo de envío de regalos (UserInterface.Gifting). Se abre desde el Store al
 	pulsar el botón "Gift" de un pack de Robux concreto (Store.CashPage.<Row>.
-	<Pack>.Gift): el Store se oculta y este frame toma el relevo. CloseBtn vuelve
-	al Store.
+	<Pack>.Gift): el Store se oculta y este frame toma el relevo.
+
+	Lista los jugadores del servidor. Cuando hay pocos jugadores reales la lista
+	se rellena con NPCs (identidades de `BotNames`) para que nunca se vea vacía;
+	los NPCs NO son regalables — su botón Gift se pinta en gris y con otro icono.
 
 	Estructura GUI:
 		UserInterface.Gifting
 		  Container
-		    Friends
-		      Container
-		        Header
-		          CloseBtn                   ← vuelve al Store
-		        Search
-		          TextBox                    ← filtro en vivo
-		        ScrollingFrame               ← canvas automático según contenido
-		          Template                   ← fila de amigo: Icon/Username/DisplayName/Status
-		    Action                           ← visible SOLO con un amigo seleccionado
-		      Container
-		        Contents
-		          Gift
-		            Name / Price             ← qué se regala y su precio
-		          Friend                     ← amigo elegido: Icon/Username/DisplayName
-		        Gift                         ← botón: valida y lanza el envío
+		    Divider
+		    ScrollingFrame              ← canvas automático según contenido
+		      UIListLayout
+		      Template                  ← fila de jugador
+		        Thumbnail               ← ImageLabel (headshot)
+		        Name                    ← TextLabel (displayName / nombre del NPC)
+		        Gift                    ← botón de envío
+		          Icon                  ← ImageLabel (glifo según real/NPC)
+		          UIShadow              ← sombra teñida según real/NPC
 
 	Flujo de red (Network.Gifting):
 	  SendGift → SendResponse (validación server-side; success ⇒ el server lanza
@@ -46,29 +43,39 @@ local Packages = ReplicatedStorage:WaitForChild("Packages")
 local Janitor = require(Packages.janitor) :: any
 local Network = require(Shared.networking.Network)
 local StoreProducts = require(Shared.constants.StoreProducts)
+local BotNames = require(Shared.constants.BotNames)
+local GameConfig = require(Shared.GameConfig)
 local Notify = require(Client.core.ui.NotificationController)
-local UIUtils = require(Client.core.ui.UIUtils)
 local StaggerReveal = require(Client.core.ui.animators.StaggerReveal)
 
 type StoreProductDefinition = StoreProducts.StoreProductDefinition
 
 local AVATAR_THUMB_FORMAT = "rbxthumb://type=AvatarHeadShot&id=%d&w=48&h=48"
-local STATUS_ONLINE_TEXT = "· Online"
-local STATUS_OFFLINE_TEXT = "· Offline"
-local STATUS_ONLINE_COLOR = Color3.fromRGB(114, 255, 114)
-local STATUS_OFFLINE_COLOR = Color3.fromRGB(255, 255, 255)
-local GIFT_NAME_FORMAT = "%s Cash"
-local PRICE_FORMAT = "\u{E002}%d"
 local RESPONSE_TIMEOUT = 5
 local DELIVERY_TIMEOUT = 15
-local FRIENDS_CACHE_TTL = 60
+
+-- Estados del botón Gift de cada fila. Los NPCs comparten la fila pero se
+-- pintan en gris con otro icono: no son un destino válido de regalo.
+local REAL_BUTTON_COLOR = Color3.fromRGB(64, 169, 74)
+local REAL_SHADOW_COLOR = Color3.fromRGB(81, 255, 0)
+local REAL_ICON = "rbxassetid://91500847756674"
+
+local NPC_BUTTON_COLOR = Color3.fromRGB(128, 128, 128)
+local NPC_SHADOW_COLOR = Color3.fromRGB(255, 255, 255)
+local NPC_ICON = "rbxassetid://109044845487335"
+-- Los NPCs no muestran su nombre: la fila anuncia que no es un destino válido.
+local NPC_LABEL_TEXT = "Not Eligible"
+
+-- La lista representa los huecos de una partida: los que no cubren jugadores
+-- reales se rellenan con NPCs, igual que hace MatchService al rebalancear
+-- (TeamSizeTarget por equipo, dos equipos). No se usa TotalParticipantsTarget
+-- porque hoy nadie lo lee en el server y puede desincronizarse.
+local LIST_TARGET_ROWS = GameConfig.TeamSizeTarget * 2
 
 local ROW_REVEAL_STAGGER = 0.03
 local ROW_REVEAL_TWEEN = TweenInfo.new(0.26, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
-local ROW_SELECT_TWEEN = TweenInfo.new(0.18, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
-local ROW_SELECT_FROM = 0.9
-local CARD_SELECT_TWEEN = TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
-local CARD_SELECT_FROM = 0.82
+local ROW_PRESS_TWEEN = TweenInfo.new(0.18, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+local ROW_PRESS_FROM = 0.9
 
 export type GiftFlowConfig = {
 	menuController: any,
@@ -78,32 +85,13 @@ export type GiftFlowConfig = {
 
 type UserEntry = {
 	userId: number,
-	username: string,
-	displayName: string,
-	online: boolean,
+	name: string,
+	thumbnail: string,
+	isNpc: boolean,
 }
 
 local GiftFlow = {}
 GiftFlow.__index = GiftFlow
-
-local function bindRowClick(row: GuiObject, janitor: any, callback: () -> ()): ()
-	if row:IsA("GuiButton") then
-		janitor:Add(row.Activated:Connect(callback), "Disconnect")
-		return
-	end
-	local button = row:FindFirstChildWhichIsA("GuiButton", true)
-	if button then
-		janitor:Add(button.Activated:Connect(callback), "Disconnect")
-		return
-	end
-	row.Active = true
-	janitor:Add(row.InputBegan:Connect(function(input: InputObject)
-		if input.UserInputType == Enum.UserInputType.MouseButton1
-			or input.UserInputType == Enum.UserInputType.Touch then
-			callback()
-		end
-	end), "Disconnect")
-end
 
 local function ensureScale(node: GuiObject): UIScale
 	local named = node:FindFirstChild("InteractiveScale")
@@ -129,46 +117,62 @@ local function popScale(node: GuiObject, info: TweenInfo, from: number): Tween
 	return tween
 end
 
-local function fetchFriendEntries(userId: number, isStale: () -> boolean): { UserEntry }
-	local entries: { UserEntry } = {}
-
-	local inServer: { [number]: boolean } = {}
-	for _, other in Players:GetPlayers() do
-		inServer[other.UserId] = true
+-- `UIShadow` puede ser un ImageLabel, un Frame, o un modificador de UI
+-- (UIStroke / UIDropShadowEffect); cada uno expone el color en otra propiedad.
+-- Los modificadores usan `Color`, así que ese es el último recurso.
+local function applyTint(inst: Instance?, color: Color3): ()
+	if not inst then
+		return
 	end
-
-	local ok, pages = pcall(function()
-		return Players:GetFriendsAsync(userId)
+	if inst:IsA("ImageLabel") or inst:IsA("ImageButton") then
+		inst.ImageColor3 = color
+		return
+	end
+	if inst:IsA("GuiObject") then
+		inst.BackgroundColor3 = color
+		return
+	end
+	local target = inst :: any
+	pcall(function()
+		target.Color = color
 	end)
-	if not ok or not pages then
-		return entries
-	end
+end
 
-	while not isStale() do
-		for _, item in pages:GetCurrentPage() do
-			table.insert(entries, {
-				userId = item.Id,
-				username = item.Username,
-				displayName = if item.DisplayName and item.DisplayName ~= "" then item.DisplayName else item.Username,
-				online = item.IsOnline == true or inServer[item.Id] == true,
-			})
+-- Las identidades del pool son usuarios reales de Roblox. Si uno de ellos está
+-- en el servidor (incluido el local player), su identidad no puede usarse como
+-- relleno: aparecería dos veces, una regalable y otra como "Not Eligible".
+local function isIdentityTakenByRealPlayer(source: BotNames.BotIdentity): boolean
+	for _, player in Players:GetPlayers() do
+		if player.UserId == source.userId then
+			return true
 		end
-		if pages.IsFinished then
-			break
+		if player.Name:lower() == source.name:lower()
+			or player.DisplayName:lower() == source.name:lower() then
+			return true
 		end
-		local advanced = pcall(function()
-			pages:AdvanceToNextPageAsync()
-		end)
-		if not advanced then
-			break
+	end
+	return false
+end
+
+-- Jugadores reales del servidor, sin el local player, ordenados por nombre.
+local function collectServerPlayers(): { UserEntry }
+	local entries: { UserEntry } = {}
+	local localPlayer = Players.LocalPlayer
+
+	for _, other in Players:GetPlayers() do
+		if other == localPlayer then
+			continue
 		end
+		table.insert(entries, {
+			userId = other.UserId,
+			name = if other.DisplayName ~= "" then other.DisplayName else other.Name,
+			thumbnail = string.format(AVATAR_THUMB_FORMAT, other.UserId),
+			isNpc = false,
+		})
 	end
 
 	table.sort(entries, function(a, b)
-		if a.online ~= b.online then
-			return a.online
-		end
-		return a.displayName:lower() < b.displayName:lower()
+		return a.name:lower() < b.name:lower()
 	end)
 	return entries
 end
@@ -185,9 +189,10 @@ function GiftFlow.new(config: GiftFlowConfig, janitor: any)
 	self._sendPending = false
 	self._awaitingPurchase = false
 	self._pendingToken = 0
-	self._friendsCache = nil :: { UserEntry }?
-	self._friendsFetchedAt = 0
-	self._friendsFetchToken = 0
+
+	-- Offset fijo por sesión: los NPCs de relleno no deben barajarse cada vez
+	-- que se abre el panel.
+	self._npcOffset = if #BotNames > 0 then math.random(1, #BotNames) else 1
 
 	self._reveal = StaggerReveal.new({
 		staggerDelay = ROW_REVEAL_STAGGER,
@@ -195,13 +200,6 @@ function GiftFlow.new(config: GiftFlowConfig, janitor: any)
 		startScale = 0,
 	})
 	janitor:Add(self._reveal, "Destroy")
-	self._cardTween = nil :: Tween?
-	janitor:Add(function()
-		if self._cardTween then
-			self._cardTween:Cancel()
-			self._cardTween = nil
-		end
-	end, true)
 
 	local player = Players.LocalPlayer
 	local playerGui = player:WaitForChild("PlayerGui")
@@ -212,43 +210,16 @@ function GiftFlow.new(config: GiftFlowConfig, janitor: any)
 
 	local container = frame:WaitForChild("Container") :: Frame
 
-	-- Friends
-	local friends = container:WaitForChild("Friends") :: Frame
-	local friendsContainer = friends:WaitForChild("Container") :: Frame
-
-	local header = friendsContainer:WaitForChild("Header")
-	local closeBtn = header:WaitForChild("CloseBtn") :: GuiButton
-
-	local search = friendsContainer:WaitForChild("Search")
-	self._searchBox = (if search:IsA("TextBox") then search else search:WaitForChild("TextBox")) :: TextBox
-
-	local scrolling = friendsContainer:WaitForChild("ScrollingFrame") :: ScrollingFrame
+	local scrolling = container:WaitForChild("ScrollingFrame") :: ScrollingFrame
 	local template = scrolling:WaitForChild("Template") :: GuiObject
 	self._scrolling = scrolling
 	self._template = template
 
-	scrolling.AutomaticCanvasSize = Enum.AutomaticSize.Y
-	scrolling.CanvasSize = UDim2.new(0, 0, 0, 0)
+	-- El ScrollingFrame se configura en Studio (AutomaticCanvasSize/CanvasSize);
+	-- aquí solo se ocultan la plantilla y se parentean las filas.
 	template.Visible = false
 
-	-- Action
-	local action = container:WaitForChild("Action") :: Frame
-	self._actionFrame = action
-
-	local actionContainer = action:WaitForChild("Container") :: Frame
-	local contents = actionContainer:WaitForChild("Contents") :: Frame
-
-	local friendCard = contents:WaitForChild("Friend") :: GuiObject
-	self._card = friendCard
-
-	local giftCard = contents:WaitForChild("Gift") :: GuiObject
-	self._giftName = giftCard:WaitForChild("Name") :: TextLabel
-	self._giftPrice = giftCard:WaitForChild("Price") :: TextLabel
-
-	local giftBtn = (actionContainer:FindFirstChild("Gift") or actionContainer:WaitForChild("Gift")) :: GuiButton
-
 	frame.Visible = false
-	action.Visible = false
 
 	config.menuController:registerPanel(frame)
 	janitor:Add(function()
@@ -260,17 +231,23 @@ function GiftFlow.new(config: GiftFlowConfig, janitor: any)
 	end, true)
 
 	-- ── Wiring ───────────────────────────────────────────────
-	janitor:Add(closeBtn.Activated:Connect(function()
-		self:close()
-	end), "Disconnect")
+	-- El template no trae CloseBtn propio; si la GUI lo añade en el futuro se
+	-- cablea solo.
+	local closeBtn = container:FindFirstChild("CloseBtn", true)
+	if closeBtn and closeBtn:IsA("GuiButton") then
+		janitor:Add(closeBtn.Activated:Connect(function()
+			self:close()
+		end), "Disconnect")
+	end
 
-	janitor:Add(giftBtn.Activated:Connect(function()
-		self:_onSend()
-	end), "Disconnect")
-
-	janitor:Add(self._searchBox:GetPropertyChangedSignal("Text"):Connect(function()
-		self:_applyFilter()
-	end), "Disconnect")
+	-- La lista refleja quién está en el servidor: repintar al entrar/salir.
+	local function onRosterChanged()
+		if self._frame.Visible then
+			self:_refreshList(false)
+		end
+	end
+	janitor:Add(Players.PlayerAdded:Connect(onRosterChanged), "Disconnect")
+	janitor:Add(Players.PlayerRemoving:Connect(onRosterChanged), "Disconnect")
 
 	-- ── Red ──────────────────────────────────────────────────
 	janitor:Add(Network.Gifting.SendResponse.Listen(function(data: any)
@@ -295,7 +272,7 @@ function GiftFlow.new(config: GiftFlowConfig, janitor: any)
 		self._awaitingPurchase = false
 		self._pendingToken += 1
 		local receiver = self._receiver
-		local name = if receiver then "@" .. receiver.username else "your friend"
+		local name = if receiver then receiver.name else "your friend"
 		Notify.success(`Gift sent to {name}!`)
 		if frame.Visible then
 			self:close()
@@ -330,7 +307,7 @@ function GiftFlow.new(config: GiftFlowConfig, janitor: any)
 end
 
 -- ────────────────────────────────────────────────────────────
--- LISTA DE AMIGOS
+-- LISTA DE JUGADORES
 -- ────────────────────────────────────────────────────────────
 
 function GiftFlow:_clearRows()
@@ -341,21 +318,58 @@ function GiftFlow:_clearRows()
 	table.clear(self._rows)
 end
 
+-- Rellena la lista con NPCs hasta LIST_TARGET_ROWS, empezando en el offset fijo
+-- de la sesión y dando la vuelta al pool.
+function GiftFlow:_buildEntries(): { UserEntry }
+	local entries = collectServerPlayers()
+
+	local poolSize = #BotNames
+	local missing = LIST_TARGET_ROWS - #entries
+	-- Recorre el pool desde el offset de la sesión saltando las identidades que
+	-- pertenezcan a alguien presente en el servidor, hasta cubrir los huecos o
+	-- agotar el pool.
+	for i = 0, poolSize - 1 do
+		if missing <= 0 then
+			break
+		end
+		local identity = BotNames[(self._npcOffset + i - 1) % poolSize + 1]
+		if not isIdentityTakenByRealPlayer(identity) then
+			table.insert(entries, {
+				-- Los NPCs no son destino válido: el server rechaza cualquier
+				-- userId no positivo, así que nunca se envía nada por ellos.
+				userId = 0,
+				name = identity.name,
+				thumbnail = identity.image,
+				isNpc = true,
+			})
+			missing -= 1
+		end
+	end
+
+	return entries
+end
+
 function GiftFlow:_applyEntryToNode(node: GuiObject, entry: UserEntry)
-	local icon = node:WaitForChild("Icon") :: ImageLabel
-	icon.Image = string.format(AVATAR_THUMB_FORMAT, entry.userId)
+	local thumbnail = node:FindFirstChild("Thumbnail")
+	if thumbnail and thumbnail:IsA("ImageLabel") then
+		thumbnail.Image = entry.thumbnail
+	end
 
-	local username = node:WaitForChild("Username") :: TextLabel
-	username.Text = "@" .. entry.username
+	local nameLabel = node:FindFirstChild("Name")
+	if nameLabel and nameLabel:IsA("TextLabel") then
+		nameLabel.Text = if entry.isNpc then NPC_LABEL_TEXT else entry.name
+	end
 
-	local displayName = node:WaitForChild("DisplayName") :: TextLabel
-	displayName.Text = entry.displayName
+	local giftNode = node:FindFirstChild("Gift")
+	if giftNode and giftNode:IsA("GuiObject") then
+		giftNode.BackgroundColor3 = if entry.isNpc then NPC_BUTTON_COLOR else REAL_BUTTON_COLOR
 
-	local status = node:FindFirstChild("Status")
-	if status and status:IsA("TextLabel") then
-		local online = entry.online or Players:GetPlayerByUserId(entry.userId) ~= nil
-		status.Text = if online then STATUS_ONLINE_TEXT else STATUS_OFFLINE_TEXT
-		status.TextColor3 = if online then STATUS_ONLINE_COLOR else STATUS_OFFLINE_COLOR
+		local icon = giftNode:FindFirstChild("Icon")
+		if icon and icon:IsA("ImageLabel") then
+			icon.Image = if entry.isNpc then NPC_ICON else REAL_ICON
+		end
+
+		applyTint(giftNode:FindFirstChild("UIShadow"), if entry.isNpc then NPC_SHADOW_COLOR else REAL_SHADOW_COLOR)
 	end
 end
 
@@ -364,27 +378,26 @@ function GiftFlow:_populate(entries: { UserEntry }, animate: boolean?)
 
 	for index, entry in entries do
 		local row = self._template:Clone() :: GuiObject
-		row.Name = entry.username
+		row.Name = entry.name
 		row.LayoutOrder = index
 		self:_applyEntryToNode(row, entry)
 
 		local rowJanitor = Janitor.new()
-		bindRowClick(row, rowJanitor, function()
-			self:_select(entry, row)
-		end)
+		local giftNode = row:FindFirstChild("Gift")
+		if giftNode and giftNode:IsA("GuiButton") then
+			rowJanitor:Add(giftNode.Activated:Connect(function()
+				self:_onGiftPressed(entry, giftNode)
+			end), "Disconnect")
+		end
 
 		row.Visible = true
 		row.Parent = self._scrolling
 		table.insert(self._rows, { row = row, entry = entry, janitor = rowJanitor })
 	end
 
-	self:_applyFilter()
-
 	local visibleRows: { GuiObject } = {}
 	for _, record in self._rows do
-		if record.row.Visible then
-			table.insert(visibleRows, record.row)
-		end
+		table.insert(visibleRows, record.row)
 	end
 	self._reveal:setItems(visibleRows)
 	if animate then
@@ -392,72 +405,24 @@ function GiftFlow:_populate(entries: { UserEntry }, animate: boolean?)
 	end
 end
 
-function GiftFlow:_applyFilter()
-	local query = self._searchBox.Text:gsub("^%s+", ""):gsub("%s+$", ""):lower()
-	for _, record in self._rows do
-		local entry = record.entry
-		record.row.Visible = query == ""
-			or entry.username:lower():find(query, 1, true) ~= nil
-			or entry.displayName:lower():find(query, 1, true) ~= nil
-	end
+function GiftFlow:_refreshList(animate: boolean?)
+	self:_populate(self:_buildEntries(), animate)
 end
 
-function GiftFlow:_refreshList(animate: boolean?)
-	local now = os.clock()
-	if self._friendsCache and now - self._friendsFetchedAt < FRIENDS_CACHE_TTL then
-		self:_populate(self._friendsCache, animate)
+-- ────────────────────────────────────────────────────────────
+-- ENVÍO
+-- ────────────────────────────────────────────────────────────
+
+function GiftFlow:_onGiftPressed(entry: UserEntry, button: GuiObject)
+	popScale(button, ROW_PRESS_TWEEN, ROW_PRESS_FROM)
+
+	if entry.isNpc then
+		Notify.warning("You can't send a gift to that player.")
 		return
 	end
 
-	self:_populate({}, false)
-	self._friendsFetchToken += 1
-	local token = self._friendsFetchToken
-	task.spawn(function()
-		local entries = fetchFriendEntries(Players.LocalPlayer.UserId, function()
-			return token ~= self._friendsFetchToken
-		end)
-		if token ~= self._friendsFetchToken then
-			return
-		end
-		self._friendsCache = entries
-		self._friendsFetchedAt = os.clock()
-		if self._frame.Visible then
-			self:_populate(entries, animate)
-		end
-	end)
-end
-
--- ────────────────────────────────────────────────────────────
--- RECEPTOR + ENVÍO
--- ────────────────────────────────────────────────────────────
-
-function GiftFlow:_select(entry: UserEntry, row: GuiObject?)
 	self._receiver = entry
-	self:_updateCard()
-
-	if row then
-		popScale(row, ROW_SELECT_TWEEN, ROW_SELECT_FROM)
-	end
-
-	local card = self._card
-	if card and card.Visible then
-		if self._cardTween then
-			self._cardTween:Cancel()
-		end
-		self._cardTween = popScale(card, CARD_SELECT_TWEEN, CARD_SELECT_FROM)
-	end
-end
-
-function GiftFlow:_updateCard()
-	local receiver = self._receiver
-	if receiver then
-		self:_applyEntryToNode(self._card, receiver)
-		self._card.Visible = true
-		self._actionFrame.Visible = true
-	else
-		self._card.Visible = false
-		self._actionFrame.Visible = false
-	end
+	self:_onSend()
 end
 
 function GiftFlow:_onSend()
@@ -499,11 +464,6 @@ function GiftFlow:openForProduct(product: StoreProductDefinition)
 	self._sendPending = false
 	self._awaitingPurchase = false
 	self._pendingToken += 1
-	self:_updateCard()
-
-	self._giftName.Text = string.format(GIFT_NAME_FORMAT, UIUtils.formatCashAmount(product.CashAmount))
-	self._giftPrice.Text = string.format(PRICE_FORMAT, product.RobuxPrice)
-	self._searchBox.Text = ""
 
 	self:_refreshList(true)
 
