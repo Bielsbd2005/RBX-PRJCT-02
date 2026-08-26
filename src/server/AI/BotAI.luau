@@ -298,6 +298,8 @@ export type ResolvedCombatProfile = {
 	CombatStepMin: number,
 	CombatStepMax: number,
 	JumpChanceMult: number,
+	StationaryPrecisionBonus: number,
+	StationarySpeedThreshold: number,
 }
 
 local function _resolveCombatProfile(overrides: BotPersonalities.CombatOverrides?): ResolvedCombatProfile
@@ -313,6 +315,10 @@ local function _resolveCombatProfile(overrides: BotPersonalities.CombatOverrides
 		CombatStepMin = o.CombatStepMin or base.CombatStepMin,
 		CombatStepMax = o.CombatStepMax or base.CombatStepMax,
 		JumpChanceMult = o.JumpChanceMult or 1,
+		-- Sin override por personalidad: el bonus contra objetivo quieto es una
+		-- regla del juego, no un rasgo de skill tier.
+		StationaryPrecisionBonus = base.StationaryPrecisionBonus,
+		StationarySpeedThreshold = base.StationarySpeedThreshold,
 	}
 end
 
@@ -1196,6 +1202,19 @@ function BotAI:Start(
 				-- per personality (D1: Noob 25 … Whale 60).
 				local fireRate = self._fireRate
 				local precision = self._combat.Precision
+
+				-- Un objetivo quieto es mucho más fácil de acertar: se suma un
+				-- bonus de precisión que se desvanece según su velocidad, así
+				-- campear no sale gratis. Se lee la velocidad del rig completo
+				-- (AssemblyLinearVelocity) para que también cuente caer o ser
+				-- empujado, no solo caminar.
+				local bonus = self._combat.StationaryPrecisionBonus
+				if bonus > 0 and targetRoot and targetRoot.Parent then
+					local threshold = math.max(0.001, self._combat.StationarySpeedThreshold)
+					local speed = targetRoot.AssemblyLinearVelocity.Magnitude
+					local stillness = 1 - math.clamp(speed / threshold, 0, 1)
+					precision = math.min(100, precision + bonus * stillness)
+				end
 
 				if os.clock() - lastShotTime > fireRate
 					and isVisible

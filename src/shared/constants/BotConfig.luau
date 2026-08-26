@@ -45,6 +45,8 @@ export type BotConfigType = {
 		ReactionDelayMax: number,
 		MissSpreadDegMin: number,
 		MissSpreadDegMax: number,
+		StationaryPrecisionBonus: number,
+		StationarySpeedThreshold: number,
 		CombatPauseChance: number,
 		CombatPauseMin: number,
 		CombatPauseMax: number,
@@ -125,6 +127,15 @@ local BotConfig: BotConfigType = {
 		ReactionDelayMax = 0.35,
 		MissSpreadDegMin = 3,      -- spread angular para misses visibles (bullet pasa al lado)
 		MissSpreadDegMax = 8,
+		-- Puntos de Precision extra contra un objetivo quieto. Se interpola con
+		-- la velocidad del objetivo: al 0% de StationarySpeedThreshold se suma
+		-- entero, al 100% o más no se suma nada. Castiga campear sin volver a
+		-- los bots infalibles (Precision se clampa a 100).
+		StationaryPrecisionBonus = 25,
+		-- studs/s a partir de los cuales el objetivo cuenta como "en movimiento".
+		-- WalkSpeed por defecto de Roblox es 16, así que a media velocidad de
+		-- carrera el bonus ya se ha agotado.
+		StationarySpeedThreshold = 8,
 		CombatPauseChance = 0.4,   -- 40% pause, 60% step — punto medio: 60% torreta era mucho, 25% era hiperactivo
 		CombatPauseMin = 0.3,      -- pausas perceptibles pero breves
 		CombatPauseMax = 0.9,
