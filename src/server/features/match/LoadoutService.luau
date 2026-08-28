@@ -17,6 +17,7 @@ local WeaponCategory = require(Shared.constants.WeaponCategory)
 local ItemDefaults = require(Shared.constants.ItemDefaults)
 local WeaponLevelConfig = require(Shared.constants.WeaponLevelConfig)
 local CosmeticsTemplates = require(Shared.Locker.CosmeticsTemplates)
+local BackWeaponService = require(script.Parent:WaitForChild("BackWeaponService"))
 
 local LoadoutService = {}
 
@@ -26,6 +27,11 @@ local BODIES_ROOT_NAME = "Bodies"
 local DEFAULT_BODY_ID = "Default"
 local MATCH_BODY_CLONE_ATTRIBUTE = "MatchBodyClone"
 local MATCH_LOADOUT_TOOL_ATTRIBUTE = "MatchLoadoutTool"
+-- Categoría de la slot ("Main"/"Special") estampada en la Tool. El nombre de la
+-- Tool es el weaponId, que no basta: el mismo id puede existir en ambos
+-- catálogos (p.ej. "Default"). BackWeaponService lo lee para saber qué arma
+-- cuelga de la espalda.
+local MATCH_LOADOUT_CATEGORY_ATTRIBUTE = "MatchLoadoutCategory"
 local MATCH_LOADOUT_HAT_ATTRIBUTE = "MatchLoadoutHat"
 
 -- ── Helpers internos ─────────────────────────────────────────
@@ -130,10 +136,16 @@ local function _clearMatchLoadoutTools(player: Player)
 	end
 end
 
-local function _grantMatchLoadoutTools(player: Player, dataService: any): (boolean, boolean, string?)
+-- Devuelve (éxito, reintentable, mainWeaponId, slots). `slots` lleva arma+wrap
+-- ya resueltos de ambas categorías; lo consume BackWeaponService para holsterar
+-- la que no se equipe.
+local function _grantMatchLoadoutTools(
+	player: Player,
+	dataService: any
+): (boolean, boolean, string?, BackWeaponService.Slots?)
 	local profile = if dataService then dataService:GetProfile(player) else nil
 	if not profile or not profile.Data or not profile.Data.Loadout then
-		return false, true, nil
+		return false, true, nil, nil
 	end
 
 	local profileData = profile.Data
@@ -160,7 +172,7 @@ local function _grantMatchLoadoutTools(player: Player, dataService: any): (boole
 	local backpackNode = player:WaitForChild("Backpack", 1)
 	local backpack = if backpackNode and backpackNode:IsA("Backpack") then backpackNode else nil
 	if not backpack then
-		return false, true, nil
+		return false, true, nil, nil
 	end
 
 	_clearMatchLoadoutTools(player)
@@ -175,6 +187,7 @@ local function _grantMatchLoadoutTools(player: Player, dataService: any): (boole
 		local backpackClone = template:Clone()
 		CosmeticsTemplates.applyWeaponWrapToTool(backpackClone, wrapId)
 		backpackClone:SetAttribute(MATCH_LOADOUT_TOOL_ATTRIBUTE, true)
+		backpackClone:SetAttribute(MATCH_LOADOUT_CATEGORY_ATTRIBUTE, loadoutCategory)
 		-- Nivel de arma (1..5) derivado de las kills acumuladas con esa arma.
 		-- BaseWeapon lee este atributo para escalar daño/cadencia/recarga/cargador.
 		backpackClone:SetAttribute(WeaponLevelConfig.ATTRIBUTE, LoadoutService.GetWeaponLevel(profileData, loadoutCategory, weaponId))
@@ -185,10 +198,15 @@ local function _grantMatchLoadoutTools(player: Player, dataService: any): (boole
 	local mainOk = cloneIntoInventory(WeaponCategory.MAIN, mainWeaponId, mainWrapId)
 	local specialOk = cloneIntoInventory(WeaponCategory.SPECIAL, specialWeaponId, specialWrapId)
 	if not mainOk or not specialOk then
-		return false, false, nil
+		return false, false, nil, nil
 	end
 
-	return true, false, mainWeaponId
+	local slots: BackWeaponService.Slots = {
+		[WeaponCategory.MAIN] = { weaponId = mainWeaponId, wrapId = mainWrapId },
+		[WeaponCategory.SPECIAL] = { weaponId = specialWeaponId, wrapId = specialWrapId },
+	}
+
+	return true, false, mainWeaponId, slots
 end
 
 local function _equipMainLoadoutTool(player: Player, mainWeaponId: string): boolean
@@ -289,7 +307,7 @@ function LoadoutService.applyCosmetics(player: Player, character: Model, dataSer
 		if hatTemplate then
 			local hatClone = hatTemplate:Clone()
 			hatClone:SetAttribute(MATCH_LOADOUT_HAT_ATTRIBUTE, true)
-			hatClone.Parent = character
+			CosmeticsTemplates.attachHatToCharacter(character, hatClone)
 		else
 			warn(string.format("[LoadoutService] Hat no encontrado para Loadout.Hat=%s en Shared/locker/hats.", hatId))
 		end
@@ -403,8 +421,15 @@ end
 function LoadoutService.grantWeaponsWithRetry(player: Player, dataService: any, timeoutSec: number)
 	local endAt = time() + math.max(0.5, timeoutSec)
 	while player.Parent == Players do
-		local success, retryable, mainWeaponId = _grantMatchLoadoutTools(player, dataService)
+		local success, retryable, mainWeaponId, slots = _grantMatchLoadoutTools(player, dataService)
 		if success then
+			-- Antes de equipar: el Bind engancha character.ChildAdded, y así el
+			-- equipado de la Main de más abajo ya entra por esa vía.
+			local character = player.Character
+			if character and slots then
+				BackWeaponService.Bind(character, slots)
+			end
+
 			if type(mainWeaponId) == "string" and mainWeaponId ~= "" then
 				local equipDeadline = time() + 2
 				while time() < equipDeadline and player.Parent == Players do

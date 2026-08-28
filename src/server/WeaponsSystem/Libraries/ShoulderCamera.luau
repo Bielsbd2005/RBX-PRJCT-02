@@ -23,6 +23,8 @@ local CAMERA_RENDERSTEP_NAME = "ShoulderCameraUpdate"
 local ZOOM_ACTION_NAME = "ShoulderCameraZoom"
 local SPRINT_ACTION_NAME = "ShoulderCameraSprint"
 local MATCH_LOADOUT_HAT_ATTRIBUTE = "MatchLoadoutHat"
+-- Espejo de BackWeaponService.BACK_WEAPON_CLONE_ATTRIBUTE.
+local BACK_WEAPON_CLONE_ATTRIBUTE = "BackWeaponClone"
 local HAT_AIM_TRANSPARENCY = 0.7
 local CONTROLLABLE_HUMANOID_STATES = {
 	[Enum.HumanoidStateType.Running] = true,
@@ -1195,6 +1197,14 @@ function ShoulderCamera:handlePartTransparencies()
 			local toolParts = self:_getCachedBaseParts(child)
 			for _, part in toolParts do
 				part.LocalTransparencyModifier = hidden and 1 or 0
+			end
+		elseif child:GetAttribute(BACK_WEAPON_CLONE_ATTRIBUTE) == true then
+			-- El arma holsterada cuelga de la espalda, justo en la línea de
+			-- visión de la cámara al hombro: se difumina al apuntar igual que
+			-- los hats del loadout para no tapar la mira.
+			local backWeaponParts = self:_getCachedBaseParts(child)
+			for _, part in backWeaponParts do
+				part.LocalTransparencyModifier = if self.zoomState then HAT_AIM_TRANSPARENCY else 0
 			end
 		end
 	end
