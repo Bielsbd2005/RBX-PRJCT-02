@@ -23,6 +23,7 @@ local TweenService = game:GetService("TweenService")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ItemsConfig = require(Shared.constants.ItemsConfig)
 local TeamUtils = require(Shared.utils.TeamUtils)
+local AssetIds = require(Shared.constants.AssetIds)
 
 local GlobalKillFeed = {}
 local GlobalKillFeed_mt = { __index = GlobalKillFeed }
@@ -43,7 +44,7 @@ type GlobalKillFeedItem = {
 
 local MAX_ITEMS = 5
 local DISPLAY_TIME = 6
-local SKULL_ICON = "rbxassetid://130437553674754"
+local SKULL_ICON = AssetIds.Images.Skull
 
 -- Colores del HUD
 local TEAM_A_COLOR = Color3.fromRGB(0, 161, 251)

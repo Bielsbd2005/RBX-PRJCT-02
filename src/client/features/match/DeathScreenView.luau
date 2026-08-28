@@ -1,7 +1,10 @@
 --!strict
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
+
+local AssetIds = require(ReplicatedStorage:WaitForChild("Shared").constants.AssetIds)
 
 local DeathScreenView = {}
 DeathScreenView.__index = DeathScreenView
@@ -11,7 +14,7 @@ local STYLE = {
 	hideTween = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
 }
 
-local KILLER_VIEWPORT_ANIM_ID = "rbxassetid://126774009783214"
+local KILLER_VIEWPORT_ANIM_ID = AssetIds.Animations.KillerViewportIdle
 
 type Refs = {
 	root: GuiObject,

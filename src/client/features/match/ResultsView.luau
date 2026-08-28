@@ -39,10 +39,11 @@ local FaceApplier = require(Client.features.locker.Appliers.FaceApplier)
 local HatApplier = require(Client.features.locker.Appliers.HatApplier)
 local DataController = require(Client.core.data.DataController)
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
+local AssetIds = require(Shared.constants.AssetIds)
 
 local SLOT_COUNT = 4
 -- Mismo idle que el preview del locker.
-local IDLE_ANIMATION_ID = "rbxassetid://115197033304718"
+local IDLE_ANIMATION_ID = AssetIds.Animations.PreviewIdle
 local LOCAL_USER_ID = Players.LocalPlayer and Players.LocalPlayer.UserId
 
 -- Gris para los bonus bloqueados (no-VIP): Image/Amount/Title + chip "Locked".

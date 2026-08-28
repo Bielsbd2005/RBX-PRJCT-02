@@ -10,11 +10,14 @@
 -- packet PlayerStreakState del marcador (server-authoritative, otro concepto).
 
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 local LocalPlayer = Players.LocalPlayer
 
+local AssetIds = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("AssetIds"))
+
 -- ── Spritesheet (parámetros del asset) ────────────────────────────────────────
-local SHEET_IMAGE = "rbxassetid://79402287010899"
+local SHEET_IMAGE = AssetIds.Images.StreakSheet
 local FPS = 12
 local COLUMNS = 4
 local FRAME_WIDTH = 128

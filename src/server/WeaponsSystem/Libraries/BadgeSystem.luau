@@ -1,5 +1,8 @@
 local TweenService = game:GetService("TweenService")
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local AssetIds = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("AssetIds"))
 
 local CONFIG = {
 	TWEEN_SPEED    = 0.4,
@@ -14,12 +17,14 @@ local CONFIG = {
 	EXIT_ROTATION  = 15,
 }
 
+-- Los cinco tiers comparten arte por ahora; el map se mantiene abierto para
+-- darle a cada uno el suyo sin tocar el resto del sistema.
 local BADGE_MAP = {
-	Kill        = "rbxassetid://130873581439859",
-	DoubleKill  = "rbxassetid://130873581439859",
-	TripleKill  = "rbxassetid://130873581439859",
-	Rampage     = "rbxassetid://130873581439859",
-	Godlike     = "rbxassetid://130873581439859",
+	Kill        = AssetIds.Images.KillBadge,
+	DoubleKill  = AssetIds.Images.KillBadge,
+	TripleKill  = AssetIds.Images.KillBadge,
+	Rampage     = AssetIds.Images.KillBadge,
+	Godlike     = AssetIds.Images.KillBadge,
 }
 
 local function buildGui()

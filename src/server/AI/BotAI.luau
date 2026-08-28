@@ -18,6 +18,7 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local TeamUtils = require(Shared.utils.TeamUtils)
 local BotConfig = require(Shared.constants.BotConfig)
 local BotPersonalities = require(Shared.constants.BotPersonalities)
+local AssetIds = require(Shared.constants.AssetIds)
 local CollisionGroups = require(Shared:WaitForChild("CollisionGroups"))
 local LastAttackerStore = require(ReplicatedStorage:WaitForChild("WeaponsSystem"):WaitForChild("Libraries"):WaitForChild("LastAttackerStore"))
 
@@ -130,10 +131,10 @@ local AGENT_PARAMS = {
 -- Catálogo de animaciones por estado lógico del bot.
 -- Estructura esperada: dictionary<string, string> donde cada valor es rbxassetid.
 local ANIM_IDS = {
-	Idle = "rbxassetid://507766388",
-	Run = "rbxassetid://507767714",
-	Jump = "rbxassetid://507765000",
-	ToolHold = "rbxassetid://80449761976468",
+	Idle = AssetIds.Animations.CharacterIdle,
+	Run = AssetIds.Animations.CharacterRun,
+	Jump = AssetIds.Animations.CharacterJump,
+	ToolHold = AssetIds.Animations.BotToolHold,
 }
 
 -- Cache global de instancias Animation para evitar recreación por respawn.

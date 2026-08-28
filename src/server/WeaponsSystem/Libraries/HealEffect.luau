@@ -11,11 +11,14 @@
 -- un respawn antes de terminar.
 
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 
 local LocalPlayer = Players.LocalPlayer
 
-local IMAGE_ID = "rbxassetid://117688967482768"
+local AssetIds = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("AssetIds"))
+
+local IMAGE_ID = AssetIds.Images.HealPlus
 local HEAL_COLOR = Color3.fromRGB(120, 255, 150)
 local GLOW_THICKNESS = 0.19
 local GLOW_MAX_OPACITY = 0.13

@@ -20,12 +20,13 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Network = require(Shared:WaitForChild("networking"):WaitForChild("Network"))
+local AssetIds = require(Shared:WaitForChild("constants"):WaitForChild("AssetIds"))
 
 local SoundService = game:GetService("SoundService")
 
 local PickupDropEffect = {}
 
-local PICKUP_SOUND_ID = "rbxassetid://5728423829"
+local PICKUP_SOUND_ID = AssetIds.Sounds.Pickup
 
 local _pickupSoundPool: { Sound } = {}
 local _PICKUP_SOUND_POOL_SIZE = 2
