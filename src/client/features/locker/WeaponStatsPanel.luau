@@ -210,7 +210,9 @@ local function applyDelta(node: StatNodes, delta: number, dir: string)
 end
 
 function WeaponStatsPanel.new(lockerFrame: Instance, janitor: any): WeaponStatsPanel
-	local statsFrame = lockerFrame:FindFirstChild("Stats")
+	-- Locker.WeaponStats: se renombró desde "Stats" cuando el Locker adoptó el HUD
+	-- de monedas del Menu, que trae su propio nodo "Stats".
+	local statsFrame = lockerFrame:FindFirstChild("WeaponStats")
 	local statsGui = if statsFrame and statsFrame:IsA("GuiObject") then statsFrame else nil
 
 	local nodes: { [string]: StatNodes } = {}

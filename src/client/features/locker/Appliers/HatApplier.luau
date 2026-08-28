@@ -33,17 +33,6 @@ local function resolveHatsFolder(): Folder?
 		end
 	end
 
-	local systems = shared:FindFirstChild("Systems")
-	if systems and systems:IsA("Folder") then
-		local systemsLocker = systems:FindFirstChild("Locker")
-		if systemsLocker and systemsLocker:IsA("Folder") then
-			local systemsHats = systemsLocker:FindFirstChild("Hats")
-			if systemsHats and systemsHats:IsA("Folder") then
-				return systemsHats
-			end
-		end
-	end
-
 	return nil
 end
 

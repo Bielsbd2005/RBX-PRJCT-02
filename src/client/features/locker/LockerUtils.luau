@@ -4,6 +4,24 @@
 
 local LockerUtils = {}
 
+-- Animation cacheada por id: LoadAnimation copia la data del asset, así que
+-- reutilizar la misma instancia evita crear y destruir un Instance por preview
+-- (el locker rehace previews en cada cambio de selección).
+local _animationById: { [string]: Animation } = {}
+
+local function getIdleAnimation(animationId: string): Animation
+	local cached = _animationById[animationId]
+	if cached then
+		return cached
+	end
+
+	local anim = Instance.new("Animation")
+	anim.Name = "LockerPreviewIdle"
+	anim.AnimationId = animationId
+	_animationById[animationId] = anim
+	return anim
+end
+
 function LockerUtils.placePreviewCharacter(previewModel: Model, spawnTarget: Instance)
 	local humanoid = previewModel:FindFirstChildWhichIsA("Humanoid", true)
 	if humanoid then
@@ -56,20 +74,16 @@ function LockerUtils.playPreviewIdleAnimation(previewModel: Model, ownerJanitor:
 		return nil
 	end
 
-	local anim = Instance.new("Animation")
-	anim.Name = "LockerPreviewIdle"
-	anim.AnimationId = animationId
-
-	local animationTrack = animator:LoadAnimation(anim)
+	local animationTrack = animator:LoadAnimation(getIdleAnimation(animationId))
 	animationTrack.Name = "LockerPreviewIdle"
 	animationTrack.Looped = true
 	animationTrack.Priority = Enum.AnimationPriority.Idle
 	animationTrack:Play(0.1)
 
+	-- La Animation NO se destruye: vive en la cache compartida.
 	ownerJanitor:Add(function()
 		animationTrack:Stop(0.1)
 		animationTrack:Destroy()
-		anim:Destroy()
 	end, true)
 
 	return animationTrack

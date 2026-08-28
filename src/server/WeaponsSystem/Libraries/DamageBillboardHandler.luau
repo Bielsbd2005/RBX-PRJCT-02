@@ -137,15 +137,27 @@ local COLOR_HEADSHOT_STROKE = Color3.fromRGB(92, 56, 12)   -- headshot stroke (m
 
 -- TweenInfos
 local TI_NUM_APPEAR   = TweenInfo.new(0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
--- Flotación: sube y se desvanece en un único gesto, desacelerando (Out). Sin
--- tramo de caída — el descenso de vuelta al origen era lo que hacía parecer que
--- el número "desaparecía y reaparecía".
-local TI_NUM_FLOAT    = TweenInfo.new(1.05, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
--- Geometría de la flotación (en scale del billboard)
-local FLOAT_RISE      = 1.1  -- cuánto sube en total
-local FLOAT_DRIFT_X   = 0.4  -- deriva horizontal máxima (±), da un toque orgánico
-local FLOAT_MAX_ROT   = 14   -- rotación final (±)
+-- Geometría de la flotación (en scale del billboard).
+--
+-- Cada número randomiza deriva, altura y duración de forma independiente. Antes
+-- todos compartían la misma duración y altura y la deriva se sorteaba en un
+-- rango centrado en cero, así que la mayoría salía casi recta y las ráfagas
+-- subían en bloque, superpuestas.
+local FLOAT_RISE_MIN  = 0.85  -- cuánto sube en total
+local FLOAT_RISE_MAX  = 1.45
+-- La deriva se sortea con signo aparte y magnitud MÍNIMA distinta de cero: es lo
+-- que garantiza que dos números consecutivos se separen en abanico.
+local FLOAT_DRIFT_MIN = 0.28
+local FLOAT_DRIFT_MAX = 0.62
+local FLOAT_TIME_MIN  = 0.85  -- duración del gesto; desincroniza los impactos seguidos
+local FLOAT_TIME_MAX  = 1.2
+local SPAWN_JITTER    = 0.1   -- dispersión del punto de salida (±)
+local FLOAT_ROT_MIN   = 6     -- rotación final; el signo sigue al de la deriva
+local FLOAT_ROT_MAX   = 18
+-- Fracción inicial del vuelo en la que el número se mantiene opaco antes de
+-- empezar a desvanecerse, para que el pico de lectura sea el arranque.
+local FADE_HOLD_RATIO = 0.35
 
 -- Desktop-only profile (no mobile distinctions)
 local MAX_UI_DISTANCE     = 200
@@ -388,16 +400,18 @@ function DamageBillboardHandler:CreateBillboardForAdornee(adornee: Instance): Bi
 	return billboard
 end
 
--- Render a single number con trayectoria en arco (sube a un ápex y cae con gravedad)
+-- Render a single number: sale disparado en abanico hacia un lado y se desvanece
+-- en la parte final del recorrido. Cada número randomiza lado, deriva, altura y
+-- duración, de modo que una ráfaga se abre en lugar de subir en bloque.
 local function renderNumber(billboard: BillboardGui, value: number, isHeadshot: boolean)
 	local label = getBillboardLabel(billboard, isHeadshot)
 	if not label then return end
 
 	label.Text = tostring(value)
 
-	-- Pequeño jitter de spawn alrededor del centro
-	local startX = 0.5 + RNG:NextNumber(-0.04, 0.04)
-	local startY = 0.5 + RNG:NextNumber(-0.04, 0.04)
+	-- Jitter de spawn alrededor del centro
+	local startX = 0.5 + RNG:NextNumber(-SPAWN_JITTER, SPAWN_JITTER)
+	local startY = 0.5 + RNG:NextNumber(-SPAWN_JITTER, SPAWN_JITTER)
 	label.Position = UDim2.fromScale(startX, startY)
 
 	-- Use cached stroke (already guaranteed to exist via ensureStroke)
@@ -408,31 +422,61 @@ local function renderNumber(billboard: BillboardGui, value: number, isHeadshot: 
 		stroke.Transparency = isHeadshot and 0 or 0.8
 	end
 
-	-- Destino: sube con una pequeña deriva horizontal (un solo gesto, sin bajar).
-	local driftX = RNG:NextNumber(-FLOAT_DRIFT_X, FLOAT_DRIFT_X)
-	local endX = startX + driftX
-	local endY = startY - FLOAT_RISE
+	-- Lado y magnitud por separado: sortear en un rango centrado en cero deja la
+	-- mayoría de tiradas cerca de 0, que es justo lo que hacía que salieran rectos.
+	local driftSign = if RNG:NextNumber() < 0.5 then -1 else 1
+	local endX = startX + driftSign * RNG:NextNumber(FLOAT_DRIFT_MIN, FLOAT_DRIFT_MAX)
+	local endY = startY - RNG:NextNumber(FLOAT_RISE_MIN, FLOAT_RISE_MAX)
+	local duration = RNG:NextNumber(FLOAT_TIME_MIN, FLOAT_TIME_MAX)
 
 	-- Pop de aparición (tamaño), en paralelo a la flotación.
 	local appearTween = TweenService:Create(label, TI_NUM_APPEAR, {
 		Size = UDim2_APPEAR_END,
 	})
 
-	-- Sube y se desvanece. El stroke se desvanece a la vez (mismo TweenInfo, así
-	-- termina a la par que floatTween, justo cuando se libera el label → sin
-	-- conflicto con el reuso del pool).
-	local floatTween = TweenService:Create(label, TI_NUM_FLOAT, {
-		Position = UDim2.fromScale(endX, endY),
-		Rotation = RNG:NextNumber(-FLOAT_MAX_ROT, FLOAT_MAX_ROT),
-		TextTransparency = 1,
-	})
-	if stroke then
-		TweenService:Create(stroke, TI_NUM_FLOAT, { Transparency = 1 }):Play()
+	-- Quint/Out: salida rápida (el golpe se lee al instante) y cola lenta a la
+	-- deriva. La rotación acompaña al lado del abanico, como si saliera despedido.
+	local floatTween = TweenService:Create(
+		label,
+		TweenInfo.new(duration, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+		{
+			Position = UDim2.fromScale(endX, endY),
+			Rotation = driftSign * RNG:NextNumber(FLOAT_ROT_MIN, FLOAT_ROT_MAX),
+		}
+	)
+
+	-- El fade arranca con retraso para que el número sea legible durante el pico
+	-- del gesto. Termina exactamente a la vez que floatTween: el label se libera
+	-- al pool en ese momento, así que no puede quedar un tween pisando al reuso.
+	local holdTime = duration * FADE_HOLD_RATIO
+	local fadeInfo = TweenInfo.new(
+		duration - holdTime,
+		Enum.EasingStyle.Quad,
+		Enum.EasingDirection.In,
+		0,
+		false,
+		holdTime
+	)
+	local fadeTween = TweenService:Create(label, fadeInfo, { TextTransparency = 1 })
+	fadeTween:Play()
+	local strokeFadeTween = if stroke
+		then TweenService:Create(stroke, fadeInfo, { Transparency = 1 })
+		else nil
+	if strokeFadeTween then
+		strokeFadeTween:Play()
 	end
 
 	-- Cleanup al terminar. Audit mobile: :Once auto-disconnect (Completed dispara
 	-- una vez, tanto en finalización como en cancel).
 	floatTween.Completed:Once(function()
+		-- Los fades terminan a la vez que floatTween, pero el orden entre tweens
+		-- que acaban en el mismo frame no está garantizado: cancelarlos evita que
+		-- uno rezagado pise el TextTransparency = 0 que resetLabelVisual pone al
+		-- reutilizar este label para el siguiente impacto.
+		fadeTween:Cancel()
+		if strokeFadeTween then
+			strokeFadeTween:Cancel()
+		end
 		if stroke then
 			stroke.Transparency = 1
 		end

@@ -3,7 +3,6 @@
 local Players = game:GetService("Players")
 local MarketplaceService = game:GetService("MarketplaceService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
@@ -20,17 +19,20 @@ local ScenePresetController = require(Client.core.lighting.ScenePresetController
 local LobbyCharacterPreview = require(Client.core.character.LobbyCharacterPreview)
 local LockerCatalog = require(script:WaitForChild("LockerCatalog"))
 local LockerGrid = require(script:WaitForChild("LockerGrid"))
+local LockerUtils = require(script:WaitForChild("LockerUtils"))
 local WeaponPreviewController = require(script:WaitForChild("WeaponPreviewController"))
 local WeaponStatsPanel = require(script:WaitForChild("WeaponStatsPanel"))
 local MenuHover = require(Client.core.ui.MenuHover)
 local NavStaggerController = require(Client.core.ui.NavStaggerController)
 local UIUtils = require(Client.core.ui.UIUtils)
 local ItemsConfig = require(Shared.constants.ItemsConfig)
+local AssetIds = require(Shared.constants.AssetIds)
 local WeaponLevelConfig = require(Shared.constants.WeaponLevelConfig)
 local LockerConfig = require(Shared.constants.LockerConfig)
 local WeaponCategoryMod = require(Shared.constants.WeaponCategory)
 local ItemDefaults = require(Shared.constants.ItemDefaults)
 local LockerCategory = require(Shared.constants.LockerCategory)
+local CurrencyMod = require(Shared.constants.Currency)
 local LockerMainCategory = require(Shared.constants.LockerMainCategory)
 local Network = require(Shared.networking.Network)
 local KillEffectsRegistry = require(Shared.Locker.killEffects.KillEffectsRegistry)
@@ -51,11 +53,14 @@ local PURCHASE_BUTTON_HOVER_SCALE = 1.03
 local PURCHASE_BUTTON_CLICK_SCALE = 0.96
 local DEFAULT_NAV_THUMBNAIL = "rbxasset://textures/ui/GuiImagePlaceholder.png"
 local ACTION_FRAME_TWEEN_INFO = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-local ACTION_ICON_LOCKED = "rbxassetid://86881935952206"
-local ACTION_ICON_PURCHASE = "rbxassetid://120069483795815"
+local ACTION_ICON_LOCKED = AssetIds.Images.LockerLocked
+local ACTION_ICON_PURCHASE = AssetIds.Images.LockerPurchase
+-- Mismo icono de gema que pinta el grid (LockerGrid.STATUS_ICON_GEMS): el panel
+-- de acción tiene que anunciar la moneda antes de que el jugador pulse comprar.
+local ACTION_ICON_PURCHASE_GEMS = AssetIds.Images.LockerStatusGems
 local ACTION_BTN_COLOR_PURCHASE = Color3.fromRGB(255, 0, 127)
 local ACTION_BTN_COLOR_LOCKED = Color3.fromRGB(161, 161, 161)
-local LOCKER_PREVIEW_IDLE_ANIMATION_ID = "rbxassetid://115197033304718"
+local LOCKER_PREVIEW_IDLE_ANIMATION_ID = AssetIds.Animations.PreviewIdle
 local SHOP_REQUEST_TIMEOUT = 5
 
 type LockerCategoryKey = LockerMainCategory.LockerMainCategory
@@ -96,6 +101,7 @@ type PendingShopAction = {
 type StatsData = {
 	Level: number,
 	Cash: number,
+	Gems: number?,
 }
 
 type InventoryData = {
@@ -112,7 +118,6 @@ type LoadoutData = {
 
 type WeaponCategory = WeaponCategoryMod.WeaponCategory
 
-type LockerPreviewSpawnTarget = Folder | Model | BasePart
 
 local LOCKER_NAV_ITEMS = LockerConfig.NavItems :: { [LockerCategoryKey]: { LockerNavItemDefinition } }
 local ITEMS_CONFIG_BY_NAV = LockerConfig.ItemsConfigByNav :: { [LockerCategoryKey]: { [string]: string } }
@@ -148,7 +153,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local lobbyCharacter = LobbyCharacterPreview.get()
 
 	local lockerFolder = Workspace:WaitForChild("Locker")
-	local lockerWeaponsFolder = lockerFolder:WaitForChild("weapons")
 
 	-- Lighting por atributo: el look del Locker lo lleva Workspace.Locker
 	-- (LightingPreset="Locker") y el de vuelta al menú lo lleva
@@ -161,10 +165,24 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end
 	end
 	local dummySpawn = lockerFolder:WaitForChild("DummySpawn")
-	local mainWeaponSpawn = lockerFolder:WaitForChild("MainSpawn")
-	local specialWeaponSpawn = lockerFolder:WaitForChild("SpecialSpawn")
-	local mainIndicator = lockerWeaponsFolder:FindFirstChild("MainIndicator")
-	local specialIndicator = lockerWeaponsFolder:FindFirstChild("SpecialIndicator")
+	-- Anclas del preview de armas por ROL, no por arma: el arma de la categoría
+	-- activa se va a la mesa y la otra a la pared (WeaponPreviewController las
+	-- intercambia al cambiar de nav). Fallback a los nombres antiguos mientras el
+	-- place no tenga los nuevos: el intercambio funciona igual, entre las posiciones
+	-- de siempre.
+	local function resolveWeaponAnchor(preferredName: string, legacyName: string): Instance?
+		local preferred = lockerFolder:FindFirstChild(preferredName)
+		if preferred then
+			return preferred
+		end
+		local legacy = lockerFolder:FindFirstChild(legacyName)
+		if not legacy then
+			warn(`[Locker] Ancla de arma no encontrada: Locker.{preferredName} (ni {legacyName})`)
+		end
+		return legacy
+	end
+	local tableWeaponSpawn = resolveWeaponAnchor("TableSpawn", "MainSpawn")
+	local wallWeaponSpawn = resolveWeaponAnchor("WallSpawn", "SpecialSpawn")
 
 	-- Botón de apertura en Menu.Container.Locker
 	local container = menuGui:FindFirstChild("Container")
@@ -275,12 +293,21 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end
 	end
 
-	local cashFrame = lockerFrame:WaitForChild("CashFrame")
-	local cashValueNode = cashFrame:WaitForChild("Value")
-	local cashValueLabel = if cashValueNode:IsA("TextLabel") then cashValueNode else nil
-	local levelContainer = lockerFrame:WaitForChild("LevelContainer")
-	local levelValueNode = levelContainer:WaitForChild("Value")
-	local levelValueLabel = if levelValueNode:IsA("TextLabel") then levelValueNode else nil
+	-- HUD de monedas: el Locker monta una copia del Stats del Menu
+	-- (Stats.CoinsFrame.Value + Stats.GemsFrame.Value opcional). El panel de stats
+	-- del arma vive aparte, en Locker.WeaponStats. Todo opcional: sin HUD montado el
+	-- locker funciona igual, solo no pinta el cash.
+	local statsHud = lockerFrame:FindFirstChild("Stats")
+	local coinsFrame = if statsHud then statsHud:FindFirstChild("CoinsFrame") else nil
+	local coinsValueNode = if coinsFrame then coinsFrame:FindFirstChild("Value") else nil
+	local cashValueLabel = if coinsValueNode and coinsValueNode:IsA("TextLabel") then coinsValueNode else nil
+	local statsHudNode = if statsHud and statsHud:IsA("GuiObject") then statsHud :: GuiObject else nil
+	local gemsFrame = if statsHudNode then statsHudNode:FindFirstChild("GemsFrame") else nil
+	local gemsValueNode = if gemsFrame then gemsFrame:FindFirstChild("Value") else nil
+	local gemsValueLabel = if gemsValueNode and gemsValueNode:IsA("TextLabel") then gemsValueNode else nil
+	if not cashValueLabel then
+		warn("[Locker] HUD de cash no encontrado (Stats.CoinsFrame.Value) dentro de Locker")
+	end
 	local cameraController = LockerCameraController.new("weapons")
 	janitor:Add(cameraController, "Destroy")
 	lockerFrame.Visible = false
@@ -305,7 +332,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local nav1ButtonsJanitor = Janitor.new()
 	janitor:Add(nav1ButtonsJanitor, "Destroy")
 	local activeNavSizeTweens = {} :: { [GuiButton]: Tween }
-	local selectedNavButton: GuiButton? = nil
 	local selectedMainCategory: LockerCategoryKey? = nil
 	local selectedCatalogItem: LockerCatalogItem? = nil
 	local wrapsTargetWeaponCategory: WeaponCategory = WeaponCategoryMod.MAIN
@@ -353,8 +379,9 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 	local function setWrapsMode(enabled: boolean)
 		isWrapsMode = enabled
-		if levelContainer then levelContainer.Visible = not enabled end
-		if cashFrame then cashFrame.Visible = not enabled end
+		if statsHudNode then
+			statsHudNode.Visible = not enabled
+		end
 		if nav then nav.Visible = not enabled end
 		-- Entrar al modo wraps oculta el WeaponNav; al salir, updateActionFrameForSelected
 		-- lo vuelve a mostrar si toca.
@@ -399,12 +426,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		return math.max(0, math.floor(tonumber(getCurrentStats().Level) or 0))
 	end
 
-	local function setOptionalVisible(guiObject: GuiObject?, visible: boolean)
-		if guiObject then
-			guiObject.Visible = visible
-		end
-	end
-
 	local function cancelTween(tween: Tween?): Tween?
 		if tween then
 			tween:Cancel()
@@ -421,96 +442,11 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		table.clear(tweenMap)
 	end
 
-	local function disconnectFromMap(map: { [any]: RBXScriptConnection }, key: any)
-		local conn = map[key]
-		if conn then
-			conn:Disconnect()
-			map[key] = nil
-		end
-	end
 
-	local function cancelTweenFromMap(map: { [any]: Tween }, key: any)
-		local tw = map[key]
-		if tw then
-			tw:Cancel()
-			map[key] = nil
-		end
-	end
-
-	local function getSpawnPivot(spawnTarget: LockerPreviewSpawnTarget): CFrame
-		if spawnTarget:IsA("BasePart") then
-			return spawnTarget.CFrame
-		end
-
-		return spawnTarget:GetPivot()
-	end
-
-	local function placePreviewCharacter(previewModel: Model, spawnTarget: LockerPreviewSpawnTarget)
-		if not spawnTarget:IsA("BasePart") then
-			previewModel:PivotTo(spawnTarget:GetPivot())
-			return
-		end
-
-		local rootPart = previewModel:FindFirstChild("HumanoidRootPart", true)
-		if rootPart and rootPart:IsA("BasePart") then
-			local rootOffset = previewModel:GetPivot():ToObjectSpace(rootPart.CFrame)
-			local targetPivot = spawnTarget.CFrame * rootOffset:Inverse()
-			previewModel:PivotTo(targetPivot)
-			return
-		end
-
-		previewModel:MoveTo(spawnTarget.Position)
-	end
-
-	local _cachedIdleAnimation: Animation? = nil
-
+	-- La implementación vive en LockerUtils (la comparte ResultsView); aquí solo se
+	-- fija la animación del locker y el janitor por defecto.
 	local function playPreviewIdleAnimation(previewModel: Model, ownerJanitor: any?)
-		local animator = previewModel:FindFirstChildWhichIsA("Animator", true)
-		if not animator then
-			local humanoid = previewModel:FindFirstChildWhichIsA("Humanoid", true)
-			if humanoid then
-				animator = humanoid:FindFirstChildOfClass("Animator")
-				if not animator then
-					animator = Instance.new("Animator")
-					animator.Parent = humanoid
-				end
-			else
-				local animationController = previewModel:FindFirstChildWhichIsA("AnimationController", true)
-				if not animationController then
-					animationController = Instance.new("AnimationController")
-					animationController.Name = "LockerPreviewAnimationController"
-					animationController.Parent = previewModel
-				end
-
-				animator = animationController:FindFirstChildOfClass("Animator")
-				if not animator then
-					animator = Instance.new("Animator")
-					animator.Parent = animationController
-				end
-			end
-		end
-
-		if not animator then
-			return
-		end
-
-		if not _cachedIdleAnimation then
-			_cachedIdleAnimation = Instance.new("Animation")
-			_cachedIdleAnimation.Name = "LockerPreviewIdle"
-			_cachedIdleAnimation.AnimationId = LOCKER_PREVIEW_IDLE_ANIMATION_ID
-		end
-
-		local animationTrack = animator:LoadAnimation(_cachedIdleAnimation)
-		animationTrack.Name = "LockerPreviewIdle"
-		animationTrack.Looped = true
-		animationTrack.Priority = Enum.AnimationPriority.Idle
-		animationTrack:Play(0.1)
-
-		local cleanupTarget = ownerJanitor or janitor
-		cleanupTarget:Add(function()
-			animationTrack:Stop(0.1)
-			animationTrack:Destroy()
-		end, true)
+		LockerUtils.playPreviewIdleAnimation(previewModel, ownerJanitor or janitor, LOCKER_PREVIEW_IDLE_ANIMATION_ID)
 	end
 
 	local KILL_EFFECT_PREVIEW_COOLDOWN = 0.4
@@ -570,7 +506,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
 		end
 		clone.Parent = lockerFolder
-		placePreviewCharacter(clone, dummySpawn :: LockerPreviewSpawnTarget)
+		LockerUtils.placePreviewCharacter(clone, dummySpawn)
 		snapPartsToCanonicalPose(clone)
 
 		-- Anclar HRP para que el dummy no caiga por gravedad antes del clic.
@@ -632,7 +568,12 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 	local function applySelectedHatPreview(item: LockerCatalogItem?)
 		if item and item.Category == LockerCategory.HATS then
-			lobbyCharacter:applyHatItem(item)
+			-- Igual que el body: si el hat está bloqueado por nivel, el preview lo
+			-- marca con el contorno de bloqueo (sin billboard, ese es solo del body).
+			local lockedLevel: number? = if getCurrentLevel() < item.LevelRequired
+				then item.LevelRequired
+				else nil
+			lobbyCharacter:applyHatItem(item, lockedLevel)
 			return
 		end
 
@@ -649,12 +590,18 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 	local function applySelectedBodyPreview(item: LockerCatalogItem?)
 		local targetOutfitId: string?
+		-- Nivel requerido solo cuando el body seleccionado está bloqueado: el preview
+		-- lo marca con el contorno de bloqueo + el billboard LevelLock.
+		local lockedLevel: number?
 		if item and item.Category == LockerCategory.OUTFITS then
 			targetOutfitId = item.id
+			if getCurrentLevel() < item.LevelRequired then
+				lockedLevel = item.LevelRequired
+			end
 		else
 			targetOutfitId = getOptionalString(equippedLookup.Outfits) or getCurrentLoadout().Outfit
 		end
-		lobbyCharacter:applyOutfit(targetOutfitId)
+		lobbyCharacter:applyOutfit(targetOutfitId, lockedLevel)
 	end
 
 	-- WeaponPreviewController se inicializa después de las funciones que necesita como dependencia.
@@ -846,11 +793,9 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	weaponPreviewController = WeaponPreviewController.new({
-		mainWeaponSpawn = mainWeaponSpawn,
-		specialWeaponSpawn = specialWeaponSpawn,
+		tableSpawn = tableWeaponSpawn :: any,
+		wallSpawn = wallWeaponSpawn :: any,
 		sharedWeaponAssets = sharedWeaponAssets,
-		mainIndicator = mainIndicator,
-		specialIndicator = specialIndicator,
 		itemsConfig = ItemsConfig,
 		getCurrentLevel = getCurrentLevel,
 		getCurrentLoadout = getCurrentLoadout,
@@ -863,8 +808,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	})
 	janitor:Add(weaponPreviewController, "Destroy")
 
-	local function updateWeaponCategoryIndicators()
-		weaponPreviewController:updateIndicators(selectedMainCategory, selectedNavKey, wrapsTargetWeaponCategory)
+	local function updateWeaponFocusCategory()
+		weaponPreviewController:updateFocusCategory(selectedMainCategory, selectedNavKey, wrapsTargetWeaponCategory)
 	end
 
 	local function applySelectedWeaponPreview(item: any)
@@ -889,7 +834,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local function clearNavButtons()
 		navItemsJanitor:Cleanup()
 		table.clear(navButtons)
-		selectedNavButton = nil
 		navItemController:clear()
 
 		for _, tween in activeNavSizeTweens do
@@ -914,17 +858,16 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	local function setSelectedNavButton(selectedButton: GuiButton)
-		selectedNavButton = selectedButton
 		navItemController:setActive(selectedButton.Name)
 	end
 
 	local function setSelectedMainCategory(categoryKey: LockerCategoryKey)
 		selectedMainCategory = categoryKey
-		updateWeaponCategoryIndicators()
+		updateWeaponFocusCategory()
 		nav1TabController:setActive(categoryKey)
 	end
 
-	local function bindStrokeHover(button: GuiButton, parentJanitor: any, isSelected: () -> boolean)
+	local function bindStrokeHover(button: GuiButton, parentJanitor: any)
 		if not canUseHoverAnimations then
 			return
 		end
@@ -980,9 +923,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			if stroke then
 				stroke.Color = STROKE_DEFAULT
 			end
-			bindStrokeHover(button, nav1ButtonsJanitor, function()
-				return false
-			end)
+			bindStrokeHover(button, nav1ButtonsJanitor)
 
 			local onActivated = definition.onActivated
 			nav1ButtonsJanitor:Add(button.Activated:Connect(onActivated), "Disconnect")
@@ -1043,7 +984,9 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		else
 			panel.titleLabel.Text = item.Name
 			panel.subtitleLabel.Text = item.Rarity
-			panel.icon.Image = ACTION_ICON_PURCHASE
+			panel.icon.Image = if CurrencyMod.resolve(item.Currency) == CurrencyMod.GEMS
+				then ACTION_ICON_PURCHASE_GEMS
+				else ACTION_ICON_PURCHASE
 			-- Item comprable: el botón muestra el precio (en lugar de "PURCHASE").
 			setPanelButtonText(panel, UIUtils.formatCashAmount(item.Price))
 			panel.button.BackgroundColor3 = ACTION_BTN_COLOR_PURCHASE
@@ -1331,7 +1274,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 				local selectedWeaponCategory = item.Category :: WeaponCategory
 				wrapsTargetWeaponCategory = selectedWeaponCategory
 				setStoredWrapsTargetWeaponId(selectedWeaponCategory, item.id)
-				updateWeaponCategoryIndicators()
+				updateWeaponFocusCategory()
 			end
 			applySelectedBodyPreview(item)
 			applySelectedFacePreview(item)
@@ -1401,7 +1344,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			local equippedWeapon = getEquippedWeaponByCategory(weaponCategory)
 			wrapsTargetWeaponCategory = weaponCategory
 			setStoredWrapsTargetWeaponId(weaponCategory, equippedWeapon)
-			updateWeaponCategoryIndicators()
+			updateWeaponFocusCategory()
 			return LockerConfig.makeQualifiedId(weaponCategory, equippedWeapon)
 		end
 
@@ -1517,7 +1460,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	populateMainContentForNavItem = function(categoryKey: LockerCategoryKey, navKey: string, selectedQualifiedId: string?, stagger: boolean?)
 		local previousNavKey = selectedNavKey
 		selectedNavKey = navKey
-		updateWeaponCategoryIndicators()
+		updateWeaponFocusCategory()
 		if categoryKey ~= LockerMainCategory.ARSENAL or previousNavKey ~= navKey then
 			restoreEquippedWeaponPreviews()
 		end
@@ -1620,9 +1563,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 				stroke.Color = STROKE_DEFAULT
 			end
 
-			bindStrokeHover(navButton, navItemsJanitor, function()
-				return navButton == selectedNavButton
-			end)
+			bindStrokeHover(navButton, navItemsJanitor)
 
 			navItemsJanitor:Add(navButton.Activated:Connect(function()
 				-- Si ya estamos en esta nav, no repoblar (clic sobre la nav activa).
@@ -1696,39 +1637,55 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		populateNav1(definitions, selectedMainCategory)
 	end
 
+	-- El nivel ya no se pinta aquí: el LevelContainer del Locker desapareció y el
+	-- HUD copiado del Menu solo trae monedas.
 	local function updateStatsUi()
 		local stats = getCurrentStats()
 		if cashValueLabel then
 			cashValueLabel.Text = UIUtils.formatCashAmount(stats.Cash)
 		end
 
-		if levelValueLabel then
-			levelValueLabel.Text = "Lvl " .. tostring(stats.Level)
+		if gemsValueLabel then
+			-- `or 0` cubre el perfil que aún no pasó por Reconcile (igual que MenuController).
+			gemsValueLabel.Text = UIUtils.formatCashAmount(stats.Gems or 0)
 		end
-	end
-
-	local function updateStatsUiFromData()
-		updateStatsUi()
-		updateActionFrameForSelected()
 	end
 
 	navTemplate.Visible = false
 	itemGridTemplate.Visible = false
 	do
-		local function promptBestFitPack(item: LockerCatalogItem)
-			local cash = getCurrentStats().Cash
-			local deficit = item.Price - cash
-			local bestPack: StoreProducts.StoreProductDefinition? = nil
+		-- Saldo del jugador en la moneda del ítem (Cash por defecto). El server
+		-- cobra de este mismo stat (ShopService + Shared.constants.Currency).
+		local function getBalanceFor(item: LockerCatalogItem): number
+			local stats = getCurrentStats()
+			if CurrencyMod.resolve(item.Currency) == CurrencyMod.GEMS then
+				-- `or 0` cubre el perfil que aún no pasó por Reconcile.
+				return stats.Gems or 0
+			end
+			return stats.Cash
+		end
 
-			for _, pack in StoreProducts.Cash.InOrder do
-				if pack.CashAmount >= deficit and pack.ProductId > 0 then
+		local function promptBestFitPack(item: LockerCatalogItem)
+			local isGems = CurrencyMod.resolve(item.Currency) == CurrencyMod.GEMS
+			local deficit = item.Price - getBalanceFor(item)
+			-- Los dos catálogos tienen la misma forma salvo el campo de cantidad,
+			-- así que solo cambia de dónde se lee el importe del pack.
+			local packs: { any } = if isGems then StoreProducts.Gems.InOrder else StoreProducts.Cash.InOrder
+			local function amountOf(pack: any): number
+				return if isGems then pack.GemAmount else pack.CashAmount
+			end
+
+			local bestPack: any = nil
+
+			for _, pack in packs do
+				if amountOf(pack) >= deficit and pack.ProductId > 0 then
 					bestPack = pack
 					break
 				end
 			end
 
 			if not bestPack then
-				local largest = StoreProducts.Cash.InOrder[#StoreProducts.Cash.InOrder]
+				local largest = packs[#packs]
 				if largest and largest.ProductId > 0 then
 					bestPack = largest
 				end
@@ -1739,29 +1696,36 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			end
 		end
 
-		-- Handler de compra: idéntico para el botón de ambos ActionFrame (actúa sobre
-		-- selectedCatalogItem, no sobre el frame), así que se comparte.
-		local function onPurchaseActivated()
-			local item = selectedCatalogItem
-			if not item or pendingShopAction then
-				return
+		-- Condiciones de compra: nivel, inventario, wraps de desafío y saldo (si
+		-- falta saldo se ofrece el pack que mejor encaja en vez de comprar).
+		local function canPurchase(item: LockerCatalogItem): boolean
+			if pendingShopAction then
+				return false
 			end
 
 			if getCurrentLevel() < item.LevelRequired then
-				return
+				return false
 			end
 
 			if isItemOwned(item) then
-				return
+				return false
 			end
 
 			if item.KillGoal ~= nil and item.KillGoal > 0 then
 				-- Los wraps de desafío de kills no se compran.
-				return
+				return false
 			end
 
-			if getCurrentStats().Cash < item.Price then
+			if getBalanceFor(item) < item.Price then
 				promptBestFitPack(item)
+				return false
+			end
+
+			return true
+		end
+
+		local function executePurchase(item: LockerCatalogItem)
+			if not canPurchase(item) then
 				return
 			end
 
@@ -1793,6 +1757,15 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 				weaponCategory = weaponCategory,
 				weaponId = weaponId,
 			})
+		end
+
+		-- Handler de compra: idéntico para el botón de ambos ActionFrame (actúa sobre
+		-- selectedCatalogItem, no sobre el frame), así que se comparte.
+		local function onPurchaseActivated()
+			local item = selectedCatalogItem
+			if item then
+				executePurchase(item)
+			end
 		end
 
 		-- Wiring de hover/escala/click + handler de compra de un botón de acción.
@@ -1912,15 +1885,16 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			local selectedWeaponCategory = item.Category :: WeaponCategory
 			wrapsTargetWeaponCategory = selectedWeaponCategory
 			setStoredWrapsTargetWeaponId(selectedWeaponCategory, item.id)
-			updateWeaponCategoryIndicators()
+			updateWeaponFocusCategory()
 
 			-- Arrancar en Owned ANTES de setWrapsMode: populateWrapsViewNav usa
 			-- `wrapsView` como tab activo al reconstruir Nav1.
 			wrapsView = "owned"
 			setWrapsMode(true)
-			local spawnPart = if selectedWeaponCategory == WeaponCategoryMod.MAIN then mainWeaponSpawn else specialWeaponSpawn
-			if spawnPart and spawnPart:IsA("BasePart") then
-				cameraController:zoomOnPosition(spawnPart.Position)
+			-- updateWeaponFocusCategory (arriba) ya ha mandado el arma objetivo a
+			-- la mesa, así que el zoom va siempre al ancla de la mesa.
+			if tableWeaponSpawn and tableWeaponSpawn:IsA("BasePart") then
+				cameraController:zoomOnPosition(tableWeaponSpawn.Position)
 			end
 
 			populateMainContentForNavItem(LockerMainCategory.ARSENAL, LockerCategory.WEAPON_WRAPS, nil, true)

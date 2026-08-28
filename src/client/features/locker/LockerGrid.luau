@@ -14,6 +14,7 @@ local UIUtils = require(script.Parent.Parent.Parent.core.ui.UIUtils)
 local WeaponCategoryMod = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("WeaponCategory"))
 local ItemDefaults = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("ItemDefaults"))
 local LockerCategory = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("LockerCategory"))
+local AssetIds = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("AssetIds"))
 
 export type LockerCatalogItem = {
 	qualifiedId: string,
@@ -21,6 +22,7 @@ export type LockerCatalogItem = {
 	id: string,
 	Name: string,
 	Price: number,
+	Currency: string?,
 	LevelRequired: number,
 	Rarity: string,
 	Image: string,
@@ -54,9 +56,9 @@ type ItemGridCardRefs = {
 	itemNodeDefaultSize: UDim2?,
 	nameNode: TextLabel?,
 	viewportNode: ViewportFrame?,
-	-- Status { Value (label de estado/progreso), Locked (imagen) }.
+	-- Footer.Status { Value (label de estado/progreso), Icon (imagen de estado) }.
 	statusValueNode: TextLabel?,
-	lockedNode: GuiObject?,
+	statusIconNode: GuiObject?,
 	-- Glow (resplandor coloreado por rareza) y Template.UIGradient (gradiente
 	-- de la card, también por rareza).
 	glowNode: GuiObject?,
@@ -102,8 +104,6 @@ export type LockerGrid = {
 	Populate: (self: LockerGrid, items: { LockerCatalogItem }, selectedQualifiedId: string?, templateKey: TemplateKey?) -> (),
 	PlayStagger: (self: LockerGrid) -> (),
 	RefreshVisibleState: (self: LockerGrid, notifySelection: boolean?) -> (),
-	GetSelectedItem: (self: LockerGrid) -> LockerCatalogItem?,
-	GetCardForItem: (self: LockerGrid, qualifiedId: string) -> GuiObject?,
 	_getButtonStroke: (self: LockerGrid, button: GuiButton) -> UIStroke?,
 	_buildGridCardRefs: (self: LockerGrid, card: GuiObject, templateKey: TemplateKey) -> ItemGridCardRefs,
 	_getGridCardRefs: (self: LockerGrid, card: GuiObject) -> ItemGridCardRefs,
@@ -131,7 +131,14 @@ local GRID_ITEM_DEFAULT_COLOR = Color3.fromRGB(255, 255, 255)
 local GRID_ITEM_LOCKED_COLOR = Color3.fromRGB(24, 24, 24)
 -- Wrap no desbloqueado (por mastery): en vez del viewport 3D se
 -- muestra esta imagen placeholder en Item.
-local WRAP_LOCKED_PLACEHOLDER_IMAGE = "rbxassetid://82849715642061"
+local WRAP_LOCKED_PLACEHOLDER_IMAGE = AssetIds.Images.WrapLockedPlaceholder
+
+-- Footer.Status.Icon (antes "Locked"): candado si el item está bloqueado, y si no
+-- la moneda con la que se compra. Oculto cuando ya es del jugador.
+local STATUS_ICON_LOCKED = AssetIds.Images.LockerLocked
+local STATUS_ICON_CASH = AssetIds.Images.LockerStatusCash
+local STATUS_ICON_GEMS = AssetIds.Images.LockerStatusGems
+local CURRENCY_GEMS = "Gems"
 local STROKE_DEFAULT = UITheme.StrokeDefault
 local STROKE_WHITE = UITheme.StrokeHover
 -- Glow + gradiente de la card por rareza. Rarezas sin entrada (legacy
@@ -207,7 +214,7 @@ end
 function LockerGrid:_buildGridCardRefs(card: GuiObject, templateKey: TemplateKey): ItemGridCardRefs
 	-- Plantilla única ItemTemplate (la vista de wraps la reutiliza): el card ES el
 	-- GuiButton y contiene ViewportFrame (preview 3D), Item (imagen) y
-	-- Status { Value, Locked, Bar { Fill } }.
+	-- Status { Value, Icon, Bar { Fill } }.
 	local button: GuiButton? = if card:IsA("GuiButton") then card :: GuiButton else nil
 	if not button then
 		local buttonNode = card:FindFirstChild("Button")
@@ -224,10 +231,10 @@ function LockerGrid:_buildGridCardRefs(card: GuiObject, templateKey: TemplateKey
 	local nameNode = if button then button:FindFirstChild("Name") else nil
 	local resolvedNameNode = if nameNode and nameNode:IsA("TextLabel") then nameNode else nil
 
-	-- Status vive bajo Footer en el template nuevo; fallback a hijo directo (legacy).
-	local statusNode = if button then (button:FindFirstChild("Status", true) or button:FindFirstChild("Status")) else nil
+	-- Status vive bajo Footer, así que la búsqueda es recursiva.
+	local statusNode = if button then button:FindFirstChild("Status", true) else nil
 	local statusValueNode = if statusNode then statusNode:FindFirstChild("Value") else nil
-	local statusLockedNode = if statusNode then statusNode:FindFirstChild("Locked") else nil
+	local statusIconNode = if statusNode then statusNode:FindFirstChild("Icon") else nil
 
 	-- Glow (resplandor) y el UIGradient directo de la card (Template.UIGradient),
 	-- ambos coloreados por rareza en _applyRarityVisuals.
@@ -242,7 +249,7 @@ function LockerGrid:_buildGridCardRefs(card: GuiObject, templateKey: TemplateKey
 		nameNode = resolvedNameNode,
 		viewportNode = viewport,
 		statusValueNode = if statusValueNode and statusValueNode:IsA("TextLabel") then statusValueNode else nil,
-		lockedNode = if statusLockedNode and statusLockedNode:IsA("GuiObject") then statusLockedNode else nil,
+		statusIconNode = if statusIconNode and statusIconNode:IsA("GuiObject") then statusIconNode else nil,
 		glowNode = if glowNode and glowNode:IsA("GuiObject") then glowNode else nil,
 		rarityGradientNode = rarityGradient,
 	}
@@ -359,6 +366,27 @@ function LockerGrid:_returnCardToPool(card: GuiObject)
 	end
 end
 
+-- Imagen que toca a Footer.Status.Icon, o nil para ocultarlo.
+local function resolveStatusIcon(item: LockerCatalogItem, isLocked: boolean, isOwned: boolean): string?
+	if isLocked then
+		return STATUS_ICON_LOCKED
+	end
+	if isOwned then
+		return nil
+	end
+	return if item.Currency == CURRENCY_GEMS then STATUS_ICON_GEMS else STATUS_ICON_CASH
+end
+
+local function applyStatusIcon(node: GuiObject?, image: string?)
+	if not node then
+		return
+	end
+	node.Visible = image ~= nil
+	if image and (node:IsA("ImageLabel") or node:IsA("ImageButton")) then
+		(node :: any).Image = image
+	end
+end
+
 function LockerGrid:_updateGridCardVisual(button: GuiButton)
 	local card = self._gridCardByButton[button]
 	if not card or not card.Visible then
@@ -379,10 +407,16 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 		self:_syncWrapPreviewVisibility(card, item, isOwned)
 		local isChallenge = isKillChallengeItem(item) and not isOwned
 
-		-- Status.Locked: candado visible solo en wraps de desafío bloqueados.
-		if refs.lockedNode then
-			refs.lockedNode.Visible = isChallenge
-		end
+		-- Status.Icon: candado en los wraps de desafío bloqueados; en los demás, la
+		-- moneda mientras no sean del jugador (los que no se compran no llevan icono).
+		local isWrapPurchasable = item.CanPurchase and item.Price > 0
+		applyStatusIcon(
+			refs.statusIconNode,
+			if isChallenge
+				then STATUS_ICON_LOCKED
+				elseif isOwned or not isWrapPurchasable then nil
+				else resolveStatusIcon(item, false, false)
+		)
 
 		if isChallenge then
 			local goal = math.max(1, item.KillGoal or 0)
@@ -443,10 +477,8 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 			else UIUtils.formatCashAmount(item.Price)
 	end
 
-	-- Status.Locked: imagen visible solo en bloqueo por nivel.
-	if refs.lockedNode then
-		refs.lockedNode.Visible = isLevelLocked
-	end
+	-- Status.Icon: candado si está bloqueado por nivel, moneda si está a la venta.
+	applyStatusIcon(refs.statusIconNode, resolveStatusIcon(item, isLevelLocked, isOwned))
 
 	local stroke = self:_getButtonStroke(button)
 	if not stroke then
@@ -887,18 +919,6 @@ function LockerGrid:RefreshVisibleState(notifySelection: boolean?)
 	if notifySelection ~= false then
 		self._callbacks.onSelectionChanged(self._selectedCatalogItem)
 	end
-end
-
-function LockerGrid:GetSelectedItem(): LockerCatalogItem?
-	return self._selectedCatalogItem
-end
-
-function LockerGrid:GetCardForItem(qualifiedId: string): GuiObject?
-	local button = self._gridButtonByQualifiedId[qualifiedId]
-	if not button then
-		return nil
-	end
-	return self._gridCardByButton[button]
 end
 
 function LockerGrid:Destroy()

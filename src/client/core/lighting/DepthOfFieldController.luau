@@ -39,6 +39,8 @@ local _suppressCount = 0
 -- cada vez porque ScenePresetController puede reemplazar el DepthOfFieldEffect
 -- entero al cambiar de preset, invalidando cualquier snapshot anterior.
 local _propertiesOverrideActive = false
+-- Último override pedido con setProperties: se re-aplica si el effect cambia.
+local _activeProps: DepthOfFieldProperties? = nil
 local _savedFarIntensity: number? = nil
 local _savedFocusDistance: number? = nil
 local _savedInFocusRadius: number? = nil
@@ -64,6 +66,7 @@ end
 --- Re-captura el snapshot cada vez (el DepthOfFieldEffect puede haber sido reemplazado
 --- por ScenePresetController entre llamadas).
 function DepthOfFieldController.setProperties(props: DepthOfFieldProperties?)
+	_activeProps = props
 	local dof = _getDof()
 	if not dof then
 		return
@@ -112,6 +115,48 @@ function DepthOfFieldController.setProperties(props: DepthOfFieldProperties?)
 		_savedNearIntensity = nil
 	end
 end
+
+-- ScenePresetController hace REEMPLAZO TOTAL de los effects de Lighting al aplicar
+-- o restaurar un preset, así que el DepthOfFieldEffect es OTRA instancia con el
+-- Enabled y las props que trae autorado el preset. Sin esto, el estado del
+-- controller (fase + supresores + override de props) solo se aplicaba en la
+-- siguiente llamada a setEnabled/suppress/setProperties: si el preset se aplicaba
+-- DESPUÉS de esas llamadas — el orden depende de quién gane la carrera al volver
+-- al menú — el DoF se quedaba como lo dejó el preset. De ahí que fallara "a veces".
+local function _adoptDof(dof: DepthOfFieldEffect)
+	_dof = dof
+
+	-- El snapshot guardado pertenecía al effect anterior: ya no sirve para
+	-- restaurar nada. Se descarta y, si hay override activo, se re-captura sobre
+	-- el effect nuevo.
+	_propertiesOverrideActive = false
+	_savedFarIntensity = nil
+	_savedFocusDistance = nil
+	_savedInFocusRadius = nil
+	_savedNearIntensity = nil
+
+	if _activeProps then
+		DepthOfFieldController.setProperties(_activeProps)
+	end
+
+	_apply()
+end
+
+Lighting.ChildAdded:Connect(function(child)
+	if child:IsA("DepthOfFieldEffect") then
+		_adoptDof(child)
+	end
+end)
+
+Lighting.ChildRemoved:Connect(function(child)
+	if child == _dof then
+		_dof = nil
+		local replacement = Lighting:FindFirstChildOfClass("DepthOfFieldEffect")
+		if replacement then
+			_adoptDof(replacement)
+		end
+	end
+end)
 
 --- Enciende/apaga el DepthOfField del lobby. Lo conduce la fase de MatchState.
 function DepthOfFieldController.setEnabled(enabled: boolean)

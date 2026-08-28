@@ -53,17 +53,15 @@ local BOT_APPEARANCE_HAT_ATTRIBUTE = "BotAppearanceHat"
 
 local function _buildHatPool(): { string }
 	local pool: { string } = {}
-	local locker = Shared:FindFirstChild("Locker")
-	local hatsRoot = locker and locker:FindFirstChild("Hats")
-	if not hatsRoot then
-		return pool
-	end
 	local hatsConfig = ItemsConfig.Hats
 	if type(hatsConfig) ~= "table" then
 		return pool
 	end
+	-- Vía findHatTemplate: los assets se nombran por el `Name` del catálogo, no por
+	-- el id, así que un FindFirstChild(hatId) a pelo dejaba el pool vacío y los bots
+	-- nunca llevaban hat.
 	for hatId in hatsConfig do
-		if hatsRoot:FindFirstChild(hatId) ~= nil then
+		if CosmeticsTemplates.findHatTemplate(hatId) ~= nil then
 			table.insert(pool, hatId)
 		end
 	end
@@ -248,7 +246,7 @@ function BotAppearance.apply(character: Model, appearance: BotAppearance?)
 		if hatTemplate then
 			local hatClone = hatTemplate:Clone()
 			hatClone:SetAttribute(BOT_APPEARANCE_HAT_ATTRIBUTE, true)
-			hatClone.Parent = character
+			CosmeticsTemplates.attachHatToCharacter(character, hatClone)
 		end
 	end
 

@@ -319,29 +319,6 @@ function WeaponWrapPreviewer.reframeCentered(vp: ViewportFrame): ()
     )
 end
 
--- Construye un clon del modelo de arma (Locker.weapons.<cat>.<id>, resuelto por
--- PreviewWeaponCategory/PreviewWeaponId) con el wrap aplicado sobre su primary
--- part, listo para colocarlo en el MUNDO (no en un viewport): todos los BaseParts
--- vienen anchored del template preparado. El caller lo parenta y lo posiciona
--- (:PivotTo / .CFrame). Devuelve nil si no se resuelve el template del arma.
--- Registra el clon y las scroll textures animadas en `janitor` para el cleanup.
-function WeaponWrapPreviewer.buildWeaponModelWithWrap(item: WeaponWrapPreviewItem, janitor: any): Instance?
-    local template = resolveWeaponTemplate(item)
-    if not template then
-        return nil
-    end
-
-    local clonedWeapon = _getPreparedTemplate(template):Clone()
-    janitor:Add(clonedWeapon, "Destroy")
-
-    local primaryPart = getWrapPreviewPrimaryPart(clonedWeapon)
-    if primaryPart then
-        applyWrapAppearanceToPrimaryPart(primaryPart, item, janitor)
-    end
-
-    return clonedWeapon
-end
-
 function WeaponWrapPreviewer.Render(viewportNode: ViewportFrame, item: WeaponWrapPreviewItem, previewJanitor: any): boolean
     local worldModel = Instance.new("WorldModel")
     worldModel.Parent = viewportNode

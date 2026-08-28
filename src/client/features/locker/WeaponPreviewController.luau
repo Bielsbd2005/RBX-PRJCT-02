@@ -1,8 +1,13 @@
 --!strict
 -- WeaponPreviewController: gestiona los previews de armas (Main/Special) en el locker.
 -- Encapsula clonación de templates, aplicación de wraps (con animación de scroll),
--- preview de armas bloqueadas (negro neón), motion de selección (rise + bob), y
+-- preview de armas bloqueadas (Highlight de bloqueo), motion de selección (rise + bob), y
 -- transición down/up al cambiar de arma.
+--
+-- Los dos previews (Main y Special) NO tienen un sitio fijo: hay dos anclas por
+-- ROL — la mesa (arma en foco) y la pared (arma en segundo plano) — y al cambiar
+-- de categoría ambos previews intercambian ancla con un tween en arco. Por
+-- defecto la Main está en la mesa.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
@@ -20,7 +25,18 @@ local SELECTED_WEAPON_BOB_AMPLITUDE = 0.2
 local SELECTED_WEAPON_BOB_SPEED = 0.3
 local SELECTED_WEAPON_SWITCH_DOWN_TWEEN_INFO = TweenInfo.new(0.06, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 local SELECTED_WEAPON_SWITCH_DOWN_STUDS = 0.05
-local LOCKED_WEAPON_PREVIEW_COLOR = Color3.fromRGB(0, 0, 0)
+-- Bloqueo por nivel: mismo contorno que el preview del personaje del lobby
+-- (LobbyCharacterPreview) — relleno negro casi opaco + contorno blanco.
+local LOCKED_HIGHLIGHT_NAME = "LockHighlight"
+local LOCKED_FILL_COLOR = Color3.fromRGB(0, 0, 0)
+local LOCKED_FILL_TRANSPARENCY = 0.1
+local LOCKED_OUTLINE_COLOR = Color3.fromRGB(255, 255, 255)
+local LOCKED_OUTLINE_TRANSPARENCY = 0.1
+-- Intercambio mesa↔pared. El arco (subir a mitad de vuelo) evita que el arma
+-- atraviese la mesa en línea recta y da sensación de "la cojo y la cuelgo".
+local WEAPON_SWAP_TWEEN_INFO = TweenInfo.new(0.55, Enum.EasingStyle.Quint, Enum.EasingDirection.InOut)
+local WEAPON_SWAP_ARC_HEIGHT = 1.1
+
 local DEFAULT_WRAP_STUDS_PER_TILE = 3
 local WEAPON_WRAP_TEXTURE_SCROLL_SPEED_U = 1
 local WEAPON_WRAP_TEXTURE_SCROLL_SPEED_V = 0
@@ -70,11 +86,11 @@ export type LoadoutData = {
 }
 
 export type WeaponPreviewControllerOptions = {
-	mainWeaponSpawn: LockerPreviewSpawnTarget,
-	specialWeaponSpawn: LockerPreviewSpawnTarget,
+	-- Anclas por ROL, no por arma: el arma en foco va a `tableSpawn` y la otra a
+	-- `wallSpawn`; al cambiar de categoría se intercambian.
+	tableSpawn: LockerPreviewSpawnTarget,
+	wallSpawn: LockerPreviewSpawnTarget,
 	sharedWeaponAssets: Instance,
-	mainIndicator: Instance?,
-	specialIndicator: Instance?,
 	itemsConfig: any,
 	getCurrentLevel: () -> number,
 	getCurrentLoadout: () -> LoadoutData,
@@ -89,11 +105,12 @@ export type WeaponPreviewControllerOptions = {
 
 export type WeaponPreviewController = {
 	applySelected: (self: WeaponPreviewController, item: LockerCatalogItem?) -> (),
+	setFocusCategory: (self: WeaponPreviewController, category: string?) -> (),
 	applyWrapPreview: (self: WeaponPreviewController, weaponCategory: string, wrapId: string?) -> (),
 	restoreEquipped: (self: WeaponPreviewController) -> (),
 	restoreEquippedFor: (self: WeaponPreviewController, category: string) -> (),
 	destroyAll: (self: WeaponPreviewController) -> (),
-	updateIndicators: (
+	updateFocusCategory: (
 		self: WeaponPreviewController,
 		selectedMainCategory: string?,
 		selectedNavKey: string?,
@@ -257,6 +274,16 @@ function WeaponPreviewController.new(options: WeaponPreviewControllerOptions): W
 	self._motionTargetByCategory = {} :: { [string]: Instance }
 	self._motionConnByCategory = {} :: { [string]: RBXScriptConnection }
 
+	-- Categoría en la mesa (foco). El resto va a la pared.
+	self._focusCategory = WeaponCategoryMod.MAIN :: WeaponCategory
+	-- Driver del intercambio mesa↔pared, uno por categoría (mismo patrón que el
+	-- CFrameValue del bob: cero allocs por cambio de nav).
+	self._swapAlphaByCategory = {} :: { [string]: NumberValue }
+	self._swapConnByCategory = {} :: { [string]: RBXScriptConnection }
+	self._swapStateByCategory = {} :: {
+		[string]: { preview: Instance, startPivot: CFrame, targetPivot: CFrame }
+	}
+
 	self._sharedHeartbeat = nil :: RBXScriptConnection?
 	return self
 end
@@ -296,12 +323,10 @@ end
 -- ── Métodos privados ───────────────────────────────────────────
 
 function WeaponPreviewController:_getSpawnFor(category: string): LockerPreviewSpawnTarget?
-	if category == WeaponCategoryMod.MAIN then
-		return self._options.mainWeaponSpawn
-	elseif category == WeaponCategoryMod.SPECIAL then
-		return self._options.specialWeaponSpawn
+	if not isWeaponCategory(category) then
+		return nil
 	end
-	return nil
+	return if category == self._focusCategory then self._options.tableSpawn else self._options.wallSpawn
 end
 
 function WeaponPreviewController:_isLocked(category: WeaponCategory, itemId: string?): boolean
@@ -355,18 +380,34 @@ function WeaponPreviewController:_getStateId(
 	return previewId .. "::" .. resolvedWrapId .. "::unlocked"
 end
 
+-- El arma bloqueada conserva su geometría y materiales: el bloqueo lo marca un
+-- Highlight, igual que el body y los hats del preview del lobby. El clone vive en
+-- _lockedTemplateCache y nunca se reutiliza para el estado desbloqueado (ver
+-- _getStateId), así que no hace falta quitar el Highlight en ningún punto.
 function WeaponPreviewController:_applyLockedAppearance(previewInstance: Instance, weaponCategory: WeaponCategory)
 	self._wrapAnimDataByCategory[weaponCategory] = nil
 
-	for _, descendant in previewInstance:GetDescendants() do
-		if descendant:IsA("MeshPart") then
-			descendant.TextureID = ""
-			descendant.Color = LOCKED_WEAPON_PREVIEW_COLOR
-			descendant.Material = Enum.Material.Neon
-		elseif descendant:IsA("Texture") or descendant:IsA("Decal") or descendant:IsA("SurfaceAppearance") then
-			descendant:Destroy()
-		end
+	local existing = previewInstance:FindFirstChild(LOCKED_HIGHLIGHT_NAME)
+	local highlight: Highlight
+	if existing and existing:IsA("Highlight") then
+		highlight = existing
+	else
+		highlight = Instance.new("Highlight")
+		highlight.Name = LOCKED_HIGHLIGHT_NAME
+		highlight.DepthMode = Enum.HighlightDepthMode.Occluded
+		highlight.Parent = previewInstance
 	end
+
+	-- Adornee explícito: el template puede ser Model o BasePart suelto.
+	if previewInstance:IsA("Model") or previewInstance:IsA("BasePart") then
+		highlight.Adornee = previewInstance :: any
+	end
+
+	highlight.FillColor = LOCKED_FILL_COLOR
+	highlight.FillTransparency = LOCKED_FILL_TRANSPARENCY
+	highlight.OutlineColor = LOCKED_OUTLINE_COLOR
+	highlight.OutlineTransparency = LOCKED_OUTLINE_TRANSPARENCY
+	highlight.Enabled = true
 end
 
 function WeaponPreviewController:_applyWrap(previewInstance: Instance, weaponCategory: WeaponCategory, wrapId: string)
@@ -474,6 +515,16 @@ end
 
 function WeaponPreviewController:_stopMotion(category: string, restoreToBase: boolean?)
 	self._motionDataByCategory[category] = nil
+
+	-- Un viaje mesa↔pared en curso manda sobre el bob. Sin esto, la repoblación de
+	-- la nav (populateMainContentForNavItem → restoreEquippedWeaponPreviews) caía
+	-- aquí justo después de arrancar el viaje, lo cancelaba y encima recolocaba el
+	-- arma en su ancla nueva: el arma aparecía de golpe en el destino y no se veía
+	-- el recorrido. El propio _travelToAnchor limpia su estado al terminar.
+	if self._swapStateByCategory[category] then
+		return
+	end
+
 	cancelTweenFromMap(self._activeMotionTweenByCategory, category)
 
 	if restoreToBase ~= false then
@@ -558,6 +609,109 @@ function WeaponPreviewController:_startMotion(category: WeaponCategory, startOff
 	riseTween:Play()
 end
 
+-- Driver del intercambio: NumberValue 0→1 por categoría. En cada update lerpea
+-- entre el ancla de salida y la de llegada, y añade el arco (sube a mitad de
+-- vuelo). Cacheado por categoría igual que el CFrameValue del bob.
+function WeaponPreviewController:_ensureSwapDriver(category: string): NumberValue
+	local existing = self._swapAlphaByCategory[category]
+	if existing then
+		return existing
+	end
+
+	local alpha = Instance.new("NumberValue")
+	alpha.Name = "SwapAlpha_" .. category
+	self._swapAlphaByCategory[category] = alpha
+	self._swapConnByCategory[category] = alpha:GetPropertyChangedSignal("Value"):Connect(function()
+		local state = self._swapStateByCategory[category]
+		if not state or not state.preview.Parent then
+			return
+		end
+		local t = alpha.Value
+		local pivot = state.startPivot:Lerp(state.targetPivot, t)
+		local arc = math.sin(t * math.pi) * WEAPON_SWAP_ARC_HEIGHT
+		setWeaponPreviewPivot(state.preview, pivot * CFrame.new(0, arc, 0))
+	end)
+	return alpha
+end
+
+-- Manda una categoría a su ancla actual (según el foco) con el tween de arco.
+-- `focused` decide qué pasa al llegar: la de la mesa retoma el bob; la de la
+-- pared se queda quieta en su sitio.
+function WeaponPreviewController:_travelToAnchor(category: WeaponCategory, focused: boolean)
+	local preview = self._activePreviewByCategory[category]
+	local spawnTarget = self:_getSpawnFor(category)
+	if not preview or not preview.Parent or not spawnTarget then
+		return
+	end
+
+	local targetPivot = getSpawnPivot(spawnTarget)
+	local startPivot = getWeaponPreviewPivot(preview) or targetPivot
+
+	-- El ancla nueva pasa a ser la base: el bob y los restores posteriores
+	-- (_stopMotion con restoreToBase) tienen que referirse ya al destino.
+	self._previewBasePivotByCategory[category] = targetPivot
+
+	-- Corta bob y cualquier tween en curso sin recolocar: seguimos desde donde
+	-- esté el arma ahora mismo, que es lo que hace que un cambio de nav a media
+	-- animación no dé saltos.
+	self:_stopMotion(category, false)
+
+	-- Invalida la transición de selección en vuelo (el down/up de applySelected):
+	-- su Completed recolocaría el arma en el ancla vieja.
+	self._selectionTransitionTokenByCategory[category] = (self._selectionTransitionTokenByCategory[category] or 0) + 1
+
+	self._swapStateByCategory[category] = {
+		preview = preview,
+		startPivot = startPivot,
+		targetPivot = targetPivot,
+	}
+
+	local alpha = self:_ensureSwapDriver(category)
+	alpha.Value = 0
+	local swapTween = TweenService:Create(alpha, WEAPON_SWAP_TWEEN_INFO, { Value = 1 })
+	self._activeMotionTweenByCategory[category] = swapTween
+
+	swapTween.Completed:Once(function(playbackState)
+		if self._activeMotionTweenByCategory[category] == swapTween then
+			self._activeMotionTweenByCategory[category] = nil
+		end
+		self._swapStateByCategory[category] = nil
+
+		-- El preview puede haberse reconstruido durante el viaje (cambio de arma o
+		-- de wrap a media animación), así que se lee el vivo, no el capturado.
+		local arrived = self._activePreviewByCategory[category]
+		if playbackState ~= Enum.PlaybackState.Completed or not arrived or not arrived.Parent then
+			return
+		end
+
+		if focused then
+			self:_startMotion(category)
+		else
+			setWeaponPreviewPivot(arrived, self._previewBasePivotByCategory[category] or targetPivot)
+		end
+	end)
+
+	swapTween:Play()
+end
+
+--- Pone `category` en la mesa y la otra en la pared. No-op si ya es la del foco.
+--- `nil` (fuera de la vista de armas) mantiene el reparto actual.
+function WeaponPreviewController:setFocusCategory(category: string?)
+	if not category or not isWeaponCategory(category) then
+		return
+	end
+
+	local nextFocus = category :: WeaponCategory
+	if self._focusCategory == nextFocus then
+		return
+	end
+
+	self._focusCategory = nextFocus
+	local other = if nextFocus == WeaponCategoryMod.MAIN then WeaponCategoryMod.SPECIAL else WeaponCategoryMod.MAIN
+	self:_travelToAnchor(nextFocus, true)
+	self:_travelToAnchor(other, false)
+end
+
 function WeaponPreviewController:_applyForCategory(category: string, itemId: string?, itemName: string?, previewId: string)
 	if not isWeaponCategory(category) then
 		return
@@ -612,6 +766,14 @@ function WeaponPreviewController:_applyForCategory(category: string, itemId: str
 
 	self._activePreviewByCategory[category] = clonedWeapon
 	self._activePreviewItemIdByCategory[category] = previewStateId
+
+	-- Si el arma está a mitad de viaje mesa↔pared, el clone nuevo hereda el viaje:
+	-- si no, se quedaría clavado en el ancla mientras el driver sigue moviendo al
+	-- que acaba de morir.
+	local swapState = self._swapStateByCategory[category]
+	if swapState then
+		swapState.preview = clonedWeapon
+	end
 end
 
 -- ── API pública ────────────────────────────────────────────────
@@ -701,6 +863,15 @@ function WeaponPreviewController:applySelected(item: LockerCatalogItem?)
 		return
 	end
 
+	-- Con un viaje mesa↔pared en curso no se hace el down/up de selección: el arma
+	-- ya se está moviendo y su clone nuevo hereda el viaje (_applyForCategory). Sin
+	-- esto, el down tween pisaría la referencia del tween de viaje y quedarían dos
+	-- drivers moviendo la misma arma.
+	if self._swapStateByCategory[selectedCategory] then
+		self:_applyForCategory(item.Category, item.id, item.Name, item.qualifiedId)
+		return
+	end
+
 	local nextTransitionToken = (self._selectionTransitionTokenByCategory[selectedCategory] or 0) + 1
 	self._selectionTransitionTokenByCategory[selectedCategory] = nextTransitionToken
 
@@ -764,19 +935,18 @@ end
 function WeaponPreviewController:destroyAll()
 	self:_destroyForCategory(WeaponCategoryMod.MAIN)
 	self:_destroyForCategory(WeaponCategoryMod.SPECIAL)
+	-- Sin previews en el mundo el reparto vuelve al de arranque: Main en la mesa.
+	self._focusCategory = WeaponCategoryMod.MAIN
+	table.clear(self._swapStateByCategory)
 end
 
-function WeaponPreviewController:updateIndicators(
+--- Deriva de la navegación qué categoría de arma está en foco y la manda a la
+--- mesa (la otra se va a la pared).
+function WeaponPreviewController:updateFocusCategory(
 	selectedMainCategory: string?,
 	selectedNavKey: string?,
 	wrapsTargetWeaponCategory: WeaponCategory
 )
-	local mainIndicator = self._options.mainIndicator
-	local specialIndicator = self._options.specialIndicator
-	if not (mainIndicator and mainIndicator:IsA("BasePart") and specialIndicator and specialIndicator:IsA("BasePart")) then
-		return
-	end
-
 	local activeWeaponCategory: WeaponCategory? = nil
 	if selectedMainCategory == LockerMainCategory.ARSENAL then
 		if WeaponCategoryMod.isValid(selectedNavKey) then
@@ -786,8 +956,7 @@ function WeaponPreviewController:updateIndicators(
 		end
 	end
 
-	(mainIndicator :: BasePart).LocalTransparencyModifier = if activeWeaponCategory == WeaponCategoryMod.MAIN then 0 else 1
-	(specialIndicator :: BasePart).LocalTransparencyModifier = if activeWeaponCategory == WeaponCategoryMod.SPECIAL then 0 else 1
+	self:setFocusCategory(activeWeaponCategory)
 end
 
 function WeaponPreviewController:Destroy()
@@ -802,9 +971,18 @@ function WeaponPreviewController:Destroy()
 	for _, conn in self._motionConnByCategory do
 		conn:Disconnect()
 	end
+	for _, conn in self._swapConnByCategory do
+		conn:Disconnect()
+	end
 	for _, cv in self._motionCFrameByCategory do
 		cv:Destroy()
 	end
+	for _, alpha in self._swapAlphaByCategory do
+		alpha:Destroy()
+	end
+	table.clear(self._swapConnByCategory)
+	table.clear(self._swapAlphaByCategory)
+	table.clear(self._swapStateByCategory)
 	table.clear(self._motionConnByCategory)
 	table.clear(self._motionCFrameByCategory)
 	table.clear(self._motionTargetByCategory)
