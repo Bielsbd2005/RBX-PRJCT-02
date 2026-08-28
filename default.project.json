@@ -1,5 +1,12 @@
 {
   "name": "Shooter",
+
+  "globIgnorePaths": [
+    "src/shared/Bodies/*.rbxm",
+    "src/shared/Locker/Hats/*.rbxm",
+    "src/shared/Locker/weapons/**/*.rbxm"
+  ],
+
   "tree": {
     "$className": "DataModel",
     "ReplicatedStorage": {
