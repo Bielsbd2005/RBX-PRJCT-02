@@ -400,6 +400,9 @@ local function _buildSessionEnd(player: Player): any?
 		payload.balances = { cash = stats.Cash, gems = stats.Gems or 0 }
 		payload.lifetime = {
 			totalCashEarned = stats.TotalCashEarned,
+			-- `or 0`: un perfil cargado por un server anterior a este campo no
+			-- lo tiene todavía (Reconcile lo rellena al siguiente load).
+			totalCashPurchased = stats.TotalCashPurchased or 0,
 			totalGemsEarned = stats.TotalGemsEarned or 0,
 			totalRobuxSpent = stats.TotalRobuxSpent,
 			level = stats.Level,

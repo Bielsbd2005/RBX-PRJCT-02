@@ -1,10 +1,15 @@
 --!strict
 --[[
-	GiftFlow.luau  (Client Feature Library — Store)
+	GiftFlow.luau  (Client Feature Library — Gifting)
 
-	Flujo de envío de regalos (UserInterface.Gifting). Se abre desde el Store al
-	pulsar el botón "Gift" de un pack de Robux concreto (Store.CashPage.<Row>.
-	<Pack>.Gift): el Store se oculta y este frame toma el relevo.
+	Flujo de envío de regalos (UserInterface.Gifting). Es agnóstico de quién lo
+	abre: el llamante decide desde qué GUI se lanza y le pasa el pack de Robux a
+	regalar con `openForProduct(product)`.
+
+	No toca ninguna GUI que no sea la suya. Si el panel que lo abre debe
+	ocultarse mientras la lista está en pantalla, ese panel lo hace en su
+	callback: `onOpened` al presentar la lista y `onClosed` cuando el flujo se
+	retira (botón de cerrar, regalo entregado o `reset()`).
 
 	Lista los jugadores del servidor. Cuando hay pocos jugadores reales la lista
 	se rellena con NPCs (identidades de `BotNames`) para que nunca se vea vacía;
@@ -27,7 +32,7 @@
 	  SendGift → SendResponse (validación server-side; success ⇒ el server lanza
 	  el prompt de compra) → [compra Robux] → GiftDelivered (regalo entregado).
 	  Validación fallida o prompt cancelado dejan el frame abierto para
-	  reintentar; GiftDelivered notifica éxito, vuelve al Store y avisa al
+	  reintentar; GiftDelivered notifica éxito, cierra el flujo y avisa al
 	  feature (onDelivered).
 ]]
 
@@ -45,6 +50,7 @@ local Network = require(Shared.networking.Network)
 local StoreProducts = require(Shared.constants.StoreProducts)
 local BotNames = require(Shared.constants.BotNames)
 local GameConfig = require(Shared.GameConfig)
+local AssetIds = require(Shared.constants.AssetIds)
 local Notify = require(Client.core.ui.NotificationController)
 local StaggerReveal = require(Client.core.ui.animators.StaggerReveal)
 
@@ -58,11 +64,11 @@ local DELIVERY_TIMEOUT = 15
 -- pintan en gris con otro icono: no son un destino válido de regalo.
 local REAL_BUTTON_COLOR = Color3.fromRGB(64, 169, 74)
 local REAL_SHADOW_COLOR = Color3.fromRGB(81, 255, 0)
-local REAL_ICON = "rbxassetid://91500847756674"
+local REAL_ICON = AssetIds.Images.GiftRealPlayer
 
 local NPC_BUTTON_COLOR = Color3.fromRGB(128, 128, 128)
 local NPC_SHADOW_COLOR = Color3.fromRGB(255, 255, 255)
-local NPC_ICON = "rbxassetid://109044845487335"
+local NPC_ICON = AssetIds.Images.GiftNpc
 -- Los NPCs no muestran su nombre: la fila anuncia que no es un destino válido.
 local NPC_LABEL_TEXT = "Not Eligible"
 
@@ -79,7 +85,10 @@ local ROW_PRESS_FROM = 0.9
 
 export type GiftFlowConfig = {
 	menuController: any,
-	storeFrame: GuiObject,
+	-- Se invocan al presentar y al retirar la lista, para que el panel que abre
+	-- el flujo gestione su propia visibilidad sin que GiftFlow la conozca.
+	onOpened: (() -> ())?,
+	onClosed: (() -> ())?,
 	onDelivered: (() -> ())?,
 }
 
@@ -180,7 +189,8 @@ end
 function GiftFlow.new(config: GiftFlowConfig, janitor: any)
 	local self = setmetatable({}, GiftFlow)
 	self._janitor = janitor
-	self._storeFrame = config.storeFrame
+	self._onOpened = config.onOpened
+	self._onClosed = config.onClosed
 	self._onDelivered = config.onDelivered
 
 	self._receiver = nil :: UserEntry?
@@ -467,15 +477,22 @@ function GiftFlow:openForProduct(product: StoreProductDefinition)
 
 	self:_refreshList(true)
 
-	self._storeFrame.Visible = false
 	self._frame.Visible = true
+	if self._onOpened then
+		self._onOpened()
+	end
 end
 
 function GiftFlow:close()
 	self._frame.Visible = false
-	self._storeFrame.Visible = true
+	if self._onClosed then
+		self._onClosed()
+	end
 end
 
+-- Descarte silencioso: lo llama el panel que abre el flujo cuando él mismo se
+-- está cerrando. No dispara `onClosed` a propósito — ese callback existe para
+-- devolverle el protagonismo al panel, y aquí el panel se va con nosotros.
 function GiftFlow:reset()
 	self._frame.Visible = false
 	self._sendPending = false

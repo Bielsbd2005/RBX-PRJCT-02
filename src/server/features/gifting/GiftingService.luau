@@ -476,6 +476,10 @@ function GiftingService:_handleClaimGift(player: Player, giftId: string): ()
 	local ok = _dataService:BatchUpdate(player, {
 		{ path = { "Stats", "Cash" }, delta = amount },
 		{ path = { "Stats", "TotalCashEarned" }, delta = amount },
+		-- El cash regalado lo compró el remitente con Robux: cuenta también en
+		-- el contador de comprado, para que la telemetría pueda restar y medir
+		-- el ritmo JUGADO sin regalos dentro.
+		{ path = { "Stats", "TotalCashPurchased" }, delta = amount },
 		-- Ledger anti doble-claim: si este giftId (PurchaseId) volviera a
 		-- entregarse (receipt/message re-entregado tras un crash), _depositGift
 		-- lo rechaza. DataService lo poda por edad al cargar el perfil.

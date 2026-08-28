@@ -57,6 +57,13 @@ export type Stats = {
 	TimePlayedSeconds: number,
 	Cash: number,
 	TotalCashEarned: number,
+	-- Parte de TotalCashEarned que NO salió de jugar: packs comprados con
+	-- Robux y regalos recibidos (que el remitente compró). TotalCashEarned lo
+	-- suma TODO, así que solo no distingue el grind del gasto — y la telemetría
+	-- necesita esa resta para que "Coin por hora jugada" mida juego, no ventas.
+	-- Los perfiles anteriores a este campo arrancan en 0: su histórico comprado
+	-- queda dentro de TotalCashEarned y no se puede separar retroactivamente.
+	TotalCashPurchased: number,
 	-- Gems: moneda premium. NO se gana jugando — solo con recompensas del
 	-- Battle Pass o comprando packs con Robux. Por eso no hay ningún faucet
 	-- de Gems en ActionRewards: si algún día aparece uno, es un bug de diseño.
@@ -336,6 +343,7 @@ local DEFAULT: PlayerProfile = {
 		TimePlayedSeconds = 0,
 		Cash = 500,
 		TotalCashEarned = 0,
+		TotalCashPurchased = 0,
 		-- Arranca a 0: los Gems son premium, no se regalan de salida.
 		Gems = 0,
 		TotalGemsEarned = 0,

@@ -4,22 +4,25 @@
 	Catálogo de todo lo que se compra con Robux: los developer products de la
 	tienda (packs de Cash y de Gems) y los gamepasses.
 
-	Los packs son dos monedas con exactamente la misma forma: packs de Cash (Store.CashPage) y
-	packs de Gems (Store.GemsPage). Cada una declara una lista de datos puros y
-	`buildCatalog` deriva de ahí los índices que consumen cliente y servidor, así
-	que ambas monedas no pueden divergir por copy-paste.
+	Los packs son dos monedas con exactamente la misma forma: packs de Cash y packs
+	de Gems. Cada una declara una lista de datos puros y `buildCatalog` deriva de
+	ahí los índices que consumen cliente y servidor, así que ambas monedas no
+	pueden divergir por copy-paste.
 
 	Para editar el catálogo solo se tocan las listas de packs de más abajo:
 	  · el orden de la lista es el orden de aparición en la UI;
-	  · `Row` agrupa botones en Store.<PageName>.<Row>.<ButtonName>, y mover un
-	    pack de fila es cambiar ese campo (por defecto DEFAULT_ROW);
 	  · `PriceText` NO se escribe a mano: se deriva de `RobuxPrice` para que no
 	    puedan quedar desincronizados.
 
 	Cash y Gems son catálogos separados (y no una sola lista con un campo de
-	moneda) porque el binder del cliente busca cada botón bajo la página de su
-	catálogo: mezclarlos haría buscar los packs de Gems bajo CashPage y no
-	aparecerían.
+	moneda) porque cada uno se cablea sobre una fila distinta de la GUI: los packs
+	de Cash en Store…Content.CoinsRow y los de Gems en GemsRow (el mapeo fila↔
+	catálogo vive en el cliente, store/init.luau). Mezclarlos haría buscar los
+	packs de Gems en la fila del cash y no aparecerían.
+
+	`PageName` y `Row` son HERENCIA de la GUI anterior (páginas con filas Row1/
+	Row2…). Hoy no los usa nadie para localizar botones; se conservan porque
+	`Rows` sigue siendo el orden estable con el que recorrer el catálogo.
 
 	ProductId = 0 significa "sin configurar" (mismo convenio que
 	`BattlePassConfig.PremiumProductId`): el pack queda fuera de `ByProductId`,

@@ -6,8 +6,8 @@
 
 	Flujo de una compra (BuyItem):
 	  1. Cliente envía Network.Shop.BuyItem via ByteNet
-	  2. ShopService valida: cooldown → ítem existe → nivel suficiente → cash suficiente → no poseído
-	  3. DataService:BatchUpdate aplica la transacción atómica (cash − precio, ítem = true, auto-equip si aplica)
+	  2. ShopService valida: cooldown → ítem existe → nivel suficiente → saldo suficiente → no poseído
+	  3. DataService:BatchUpdate aplica la transacción atómica (saldo − precio, ítem = true, auto-equip si aplica)
 	  4. Network.Shop.Response confirma al cliente
 
 	Flujo de equip (EquipItem):
@@ -37,6 +37,7 @@ local Network     = require(Shared.networking.Network)
 local NetGuards   = require(Shared.networking.NetGuards)
 local InventoryRepository = require(Shared.data.InventoryRepository)
 local ItemsConfig = require(Shared.constants.ItemsConfig)
+local Currency = require(Shared.constants.Currency)
 local LockerConfig = require(Shared.constants.LockerConfig)
 local BattlePassConfig = require(Shared.constants.BattlePassConfig)
 local WeaponCategory = require(Shared.constants.WeaponCategory)
@@ -88,6 +89,13 @@ end
 
 -- Cooldown por acción (segundos)
 local COOLDOWN = 0.3
+
+-- Mensaje de saldo insuficiente por moneda (el %d es el precio). Se declaran
+-- enteros y no concatenando la moneda porque "Gems insuficiente" no concuerda.
+local INSUFFICIENT_FUNDS_MESSAGE: { [string]: string } = {
+	[Currency.CASH] = "Cash insuficiente. Necesitas %d.",
+	[Currency.GEMS] = "Gems insuficientes. Necesitas %d.",
+}
 
 -- ────────────────────────────────────────────────────────────
 -- ESTADO DEL MÓDULO
@@ -244,13 +252,17 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 		return
 	end
 
-	-- Validación 6: cash suficiente
-	local currentCash: number = profile.Data.Stats.Cash or 0
+	-- Validación 6: saldo suficiente EN LA MONEDA DEL ÍTEM.
+	-- `Currency` es opcional en ItemsConfig y resolve() cae a Cash con cualquier
+	-- otro valor, así que un ítem sin el campo se cobra como siempre.
+	local currency = Currency.resolve(itemConfig.Currency)
+	local balancePath = Currency.balancePath(currency)
+	local currentBalance: number = _getPath(profile.Data, balancePath) or 0
 	local price: number = itemConfig.Price or 0
-	if currentCash < price then
+	if currentBalance < price then
 		Network.Shop.Response.SendTo({
 			success = false,
-			message = "Cash insuficiente. Necesitas " .. tostring(price) .. ".",
+			message = INSUFFICIENT_FUNDS_MESSAGE[currency]:format(price),
 		}, player)
 		return
 	end
@@ -258,10 +270,10 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 	-- ── Transacción atómica ──────────────────────────────────
 	-- Si la categoría es equipable, la compra actualiza también el Loadout
 	-- en la misma operación para evitar un segundo request del cliente.
-	-- Cash se descuenta con delta para evitar TOCTOU si otro flujo (kill,
-	-- claim, otra compra) muta Stats.Cash entre la lectura y el write.
+	-- El saldo se descuenta con delta para evitar TOCTOU si otro flujo (kill,
+	-- claim, otra compra) muta el stat entre la lectura y el write.
 	local updates = {
-		{ path = { "Stats", "Cash" }, delta = -price },
+		{ path = balancePath, delta = -price },
 	}
 
 	if data.category == LockerCategory.WEAPON_WRAPS then
@@ -323,7 +335,7 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 		-- `itemId` viaja como campo propio (no concatenado al transactionType):
 		-- la vista de Shop necesita desglose por ítem, y así el backend no tiene
 		-- que parsear claves compuestas.
-		TelemetryService.RecordFlow(player, "sink", "Shop::" .. data.category, price, data.itemId, "Cash")
+		TelemetryService.RecordFlow(player, "sink", "Shop::" .. data.category, price, data.itemId, currency)
 		TelemetryService.RecordItem(player, "ShopItem::" .. data.category, data.itemId)
 
 		Network.Shop.Response.SendTo({

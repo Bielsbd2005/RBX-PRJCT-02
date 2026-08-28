@@ -27,6 +27,10 @@ type PackKind = {
 	-- Stats del profile: saldo y contador acumulado de la moneda.
 	BalanceStat: string,
 	TotalEarnedStat: string,
+	-- Contador de lo COMPRADO, cuando la moneda lo separa. TotalCashEarned
+	-- suma todo (grind + packs + regalos); este es el que permite a la
+	-- telemetría restar y medir "Coin por hora jugada" sin las ventas dentro.
+	TotalPurchasedStat: string?,
 	Currency: TelemetryService.Currency,
 	TelemetryKind: TelemetryService.PurchaseKind,
 }
@@ -39,6 +43,7 @@ local PACK_KINDS: { PackKind } = {
 		end,
 		BalanceStat = "Cash",
 		TotalEarnedStat = "TotalCashEarned",
+		TotalPurchasedStat = "TotalCashPurchased",
 		Currency = "Cash",
 		TelemetryKind = "CashPack",
 	},
@@ -176,12 +181,16 @@ function ServerBootstrap.start(serverRoot: Script): ()
 		local amount = kind.GetAmount(product)
 
 		-- Atómico: grant de la moneda + mark receipt en el mismo BatchUpdate.
-		local ok = DataService:BatchUpdate(buyer, {
+		local updates = {
 			{ path = { "Stats", kind.BalanceStat }, delta = amount },
 			{ path = { "Stats", kind.TotalEarnedStat }, delta = amount },
 			{ path = { "Stats", "TotalRobuxSpent" }, delta = product.RobuxPrice },
 			{ path = { "ProcessedReceipts", purchaseId }, value = os.time() },
-		})
+		}
+		if kind.TotalPurchasedStat then
+			table.insert(updates, { path = { "Stats", kind.TotalPurchasedStat }, delta = amount })
+		end
+		local ok = DataService:BatchUpdate(buyer, updates)
 		if not ok then
 			return Enum.ProductPurchaseDecision.NotProcessedYet
 		end

@@ -29,7 +29,7 @@
 		UserInterface.GiftAlert
 		  Container
 		    Claim        ← botón: reclama (el server concede el cash) y cierra
-		    Product      ← imagen del pack regalado (copiada del botón del Store)
+		    Product      ← imagen del pack regalado (hoy sin cablear, ver TODO en `show`)
 		    Description  ← "<font color="#FF3A54">@Usuario</font> just gifted you <font color="#FFC850">X</font>! What an absolute legend, claim it right now! 🎉🔥"
 		    Value        ← cantidad de cash del pack ("3.000", etc.)
 
@@ -81,7 +81,6 @@ function GiftingFeature.start(menuController: any): any
 	local container = alertFrame:WaitForChild("Container") :: Frame
 
 	local claimBtn = container:WaitForChild("Claim") :: GuiButton
-	local productImage = container:WaitForChild("Product") :: ImageLabel
 	local descriptionLabel = container:WaitForChild("Description") :: TextLabel
 	local valueLabel = container:WaitForChild("Value") :: TextLabel
 
@@ -125,41 +124,17 @@ function GiftingFeature.start(menuController: any): any
 
 	-- ── Presentación ─────────────────────────────────────────
 
-	local function findProductImage(productId: number): string?
-		local product = StoreProducts.Cash.ByProductId[productId]
-		if not product then
-			return nil
-		end
-		local storeNode = uiGui:FindFirstChild("Store")
-		if not storeNode then
-			return nil
-		end
-		local cashPage = storeNode:FindFirstChild(StoreProducts.Cash.PageName) or storeNode:FindFirstChild("Cash")
-		local rowContainer = if cashPage then cashPage:FindFirstChild(product.Row) else nil
-		local button = if rowContainer then rowContainer:FindFirstChild(product.ButtonName) else nil
-		if not button and cashPage then
-			button = cashPage:FindFirstChild(product.ButtonName)
-		end
-		if button then
-			if button:IsA("ImageButton") and button.Image ~= "" then
-				return button.Image
-			end
-			local image = button:FindFirstChild("Icon") or button:FindFirstChildWhichIsA("ImageLabel")
-			return if image and image:IsA("ImageLabel") then image.Image else nil
-		end
-		return nil
-	end
-
 	local function show(giftId: string, gift: any)
 		if currentGiftId == giftId and alertFrame.Visible then
 			return
 		end
 		currentGiftId = giftId
 
-		local image = findProductImage(tonumber(gift.ProductId) or 0)
-		if image and image ~= "" then
-			productImage.Image = image
-		end
+		-- TODO: el alert ya no pinta la imagen del pack (GiftAlert.Container.
+		-- Product se queda con la que tenga en Studio). Antes la copiaba del
+		-- botón del pack dentro de UserInterface.Store, acoplándose al layout de
+		-- la tienda; con la GUI nueva hace falta otra fuente — p.ej. un campo
+		-- `Image` en StoreProducts — de la que leer aquí.
 
 		local cashAmount = tonumber(gift.CashAmount) or 0
 		if cashAmount <= 0 then
