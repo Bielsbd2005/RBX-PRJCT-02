@@ -17,6 +17,7 @@ local WeaponsSystemFolder = script.Parent
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Network = require(Shared.networking.Network)
 local ItemsConfig = require(Shared.constants.ItemsConfig)
+local WeaponsConfig = require(Shared.constants.WeaponsConfig)
 local ActionRewards = require(Shared.constants.ActionRewards)
 local WeaponTypes = WeaponsSystemFolder:WaitForChild("WeaponTypes")
 local Libraries = WeaponsSystemFolder:WaitForChild("Libraries")
@@ -105,7 +106,6 @@ end
 
 local Configuration = WeaponsSystemFolder:WaitForChild("Configuration")
 local ConfigurationValues = {
-	SprintEnabled = Configuration:WaitForChild("SprintEnabled"),
 	SlowZoomWalkEnabled = Configuration:WaitForChild("SlowZoomWalkEnabled"),
 }
 
@@ -332,6 +332,12 @@ end
 local function _getToolCategory(tool: Tool?): string?
 	if not tool then
 		return nil
+	end
+
+	-- Identidad estampada por el server (desambigua ids repetidos como "Default").
+	local category = WeaponsConfig.ResolveToolIdentity(tool)
+	if category then
+		return category
 	end
 
 	if ItemsConfig.Main[tool.Name] then
@@ -673,11 +679,17 @@ end
 
 function WeaponsSystem.createWeaponForInstance(weaponInstance)
 	coroutine.wrap(function()
-		local weaponTypeAttribute = weaponInstance:GetAttribute("WeaponType")
-		if type(weaponTypeAttribute) ~= "string" or weaponTypeAttribute == "" then
-			warn(string.format("Missing Tool attribute WeaponType on %s.", weaponInstance:GetFullName()))
+		-- El tipo de arma lo dicta la definición de WeaponsConfig. Un Tool sin
+		-- definición no se instancia: sin stats no hay arma jugable.
+		local definition = WeaponsConfig.GetForTool(weaponInstance)
+		if not definition then
+			warn(string.format(
+				"[WeaponsSystem] %s no tiene definición en WeaponsConfig (Definitions/<Category>/<Id>.luau); no se instancia.",
+				weaponInstance:GetFullName()
+			))
 			return
 		end
+		local weaponTypeAttribute = definition.WeaponType
 
 		local weaponType = WEAPON_TYPES_LOOKUP[weaponTypeAttribute]
 		if not weaponType then

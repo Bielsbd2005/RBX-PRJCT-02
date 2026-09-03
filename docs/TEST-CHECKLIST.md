@@ -261,6 +261,35 @@ General sanity before anything: no red errors in **Output** on join, and
 
 ---
 
+## 5. WEAPONS CONFIG MIGRATION (Configuration → Shared/constants/WeaponsConfig)
+
+Prereq: run `tools/weapons/StudioMigration.luau` from the Studio command bar once
+(stamps `WeaponCategory`/`WeaponId` on each `ServerStorage.WeaponTools` Tool and
+removes its legacy `Configuration`), then save the place.
+
+- ✅ **Boot clean**: no `[WeaponsConfig]` errors (Studio fails fast on a bad key/type)
+  and no `[BaseWeapon] ... Configuration obsoleta` warns (those mean the migration
+  script has not been run on that Tool).
+- ✅ **Per-weapon feel unchanged**: AK/Groza/Default automatic at 8 shots/s, Sniper has
+  scope + 4.5x zoom + 1-round mag, Large fires 5 pellets, RPG explodes with the
+  Rocket tracer, UZI at 20 shots/s. Compare against the values in
+  `Definitions/<Category>/<Id>.luau`.
+- ✅ **Locker stats panel**: select each weapon → Damage/FireRate/Reload/Ammo show
+  instantly (no round-trip) and match the definition; compare bars vs equipped
+  weapon still colour up/down; level scaling still applies with kills.
+- ✅ **Hotbar ammo**: magazine capacity matches `AmmoCapacity` (× WeaponLevel).
+- ✅ **Bots**: a bot with a catalog weapon (e.g. Sniper) fires at that weapon's
+  cadence; the client renders its tracers/sounds (Tool resolves its definition).
+- ✅ **Both "Default" weapons**: Main/Default and Special/Default resolve to their own
+  category (attribute-based identity), hotbar slots are correct.
+- 🔁 **No definition, no weapon**: a Tool tagged `WeaponsSystemWeapon` with no definition
+  (e.g. a prototype outside `WeaponTools`) logs one `[WeaponsSystem]` warn and is not
+  instantiated; nothing else breaks.
+- 🔁 Server-side hit validation (WeaponSecurity) still uses the same ShotCooldown /
+  NumProjectiles / MaxDistance — no "shot too fast" rejections on legit fire.
+
+---
+
 ## Suggested test order (fastest path to confidence)
 1. **Boot + Output clean** (catches deletions / syntax / require breaks immediately).
 2. **2-player match**: kills, damage falloff, headshots, kill feed, caps, respawn, death

@@ -16,6 +16,7 @@ local InventoryRepository = require(Shared.data.InventoryRepository)
 local WeaponCategory = require(Shared.constants.WeaponCategory)
 local ItemDefaults = require(Shared.constants.ItemDefaults)
 local WeaponLevelConfig = require(Shared.constants.WeaponLevelConfig)
+local WeaponsConfig = require(Shared.constants.WeaponsConfig)
 local CosmeticsTemplates = require(Shared.Locker.CosmeticsTemplates)
 local BackWeaponService = require(script.Parent:WaitForChild("BackWeaponService"))
 
@@ -188,6 +189,9 @@ local function _grantMatchLoadoutTools(
 		CosmeticsTemplates.applyWeaponWrapToTool(backpackClone, wrapId)
 		backpackClone:SetAttribute(MATCH_LOADOUT_TOOL_ATTRIBUTE, true)
 		backpackClone:SetAttribute(MATCH_LOADOUT_CATEGORY_ATTRIBUTE, loadoutCategory)
+		-- Identidad canónica (WeaponCategory/WeaponId): BaseWeapon, Hotbar y BotAI
+		-- resuelven con ella la definición de WeaponsConfig en cliente y servidor.
+		WeaponsConfig.StampTool(backpackClone, loadoutCategory, weaponId)
 		-- Nivel de arma (1..5) derivado de las kills acumuladas con esa arma.
 		-- BaseWeapon lee este atributo para escalar daño/cadencia/recarga/cargador.
 		backpackClone:SetAttribute(WeaponLevelConfig.ATTRIBUTE, LoadoutService.GetWeaponLevel(profileData, loadoutCategory, weaponId))

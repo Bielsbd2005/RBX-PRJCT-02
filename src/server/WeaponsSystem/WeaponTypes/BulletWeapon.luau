@@ -1149,11 +1149,6 @@ function BulletWeapon:onConfigValueChanged(valueName, newValue, oldValue)
 	if valueName == "ShotEffect" then
 		self.bulletEffectTemplate = ShotsFolder:FindFirstChild(self:getConfigValue("ShotEffect", "Bullet"))
 		if self.bulletEffectTemplate then
-			local config = self.bulletEffectTemplate:FindFirstChildOfClass("Configuration")
-			if config then
-				self:importConfiguration(config)
-			end
-
 			local beam0 = self.bulletEffectTemplate:FindFirstChild("Beam0")
 			-- Audit mobile: preload una sola vez por beam0 (cacheado al nivel
 			-- de la instancia). Antes cada onConfigValueChanged disparaba un
@@ -1168,12 +1163,6 @@ function BulletWeapon:onConfigValueChanged(valueName, newValue, oldValue)
 		end
 	elseif valueName == "HitMarkEffect" then
 		self.hitMarkTemplate = HitMarksFolder:FindFirstChild(self:getConfigValue("HitMarkEffect", "BulletHole"))
-		if self.hitMarkTemplate then
-			local config = self.hitMarkTemplate:FindFirstChildOfClass("Configuration")
-			if config then
-				self:importConfiguration(config)
-			end
-		end
 	elseif valueName == "ChargeRate" then
 		self.usesCharging = newValue ~= nil
 	end

@@ -437,51 +437,6 @@ local GiftingNamespace = ByteNet.DefineNamespace("Gifting", function()
 end)
 
 -- ────────────────────────────────────────────────────────────
--- NAMESPACE: WeaponStats
--- El locker muestra los stats de combate del arma seleccionada. Esos valores
--- viven en la Configuration del Tool real (ServerStorage.WeaponTools), que NO
--- se replica al cliente — así que el cliente los PIDE y el server los lee y
--- responde. Valores BASE (nivel 1): el escalado por nivel (WeaponLevelConfig)
--- es config pública compartida y lo aplica el cliente con sus propias kills,
--- evitando un round-trip por cada subida de nivel.
--- ────────────────────────────────────────────────────────────
-
-local WeaponStatsNamespace = ByteNet.DefineNamespace("WeaponStats", function()
-	return {
-		-- C → S: pedir los stats de un arma (por categoría + id).
-		Request = ByteNet.DefinePacket({
-			Value = ByteNet.Struct({
-				weaponCategory = ByteNet.String,  -- "Main" | "Special"
-				weaponId       = ByteNet.String,
-			}),
-			ReliabilityType = "Reliable",
-		}),
-
-		-- S → C: stats BASE del arma + rangos del arsenal para normalizar barras.
-		-- weaponCategory/weaponId se reflejan para que el cliente correlacione la
-		-- respuesta con su selección actual (descarta respuestas tardías de un
-		-- arma que ya no está seleccionada). damage = HitDamage o BlastDamage si
-		-- el arma explota al impactar. fireRate = balas/min (60/ShotCooldown).
-		-- damageMax/fireRateMax/reloadMin son agregados del arsenal entero.
-		Response = ByteNet.DefinePacket({
-			Value = ByteNet.Struct({
-				weaponCategory = ByteNet.String,
-				weaponId       = ByteNet.String,
-				success        = ByteNet.Bool,
-				damage         = ByteNet.Float32,
-				fireRate       = ByteNet.Float32,
-				reloadTime     = ByteNet.Float32,
-				ammoCapacity   = ByteNet.Int32,
-				damageMax      = ByteNet.Float32,
-				fireRateMax    = ByteNet.Float32,
-				reloadMin      = ByteNet.Float32,
-			}),
-			ReliabilityType = "Reliable",
-		}),
-	}
-end)
-
--- ────────────────────────────────────────────────────────────
 -- EXPORT
 -- ────────────────────────────────────────────────────────────
 
@@ -494,5 +449,4 @@ return {
 	Match       = MatchNamespace,
 	BattlePass  = BattlePassNamespace,
 	Gifting     = GiftingNamespace,
-	WeaponStats = WeaponStatsNamespace,
 }

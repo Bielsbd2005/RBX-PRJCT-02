@@ -17,6 +17,8 @@ local RunService = game:GetService("RunService")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local TeamUtils = require(Shared.utils.TeamUtils)
 local BotConfig = require(Shared.constants.BotConfig)
+local WeaponsConfig = require(Shared.constants.WeaponsConfig)
+local WeaponCategory = require(Shared.constants.WeaponCategory)
 local BotPersonalities = require(Shared.constants.BotPersonalities)
 local AssetIds = require(Shared.constants.AssetIds)
 local CollisionGroups = require(Shared:WaitForChild("CollisionGroups"))
@@ -422,7 +424,8 @@ end
 @return nil
 ]]
 function BotAI:_setupTool()
-	local toolTemplate = BotAppearance.findWeaponTemplate(self._weaponId) or _getWeaponTemplate()
+	local catalogTemplate = BotAppearance.findWeaponTemplate(self._weaponId)
+	local toolTemplate = catalogTemplate or _getWeaponTemplate()
 	if not toolTemplate then
 		warn(string.format(
 			"[BotAI] %s sin arma: ni WeaponTools.Main.%s ni ReplicatedStorage.AR-NPC disponibles. El bot no disparará.",
@@ -432,6 +435,12 @@ function BotAI:_setupTool()
 		return
 	end
 	local tool = toolTemplate:Clone()
+	local catalogWeaponId = self._weaponId
+	if catalogTemplate and catalogWeaponId then
+		-- Misma identidad que estampa LoadoutService a los jugadores: así el
+		-- WeaponsSystem (server y clientes) resuelve la definición del arma.
+		WeaponsConfig.StampTool(tool, WeaponCategory.MAIN, catalogWeaponId)
+	end
 	BotAppearance.applyWrapToTool(tool, self._wrapId)
 	tool.Parent = self._dummy
 	if not CollectionService:HasTag(tool, WEAPON_TAG) then
@@ -450,10 +459,9 @@ function BotAI:_setupTool()
 	-- el arma — sigue siendo el perfil RNG del bot (VsPlayer/VsBot), así que
 	-- la cadencia solo cambia el ritmo, no rompe el balance de UX. Clamp
 	-- defensivo por si una config trae valores extremos.
-	local config = tool:FindFirstChildOfClass("Configuration")
-	local cooldownNode = if config then config:FindFirstChild("ShotCooldown") else nil
-	if cooldownNode and cooldownNode:IsA("NumberValue") and cooldownNode.Value > 0 then
-		self._fireRate = math.clamp(cooldownNode.Value, 0.08, 1.5)
+	local shotCooldown = tonumber(WeaponsConfig.GetValueForTool(tool, "ShotCooldown"))
+	if shotCooldown and shotCooldown > 0 then
+		self._fireRate = math.clamp(shotCooldown, 0.08, 1.5)
 	end
 end
 

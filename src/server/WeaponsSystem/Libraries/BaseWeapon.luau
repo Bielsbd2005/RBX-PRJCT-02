@@ -10,7 +10,9 @@ local AnimationsFolder = WeaponsSystemFolder:WaitForChild("Assets"):WaitForChild
 local AutoAimSystem = require(script.Parent:WaitForChild("AutoAimSystem"))
 local WeaponsNetwork = require(script.Parent:WaitForChild("WeaponsNetwork"))
 local PewEffect = require(script.Parent:WaitForChild("PewEffect"))
-local WeaponLevelConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("WeaponLevelConfig"))
+local SharedConstants = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants")
+local WeaponLevelConfig = require(SharedConstants:WaitForChild("WeaponLevelConfig"))
+local WeaponsConfig = require(SharedConstants:WaitForChild("WeaponsConfig"))
 
 -- DEBUG: forzar comportamiento de autoshoot de movil tambien en PC.
 -- Poner en false para volver al gating normal por plataforma.
@@ -59,7 +61,6 @@ function BaseWeapon.new(weaponsSystem, instance)
 	self.animTracks = {}
 	self.sounds = {}
 	self.configValues = {}
-	self.trackedConfigurations = {}
 
 	self.reloading = false
 	self.canReload = true
@@ -80,12 +81,12 @@ function BaseWeapon:doInitialSetup()
 	local selfClass = getmetatable(self)
 	self.instanceIsTool = self.instance:IsA("Tool")
 
-	-- Set up child added/removed
+	-- Config de combate desde WeaponsConfig (Shared), antes del barrido de hijos.
+	self:loadConfigFromDefinition()
+
+	-- Set up child added
 	self.connections.childAdded = self.instance.ChildAdded:Connect(function(child)
 		self:onChildAdded(child)
-	end)
-	self.connections.childRemoved = self.instance.ChildRemoved:Connect(function(child)
-		self:onChildRemoved(child)
 	end)
 	for _, child in self.instance:GetChildren() do
 		self:onChildAdded(child)
@@ -584,82 +585,35 @@ function BaseWeapon:onDestroyed()
 	end
 end
 
-function BaseWeapon:onConfigValueAdded(valueObj)
-	local valueName = valueObj.Name
-	local newValue = valueObj.Value
-	self.configValues[valueName] = newValue
-	self:onConfigValueChanged(valueName, newValue, nil)
-
-	self.connections["valueChanged:" .. valueName] = valueObj.Changed:Connect(function(changedValue)
-		local oldValue = self.configValues[valueName]
-		self.configValues[valueName] = changedValue
-
-		self:onConfigValueChanged(valueName, changedValue, oldValue)
-	end)
-	self.connections["valueRenamed:" .. valueName] = valueObj:GetPropertyChangedSignal("Name"):Connect(function()
-		self.configValues[valueName] = nil
-		self:cleanupConnection("valueChanged:" .. valueName)
-		self:cleanupConnection("valueRenamed:" .. valueName)
-		self:onConfigValueAdded(valueObj)
-	end)
-end
-
-function BaseWeapon:onConfigValueRemoved(valueObj)
-	local valueName = valueObj.Name
-	self.configValues[valueName] = nil
-
-	self:cleanupConnection("valueChanged:" .. valueName)
-	self:cleanupConnection("valueRenamed:" .. valueName)
-end
-
--- This function is used to set configuration values from outside configuration objects/folders
-function BaseWeapon:importConfiguration(config)
-	if not config then
-		return
-	end
-	for _, child in config:GetChildren() do
-		if child:IsA("ValueBase") then
-			local valueName = child.Name
-			local newValue = child.Value
-			local oldValue = self.configValues[valueName]
-			self.configValues[valueName] = newValue
-			self:onConfigValueChanged(valueName, newValue, oldValue)
-		end
-	end
-end
-
-function BaseWeapon:setConfiguration(config)
-	self:cleanupConnection("configChildAdded", "configChildRemoved")
-	if not config or not config:IsA("Configuration") then
-		return
+--[[
+	Carga la config del arma desde WeaponsConfig (Shared/constants/WeaponsConfig),
+	resolviendo la identidad del Tool por atributos (ver WeaponsConfig.StampTool).
+	WeaponsSystem.createWeaponForInstance ya garantiza que hay definición; si
+	aun así faltara, el arma queda con los defaults de cada getConfigValue.
+]]
+function BaseWeapon:loadConfigFromDefinition()
+	local definition = WeaponsConfig.GetForTool(self.instance)
+	self.definition = definition
+	if not definition then
+		warn(string.format("[BaseWeapon] %s no tiene definición en WeaponsConfig; usando defaults.", self.instance:GetFullName()))
+		return false
 	end
 
-	for _, child in config:GetChildren() do
-		if child:IsA("ValueBase") then
-			self:onConfigValueAdded(child)
-		end
+	for valueName, value in definition.Config do
+		self.configValues[valueName] = value
+		self:onConfigValueChanged(valueName, value, nil)
 	end
-	self.connections.configChildAdded = config.ChildAdded:Connect(function(child)
-		if child:IsA("ValueBase") then
-			self:onConfigValueAdded(child)
-		end
-	end)
-	self.connections.configChildRemoved = config.ChildRemoved:Connect(function(child)
-		if child:IsA("ValueBase") then
-			self:onConfigValueRemoved(child)
-		end
-	end)
+	return true
 end
 
 function BaseWeapon:onChildAdded(child)
-	if child:IsA("Configuration") then
-		self:setConfiguration(child)
-	end
-end
-
-function BaseWeapon:onChildRemoved(child)
-	if child:IsA("Configuration") then
-		self:setConfiguration(nil)
+	-- La config ya no vive en el Tool. Una Configuration aquí es un resto de
+	-- la migración: se ignora, y en Studio se avisa para que se borre.
+	if child:IsA("Configuration") and RunService:IsStudio() then
+		warn(string.format(
+			"[BaseWeapon] %s tiene una Configuration obsoleta que se ignora (la config vive en WeaponsConfig). Bórrala con tools/weapons/StudioMigration.luau.",
+			self.instance:GetFullName()
+		))
 	end
 end
 

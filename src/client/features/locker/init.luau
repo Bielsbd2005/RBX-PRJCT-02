@@ -28,6 +28,7 @@ local UIUtils = require(Client.core.ui.UIUtils)
 local ItemsConfig = require(Shared.constants.ItemsConfig)
 local AssetIds = require(Shared.constants.AssetIds)
 local WeaponLevelConfig = require(Shared.constants.WeaponLevelConfig)
+local WeaponDisplayStats = require(Shared.constants.WeaponsConfig.DisplayStats)
 local LockerConfig = require(Shared.constants.LockerConfig)
 local WeaponCategoryMod = require(Shared.constants.WeaponCategory)
 local ItemDefaults = require(Shared.constants.ItemDefaults)
@@ -1022,23 +1023,13 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	-- ── Panel de stats del arma (Locker.Stats) ───────────────────
-	-- Los stats de combate viven en la Configuration del Tool (ServerStorage,
-	-- no replicado), así que se piden al server (Network.WeaponStats). Los
-	-- valores BASE se cachean por arma (estáticos) y el escalado por nivel se
-	-- aplica aquí con las WeaponKills locales — así subir de nivel re-anima sin
-	-- otro round-trip. El panel compara la SELECCIONADA contra la EQUIPADA
-	-- (delta bar verde/rojo), así que se piden/cachean ambas armas.
+	-- Los stats de combate viven en Shared (WeaponsConfig), así que se derivan
+	-- en local (WeaponDisplayStats) sin red. Son valores BASE; el escalado por
+	-- nivel se aplica aquí con las WeaponKills locales. El panel compara la
+	-- SELECCIONADA contra la EQUIPADA (delta bar verde/rojo).
 	local weaponStatsPanel = WeaponStatsPanel.new(lockerFrame, janitor)
 
-	type WeaponBaseStats = {
-		damage: number,
-		fireRate: number,
-		reloadTime: number,
-		ammoCapacity: number,
-		damageMax: number,
-		fireRateMax: number,
-		reloadMin: number,
-	}
+	type WeaponBaseStats = WeaponDisplayStats.WeaponDisplayStats
 	-- Valores escalados por nivel + sus fills 0..1 (para comparar y mostrar).
 	type ScaledStats = {
 		damage: number,
@@ -1049,19 +1040,12 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		fireRateFill: number,
 		reloadFill: number,
 	}
-	local weaponStatsCache = {} :: { [string]: WeaponBaseStats }
-	-- Requests en vuelo (evita reenviar el mismo paquete mientras se espera).
-	local pendingStatsRequests = {} :: { [string]: boolean }
 	-- Arma seleccionada ahora (category/id, "" si ninguna). Se compara contra la
 	-- equipada de su misma categoría.
 	local statsSelectedCategory = ""
 	local statsSelectedId = ""
 	-- Token del debounce: invalida renders pendientes al cambiar de selección.
 	local statsRenderToken = 0
-
-	local function weaponStatsKey(category: string, weaponId: string): string
-		return category .. "|" .. weaponId
-	end
 
 	local function getWeaponKillsFor(category: WeaponCategory, weaponId: string): number
 		local weaponKills = Fusion.peek(DataController.WeaponKills) :: any
@@ -1074,16 +1058,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end
 		local value = tonumber(categoryKills[weaponId])
 		return if value and value > 0 then math.floor(value) else 0
-	end
-
-	-- Pide los stats de un arma al server si no están cacheados ni en vuelo.
-	local function requestStats(category: string, weaponId: string)
-		local key = weaponStatsKey(category, weaponId)
-		if weaponStatsCache[key] or pendingStatsRequests[key] then
-			return
-		end
-		pendingStatsRequests[key] = true
-		Network.WeaponStats.Request.Send({ weaponCategory = category, weaponId = weaponId })
 	end
 
 	-- Escala los stats base al nivel del arma y calcula sus fills 0..1 (las barras
@@ -1153,8 +1127,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		}
 	end
 
-	-- Renderiza la comparación seleccionada-vs-equipada. Pide las armas que falten
-	-- (vuelve al llegar su respuesta); sólo anima cuando ambas están cacheadas.
+	-- Renderiza la comparación seleccionada-vs-equipada.
 	local function tryRenderStats()
 		local category = statsSelectedCategory
 		local selId = statsSelectedId
@@ -1162,18 +1135,9 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			return
 		end
 
-		local selBase = weaponStatsCache[weaponStatsKey(category, selId)]
-		if not selBase then
-			requestStats(category, selId)
-			return
-		end
-
+		local selBase = WeaponDisplayStats.Get(category, selId)
 		local eqId = getEquippedWeaponByCategory(category :: WeaponCategory)
-		local eqBase = weaponStatsCache[weaponStatsKey(category, eqId)]
-		if not eqBase then
-			requestStats(category, eqId)
-			return
-		end
+		local eqBase = WeaponDisplayStats.Get(category, eqId)
 
 		local selLevel = WeaponLevelConfig.GetLevelForKills(getWeaponKillsFor(category :: WeaponCategory, selId))
 		local eqLevel = WeaponLevelConfig.GetLevelForKills(getWeaponKillsFor(category :: WeaponCategory, eqId))
@@ -1202,32 +1166,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			tryRenderStats()
 		end)
 	end
-
-	janitor:Add(Network.WeaponStats.Response.Listen(function(response: any)
-		local key = weaponStatsKey(response.weaponCategory, response.weaponId)
-		pendingStatsRequests[key] = nil
-		if not response.success then
-			return
-		end
-		weaponStatsCache[key] = {
-			damage = response.damage,
-			fireRate = response.fireRate,
-			reloadTime = response.reloadTime,
-			ammoCapacity = response.ammoCapacity,
-			damageMax = response.damageMax,
-			fireRateMax = response.fireRateMax,
-			reloadMin = response.reloadMin,
-		}
-		-- Re-render sólo si el arma recibida es la seleccionada o su equipada
-		-- (su baseline de comparación) — evita renders redundantes.
-		if statsSelectedCategory ~= "" then
-			local selKey = weaponStatsKey(statsSelectedCategory, statsSelectedId)
-			local eqKey = weaponStatsKey(statsSelectedCategory, getEquippedWeaponByCategory(statsSelectedCategory :: WeaponCategory))
-			if key == selKey or key == eqKey then
-				tryRenderStats()
-			end
-		end
-	end), true)
 
 	catalog = LockerCatalog.new(ItemsConfig, ITEMS_CONFIG_BY_NAV, DEFAULT_NAV_THUMBNAIL, getRarityRank, isItemOwned)
 	local updateActionFrameForSelected: () -> ()
