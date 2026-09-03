@@ -108,23 +108,23 @@ end
 ]]
 local function _onClaimLikeJoin(_: {}, player: Player): ()
 	if not _checkCooldown(player, "likeJoin") then
-		_send(player, false, "Demasiadas peticiones.", "LikeJoin", 0)
+		_send(player, false, "Too many requests. Slow down.", "LikeJoin", 0)
 		return
 	end
 
 	local profile = _dataService:GetProfile(player)
 	if not profile then
-		_send(player, false, "Perfil no disponible.", "LikeJoin", 0)
+		_send(player, false, "Your data isn't loaded yet.", "LikeJoin", 0)
 		return
 	end
 
 	if profile.Data.Rewards.GroupClaimed == true then
-		_send(player, false, "Like&Join ya reclamado.", "LikeJoin", 0)
+		_send(player, false, "Like & Join reward already claimed.", "LikeJoin", 0)
 		return
 	end
 
 	if not _isPlayerInGameGroup(player) then
-		_send(player, false, "Debes unirte al grupo para reclamar esta recompensa.", "LikeJoin", 0)
+		_send(player, false, "Join the group to claim this reward.", "LikeJoin", 0)
 		return
 	end
 
@@ -133,26 +133,26 @@ local function _onClaimLikeJoin(_: {}, player: Player): ()
 	}, "LikeJoin")
 
 	if ok then
-		_send(player, true, "Like&Join reclamado. +" .. tostring(rewardCash) .. " Cash.", "LikeJoin", rewardCash)
+		_send(player, true, "Like & Join claimed. +" .. tostring(rewardCash) .. " Cash.", "LikeJoin", rewardCash)
 	else
-		_send(player, false, "No se pudo completar el claim.", "LikeJoin", 0)
+		_send(player, false, "Couldn't complete the claim. Try again.", "LikeJoin", 0)
 	end
 end
 
 local function _onClaimNotifications(_: {}, player: Player): ()
 	if not _checkCooldown(player, "notifications") then
-		_send(player, false, "Demasiadas peticiones.", "Notifications", 0)
+		_send(player, false, "Too many requests. Slow down.", "Notifications", 0)
 		return
 	end
 
 	local profile = _dataService:GetProfile(player)
 	if not profile then
-		_send(player, false, "Perfil no disponible.", "Notifications", 0)
+		_send(player, false, "Your data isn't loaded yet.", "Notifications", 0)
 		return
 	end
 
 	if profile.Data.Rewards.NotificationsClaimed then
-		_send(player, false, "Recompensa de notificaciones ya reclamada.", "Notifications", 0)
+		_send(player, false, "Notifications reward already claimed.", "Notifications", 0)
 		return
 	end
 
@@ -161,9 +161,9 @@ local function _onClaimNotifications(_: {}, player: Player): ()
 	}, "Notifications")
 
 	if ok then
-		_send(player, true, "Notificaciones reclamadas. +" .. tostring(rewardCash) .. " Cash.", "Notifications", rewardCash)
+		_send(player, true, "Notifications reward claimed. +" .. tostring(rewardCash) .. " Cash.", "Notifications", rewardCash)
 	else
-		_send(player, false, "No se pudo completar el claim.", "Notifications", 0)
+		_send(player, false, "Couldn't complete the claim. Try again.", "Notifications", 0)
 	end
 end
 
@@ -171,30 +171,30 @@ local function _onRedeemCode(data: { code: string }, player: Player): ()
 	-- Cap longitud antes de gsub/upper para evitar DoS asimétrico (cliente
 	-- podría mandar un code de cientos de KB que el server procesaría O(n)).
 	if not NetGuards.validate(data, { code = M.Code }) then
-		_send(player, false, "Codigo invalido.", "Code", 0)
+		_send(player, false, "That code isn't valid.", "Code", 0)
 		return
 	end
 
 	if not _checkCooldown(player, "code") then
-		_send(player, false, "Demasiadas peticiones.", "Code", 0)
+		_send(player, false, "Too many requests. Slow down.", "Code", 0)
 		return
 	end
 
 	local profile = _dataService:GetProfile(player)
 	if not profile then
-		_send(player, false, "Perfil no disponible.", "Code", 0)
+		_send(player, false, "Your data isn't loaded yet.", "Code", 0)
 		return
 	end
 
 	local normalizedCode = string.upper(_trim(data.code))
 	if normalizedCode == "" then
-		_send(player, false, "Debes escribir un codigo.", "Code", 0)
+		_send(player, false, "Enter a code to redeem.", "Code", 0)
 		return
 	end
 
 	local actionKey = CODE_TO_ACTION[normalizedCode]
 	if not actionKey or not ActionRewards.Has(actionKey) then
-		_send(player, false, "Codigo invalido.", "Code", 0)
+		_send(player, false, "That code isn't valid.", "Code", 0)
 		return
 	end
 
@@ -203,12 +203,12 @@ local function _onRedeemCode(data: { code: string }, player: Player): ()
 	if cashFromCatalog > MAX_CODE_REWARD then
 		warn(("[RewardsService] Code %s (%s) excede MAX_CODE_REWARD (%d > %d) — bloqueando claim"):format(
 			normalizedCode, actionKey, cashFromCatalog, MAX_CODE_REWARD))
-		_send(player, false, "Codigo invalido.", "Code", 0)
+		_send(player, false, "That code isn't valid.", "Code", 0)
 		return
 	end
 
 	if profile.Data.Rewards.ClaimedCodes[normalizedCode] then
-		_send(player, false, "Ese codigo ya fue reclamado.", "Code", 0)
+		_send(player, false, "You already redeemed that code.", "Code", 0)
 		return
 	end
 
@@ -217,9 +217,9 @@ local function _onRedeemCode(data: { code: string }, player: Player): ()
 	}, normalizedCode)
 
 	if ok then
-		_send(player, true, "Codigo reclamado. +" .. tostring(rewardCash) .. " Cash.", "Code", rewardCash)
+		_send(player, true, "Code redeemed. +" .. tostring(rewardCash) .. " Cash.", "Code", rewardCash)
 	else
-		_send(player, false, "No se pudo canjear el codigo.", "Code", 0)
+		_send(player, false, "Couldn't redeem that code. Try again.", "Code", 0)
 	end
 end
 

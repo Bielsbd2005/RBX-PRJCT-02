@@ -13,8 +13,8 @@
 	Llamable desde cualquier módulo cliente sin instanciar nada:
 
 		local Notify = require(Client.core.ui.NotificationController)
-		Notify.success("Código reclamado. +500 Cash")
-		Notify.warning("Ese código ya fue reclamado.")
+		Notify.success("Code redeemed. +500 Cash")
+		Notify.warning("You already redeemed that code.")
 
 	Comportamiento:
 	  • Cada llamada clona su plantilla → un toast independiente.

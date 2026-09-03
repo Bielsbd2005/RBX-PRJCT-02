@@ -90,11 +90,11 @@ end
 -- Cooldown por acción (segundos)
 local COOLDOWN = 0.3
 
--- Mensaje de saldo insuficiente por moneda (el %d es el precio). Se declaran
--- enteros y no concatenando la moneda porque "Gems insuficiente" no concuerda.
+-- Mensaje de saldo insuficiente por moneda (el %d es el precio). Los textos van
+-- enteros y no concatenando la moneda para poder ajustar la frase por moneda.
 local INSUFFICIENT_FUNDS_MESSAGE: { [string]: string } = {
-	[Currency.CASH] = "Cash insuficiente. Necesitas %d.",
-	[Currency.GEMS] = "Gems insuficientes. Necesitas %d.",
+	[Currency.CASH] = "Not enough Cash. You need %d.",
+	[Currency.GEMS] = "Not enough Gems. You need %d.",
 }
 
 -- ────────────────────────────────────────────────────────────
@@ -167,13 +167,13 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 		weaponCategory = M.Category,
 		weaponId       = M.Id,
 	}) or data.itemId == "" then
-		Network.Shop.Response.SendTo({ success = false, message = "Payload inválido." }, player)
+		Network.Shop.Response.SendTo({ success = false, message = "Invalid request." }, player)
 		return
 	end
 
 	-- Validación 1: cooldown (sin marcar; se marca tras éxito real)
 	if not _isCooldownReady(player, "buy") then
-		Network.Shop.Response.SendTo({ success = false, message = "Demasiadas peticiones." }, player)
+		Network.Shop.Response.SendTo({ success = false, message = "Too many requests. Slow down." }, player)
 		return
 	end
 
@@ -182,14 +182,14 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 	local categoryCache = _itemCache[data.category]
 	local itemConfig = categoryCache and categoryCache[data.itemId]
 	if not itemConfig then
-		Network.Shop.Response.SendTo({ success = false, message = "Ítem no encontrado." }, player)
+		Network.Shop.Response.SendTo({ success = false, message = "That item doesn't exist." }, player)
 		return
 	end
 
 	if itemConfig.CanPurchase ~= true then
 		Network.Shop.Response.SendTo({
 			success = false,
-			message = "Este ítem no está disponible para compra.",
+			message = "That item isn't available for purchase.",
 		}, player)
 		return
 	end
@@ -197,7 +197,7 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 	if itemConfig.isBPExclusive == true or BattlePassConfig.IsBPExclusive(data.category, data.itemId) then
 		Network.Shop.Response.SendTo({
 			success = false,
-			message = "Este ítem solo se obtiene en el Battle Pass.",
+			message = "That item is only available in the Battle Pass.",
 		}, player)
 		return
 	end
@@ -205,7 +205,7 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 	-- Validación 3: perfil cargado
 	local profile = _dataService:GetProfile(player)
 	if not profile then
-		Network.Shop.Response.SendTo({ success = false, message = "Perfil no disponible." }, player)
+		Network.Shop.Response.SendTo({ success = false, message = "Your data isn't loaded yet." }, player)
 		return
 	end
 
@@ -216,7 +216,7 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 	if data.category == LockerCategory.WEAPON_WRAPS then
 		weaponCategoryForWraps = _resolveWeaponCategory(data.weaponCategory)
 		if not weaponCategoryForWraps then
-			Network.Shop.Response.SendTo({ success = false, message = "Categoría de arma inválida para wraps." }, player)
+			Network.Shop.Response.SendTo({ success = false, message = "Invalid weapon category for wraps." }, player)
 			return
 		end
 
@@ -226,18 +226,18 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 
 		-- Bloquea comprar wraps para armas que el jugador no posee.
 		if not _ownsTargetWeapon(profile.Data, weaponCategoryForWraps, weaponIdForWraps) then
-			Network.Shop.Response.SendTo({ success = false, message = "No posees el arma objetivo." }, player)
+			Network.Shop.Response.SendTo({ success = false, message = "You don't own that weapon." }, player)
 			return
 		end
 
 		if _getOwnedWeaponWrap(profile.Data, weaponCategoryForWraps, weaponIdForWraps, data.itemId) then
-			Network.Shop.Response.SendTo({ success = false, message = "Ya posees este wrap para esa arma." }, player)
+			Network.Shop.Response.SendTo({ success = false, message = "You already own this wrap for that weapon." }, player)
 			return
 		end
 	else
 		local alreadyOwned = _getPath(profile.Data.Inventory, { data.category, data.itemId })
 		if alreadyOwned then
-			Network.Shop.Response.SendTo({ success = false, message = "Ya posees este ítem." }, player)
+			Network.Shop.Response.SendTo({ success = false, message = "You already own this item." }, player)
 			return
 		end
 	end
@@ -247,7 +247,7 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 	if playerLevel < (itemConfig.LevelRequired or 1) then
 		Network.Shop.Response.SendTo({
 			success = false,
-			message = "Necesitas el nivel " .. tostring(itemConfig.LevelRequired) .. ".",
+			message = "You need level " .. tostring(itemConfig.LevelRequired) .. " to buy this item.",
 		}, player)
 		return
 	end
@@ -341,15 +341,15 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 		Network.Shop.Response.SendTo({
 			success = true,
 			message = if data.category == LockerCategory.WEAPON_WRAPS
-				then itemConfig.Name .. " comprado y equipado para el arma seleccionada."
+				then itemConfig.Name .. " purchased and equipped on the selected weapon."
 				else if loadoutSlot
-				then itemConfig.Name .. " comprado y equipado."
-				else itemConfig.Name .. " comprado correctamente.",
+				then itemConfig.Name .. " purchased and equipped."
+				else itemConfig.Name .. " purchased.",
 		}, player)
 	else
 		Network.Shop.Response.SendTo({
 			success = false,
-			message = "Error interno. Inténtalo de nuevo.",
+			message = "Something went wrong. Try again.",
 		}, player)
 	end
 end
@@ -362,13 +362,13 @@ local function _onEquipItem(data: { category: string, itemId: string, weaponCate
 		weaponCategory = M.Category,
 		weaponId       = M.Id,
 	}) or data.itemId == "" then
-		Network.Shop.Response.SendTo({ success = false, message = "Payload inválido." }, player)
+		Network.Shop.Response.SendTo({ success = false, message = "Invalid request." }, player)
 		return
 	end
 
 	-- Validación 1: cooldown (sin marcar; se marca tras éxito real)
 	if not _isCooldownReady(player, "equip") then
-		Network.Shop.Response.SendTo({ success = false, message = "Demasiadas peticiones." }, player)
+		Network.Shop.Response.SendTo({ success = false, message = "Too many requests. Slow down." }, player)
 		return
 	end
 
@@ -376,14 +376,14 @@ local function _onEquipItem(data: { category: string, itemId: string, weaponCate
 	local categoryCache = _itemCache[data.category]
 	local itemConfig = categoryCache and categoryCache[data.itemId]
 	if not itemConfig then
-		Network.Shop.Response.SendTo({ success = false, message = "Ítem no encontrado." }, player)
+		Network.Shop.Response.SendTo({ success = false, message = "That item doesn't exist." }, player)
 		return
 	end
 
 	-- Validación 3: perfil cargado
 	local profile = _dataService:GetProfile(player)
 	if not profile then
-		Network.Shop.Response.SendTo({ success = false, message = "Perfil no disponible." }, player)
+		Network.Shop.Response.SendTo({ success = false, message = "Your data isn't loaded yet." }, player)
 		return
 	end
 
@@ -391,19 +391,19 @@ local function _onEquipItem(data: { category: string, itemId: string, weaponCate
 	if data.category == LockerCategory.WEAPON_WRAPS then
 		local weaponCategory = _resolveWeaponCategory(data.weaponCategory)
 		if not weaponCategory then
-			Network.Shop.Response.SendTo({ success = false, message = "Arma objetivo inválida para wraps." }, player)
+			Network.Shop.Response.SendTo({ success = false, message = "Invalid target weapon for wraps." }, player)
 			return
 		end
 
 		local wrapsRootPath = WEAPON_WRAPS_PATH_BY_CATEGORY[weaponCategory]
 		if not wrapsRootPath then
-			Network.Shop.Response.SendTo({ success = false, message = "Arma objetivo inválida para wraps." }, player)
+			Network.Shop.Response.SendTo({ success = false, message = "Invalid target weapon for wraps." }, player)
 			return
 		end
 
 		local weaponSlot = CATEGORY_TO_LOADOUT_SLOT[weaponCategory]
 		if not weaponSlot then
-			Network.Shop.Response.SendTo({ success = false, message = "Slot de arma inválido." }, player)
+			Network.Shop.Response.SendTo({ success = false, message = "Invalid weapon slot." }, player)
 			return
 		end
 
@@ -412,12 +412,12 @@ local function _onEquipItem(data: { category: string, itemId: string, weaponCate
 
 		-- Re-validar ownership del arma objetivo y del wrap.
 		if not _ownsTargetWeapon(profile.Data, weaponCategory, targetWeaponId) then
-			Network.Shop.Response.SendTo({ success = false, message = "No posees el arma objetivo." }, player)
+			Network.Shop.Response.SendTo({ success = false, message = "You don't own that weapon." }, player)
 			return
 		end
 
 		if not _getOwnedWeaponWrap(profile.Data, weaponCategory, targetWeaponId, data.itemId) then
-			Network.Shop.Response.SendTo({ success = false, message = "No posees este wrap para esa arma." }, player)
+			Network.Shop.Response.SendTo({ success = false, message = "You don't own this wrap for that weapon." }, player)
 			return
 		end
 
@@ -426,14 +426,14 @@ local function _onEquipItem(data: { category: string, itemId: string, weaponCate
 		-- Validación 4: el jugador posee el ítem
 		local isOwned = _getPath(profile.Data.Inventory, { data.category, data.itemId })
 		if not isOwned then
-			Network.Shop.Response.SendTo({ success = false, message = "No posees este ítem." }, player)
+			Network.Shop.Response.SendTo({ success = false, message = "You don't own this item." }, player)
 			return
 		end
 
 		-- Validación 5: categoría tiene un slot de Loadout válido
 		local loadoutSlot = CATEGORY_TO_LOADOUT_SLOT[data.category]
 		if not loadoutSlot then
-			Network.Shop.Response.SendTo({ success = false, message = "Categoría no equipable." }, player)
+			Network.Shop.Response.SendTo({ success = false, message = "That category can't be equipped." }, player)
 			return
 		end
 
@@ -445,12 +445,12 @@ local function _onEquipItem(data: { category: string, itemId: string, weaponCate
 		_markCooldown(player, "equip")
 		Network.Shop.Response.SendTo({
 			success = true,
-			message = itemConfig.Name .. " equipado.",
+			message = itemConfig.Name .. " equipped.",
 		}, player)
 	else
 		Network.Shop.Response.SendTo({
 			success = false,
-			message = "Error al equipar. Inténtalo de nuevo.",
+			message = "Couldn't equip that. Try again.",
 		}, player)
 	end
 end
