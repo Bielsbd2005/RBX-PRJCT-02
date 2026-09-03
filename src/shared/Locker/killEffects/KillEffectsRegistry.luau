@@ -7,6 +7,7 @@ local Utils = require(script.Parent.Utils)
 local DefaultKillEffect = require(script.Parent.Default)
 local GravityKillEffect = require(script.Parent.Gravity)
 local ExplosionKillEffect = require(script.Parent.Explosion)
+local TornadoKillEffect = require(script.Parent.Tornado)
 
 type KillEffectModule = {
 	apply: (target: Model) -> boolean,
@@ -16,6 +17,7 @@ local killEffectsById = {
 	Default = DefaultKillEffect,
 	Gravity = GravityKillEffect,
 	Explosion = ExplosionKillEffect,
+	Tornado = TornadoKillEffect,
 } :: { [string]: KillEffectModule }
 
 local KillEffectsRegistry = {}
