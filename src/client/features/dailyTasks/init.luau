@@ -5,6 +5,11 @@
 	  MatchHud.LeftContainer.TaskFrame.Task<N>
 	Reactivo a cambios en DataController.DailyTasks (replicado desde server).
 
+	Qué tarea toca hoy en cada slot lo decide la rotación diaria
+	(DailyTasks.GetForSlot, sembrada con el DateKey del propio estado, que es el
+	mismo con el que el server paga). El cash es de la TAREA, no del slot
+	(DailyTasks.RewardKey → ActionRewards).
+
 	Per-slot UI esperada:
 	  Task<N>.Title          — TextLabel
 	  Task<N>.Value          — TextLabel ("p/o")
@@ -79,9 +84,9 @@ local function _paintSlot(slot: Slot, def: any, progress: number, claimed: boole
 
 	_setText(slot.titleLabel, def.Title)
 	_setText(slot.valueLabel, string.format("%d/%d", clampedProgress, objective))
-	-- Cash de la tarea vive en ActionRewards (clave "Daily"..Id) — fuente única
-	-- compartida con RewardService en el server.
-	_setText(slot.rewardLabel, UIUtils.formatCashAmount(ActionRewards.GetCash("Daily" .. def.Id)))
+	-- Cash de la tarea vive en ActionRewards (clave DailyTasks.RewardKey(def)) —
+	-- fuente única compartida con RewardService en el server.
+	_setText(slot.rewardLabel, UIUtils.formatCashAmount(ActionRewards.GetCash(DailyTasks.RewardKey(def))))
 
 	if slot.barFill then
 		-- Solo escalar el eje X; conservar Y. X.Offset = 0 para evitar que el
@@ -121,12 +126,12 @@ local function _resolveSlotsFromTaskFrame(taskFrame: Instance?, label: string): 
 	local result: { Slot } = {}
 	if not taskFrame then return result end
 
-	for _, def in DailyTasks.Tasks do
-		local slot = _resolveSlot(taskFrame, def.Id)
+	for _, slotId in DailyTasks.SlotIds do
+		local slot = _resolveSlot(taskFrame, slotId)
 		if slot then
 			table.insert(result, slot)
 		else
-			warn(string.format("[DailyTasks] Slot %s no encontrado en %s", def.Id, label))
+			warn(string.format("[DailyTasks] Slot %s no encontrado en %s", slotId, label))
 		end
 	end
 	return result
@@ -155,12 +160,12 @@ function DailyTasksFeature.start(_menuController: any): any
 			return
 		end
 
-		local function _paintAll(slots: { Slot }, progress: any, claimed: any)
+		local function _paintAll(slots: { Slot }, dateKey: string?, progress: any, claimed: any)
 			for _, slot in slots do
-				local def = DailyTasks.GetById(slot.id)
+				local def = DailyTasks.GetForSlot(dateKey, slot.id)
 				if def then
 					local current = math.max(0, math.floor((progress :: any)[def.Kind] or 0))
-					local isClaimed = (claimed :: any)[def.Id] == true
+					local isClaimed = (claimed :: any)[slot.id] == true
 					_paintSlot(slot, def, current, isClaimed)
 				end
 			end
@@ -168,9 +173,10 @@ function DailyTasksFeature.start(_menuController: any): any
 
 		local function _render()
 			local state = Fusion.peek(DataController.DailyTasks)
+			local dateKey = if state and type(state.DateKey) == "string" then state.DateKey else nil
 			local progress = state and state.Progress or {}
 			local claimed = state and state.Claimed or {}
-			_paintAll(hudSlots, progress, claimed)
+			_paintAll(hudSlots, dateKey, progress, claimed)
 		end
 
 		_render()

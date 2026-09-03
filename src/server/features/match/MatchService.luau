@@ -797,6 +797,10 @@ local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?, a
 		deadStats.deaths += 1
 	end
 	KillAttributionService:SendStreakBroadcast(deadPlayer.UserId)
+	-- Morir corta la racha de bajas que cuenta la tarea diaria de racha.
+	pcall(function()
+		DailyTasksService:OnDeath(deadPlayer)
+	end)
 
 	-- Persistir Stats.Deaths lifetime del que muere (siempre que sea jugador).
 	-- C2: si el profile aún no cargó, encolar para flush en ProfileLoaded.
@@ -1855,6 +1859,18 @@ local function _onRequestReturnToMenu(_: {}, player: Player)
 	end
 end
 
+--[[
+	Consulta pública del cap de XP de la ronda actual. Existe para que las
+	fuentes de XP que NO pasan por GrantCombatReward (hoy: el XP del Battle
+	Pass, colgado de WeaponsSystem.Killed en ServerBootstrap) puedan respetar
+	el mismo freno anti-farm que el XP de cuenta — sin él, farmear kills capaba
+	el XP de nivel pero seguía subiendo el pase (y sus Gems) sin límite.
+	Fuera de ronda no hay contador, así que nunca capa (igual que el resto).
+]]
+function MatchService:IsXPCapReached(player: Player): boolean
+	return _isXPCapReached(player.UserId)
+end
+
 function MatchService:GrantCombatReward(player: Player, actionKey: string, extraUpdates: any?, itemSku: string?)
 	-- L14: cap por moneda independiente. Si ambas monedas están capadas pero NO
 	-- hay extraUpdates (que deben aplicarse igualmente, p. ej. Stats.Assists),
@@ -1878,6 +1894,9 @@ function MatchService:GrantCombatReward(player: Player, actionKey: string, extra
 				stats.assists += 1
 				KillAttributionService:SendStreakBroadcast(player.UserId)
 			end
+			pcall(function()
+				DailyTasksService:OnAssist(player)
+			end)
 		end
 	end
 	return ok, xpGranted, cashGranted

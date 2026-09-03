@@ -26,12 +26,22 @@ ActionRewards.Amounts = {
 	Headshot = { XP = 15, Cash = 5 },
 	Assist = { XP = 10, Cash = 5 },
 
-	-- Daily tasks (server/features/dailyTasks). Convención: clave = "Daily" .. Id
-	-- (Task1 -> DailyTask1). El cliente y el server resuelven el cash leyendo
-	-- de aquí en vez de duplicarlo en DailyTasks.luau.
-	DailyTask1 = { XP = 0, Cash = 20 },
-	DailyTask2 = { XP = 0, Cash = 25 },
-	DailyTask3 = { XP = 0, Cash = 20 },
+	-- Daily tasks (server/features/dailyTasks). Convención: clave = "Daily" .. Key
+	-- de la tarea en DailyTasks.Pool (Eliminations -> DailyEliminations); la
+	-- construye DailyTasks.RewardKey y server y cliente leen el cash de aquí.
+	-- El cash es de la TAREA, no del slot: la rotación diaria es un baraje, así
+	-- que pagar por slot repartía el premio al azar entre tareas de esfuerzo muy
+	-- distinto. Escalado al coste real (ronda de 8 min ≈ 220 Cash): las de ~½-1
+	-- partida pagan 40-50, "Play 3" (~24 min) 75 y "Win 2" (~4 partidas al 50%
+	-- de winrate) 100. Tres del pool al día = 130-225 Cash (media ~180 ≈ ¾ de
+	-- partida, ~10k por season de 8 semanas). Sin XP a propósito: todo el XP es
+	-- de combate y el ritmo del pase está calibrado así.
+	DailyEliminations = { XP = 0, Cash = 40 },
+	DailyAssists = { XP = 0, Cash = 40 },
+	DailyHeadshots = { XP = 0, Cash = 50 },
+	DailyKillStreak = { XP = 0, Cash = 50 },
+	DailyPlayMatches = { XP = 0, Cash = 75 },
+	DailyWinMatches = { XP = 0, Cash = 100 },
 
 	-- Claims (server/features/rewards)
 	ClaimLikeJoin = { XP = 0, Cash = 100 },

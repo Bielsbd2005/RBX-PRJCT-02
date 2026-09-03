@@ -245,15 +245,16 @@ export type GiftIntent = {
 --   DateKey: "YYYY-MM-DD" (UTC) — cuándo fue el último reset.
 --   Progress: contador acumulado por Kind del día actual.
 --   Claimed: marca por slot UI (Task1/Task2/Task3). Una vez que progress alcanza
---            el objetivo, se otorga el cash y se setea Claimed[Id] = true para
---            no pagar dos veces aunque el contador siga subiendo.
+--            el objetivo, se otorga el cash y se setea Claimed[SlotId] = true para
+--            no pagar dos veces aunque el contador siga subiendo. Qué tarea ocupa
+--            cada slot lo decide la rotación del día (DailyTasks.GetRotation); el
+--            cash lo pone la tarea (DailyTasks.RewardKey → ActionRewards).
 export type DailyTasksState = {
 	DateKey: string,
-	Progress: {
-		Eliminations: number,
-		WinMatches: number,
-		PlayMatches: number,
-	},
+	-- Contador por Kind del pool de `shared/constants/DailyTasks.luau` (mapa, no
+	-- registro fijo: la rotación diaria puede traer cualquiera de ellos y el reset
+	-- del día los pone todos a 0).
+	Progress: { [string]: number },
 	Claimed: {
 		Task1: boolean,
 		Task2: boolean,
@@ -432,10 +433,15 @@ local DEFAULT: PlayerProfile = {
 
 	DailyTasks = {
 		DateKey = "",
+		-- El primer reset diario (DailyTasksService) los pone a 0 igualmente; esto
+		-- es solo la forma inicial de un perfil nuevo.
 		Progress = {
 			Eliminations = 0,
 			WinMatches = 0,
 			PlayMatches = 0,
+			Headshots = 0,
+			KillStreak = 0,
+			Assists = 0,
 		},
 		Claimed = {
 			Task1 = false,

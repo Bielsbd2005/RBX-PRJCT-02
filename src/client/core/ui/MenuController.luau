@@ -201,8 +201,9 @@ local function updateFamePassHud(hudRefs: HudRefs, bpState: any): ()
 	end
 end
 
--- Mapea el Id de DailyTasks ("Task1"/"Task2"/"Task3") al nombre del slot en
--- Menu.Container.Missions ("1"/"2"/"3").
+-- Mapea el slot de DailyTasks ("Task1"/"Task2"/"Task3") al nombre del slot en
+-- Menu.Container.Missions ("1"/"2"/"3"). Qué tarea cae en cada slot lo decide la
+-- rotación del día (DailyTasks.GetForSlot); el cash es del slot, no de la tarea.
 local MISSION_SLOT_NAMES: { [string]: string } = {
 	Task1 = "1",
 	Task2 = "2",
@@ -222,13 +223,13 @@ local function resolveMissionSlots(menuGui: ScreenGui): { MissionSlot }
 		return slots
 	end
 
-	for _, def in DailyTasks.Tasks do
-		local slotName = MISSION_SLOT_NAMES[def.Id]
+	for _, slotId in DailyTasks.SlotIds do
+		local slotName = MISSION_SLOT_NAMES[slotId]
 		local node = slotName and missionsNode:FindFirstChild(slotName)
 		if node then
 			local bar = node:FindFirstChild("Bar")
 			table.insert(slots, {
-				id = def.Id,
+				id = slotId,
 				titleLabel = asTextLabel(node:FindFirstChild("Title")),
 				valueLabel = asTextLabel(node:FindFirstChild("Value")),
 				barFill = if bar then bar:FindFirstChild("Fill") :: GuiObject? else nil,
@@ -245,19 +246,22 @@ local MISSION_COMPLETED_COLOR = Color3.fromRGB(60, 200, 90)
 local function updateMissionsHud(slots: { MissionSlot }, dailyTasksState: any): ()
 	local progress = dailyTasksState and dailyTasksState.Progress or {}
 	local claimed = dailyTasksState and dailyTasksState.Claimed or {}
+	local dateKey = if dailyTasksState and type(dailyTasksState.DateKey) == "string"
+		then dailyTasksState.DateKey
+		else nil
 
 	for _, slot in slots do
-		local def = DailyTasks.GetById(slot.id)
+		local def = DailyTasks.GetForSlot(dateKey, slot.id)
 		if not def then continue end
 
 		local objective = math.max(1, def.Objective)
 		local current = math.clamp(math.floor((progress :: any)[def.Kind] or 0), 0, objective)
-		local isClaimed = (claimed :: any)[def.Id] == true
+		local isClaimed = (claimed :: any)[slot.id] == true
 		local ratio = current / objective
 
 		setText(slot.titleLabel, def.Title)
 		setText(slot.valueLabel, string.format("%d/%d", current, objective))
-		setText(slot.rewardLabel, UIUtils.formatCashAmount(ActionRewards.GetCash("Daily" .. def.Id)))
+		setText(slot.rewardLabel, UIUtils.formatCashAmount(ActionRewards.GetCash(DailyTasks.RewardKey(def))))
 
 		if slot.barFill then
 			local fillRatio = if isClaimed then 1 else ratio

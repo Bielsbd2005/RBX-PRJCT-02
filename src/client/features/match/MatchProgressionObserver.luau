@@ -24,6 +24,8 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Fusion = require(Packages.fusion)
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
 local LockerCategory = require(Shared.constants.LockerCategory)
+local DailyTasks = require(Shared.constants.DailyTasks)
+local ActionRewards = require(Shared.constants.ActionRewards)
 
 local DataController = require(script.Parent.Parent.Parent.core.data.DataController)
 
@@ -280,6 +282,72 @@ function MatchProgressionObserver.attach(deps: AttachDeps)
 		local weaponKillsObserver = fusionScope:Observer(DataController.WeaponKills)
 		janitor:Add(weaponKillsObserver:onBind(onWeaponKillsChanged), true)
 		onWeaponKillsChanged()
+
+		-- ── Desafíos diarios ────────────────────────────────────
+		-- DataController.DailyTasks trae el progreso (Progress, por Kind) y el cobro
+		-- (Claimed, por slot). Qué tarea ocupa hoy cada slot lo da la rotación diaria
+		-- sembrada con el DateKey del propio estado — el mismo con el que paga el
+		-- server, así que cliente y server nunca hablan de tareas distintas. Notificamos cada avance del contador y, cuando
+		-- se marca Claimed, el completado: ese popup llena la barra, la pone verde y
+		-- manda el premio en monedas hasta Stats. Por eso reservamos antes su cash
+		-- (hud:reserveChallengeCash): el server manda cash y estado en la MISMA tanda,
+		-- y sin la reserva el popup de ganancias animaría esa subida por su cuenta.
+		-- Igual que la maestría: sembramos sin notificar y solo hablamos con el HUD
+		-- de partida en pantalla.
+		local dailySeeded = false
+		local lastDailyProgress: { [string]: number } = {}
+		local lastDailyClaimed: { [string]: boolean } = {}
+		local function onDailyTasksChanged()
+			local state = Fusion.peek(DataController.DailyTasks) :: any
+			if type(state) ~= "table" then
+				return
+			end
+			local progressByKind = if type(state.Progress) == "table" then state.Progress else {}
+			local claimedById = if type(state.Claimed) == "table" then state.Claimed else {}
+			local canNotify = dailySeeded and matchHudGui ~= nil and matchHudGui.Enabled
+
+			local dateKey = if type(state.DateKey) == "string" then state.DateKey else nil
+			for _, active in DailyTasks.GetRotation(dateKey) do
+				local def = active.Definition
+				local slotId = active.SlotId
+				local objective = math.max(1, math.floor(def.Objective))
+				local current = tonumber((progressByKind :: any)[def.Kind]) or 0
+				local previous = lastDailyProgress[def.Kind] or 0
+				local claimed = (claimedById :: any)[slotId] == true
+				local wasClaimed = lastDailyClaimed[slotId] == true
+				-- El cash lo pone la TAREA (DailyTasks.RewardKey en ActionRewards):
+				-- la misma fuente que usa el server al pagarlo.
+				local rewardCash = ActionRewards.GetCash(DailyTasks.RewardKey(def))
+
+				if canNotify then
+					if claimed and not wasClaimed then
+						hud:reserveChallengeCash(rewardCash)
+						hud:playDailyTaskAnimation({
+							current = objective,
+							target = objective,
+							name = def.Title,
+							isComplete = true,
+							rewardCash = rewardCash,
+						})
+					elseif current > previous and not claimed then
+						hud:playDailyTaskAnimation({
+							current = current,
+							target = objective,
+							name = def.Title,
+							isComplete = false,
+							rewardCash = rewardCash,
+						})
+					end
+				end
+
+				lastDailyProgress[def.Kind] = current
+				lastDailyClaimed[slotId] = claimed
+			end
+			dailySeeded = true
+		end
+		local dailyTasksObserver = fusionScope:Observer(DataController.DailyTasks)
+		janitor:Add(dailyTasksObserver:onBind(onDailyTasksChanged), true)
+		onDailyTasksChanged()
 	end)
 end
 
