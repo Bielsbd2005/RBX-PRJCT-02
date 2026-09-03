@@ -32,8 +32,11 @@ arma: WeaponsSystem avisa y la ignora.
 
 ## Runtime
 
-- `BaseWeapon:loadConfigFromDefinition()` vuelca `Config` en `configValues`;
-  `getConfigValue(key, default)` no cambia.
+- `BaseWeapon:loadConfigFromDefinition()` vuelca `Config` en `configValues`.
+  `getConfigValue(key)` resuelve en este orden: definición → default de
+  `Schema.luau` → el segundo argumento, que sólo hace falta para claves fuera
+  del esquema o para un Tool sin definición. **No repitas el default del
+  esquema en el call-site.**
 - El servidor arranca el arma con el cargador lleno (`CurrentAmmo` =
   `AmmoCapacity` de la definición) y replica el atributo al cliente para el
   hotbar.

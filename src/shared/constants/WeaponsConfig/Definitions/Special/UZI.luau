@@ -7,17 +7,15 @@ local Types = require(script.Parent.Parent.Parent.Types)
 return {
 	WeaponType = "BulletWeapon",
 	Config = {
-		AmmoCapacity = 30,
 		FireMode = "Automatic",
 		GravityFactor = 0.5,
-		HitDamage = 9,
-		MaxSpread = 1,
+		HitDamage = 8,
+		MaxSpread = 1.2,
 		MuzzleFlashSize0 = 0.75,
 		MuzzleFlashSize1 = 0.95,
 		RecoilDecay = 0.87,
 		RecoilMax = 0.55,
 		RecoilMin = 0.5,
 		ShotCooldown = 0.05,
-		ShotEffect = "Bullet",
 	},
 } :: Types.WeaponDefinition

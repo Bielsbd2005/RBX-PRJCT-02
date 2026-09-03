@@ -3,11 +3,13 @@
 	WeaponsConfig/Schema.luau
 	Esquema de claves de configuración POR TIPO DE ARMA.
 
-	Para cada clave: tipo de valor, default y descripción. El default es un
-	espejo del que usan BaseWeapon/BulletWeapon en sus `getConfigValue(...)`:
-	el runtime sigue leyendo su propio default como último recurso, así que si
-	cambias uno aquí, cámbialo también allí (o al revés). El esquema es la
-	referencia documentada y lo que valida el registro (WeaponsConfig/init) al
+	Para cada clave: tipo de valor, default y descripción. Este default es EL
+	default: `BaseWeapon:getConfigValue(key)` cae aquí cuando la definición del
+	arma no declara la clave, así que cambiarlo aquí lo cambia en todo el
+	runtime. Los call-sites no repiten el literal (antes sí: ~70 copias a mano
+	que ya habían divergido en MaxDistance).
+
+	El esquema es además lo que valida el registro (WeaponsConfig/init) al
 	cargar cada definición.
 ]]
 

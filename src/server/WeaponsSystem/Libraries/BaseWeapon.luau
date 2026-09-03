@@ -60,6 +60,7 @@ function BaseWeapon.new(weaponsSystem, instance)
 	self.animTracks = {}
 	self.sounds = {}
 	self.configValues = {}
+	self.definition = nil
 
 	self.reloading = false
 	self.canReload = true
@@ -97,7 +98,7 @@ function BaseWeapon:doInitialSetup()
 	-- copia a mano del AmmoCapacity que se desincronizaba al duplicar Tools (una
 	-- recortada de 2 cartuchos arrancaba con 5).
 	if selfClass.CanBeReloaded and IsServer then
-		self.instance:SetAttribute("CurrentAmmo", self:getConfigValue("AmmoCapacity", 30))
+		self.instance:SetAttribute("CurrentAmmo", self:getConfigValue("AmmoCapacity"))
 	end
 
 	self.connections.ancestryChanged = self.instance.AncestryChanged:Connect(function() self:onAncestryChanged() end)
@@ -433,15 +434,32 @@ function BaseWeapon:onFired(firingPlayer, fireInfo, fromNetwork)
 	end
 end
 
+--[[
+	Valor de una clave de config para esta arma, por orden de precedencia:
+	  1. lo que declara su definición (Definitions/<Category>/<Id>.luau),
+	  2. el default del esquema para su WeaponType (WeaponsConfig/Schema.luau),
+	  3. `defaultValue`, sólo como último recurso: claves fuera del esquema, o un
+	     Tool sin definición (self.definition == nil).
+
+	Los call-sites NO deben repetir el default del esquema. Antes lo hacían: eran
+	~70 literales copiados a mano que Schema.luau ya declara, y ya habían
+	divergido en MaxDistance (el chequeo anti-cheat asumía 1500 y la simulación
+	2000, así que rechazaba disparos legítimos a esa distancia).
+]]
 function BaseWeapon:getConfigValue(valueName, defaultValue)
-	local value
-	if self.configValues[valueName] ~= nil then
-		value = self.configValues[valueName]
-	else
-		value = defaultValue
+	local value = self.configValues[valueName]
+	if value ~= nil then
+		return value
 	end
 
-	return value
+	if self.definition then
+		value = WeaponsConfig.Schema.GetDefault(self.definition.WeaponType, valueName)
+		if value ~= nil then
+			return value
+		end
+	end
+
+	return defaultValue
 end
 
 --[[
@@ -633,7 +651,7 @@ function BaseWeapon:onRenderStepped(dt)
 		isSprinting = false
 	end
 
-	local runTrackKey = self:getConfigValue("RunAnimation", "Run")
+	local runTrackKey = self:getConfigValue("RunAnimation")
 	local runTrack = self.animTracks[runTrackKey]
 
 	if isSprinting and not firedRecently then
@@ -669,10 +687,10 @@ function BaseWeapon:onStepped(dt)
 	if Players.LocalPlayer:GetAttribute("AutoShoot") == false then return end
 
 	-- Rocket launcher: nunca autoshoot (riesgo de splash al teammate / al jugador).
-	if self:getConfigValue("ExplodeOnImpact", false) then return end
+	if self:getConfigValue("ExplodeOnImpact") then return end
 
 	-- Sniper: solo autoshoot cuando el jugador esta apuntando (ADS).
-	if self:getConfigValue("HasScope", false) then
+	if self:getConfigValue("HasScope") then
 		local cam = self.weaponsSystem and self.weaponsSystem.camera
 		if not (cam and cam.isZoomed and cam:isZoomed()) then return end
 	end
@@ -916,7 +934,7 @@ function BaseWeapon:reload(player, fromNetwork)
 		not self.equipped or
 		self.reloading or
 		not self.canReload or
-		self:getAmmoInWeapon() >= self:getConfigValue("AmmoCapacity", 30)
+		self:getAmmoInWeapon() >= self:getConfigValue("AmmoCapacity")
 	then
 		return false
 	end
@@ -953,7 +971,7 @@ function BaseWeapon:onReloaded(player, fromNetwork)
 
 	-- Play reload animation and sound
 	if not IsServer then
-		local reloadTrackKey = self:getConfigValue("ReloadAnimation", "RifleReload")
+		local reloadTrackKey = self:getConfigValue("ReloadAnimation")
 		if reloadTrackKey then
 			self.reloadTrack = self:getAnimTrack(reloadTrackKey)
 			if self.reloadTrack then
@@ -971,7 +989,7 @@ function BaseWeapon:onReloaded(player, fromNetwork)
 		end
 	end
 
-	local reloadTime = self:getConfigValue("ReloadTime", 2)
+	local reloadTime = self:getConfigValue("ReloadTime")
 	local startTime = os.clock()
 
 	-- GUI solo si esta weapon es la currentWeapon del LocalPlayer.
@@ -992,7 +1010,7 @@ function BaseWeapon:onReloaded(player, fromNetwork)
 		if self._reloadToken ~= token then return end
 		if not self.reloading then return end
 
-		self.instance:SetAttribute("CurrentAmmo", self:getConfigValue("AmmoCapacity", 30))
+		self.instance:SetAttribute("CurrentAmmo", self:getConfigValue("AmmoCapacity"))
 		self.reloading = false
 		self.instance:SetAttribute("IsReloading", false)
 		-- L9: restaurar canReload tras una recarga completada normalmente. Antes

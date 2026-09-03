@@ -258,7 +258,10 @@ function BulletWeapon.new(weaponsSystem, instance)
 	self:addOptionalDescendant("muzzleFlash1", "MuzzleFlash1")
 	self:addOptionalDescendant("muzzleFlashBeam", "MuzzleFlash")
 
-	self.hitMarkTemplate = HitMarksFolder:FindFirstChild(self:getConfigValue("HitMarkEffect", "BulletHole"))
+	-- Los templates de efectos salen de la config, así que se resuelven después
+	-- de doInitialSetup (ver _resolveEffectTemplates).
+	self.bulletEffectTemplate = nil
+	self.hitMarkTemplate = nil
 
 	self.ignoreList = {}
 	self.ignoreListRefreshTime = 0
@@ -283,8 +286,54 @@ function BulletWeapon.new(weaponsSystem, instance)
 	end
 
 	self:doInitialSetup()
+	self:_resolveEffectTemplates()
 
 	return self
+end
+
+--[[
+	Resuelve los templates de efectos (bala y marca de impacto) desde la config.
+
+	Sólo puede correr DESPUÉS de doInitialSetup: es él quien carga la definición,
+	y hasta entonces getConfigValue no sabe caer al default del esquema (devolvía
+	nil y FindFirstChild(nil) reventaba la creación del arma entera).
+
+	onConfigValueChanged no basta por sí solo: sólo se dispara por las claves que
+	la definición DECLARA, y la mayoría de armas no declaran ShotEffect ni
+	HitMarkEffect — heredan el default del esquema ("Bullet"/"BulletHole").
+]]
+function BulletWeapon:_resolveEffectTemplates()
+	self:_resolveShotEffect()
+	self:_resolveHitMarkEffect()
+end
+
+function BulletWeapon:_resolveShotEffect()
+	local effectName = self:getConfigValue("ShotEffect")
+	self.bulletEffectTemplate = if effectName then ShotsFolder:FindFirstChild(effectName) else nil
+	if not self.bulletEffectTemplate then
+		warn(string.format(
+			"[BulletWeapon] %s: sin template de bala para ShotEffect=%s (Assets.Effects.Shots)",
+			self.instance:GetFullName(), tostring(effectName)
+		))
+		return
+	end
+
+	local beam0 = self.bulletEffectTemplate:FindFirstChild("Beam0")
+	-- Audit mobile: preload una sola vez por beam0 (cacheado al nivel de la
+	-- instancia). Antes cada onConfigValueChanged disparaba un coroutine de
+	-- PreloadAsync (yield real al backend), incluso si ya habíamos pedido ese
+	-- mismo beam0 previamente.
+	if beam0 and self._preloadedBeam0 ~= beam0 then
+		self._preloadedBeam0 = beam0
+		task.spawn(function()
+			ContentProvider:PreloadAsync({ beam0 })
+		end)
+	end
+end
+
+function BulletWeapon:_resolveHitMarkEffect()
+	local effectName = self:getConfigValue("HitMarkEffect")
+	self.hitMarkTemplate = if effectName then HitMarksFolder:FindFirstChild(effectName) else nil
 end
 
 function BulletWeapon:onEquippedChanged()
@@ -371,10 +420,10 @@ function BulletWeapon:_showMuzzleFlash(randomGenerator: Random): boolean
 		return false
 	end
 
-	local minFlashRotation = self:getConfigValue("MuzzleFlashRotation0", -math.pi)
-	local maxFlashRotation = self:getConfigValue("MuzzleFlashRotation1", math.pi)
-	local minFlashSize = self:getConfigValue("MuzzleFlashSize0", 1)
-	local maxFlashSize = self:getConfigValue("MuzzleFlashSize1", 1)
+	local minFlashRotation = self:getConfigValue("MuzzleFlashRotation0")
+	local maxFlashRotation = self:getConfigValue("MuzzleFlashRotation1")
+	local minFlashSize = self:getConfigValue("MuzzleFlashSize0")
+	local maxFlashSize = self:getConfigValue("MuzzleFlashSize1")
 	local flashRotation = randomGenerator:NextNumber(minFlashRotation, maxFlashRotation)
 	local flashSize = randomGenerator:NextNumber(minFlashSize, maxFlashSize)
 	local baseCFrame = self.tipAttach.CFrame * CFrame.Angles(0, 0, flashRotation)
@@ -451,7 +500,7 @@ function BulletWeapon:_spawnHitMark(hitPart: BasePart, hitPoint: Vector3, hitNor
 	CollectionService:AddTag(hitMark, "WeaponsSystemIgnore")
 
 	local incomingVec = parabola:sampleVelocity(1).Unit
-	if self:getConfigValue("AlignHitMarkToNormal", true) then
+	if self:getConfigValue("AlignHitMarkToNormal") then
 		local forward = hitNormalObjectSpace
 		local up = incomingVec
 		local right = -forward:Cross(up).Unit
@@ -467,7 +516,7 @@ function BulletWeapon:_spawnHitMark(hitPart: BasePart, hitPoint: Vector3, hitNor
 	weld.Part1 = hitPart
 	weld.Parent = hitMark
 
-	if self:getConfigValue("HitMarkHeatEffect", true) then
+	if self:getConfigValue("HitMarkHeatEffect") then
 		self:_applyHitMarkHeat(hitMark)
 	end
 
@@ -482,10 +531,10 @@ function BulletWeapon:simulateFire(firingPlayer, fireInfo)
 	if self.lastFireSound then
 		self.lastFireSound:Stop()
 	end
-	self.lastFireSound = self:tryPlaySound("Fired", self:getConfigValue("FiredPlaybackSpeedRange", 0.1))
+	self.lastFireSound = self:tryPlaySound("Fired", self:getConfigValue("FiredPlaybackSpeedRange"))
 
 	-- Simulate each projectile/bullet fired from current weapon
-	local numProjectiles = self:getConfigValue("NumProjectiles", 1)
+	local numProjectiles = self:getConfigValue("NumProjectiles")
 	local randomGenerator = Random.new(self:getRandomSeedForId(fireInfo.id))
 	for i = 1, numProjectiles do
 		self:simulateProjectile(firingPlayer, fireInfo, i, randomGenerator)
@@ -495,30 +544,30 @@ function BulletWeapon:simulateFire(firingPlayer, fireInfo)
 		-- Temblor de cámara inmediato al disparar (independiente del recoil
 		-- vertical, que va con RecoilDelayTime). Configurable por arma:
 		-- ShakeIntensity acumula trauma, ShakeFOVKick añade un punch de FOV leve.
-		local shakeIntensity = self:getConfigValue("ShakeIntensity", 0.16)
+		local shakeIntensity = self:getConfigValue("ShakeIntensity")
 		if shakeIntensity > 0 then
-			self.weaponsSystem.camera:addCameraShake(shakeIntensity, self:getConfigValue("ShakeFOVKick", 1.2))
+			self.weaponsSystem.camera:addCameraShake(shakeIntensity, self:getConfigValue("ShakeFOVKick"))
 		end
 
 		-- Retroceso visual del modelo del arma: acumula kick (clamp a 1 para que el
 		-- full-auto no lo mande al infinito). onRenderStepped lo aplica y decae.
-		self._viewKick = math.min(self._viewKick + self:getConfigValue("ViewKickPerShot", 0.8), 1)
+		self._viewKick = math.min(self._viewKick + self:getConfigValue("ViewKickPerShot"), 1)
 
 		coroutine.wrap(function()
 			-- W12: task.wait sólo. El RenderStepped:Wait extra que había aquí
 			-- añadía 1 frame (~16ms) de latencia sin propósito documentado —
 			-- el recoil delay ya está cubierto por task.wait.
-			local recoilDelayTime = self:getConfigValue("RecoilDelayTime", 0.07)
+			local recoilDelayTime = self:getConfigValue("RecoilDelayTime")
 			task.wait(recoilDelayTime)
 
 			-- Add recoil to camera
-			local recoilMin, recoilMax = self:getConfigValue("RecoilMin", 0.05), self:getConfigValue("RecoilMax", 0.5)
+			local recoilMin, recoilMax = self:getConfigValue("RecoilMin"), self:getConfigValue("RecoilMax")
 			local intensityToAdd = randomGenerator:NextNumber(recoilMin, recoilMax)
 			local xIntensity = math.sin(os.clock() * 2) * intensityToAdd * math.rad(0.05)
 			local yIntensity = intensityToAdd * 0.025
 			self.weaponsSystem.camera:addRecoil(Vector2.new(xIntensity, yIntensity))
 
-			if not (self.weaponsSystem.camera:isZoomed() and self:getConfigValue("HasScope", false)) then
+			if not (self.weaponsSystem.camera:isZoomed() and self:getConfigValue("HasScope")) then
 				self.recoilIntensity = math.clamp(self.recoilIntensity * 1 + (intensityToAdd / 10), 0.005, 1)
 			end
 
@@ -555,16 +604,16 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 	local localPlayerInitiatedShot = self.player == Players.LocalPlayer
 
 	-- Retrieve config values
-	local bulletSpeed = self:getConfigValue("BulletSpeed", 1000)
-	local maxDistance = self:getConfigValue("MaxDistance", 2000)
+	local bulletSpeed = self:getConfigValue("BulletSpeed")
+	local maxDistance = self:getConfigValue("MaxDistance")
 	-- Tracer: always show the full trajectory from origin to current bullet position
-	local tracerFadeTime = self:getConfigValue("TracerFadeTime", 0.3)
-	local gravityFactor = self:getConfigValue("GravityFactor", 0)
-	local minSpread = self:getConfigValue("MinSpread", 0)
-	local maxSpread = self:getConfigValue("MaxSpread", 0)
-	local shouldMovePart = self:getConfigValue("ShouldMovePart", false)
-	local explodeOnImpact = self:getConfigValue("ExplodeOnImpact", false)
-	local blastRadius = self:getConfigValue("BlastRadius", 8)
+	local tracerFadeTime = self:getConfigValue("TracerFadeTime")
+	local gravityFactor = self:getConfigValue("GravityFactor")
+	local minSpread = self:getConfigValue("MinSpread")
+	local maxSpread = self:getConfigValue("MaxSpread")
+	local shouldMovePart = self:getConfigValue("ShouldMovePart")
+	local explodeOnImpact = self:getConfigValue("ExplodeOnImpact")
+	local blastRadius = self:getConfigValue("BlastRadius")
 
 	-- Cheat the origin of the shot back if gun tip in wall/object.
 	-- Solo en el disparo del jugador local: el cheat-back recasta desde detrás del
@@ -606,15 +655,15 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 
 	local hitAttach = bulletEffect:FindFirstChild("HitEffect")
 	local hitParticles = bulletEffect:FindFirstChild("HitParticles", true)
-	local numHitParticles = self:getConfigValue("NumHitParticles", 3)
+	local numHitParticles = self:getConfigValue("NumHitParticles")
 	local hitSound = bulletEffect:FindFirstChild("HitSound", true)
 	local flyingSound = bulletEffect:FindFirstChild("Flying", true)
 
-	local muzzleFlashTime = self:getConfigValue("MuzzleFlashTime", 0.03)
+	local muzzleFlashTime = self:getConfigValue("MuzzleFlashTime")
 	local muzzleFlashShown = false
 
-	local beamThickness0 = self:getConfigValue("BeamWidth0", 1.5)
-	local beamThickness1 = self:getConfigValue("BeamWidth1", 1.8)
+	local beamThickness0 = self:getConfigValue("BeamWidth0")
+	local beamThickness1 = self:getConfigValue("BeamWidth1")
 
 	-- Enable beam trails for projectile
 	local beam0 = bulletEffect:FindFirstChild("Beam0")
@@ -627,7 +676,7 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 	end
 
 	-- Emit muzzle particles
-	local numMuzzleParticles = self:getConfigValue("NumMuzzleParticles", 50)
+	local numMuzzleParticles = self:getConfigValue("NumMuzzleParticles")
 	_emitMuzzleParticles(bulletEffect, origin, dir, numMuzzleParticles)
 
 	-- Show muzzle flash (solo en el primer proyectil de un disparo multi-bala)
@@ -693,7 +742,7 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 
 			-- VFX de impacto: sistema modular por superficie (HitVFX) por
 			-- defecto; fallback al hitSound heredado si ModularHitVFX = false.
-			if self:getConfigValue("ModularHitVFX", true) then
+			if self:getConfigValue("ModularHitVFX") then
 				if shouldPlayPlayerHitVFX(hitInfo, self.player) then
 					HitVFX.play(hitInfo, localPlayerInitiatedShot)
 				end
@@ -714,7 +763,7 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 		end)
 
 		if not IsServer and self.usesCharging then
-			self.charge = math.clamp(self.charge - self:getConfigValue("FireDischarge", 1), 0, 1)
+			self.charge = math.clamp(self.charge - self:getConfigValue("FireDischarge"), 0, 1)
 		end
 		return
 	end
@@ -860,7 +909,7 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 				-- defecto. Resuelve dirt/metal/body/headshot/... y reproduce sus
 				-- partículas + sonido propios. El VFX heredado por-arma queda como
 				-- fallback cuando ModularHitVFX = false.
-				if self:getConfigValue("ModularHitVFX", true) then
+				if self:getConfigValue("ModularHitVFX") then
 					if shouldPlayPlayerHitVFX(hitInfo, self.player) then
 						HitVFX.play(hitInfo, localPlayerInitiatedShot)
 					end
@@ -877,7 +926,7 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 						visualEffectsLingerTime = math.max(visualEffectsLingerTime, hitParticles.Lifetime.Max)
 					elseif (not hitInfo.h or not hitInfo.h:IsA("Humanoid")) and hitParticles and numHitParticles > 0 then
 						-- Show particle effect for hitting anything else
-						if hitPart and self:getConfigValue("HitParticlesUsePartColor", true) then
+						if hitPart and self:getConfigValue("HitParticlesUsePartColor") then
 							local existingSeq = hitParticles.Color
 							local newKeypoints = {}
 
@@ -993,16 +1042,16 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 
 	-- Get rid of charge on chargeable weapons
 	if not IsServer and self.usesCharging then
-		self.charge = math.clamp(self.charge - self:getConfigValue("FireDischarge", 1), 0, 1)
+		self.charge = math.clamp(self.charge - self:getConfigValue("FireDischarge"), 0, 1)
 	end
 end
 
 function BulletWeapon:calculateDamage(travelDistance)
-	local zeroDamageDistance = self:getConfigValue("ZeroDamageDistance", 10000)
-	local fullDamageDistance = self:getConfigValue("FullDamageDistance", 1000)
+	local zeroDamageDistance = self:getConfigValue("ZeroDamageDistance")
+	local fullDamageDistance = self:getConfigValue("FullDamageDistance")
 	local distRange = zeroDamageDistance - fullDamageDistance
 	local falloff = math.clamp(1 - (math.max(0, travelDistance - fullDamageDistance) / math.max(1, distRange)), 0, 1)
-	return math.max(self:getConfigValue("HitDamage", 10) * falloff, 0)
+	return math.max(self:getConfigValue("HitDamage") * falloff, 0)
 end
 
 function BulletWeapon:applyDamage(hitInfo)
@@ -1063,10 +1112,10 @@ function BulletWeapon:onHit(hitInfo)
 	end
 
 	-- Create invisible explosion on server that deals damage to anything caught in the explosion
-	if IsServer and self:getConfigValue("ExplodeOnImpact", false) then
-		local blastRadius = self:getConfigValue("BlastRadius", 8)
-		local blastPressure = self:getConfigValue("BlastPressure", 10000)
-		local blastDamage = self:getConfigValue("BlastDamage", 100)
+	if IsServer and self:getConfigValue("ExplodeOnImpact") then
+		local blastRadius = self:getConfigValue("BlastRadius")
+		local blastPressure = self:getConfigValue("BlastPressure")
+		local blastDamage = self:getConfigValue("BlastDamage")
 
 		local explosion = Instance.new("Explosion")
 		explosion.Position = hitPoint + (hitNormal * 0.5)
@@ -1116,8 +1165,8 @@ function BulletWeapon:onFired(firingPlayer, fireInfo, fromNetwork)
 		return
 	end
 
-	local cooldownTime = self:getConfigValue("ShotCooldown", 0.1)
-	local fireMode = self:getConfigValue("FireMode", "Semiautomatic")
+	local cooldownTime = self:getConfigValue("ShotCooldown")
+	local fireMode = self:getConfigValue("FireMode")
 	local isSemiAuto = fireMode == "Semiautomatic"
 	local isBurst = fireMode == "Burst"
 
@@ -1131,11 +1180,11 @@ function BulletWeapon:onFired(firingPlayer, fireInfo, fromNetwork)
 	-- Calculate cooldown time for burst firing
 	if self.burstFiring then
 		self.burstIdx = self.burstIdx + 1
-		if self.burstIdx >= self:getConfigValue("NumBurstShots", 3) then
+		if self.burstIdx >= self:getConfigValue("NumBurstShots") then
 			self.burstFiring = false
 			self.triggerDisconnected = true
 		else
-			cooldownTime = self:getConfigValue("BurstShotCooldown", nil) or cooldownTime
+			cooldownTime = self:getConfigValue("BurstShotCooldown") or cooldownTime
 		end
 	end
 
@@ -1147,22 +1196,9 @@ end
 function BulletWeapon:onConfigValueChanged(valueName, newValue, oldValue)
 	BaseWeapon.onConfigValueChanged(self, valueName, newValue, oldValue)
 	if valueName == "ShotEffect" then
-		self.bulletEffectTemplate = ShotsFolder:FindFirstChild(self:getConfigValue("ShotEffect", "Bullet"))
-		if self.bulletEffectTemplate then
-			local beam0 = self.bulletEffectTemplate:FindFirstChild("Beam0")
-			-- Audit mobile: preload una sola vez por beam0 (cacheado al nivel
-			-- de la instancia). Antes cada onConfigValueChanged disparaba un
-			-- coroutine de PreloadAsync (yield real al backend), incluso si
-			-- ya habíamos pedido ese mismo beam0 previamente.
-			if beam0 and self._preloadedBeam0 ~= beam0 then
-				self._preloadedBeam0 = beam0
-				task.spawn(function()
-					ContentProvider:PreloadAsync({ beam0 })
-				end)
-			end
-		end
+		self:_resolveShotEffect()
 	elseif valueName == "HitMarkEffect" then
-		self.hitMarkTemplate = HitMarksFolder:FindFirstChild(self:getConfigValue("HitMarkEffect", "BulletHole"))
+		self:_resolveHitMarkEffect()
 	elseif valueName == "ChargeRate" then
 		self.usesCharging = newValue ~= nil
 	end
@@ -1266,7 +1302,7 @@ function BulletWeapon:onRenderStepped(dt)
 				local part = self._viewKickPart :: BasePart
 				-- Las armas explosivas (RPG) patean bastante más que las balísticas.
 				-- Un ViewKickDistance explícito en la config del Tool gana igualmente.
-				local defaultKick = if self:getConfigValue("ExplodeOnImpact", false) then 0.85 else 0.07
+				local defaultKick = if self:getConfigValue("ExplodeOnImpact") then 0.85 else 0.07
 				local maxBack = self:getConfigValue("ViewKickDistance", defaultKick)
 				-- "Hacia atrás" = hacia el jugador = opuesto al LookVector de la cámara
 				-- (referencia fiable; el TipAttachment no tiene orientación garantizada).
@@ -1276,7 +1312,7 @@ function BulletWeapon:onRenderStepped(dt)
 				-- part_new = part_old * CFrame.new(offset) ⇒ prop = CFrame.new(-offset) * base
 				joint[self._viewKickProp] = CFrame.new(-offset) * base
 			end
-			local returnRate = self:getConfigValue("ViewKickReturn", 13)
+			local returnRate = self:getConfigValue("ViewKickReturn")
 			self._viewKick *= math.exp(-returnRate * dt)
 			if self._viewKick <= 1e-3 then
 				self:_resetViewKick()
@@ -1284,8 +1320,8 @@ function BulletWeapon:onRenderStepped(dt)
 		end
 
 		-- Retrieve aim point from camera and update player's aim animation
-		local aimTrack = self:getAnimTrack(self:getConfigValue("AimTrack", "RifleAim"))
-		local aimZoomTrack = self:getAnimTrack(self:getConfigValue("AimZoomTrack", "RifleAimDownSights"))
+		local aimTrack = self:getAnimTrack(self:getConfigValue("AimTrack"))
+		local aimZoomTrack = self:getAnimTrack(self:getConfigValue("AimZoomTrack"))
 		if aimTrack then
 			-- W6: gunLookRay solo se usa como fallback cuando NO hay aimRayCallback.
 			-- Con ShoulderCamera activa el callback siempre está set, así que
@@ -1310,7 +1346,7 @@ function BulletWeapon:onRenderStepped(dt)
 				-- pendientes cuando se inicia uno nuevo.
 				self._startupToken = (self._startupToken or 0) + 1
 				local thisToken = self._startupToken
-				task.delay(self:getConfigValue("StartupTime", 0.2), function()
+				task.delay(self:getConfigValue("StartupTime"), function()
 					if self._startupToken == thisToken then
 						self.startupFinished = true
 					end
@@ -1353,7 +1389,7 @@ function BulletWeapon:onRenderStepped(dt)
 			end
 
 			-- Update recoil (decay over time)
-			local recoilDecay = self:getConfigValue("RecoilDecay", 0.825)
+			local recoilDecay = self:getConfigValue("RecoilDecay")
 			self.recoilIntensity = math.clamp(self.recoilIntensity * recoilDecay, 0, math.huge)
 		else
 			warn("no aimTrack")
@@ -1362,7 +1398,7 @@ function BulletWeapon:onRenderStepped(dt)
 end
 
 function BulletWeapon:setChargingParticles(charge)
-	local ratePerCharge = self:getConfigValue("ChargingParticlesRatePerCharge", 20)
+	local ratePerCharge = self:getConfigValue("ChargingParticlesRatePerCharge")
 	local rate = ratePerCharge * charge
 	for _, v in self.chargingParticles do
 		v.Rate = rate
@@ -1443,7 +1479,7 @@ function BulletWeapon:onStepped(dt)
 				chargingSound:Stop()
 			end
 			if self.chargeCompleteParticles then
-				self.chargeCompleteParticles:Emit(self:getConfigValue("NumChargeCompleteParticles", 25))
+				self.chargeCompleteParticles:Emit(self:getConfigValue("NumChargeCompleteParticles"))
 			end
 		end
 		if chargeBefore > 0 and self.charge <= 0 then
@@ -1455,7 +1491,7 @@ function BulletWeapon:onStepped(dt)
 				dischargingSound:Stop()
 			end
 			if self.dischargeCompleteParticles then
-				self.dischargeCompleteParticles:Emit(self:getConfigValue("NumDischargeCompleteParticles", 25))
+				self.dischargeCompleteParticles:Emit(self:getConfigValue("NumDischargeCompleteParticles"))
 			end
 		end
 
@@ -1481,15 +1517,15 @@ end
 
 function BulletWeapon:handleCharging(dt)
 	local chargeDelta
-	local shouldCharge = self.activated or self.burstFiring or self:getConfigValue("ChargePassively", false)
+	local shouldCharge = self.activated or self.burstFiring or self:getConfigValue("ChargePassively")
 	if self.reloading or self.triggerDisconnected then
 		shouldCharge = false
 	end
 
 	if shouldCharge then
-		chargeDelta = self:getConfigValue("ChargeRate", 0) * dt
+		chargeDelta = self:getConfigValue("ChargeRate") * dt
 	else
-		chargeDelta = self:getConfigValue("DischargeRate", 0) * -dt
+		chargeDelta = self:getConfigValue("DischargeRate") * -dt
 	end
 
 	self.charge = math.clamp(self.charge + chargeDelta, 0, 1)

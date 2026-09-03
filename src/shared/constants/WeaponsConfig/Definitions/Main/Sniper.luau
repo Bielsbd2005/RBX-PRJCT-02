@@ -17,8 +17,8 @@ return {
 		RecoilDecay = 0.75,
 		RecoilMax = 1.5,
 		RecoilMin = 1,
+		ReloadTime = 3,
 		ShotCooldown = 1.5,
-		ShotEffect = "Bullet",
 		ZoomFactor = 4.5,
 	},
 } :: Types.WeaponDefinition

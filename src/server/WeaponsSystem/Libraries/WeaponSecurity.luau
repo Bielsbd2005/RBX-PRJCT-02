@@ -24,13 +24,19 @@
 -- gameplay (ver Sprint 1 commit + revert) sin beneficio comprobado.
 
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+
+local WeaponsConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("WeaponsConfig"))
 
 local WeaponSecurity = {}
 
 local SHOT_TTL = 3
 local MAX_PENDING_PER_PLAYER = 50
-local DEFAULT_MAX_RANGE = 1500
+-- Alcance asumido para un arma que no expone su config. Sale del esquema para
+-- que el chequeo NO sea más estricto que la simulación: con 1500 a mano aquí y
+-- 2000 en BulletWeapon, un disparo legítimo a esa distancia se descartaba.
+local DEFAULT_MAX_RANGE = tonumber(WeaponsConfig.Schema.GetDefault("BulletWeapon", "MaxDistance")) or 2000
 local RANGE_TOLERANCE = 50
 local MIN_DIR_DOT = 0.5
 local MIN_DIR_CHECK_DIST = 5
@@ -135,14 +141,14 @@ function WeaponSecurity.registerShot(player: Player, weapon: any, fireInfo: any)
 
 	local cooldown = 0
 	if typeof(weapon) == "table" and typeof(weapon.getConfigValue) == "function" then
-		local cd = weapon:getConfigValue("ShotCooldown", 0.1)
+		local cd = weapon:getConfigValue("ShotCooldown")
 		if typeof(cd) == "number" and cd > 0 then
 			cooldown = cd
 		end
 		-- Burst: dentro de una ráfaga los disparos legítimos llegan cada
 		-- BurstShotCooldown (< ShotCooldown). Enforcear el intervalo mínimo
 		-- real evita rechazar los disparos 2..N de la ráfaga.
-		local burstCd = weapon:getConfigValue("BurstShotCooldown", nil)
+		local burstCd = weapon:getConfigValue("BurstShotCooldown")
 		if typeof(burstCd) == "number" and burstCd > 0 and burstCd < cooldown then
 			cooldown = burstCd
 		end
@@ -181,7 +187,7 @@ function WeaponSecurity.registerShot(player: Player, weapon: any, fireInfo: any)
 
 	local numProjectiles = 1
 	if typeof(weapon) == "table" and typeof(weapon.getConfigValue) == "function" then
-		local n = weapon:getConfigValue("NumProjectiles", 1)
+		local n = weapon:getConfigValue("NumProjectiles")
 		if typeof(n) == "number" and n > 0 then
 			numProjectiles = math.floor(n)
 		end
@@ -189,7 +195,7 @@ function WeaponSecurity.registerShot(player: Player, weapon: any, fireInfo: any)
 
 	local maxRange = DEFAULT_MAX_RANGE
 	if typeof(weapon) == "table" and typeof(weapon.getConfigValue) == "function" then
-		local r = weapon:getConfigValue("MaxDistance", DEFAULT_MAX_RANGE)
+		local r = weapon:getConfigValue("MaxDistance")
 		if typeof(r) == "number" and r > 0 then
 			maxRange = r
 		end

@@ -19,6 +19,5 @@ return {
 		RecoilMin = 0.15,
 		ReloadTime = 2.6,
 		ShotCooldown = 0.08,
-		ShotEffect = "Bullet",
 	},
 } :: Types.WeaponDefinition

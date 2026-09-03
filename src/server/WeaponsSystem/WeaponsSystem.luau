@@ -855,8 +855,8 @@ function WeaponsSystem.setWeaponEquipped(weapon, equipped)
 		WeaponsSystem.camera:setHasScope(false)
 
 		if WeaponsSystem.currentWeapon then
-			WeaponsSystem.camera:setZoomFactor(WeaponsSystem.currentWeapon:getConfigValue("ZoomFactor", 1.1))
-			WeaponsSystem.camera:setHasScope(WeaponsSystem.currentWeapon:getConfigValue("HasScope", false))
+			WeaponsSystem.camera:setZoomFactor(WeaponsSystem.currentWeapon:getConfigValue("ZoomFactor"))
+			WeaponsSystem.camera:setHasScope(WeaponsSystem.currentWeapon:getConfigValue("HasScope"))
 		end
 	end
 
@@ -865,7 +865,7 @@ function WeaponsSystem.setWeaponEquipped(weapon, equipped)
 		WeaponsSystem.gui:setEnabled(weaponIsActive)
 
 		if WeaponsSystem.currentWeapon then
-			WeaponsSystem.gui:setCrosshairWeaponScale(WeaponsSystem.currentWeapon:getConfigValue("CrosshairScale", 1))
+			WeaponsSystem.gui:setCrosshairWeaponScale(WeaponsSystem.currentWeapon:getConfigValue("CrosshairScale"))
 		else
 			WeaponsSystem.gui:setCrosshairWeaponScale(1)
 		end
