@@ -74,11 +74,30 @@ export type ProductRow<T> = {
 
 	PassId = 0 significa "sin configurar" (mismo convenio que ProductId): nadie lo
 	posee, así que el beneficio se muestra bloqueado y no se concede.
+
+	`RobuxPrice` es solo para pintar el label: el precio que se cobra es el del
+	panel de Roblox. Se declara aquí igual que en los packs para que la fila se
+	vea completa antes de que el pass exista (con PassId = 0 no hay
+	`GetProductInfo` que consultar); al crear el pass hay que pegar el id real y
+	dejar este número en el mismo precio que se puso en el panel.
 ]]
 export type GamePassDefinition = {
 	-- Nombre legible; se usa como sku en analíticas.
 	Name: string,
+	-- Botón de la GUI donde vive el pass (Store…PassesRow.<ButtonName>).
+	ButtonName: string,
 	PassId: number,
+	RobuxPrice: number,
+	-- Precio ya formateado para el label (derivado de RobuxPrice).
+	PriceText: string,
+}
+
+-- Los gamepasses no tienen filas ni páginas que derivar (van todos en la misma
+-- fila de la tienda), pero sí necesitan un orden estable: `ByName` es un
+-- diccionario y recorrerlo pintaría la fila en un orden distinto cada sesión.
+export type GamePassCatalog = {
+	InOrder: { GamePassDefinition },
+	ByName: { [string]: GamePassDefinition },
 }
 
 export type Catalog<T> = {
@@ -116,13 +135,16 @@ local GEM_PACKS = {
 	{ ButtonName = "Gems5", ProductId = 0, RobuxPrice = 799, GemAmount = 3000 },
 }
 
--- Gamepasses. No hay índices que derivar (son un puñado y se consultan por
--- nombre), así que se declaran ya en su forma final.
-local GAME_PASSES = table.freeze({
+-- Gamepasses, en el orden en el que se pintan en la fila de la tienda.
+-- `RobuxPrice` está puesto al precio real de cada pass en el panel de Roblox
+-- (ver arriba: aquí sólo pinta el label, cobra el panel). Si se cambia el precio
+-- allí hay que reflejarlo aquí o el botón mentirá.
+local GAME_PASS_LIST = {
 	-- Bonus de cash de fin de partida: el bonus "VIP" de ResultsRewards.
-	-- TODO: pegar el id real del gamepass VIP del panel de Roblox.
-	VIP = table.freeze({ Name = "VIP", PassId = 0 }) :: GamePassDefinition,
-})
+	{ Name = "VIP", ButtonName = "VIP", PassId = 1962133164, RobuxPrice = 100 },
+	-- Cuelga de la espalda el arma que no llevas en la mano (BackWeaponService).
+	{ Name = "BackWeapon", ButtonName = "BackWeapon", PassId = 1964587184, RobuxPrice = 200 },
+}
 
 -- ────────────────────────────────────────────────────────────
 -- ÍNDICES DERIVADOS
@@ -190,8 +212,51 @@ local function buildCatalog(pageName: string, packs: { any }): Catalog<any>
 	})
 end
 
+--[[
+	Misma idea que `buildCatalog` pero para los gamepasses: rellena `PriceText`,
+	congela cada pass y devuelve la lista en orden + el índice por nombre (el que
+	usan los consumidores del beneficio: `GamePasses.ByName.VIP`).
+
+	Los duplicados también revientan al requerir el módulo. El de `PassId` es el
+	que importa: dos passes con el mismo id darían por comprado un beneficio que
+	nadie pagó, y sólo se comprueba en los configurados porque PassId = 0 es
+	precisamente "todavía no tiene id".
+]]
+local function buildGamePasses(passes: { any }): GamePassCatalog
+	local inOrder = {} :: { GamePassDefinition }
+	local byName = {} :: { [string]: GamePassDefinition }
+	local byPassId = {} :: { [number]: GamePassDefinition }
+
+	for _, entry in passes do
+		local pass = table.clone(entry)
+		pass.PriceText = string.format(PRICE_TEXT_FORMAT, entry.RobuxPrice)
+		table.freeze(pass)
+
+		if byName[pass.Name] then
+			error(`[StoreProducts] GamePasses: Name duplicado "{pass.Name}"`)
+		end
+		byName[pass.Name] = pass
+
+		if pass.PassId > 0 then
+			local clash = byPassId[pass.PassId]
+			if clash then
+				error(`[StoreProducts] GamePasses: PassId {pass.PassId} repetido en "{clash.Name}" y "{pass.Name}"`)
+			end
+			byPassId[pass.PassId] = pass
+		end
+
+		table.insert(inOrder, pass)
+	end
+
+	return table.freeze({
+		InOrder = table.freeze(inOrder),
+		ByName = table.freeze(byName),
+	})
+end
+
 local Cash = buildCatalog("CashPage", CASH_PACKS) :: Catalog<StoreProductDefinition>
 local Gems = buildCatalog("GemsPage", GEM_PACKS) :: Catalog<GemProductDefinition>
+local GamePasses = buildGamePasses(GAME_PASS_LIST)
 
 -- El dispatcher de receipts (ServerBootstrap) prueba un catálogo tras otro, así
 -- que un mismo developer product en ambos entregaría la moneda equivocada según
@@ -208,5 +273,5 @@ end
 return table.freeze({
 	Cash = Cash,
 	Gems = Gems,
-	GamePasses = GAME_PASSES,
+	GamePasses = GamePasses,
 })

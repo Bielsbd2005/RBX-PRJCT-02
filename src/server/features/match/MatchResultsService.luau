@@ -7,9 +7,10 @@
 	empaqueta; MatchService solo le da el contexto del jugador al terminar la ronda.
 
 	Responsabilidades:
-	  • VIP: caché por jugador del gamepass `StoreProducts.GamePasses.VIP` (prefetch
-	    en PlayerAdded + update en GamePassPurchaseFinished). Lectura síncrona
-	    (IsVIPCached) para no bloquear el envío de RoundEnded.
+	  • VIP: lectura síncrona (IsVIPCached) del gamepass
+	    `StoreProducts.GamePasses.ByName.VIP` para no bloquear el envío de
+	    RoundEnded. El caché y su prefetch viven en GamePassService, compartidos
+	    con el resto de beneficios de pass.
 	  • Snapshot de inicio de partida (nivel + tier de BP) por jugador, para luego
 	    computar qué items se DESBLOQUEARON durante la partida (display-only — el
 	    granting de esos items ya lo hace la progresión: level-up / BP).
@@ -21,7 +22,6 @@
 	pantalla de Resultados (MatchService llama GrantCash en su loop de fin de ronda).
 ]]
 
-local MarketplaceService = game:GetService("MarketplaceService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -31,6 +31,7 @@ local BattlePassConfig = require(Shared.constants.BattlePassConfig)
 local ResultsRewards = require(Shared.constants.ResultsRewards)
 local StoreProducts = require(Shared.constants.StoreProducts)
 local RewardService = require(script.Parent.Parent.Parent.core.RewardService)
+local GamePassService = require(script.Parent.Parent.Parent.core.GamePassService)
 
 local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
 type DataService = DataServiceMod.DataServiceModule
@@ -72,44 +73,16 @@ local MatchResultsService = {}
 local _started = false
 local _dataService: DataService = nil :: any
 
--- VIP cache por userId (nil = sin resolver todavía).
-local _vipByUserId: { [number]: boolean } = {}
 -- Snapshot de inicio de partida por userId (set-if-absent; se limpia por ronda).
 local _startSnapshotByUserId: { [number]: { level: number, bpTier: number } } = {}
 
 -- ── VIP ──────────────────────────────────────────────────────
 
-local function _fetchVIP(userId: number): boolean
-	local gamePassId = StoreProducts.GamePasses.VIP.PassId
-	if gamePassId <= 0 then
-		return false
-	end
-	local ok, owns = pcall(function()
-		return MarketplaceService:UserOwnsGamePassAsync(userId, gamePassId)
-	end)
-	if not ok then
-		warn("[MatchResultsService] UserOwnsGamePassAsync falló para", userId, ":", owns)
-		return false
-	end
-	return owns == true
-end
-
--- Prefetch asíncrono (no bloquea). Idempotente: solo resuelve si aún es nil.
-local function _prefetchVIP(userId: number)
-	if _vipByUserId[userId] ~= nil then
-		return
-	end
-	task.spawn(function()
-		if _vipByUserId[userId] == nil then
-			_vipByUserId[userId] = _fetchVIP(userId)
-		end
-	end)
-end
-
--- Lectura síncrona (default false si aún no resolvió). El prefetch en join/added
--- mantiene el caché caliente para cuando termina la ronda.
+-- Lectura síncrona (false si el prefetch de GamePassService aún no resolvió).
+-- El bonus es display + grant de fin de ronda: un false tardío sólo puede
+-- costarle el bonus a quien acaba de entrar a mitad de la última ronda.
 function MatchResultsService:IsVIPCached(player: Player): boolean
-	return _vipByUserId[player.UserId] == true
+	return GamePassService.Owns(player, StoreProducts.GamePasses.ByName.VIP.PassId)
 end
 
 -- ── Snapshot de inicio de partida ────────────────────────────
@@ -130,7 +103,11 @@ function MatchResultsService:CaptureMatchStart(player: Player)
 	local bp = profile.Data.BattlePass
 	local bpTier = if bp and type(bp.CurrentTier) == "number" then math.floor(bp.CurrentTier) else 1
 	_startSnapshotByUserId[player.UserId] = { level = level, bpTier = bpTier }
-	_prefetchVIP(player.UserId)
+
+	-- Reintento del prefetch de VIP al entrar a la partida (el descarte del
+	-- resultado es intencionado): si el de PlayerAdded falló, `Owns` relanza la
+	-- consulta y da toda la ronda para que resuelva antes del cierre.
+	MatchResultsService:IsVIPCached(player)
 end
 
 -- Limpia los snapshots de inicio (llamado por MatchService al resetear la ronda).
@@ -288,23 +265,8 @@ function MatchResultsService:Start(deps: { dataService: DataService })
 	_started = true
 	_dataService = deps.dataService
 
-	for _, player in Players:GetPlayers() do
-		_prefetchVIP(player.UserId)
-	end
-	Players.PlayerAdded:Connect(function(player)
-		_prefetchVIP(player.UserId)
-	end)
 	Players.PlayerRemoving:Connect(function(player)
-		_vipByUserId[player.UserId] = nil
 		_startSnapshotByUserId[player.UserId] = nil
-	end)
-	MarketplaceService.PromptGamePassPurchaseFinished:Connect(function(player, gamePassId, wasPurchased)
-		-- Si la compra se confirma DESPUÉS de que PlayerRemoving limpió la entrada,
-		-- repoblarla la dejaría huérfana para siempre (fuga por userId). Solo
-		-- escribir si el jugador sigue conectado; un re-join repuebla vía prefetch.
-		if wasPurchased and gamePassId == StoreProducts.GamePasses.VIP.PassId and player:IsDescendantOf(Players) then
-			_vipByUserId[player.UserId] = true
-		end
 	end)
 end
 
