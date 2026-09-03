@@ -247,7 +247,7 @@ function NetworkingCallbacks.PlayerEliminated(victimName, xpGained, wasHeadshot,
 		end
 	end
 
-	-- Flash azul de viñeta junto al kick de FOV (se auto-suprime si la viñeta ya
+	-- Flash amarillo de viñeta junto al kick de FOV (se auto-suprime si la viñeta ya
 	-- está ocupada por daño o curación).
 	if HealthBarController then
 		HealthBarController.onKill()

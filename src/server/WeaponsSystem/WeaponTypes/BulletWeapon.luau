@@ -419,6 +419,23 @@ function BulletWeapon:_spawnHitMark(hitPart: BasePart, hitPoint: Vector3, hitNor
 	if NO_BULLET_DECALS or not hitPart or not hitPart.Parent or not self.hitMarkTemplate then
 		return
 	end
+	-- Barreras de colisión invisibles: los mapas las usan para cerrar el paso sin
+	-- que se vean, y la marca se quedaba flotando en el aire. Se corta ANTES del
+	-- clone, así que ahorra el clone, el weld, los tweens de calor y el Debris —
+	-- con una escopeta (NumProjectiles = 8) eso es todo eso por perdigón.
+	--
+	-- Se filtra por transparencia y no por tag a propósito: vale en los mapas que
+	-- ya existen sin etiquetarlos uno a uno, un mapa nuevo no puede olvidarse de
+	-- la regla, y leer una propiedad cruda es más barato que HasTag/GetAttribute.
+	-- Además es la regla correcta de por sí: una marca sobre algo que no se ve
+	-- siempre sobra, sea barrera o no.
+	--
+	-- Ojo si algún día hay una parte invisible cuyo aspecto lo pone un Decal o
+	-- SurfaceGui hijo (un cartel sin geometría): esa también se quedaría sin
+	-- marca, y haría falta un tag de excepción aquí.
+	if hitPart.Transparency >= 1 then
+		return
+	end
 	if hitPart.Parent:FindFirstChildOfClass("Humanoid") then
 		return
 	end

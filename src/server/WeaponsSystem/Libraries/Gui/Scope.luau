@@ -4,7 +4,7 @@
 
 local VIGNETTE_DAMAGE_COLOR = Color3.fromRGB(255, 0, 0) -- rojo, vida baja
 local VIGNETTE_HEAL_COLOR = Color3.fromRGB(0, 255, 128) -- verde, curación
-local VIGNETTE_KILL_COLOR = Color3.fromRGB(40, 130, 255) -- azul, flash de baja propia
+local VIGNETTE_KILL_COLOR = Color3.fromRGB(255, 205, 40) -- amarillo, flash de baja propia
 
 type VignetteNode = {
 	instance: GuiObject,
@@ -77,7 +77,7 @@ function Scope.new(weaponsGui: any)
 	self.vignetteHealthAlphaDriver = nil -- rojo, vida baja (peligro continuo)
 	self.vignetteHealAlphaDriver = nil -- verde, curación
 	self.vignetteDamageAlphaDriver = nil -- rojo, flash al recibir daño
-	self.vignetteKillAlphaDriver = nil -- azul, flash de baja propia
+	self.vignetteKillAlphaDriver = nil -- amarillo, flash de baja propia
 	self.vignetteHealthConn = nil
 	self.vignetteHealConn = nil
 	self.vignetteDamageConn = nil
@@ -139,15 +139,15 @@ function Scope:setup(gui: ScreenGui)
 		self._vignetteNodes = buildVignetteNodeList(self.vignette)
 
 		-- Combina los efectos: gana el de mayor alpha y su color tiñe el vignette.
-		-- Prioridad en empate: daño (rojo) > heal (verde) > baja (azul). El azul es
+		-- Prioridad en empate: daño (rojo) > heal (verde) > baja (amarillo). El amarillo es
 		-- el de menor prioridad — el flash de baja solo se dispara cuando no hay
 		-- daño ni curación en pantalla (gateado en HealthBarController), pero si uno
-		-- de esos aparece mientras el azul está en flight, el rojo/verde manda.
+		-- de esos aparece mientras el amarillo está en flight, el rojo/verde manda.
 		local function refreshVignette()
 			if not self.vignette or not self._vignetteNodes then
 				return
 			end
-			-- Rojo = max(peligro vida baja, flash de daño); verde = curación; azul = baja.
+			-- Rojo = max(peligro vida baja, flash de daño); verde = curación; amarillo = baja.
 			local healthAlpha = if self.vignetteHealthAlphaDriver then self.vignetteHealthAlphaDriver.Value else 0
 			local damageAlpha = if self.vignetteDamageAlphaDriver then self.vignetteDamageAlphaDriver.Value else 0
 			local redAlpha = math.max(healthAlpha, damageAlpha)

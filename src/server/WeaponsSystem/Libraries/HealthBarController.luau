@@ -59,14 +59,17 @@ local VIGNETTE_DAMAGE_PEAK_ALPHA = 1 - VIGNETTE_DAMAGE_PEAK_TRANSPARENCY
 local DAMAGE_FLASH_IN_INFO = TweenInfo.new(0.06, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local DAMAGE_FLASH_OUT_INFO = TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 
--- Flash AZUL de viñeta al conseguir una baja propia. Se dispara junto al kick de
+-- Flash AMARILLO de viñeta al conseguir una baja propia. Se dispara junto al kick de
 -- FOV (ver NetworkingCallbacks.PlayerEliminated). Driver propio (KillAlphaDriver),
 -- que el renderer compone con menor prioridad que rojo/verde. Solo se dispara si
 -- la viñeta NO está ya ocupada por daño o curación.
-local VIGNETTE_KILL_PEAK_TRANSPARENCY = 0.35 -- 0 = opaco, 1 = invisible (en el pico)
+local VIGNETTE_KILL_PEAK_TRANSPARENCY = 0.2 -- 0 = opaco, 1 = invisible (en el pico)
 local VIGNETTE_KILL_PEAK_ALPHA = 1 - VIGNETTE_KILL_PEAK_TRANSPARENCY
-local KILL_FLASH_IN_INFO = TweenInfo.new(0.07, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-local KILL_FLASH_OUT_INFO = TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+-- Entra igual de rápido que el flash de daño, pero aguanta un beat en el pico y
+-- se apaga más despacio: la baja se tiene que notar sin llegar a estorbar.
+local KILL_FLASH_IN_INFO = TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local KILL_FLASH_HOLD_SECONDS = 0.15
+local KILL_FLASH_OUT_INFO = TweenInfo.new(0.65, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 
 -- Damage trail ("ghost bar" estilo AAA): una barra roja detrás del Fill que
 -- muestra el chunk de vida recién perdido y se drena despacio hasta el valor
@@ -84,7 +87,7 @@ local vignette: GuiObject? = nil
 local healthAlphaDriver: NumberValue? = nil -- rojo, vida baja
 local healAlphaDriver: NumberValue? = nil -- verde, curación
 local damageAlphaDriver: NumberValue? = nil -- rojo, flash al recibir daño
-local killAlphaDriver: NumberValue? = nil -- azul, flash de baja propia
+local killAlphaDriver: NumberValue? = nil -- amarillo, flash de baja propia
 local healVignetteTween: Tween? = nil
 local damageVignetteTween: Tween? = nil
 local killVignetteTween: Tween? = nil
@@ -294,10 +297,10 @@ local function showDamageVignette()
 	end)
 end
 
--- Flash azul de baja propia. Sube rápido al pico y baja a 0 (sin hold), igual que
--- el flash de daño. GATE: no se dispara si la viñeta ya está ocupada por curación
+-- Flash amarillo de baja propia. Sube rápido al pico, aguanta un beat y baja a 0.
+-- GATE: no se dispara si la viñeta ya está ocupada por curación
 -- (verde) o por daño/peligro de vida baja (rojo) — en esos casos el otro efecto
--- manda y no queremos pisarlo con azul.
+-- manda y no queremos pisarlo con amarillo.
 local function showKillVignette()
 	getVignetteNodes()
 	local driver = killAlphaDriver
@@ -328,6 +331,8 @@ local function showKillVignette()
 
 	task.spawn(function()
 		fadeIn.Completed:Wait()
+		if killVignetteGeneration ~= myGen then return end
+		task.wait(KILL_FLASH_HOLD_SECONDS)
 		if killVignetteGeneration ~= myGen then return end
 		if not driver.Parent then return end
 
@@ -501,7 +506,7 @@ function HealthBarController.onCharacterAdded(character: Model)
 	end)
 end
 
--- Flash azul de baja propia. Se llama desde NetworkingCallbacks.PlayerEliminated
+-- Flash amarillo de baja propia. Se llama desde NetworkingCallbacks.PlayerEliminated
 -- junto al kick de FOV. Internamente se auto-suprime si hay daño/curación visible.
 function HealthBarController.onKill()
 	showKillVignette()
