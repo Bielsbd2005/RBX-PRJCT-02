@@ -19,9 +19,12 @@ local RunService = game:GetService("RunService")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local BotConfig = require(Shared:WaitForChild("constants"):WaitForChild("BotConfig"))
 
+-- `originPart` en lugar de un Vector3 capturado al encolar: con backlog en la
+-- cola el bot ya no está donde estaba al pedir el path, y el path arrancaba
+-- detrás de él. La posición se lee al momento de lanzar ComputeAsync.
 type Entry = {
 	path: Path,
-	origin: Vector3,
+	originPart: BasePart,
 	dest: Vector3,
 	callback: (ok: boolean) -> (),
 }
@@ -48,11 +51,11 @@ local _inFlight = 0
 -- dead Navigators never linger here.
 local _busyPaths: { [Path]: boolean } = {}
 
-function PathfindingQueue.enqueue(path: Path, origin: Vector3, dest: Vector3, callback: (ok: boolean) -> ())
+function PathfindingQueue.enqueue(path: Path, originPart: BasePart, dest: Vector3, callback: (ok: boolean) -> ())
 	_tail += 1
 	_queue[_tail] = {
 		path = path,
-		origin = origin,
+		originPart = originPart,
 		dest = dest,
 		callback = callback,
 	}
@@ -97,8 +100,9 @@ RunService.Heartbeat:Connect(function()
 			_inFlight += 1
 			_busyPaths[entry.path] = true
 			task.spawn(function()
+				local origin = entry.originPart.Position
 				local ok = pcall(function()
-					entry.path:ComputeAsync(entry.origin, entry.dest)
+					entry.path:ComputeAsync(origin, entry.dest)
 				end)
 				_busyPaths[entry.path] = nil
 				_inFlight -= 1

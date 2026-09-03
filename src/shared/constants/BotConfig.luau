@@ -57,6 +57,9 @@ export type BotConfigType = {
 		RetaliationWindow: number,
 		ForcedTargetRangeBonus: number,
 		GraceRangeBonus: number,
+		ShotBroadcastRange: number,
+		ShotBroadcastLodDistance: number,
+		ShotBroadcastLodDivisor: number,
 		VsPlayer: CombatTargetProfile,
 		VsBot: CombatTargetProfile,
 	},
@@ -72,6 +75,7 @@ export type BotConfigType = {
 	Navigation: {
 		RoamMinDist: number,
 		RoamMaxDist: number,
+		RoamDestJitter: number,
 		StuckThresholds: StuckThresholds,
 		StuckMoveEpsilon: number,
 		StuckSpawnGrace: number,
@@ -149,6 +153,20 @@ local BotConfig: BotConfigType = {
 		ForcedTargetRangeBonus = 20, -- studs extra sobre DetectRange para mantener el forced target
 		GraceRangeBonus = 15,        -- studs extra sobre DetectRange para mantener el target en memoria
 
+		-- Broadcast de disparos de bots a clientes (BotAI ATTACK). Cada evento
+		-- WeaponFired que recibe un cliente corre la simulación completa de la
+		-- bala (2 beams + sonidos + hit mark), así que con 6-8 bots en combate a
+		-- 10-12 disparos/seg cada uno, un móvil simulaba 60-100 balas/seg de
+		-- bots que ni veía. Mitigación por distancia observador↔tirador:
+		--   • > ShotBroadcastRange: no se envía nada.
+		--   • > ShotBroadcastLodDistance: los fallos no se envían y los
+		--     aciertos solo 1 de cada ShotBroadcastLodDivisor (los ids de
+		--     disparo siguen siendo únicos, el RNG seeded del cliente no cambia).
+		--   • <= ShotBroadcastLodDistance: todo, como antes.
+		ShotBroadcastRange = 120,       -- antes 200 (cubría el mapa entero)
+		ShotBroadcastLodDistance = 60,
+		ShotBroadcastLodDivisor = 2,
+
 		VsPlayer = {
 			DamageMin = 2,
 			DamageMax = 5,
@@ -174,6 +192,11 @@ local BotConfig: BotConfigType = {
 	Navigation = {
 		RoamMinDist = 20,
 		RoamMaxDist = 80,
+		-- Jitter XZ (±studs) aplicado al roam point elegido para que dos bots
+		-- no apunten al mismo stud. 4 → 2: un punto authoreado junto a un
+		-- borde o pared se salía del navmesh con ±4 y costaba un NoPath +
+		-- backoff de 0.3-0.5s por intento.
+		RoamDestJitter = 2,
 		-- SpawnMinDist/SpawnMaxDist removed: bot spawn placement is governed by
 		-- SpawnSelector scoring (same system as players), not a distance band.
 		StuckThresholds = { lateral = 1.0, repath = 2.0, jump = 4.0, teleport = 8.0 },
@@ -184,7 +207,12 @@ local BotConfig: BotConfigType = {
 	},
 
 	Lifecycle = {
-		RagdollCleanupDelay = 3,  -- 5→3s: mitigación móvil. Con 3-5 kills/seg sostenido, 5s mantenía ~15-25 cadáveres rendereados en cualquier momento (replicado a todos los clientes). 3s halvea la población media manteniendo el feel del ragdoll.
+		-- Segundos mínimos que el cadáver de un bot queda en pantalla antes de
+		-- fundirse (RagdollCleanup.minTime); el tope duro es este valor + 1.
+		-- Mitigación móvil: cada ragdoll son ~15 parts sin anclar con física
+		-- en el servidor replicando a todos los clientes. Si la caída se ve
+		-- cortada, sube a 4 (el valor que estaba hardcodeado en AIService).
+		RagdollCleanupDelay = 3,
 		RespawnDelay = 0,         -- D3: seg entre la muerte de un bot y su respawn. 0 = instantáneo (comportamiento histórico). Los players esperan RespawnCooldown=1s; sube esto a 1 si el diseño quiere paridad de pacing.
 	},
 }

@@ -256,17 +256,35 @@ end)
 -- Las identidades del pool son usuarios reales de Roblox (el headshot sale de
 -- su UserId). Si uno de ellos entra al servidor, un bot con esa identidad
 -- compartiría nombre y foto con él, así que queda descartada.
-local function _isIdentityTakenByRealPlayer(source: BotNames.BotIdentity): boolean
+--
+-- Se construye UNA vez por asignación el set de userIds y nombres (lowercase)
+-- de los jugadores presentes, y cada entrada del pool se comprueba contra él.
+-- Antes cada entrada del pool (223) hacía :lower() sobre Name y DisplayName de
+-- cada jugador, por cada bot, dentro de los frames del spawn pump.
+type TakenIdentitySet = { userIds: { [number]: true }, names: { [string]: true } }
+
+local _lowerNameByPoolIndex: { [number]: string } = {}
+for index, source in BotNames do
+	_lowerNameByPoolIndex[index] = source.name:lower()
+end
+
+local function _buildTakenIdentitySet(): TakenIdentitySet
+	local userIds: { [number]: true } = {}
+	local names: { [string]: true } = {}
 	for _, player in Players:GetPlayers() do
-		if player.UserId == source.userId then
-			return true
-		end
-		if player.Name:lower() == source.name:lower()
-			or player.DisplayName:lower() == source.name:lower() then
-			return true
-		end
+		userIds[player.UserId] = true
+		names[player.Name:lower()] = true
+		names[player.DisplayName:lower()] = true
 	end
-	return false
+	return { userIds = userIds, names = names }
+end
+
+local function _isIdentityTakenByRealPlayer(index: number, source: BotNames.BotIdentity, taken: TakenIdentitySet): boolean
+	if taken.userIds[source.userId] then
+		return true
+	end
+	local lowerName = _lowerNameByPoolIndex[index] or source.name:lower()
+	return taken.names[lowerName] == true
 end
 
 local function _assignIdentity(): (BotIdentity, number)
@@ -274,8 +292,9 @@ local function _assignIdentity(): (BotIdentity, number)
 	local fakeUserId = _fakeUserIdCounter
 	-- Pick an unused identity from the pool
 	local available = {}
+	local taken = _buildTakenIdentitySet()
 	for i, source in BotNames do
-		if not _usedIdentityIndices[i] and not _isIdentityTakenByRealPlayer(source) then
+		if not _usedIdentityIndices[i] and not _isIdentityTakenByRealPlayer(i, source, taken) then
 			table.insert(available, i)
 		end
 	end
@@ -452,9 +471,10 @@ local _botRigPoolByKey: { [string]: { Model } } = {}
 local _botRigRefillingByKey: { [string]: boolean } = {}
 local BOT_RIG_POOL_TARGET = 3
 -- C1: cap on TOTAL parked rigs across all outfit pools, so memory no longer
--- grows linearly with the outfit catalog (~30 parts per rig). 2× the max
--- concurrent bot count keeps a full respawn wave warm; past the cap, refills
--- stop and a cold take pays one sync clone (rare).
+-- grows linearly with the outfit catalog (~30 parts per rig). The max
+-- concurrent bot count is TeamSizeTarget × 2 (both teams, 8 today), so
+-- TeamSizeTarget × 4 = 2× that keeps a full respawn wave warm; past the cap,
+-- refills stop and a cold take pays one sync clone (rare).
 local MAX_TOTAL_PARKED_RIGS = GameConfig.TeamSizeTarget * 4
 -- C1: pools shrink to this size between rounds. Identities re-roll every
 -- round, so keeping every pool hot has no cross-round hit-rate benefit; one
@@ -855,9 +875,12 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 		-- (no corte seco) para que la desaparición no sea brusca. `maxTime` es el tope
 		-- duro. Nota perf: 4s mantiene más cadáveres vivos que los 1.8-3s previos;
 		-- el fundido y el tope de 5s acotan la población en móvil.
+		-- Tiempos desde BotConfig.Lifecycle (antes hardcodeados 4/5 mientras
+		-- el config decía 3 y nadie lo leía).
+		local ragdollMin = BotConfig.Lifecycle.RagdollCleanupDelay
 		RagdollCleanup.scheduleDestroy(botModel, {
-			minTime = 4,
-			maxTime = 5,
+			minTime = ragdollMin,
+			maxTime = ragdollMin + 1,
 			fadeTime = 0.4,
 		})
 
@@ -964,8 +987,9 @@ end
 -- las entradas recicladas que la comparten). Devuelve true si hubo cambio.
 local function _swapIdentityInPlace(identity: BotIdentity): boolean
 	local replacementIndex: number? = nil
+	local taken = _buildTakenIdentitySet()
 	for index, source in BotNames do
-		if not _usedIdentityIndices[index] and not _isIdentityTakenByRealPlayer(source) then
+		if not _usedIdentityIndices[index] and not _isIdentityTakenByRealPlayer(index, source, taken) then
 			replacementIndex = index
 			break
 		end

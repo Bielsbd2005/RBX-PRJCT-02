@@ -80,8 +80,7 @@ function Navigator.new(humanoid: Humanoid, rootPart: BasePart, agentParams: { [s
 	-- NOTA: NO conectamos `humanoid.MoveToFinished`. El walk loop usa
 	-- `humanoid:Move(direction)` + check manual de distancia para avanzar
 	-- waypoints. `MoveToFinished` es global por humanoid y se firea para
-	-- CUALQUIER `humanoid:MoveTo` que termine (incluyendo MoveTos directos
-	-- de BotAI en CHASE-visible y MoveTos superseded con timeouts 8s).
+	-- CUALQUIER `humanoid:MoveTo` que termine, venga de quien venga.
 	-- Eliminar la dependencia hace imposible que el walk loop se "contamine"
 	-- con firings espurios — la única forma robusta de evitar la race.
 
@@ -162,22 +161,28 @@ function Navigator:goTo(dest: Vector3, opts: GoToOpts?)
 		return
 	end
 
-	-- Throttle de same-dest. CRÍTICO: aplica sin condicionar a `_isMoving`.
-	-- Antes el throttle solo gateaba con `isMoving` (true tras el callback
-	-- de ComputeAsync) — entre enqueue y callback, las llamadas seguían
-	-- enqueueando. A 60Hz son 60 enqueues/seg por bot al mismo target →
-	-- cola saturada, computes cancelados por gen mismatch, bot en limbo
-	-- con "pasos a tirones".
-	-- Ahora _currentDest y _lastComputeAt se actualizan SÍNCRONAMENTE al
-	-- enqueue. La próxima goTo en <MinComputeInterval con dest cercano
-	-- se silencia inmediatamente y reutiliza las callbacks del compute en
-	-- vuelo (que sí firearán cuando termine).
-	if self._currentDest
-		and (self._currentDest - dest).Magnitude < 5
-		and (now - self._lastComputeAt) < BotConfig.Pathfinding.MinComputeInterval then
-		self._onArrived = opts and opts.onArrived
-		self._onFailed = opts and opts.onFailed
-		return
+	-- Throttle de same-dest. _currentDest y _lastComputeAt se actualizan
+	-- SÍNCRONAMENTE al enqueue (no al callback), así que entre enqueue y
+	-- callback las llamadas repetidas al mismo dest ya se silencian — sin
+	-- esto, CHASE a 20Hz metía 20 enqueues/seg por bot al mismo target y la
+	-- cola se saturaba con computes cancelados por gen mismatch.
+	--
+	-- Dos casos, ambos reutilizan las callbacks del compute/walk en vuelo:
+	--   • Ya estamos CAMINANDO hacia ese dest (_isMoving): no recomputar
+	--     nunca por tiempo. Antes el gate era solo temporal (MinComputeInterval
+	--     0.5s), así que un bot en CHASE hacia un target quieto y sin LoS
+	--     relanzaba ComputeAsync + walk (desde el waypoint 2, perdiendo el
+	--     impulso) dos veces por segundo sin ganar nada. Un path que se queda
+	--     obsoleto lo recupera el StuckDetector vía recomputeLast, que pone
+	--     _isMoving=false antes de llamar aquí y por tanto pasa este gate.
+	--   • Compute todavía en cola/vuelo (no moving): gate temporal, para que
+	--     un dest que sí cambió >5 studs o un compute colgado se relance.
+	if self._currentDest and (self._currentDest - dest).Magnitude < 5 then
+		if self._isMoving or (now - self._lastComputeAt) < BotConfig.Pathfinding.MinComputeInterval then
+			self._onArrived = opts and opts.onArrived
+			self._onFailed = opts and opts.onFailed
+			return
+		end
 	end
 
 	self._onArrived = opts and opts.onArrived
@@ -190,8 +195,10 @@ function Navigator:goTo(dest: Vector3, opts: GoToOpts?)
 	self._currentDest = dest
 	self._lastComputeAt = now
 
-	local origin = self._rootPart.Position
-	PathfindingQueue.enqueue(self._path, origin, dest, function(ok)
+	-- Se pasa el rootPart (no su Position): la cola lee la posición al lanzar
+	-- el ComputeAsync, así el path arranca donde el bot ESTÁ y no donde
+	-- estaba al encolar.
+	PathfindingQueue.enqueue(self._path, self._rootPart, dest, function(ok)
 		if self._stopped or self._generation ~= gen then
 			return
 		end
