@@ -61,7 +61,7 @@ export type LockerCameraController = {
 	setTargetPartName: (self: LockerCameraController, targetPartName: string) -> (),
 	zoomOnPosition: (self: LockerCameraController, targetPosition: Vector3) -> (),
 	unzoom: (self: LockerCameraController) -> (),
-	apply: (self: LockerCameraController) -> (),
+	apply: (self: LockerCameraController, instant: boolean?) -> (),
 	restore: (self: LockerCameraController, animated: boolean?) -> (),
 	Destroy: (self: LockerCameraController) -> (),
 }
@@ -185,7 +185,11 @@ end
 -- Desplaza la cámara (travelling) hasta el target actual. La primera vez (al abrir)
 -- guarda el estado de cámara previo y enciende la DOF; en llamadas posteriores
 -- (cambio de pestaña) solo desplaza, sin re-tocar la DOF para que no parpadee.
-function LockerCameraController:apply()
+--
+-- Con `instant` el encuadre se pone de golpe y el DOF también: es para quien tapa
+-- el corte con un fundido a negro, donde un travelling de 0.6s solo se vería como
+-- una espera con la pantalla en negro.
+function LockerCameraController:apply(instant: boolean?)
 	self:_cancelActiveTweens()
 
 	if not self._isApplied then
@@ -201,6 +205,17 @@ function LockerCameraController:apply()
 	self._camera.CameraType = Enum.CameraType.Scriptable
 
 	local targetFov = getTargetFov(self._targetPartName)
+
+	if instant then
+		self._camera.CFrame = self._targetPart.CFrame
+		self._camera.FieldOfView = targetFov
+		local instantDof = getTargetDof(self._targetPartName)
+		if instantDof then
+			DepthOfFieldController.setProperties(instantDof)
+		end
+		return
+	end
+
 	self._cameraApproachTween = TweenService:Create(self._camera, MOVE_TWEEN_INFO, {
 		CFrame = self._targetPart.CFrame,
 	})
