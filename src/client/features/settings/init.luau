@@ -30,7 +30,6 @@ local Network = require(Shared.networking.Network)
 local DataController = require(Client.core.data.DataController)
 local PanelController = require(Client.core.ui.PanelController)
 local BlurController = require(Client.core.ui.BlurController)
-local CameraFovEffect = require(Client.core.ui.CameraFovEffect)
 local SliderController = require(Client.core.ui.SliderController)
 local ToggleController = require(Client.core.ui.ToggleController)
 local MenuHover = require(Client.core.ui.MenuHover)
@@ -86,17 +85,12 @@ function SettingsFeature.start(menuController: any): any
 	local header = settingsContainer:WaitForChild("Header")
 	local closeBtn = header:WaitForChild("CloseBtn") :: GuiButton
 
-	local fovEffect = CameraFovEffect.new()
-	janitor:Add(fovEffect, "Destroy")
-
 	local panel = PanelController.new(menuController, frame, settingsBtn, closeBtn, {
 		onOpen = function()
 			BlurController.acquire(BLUR_KEY)
-			fovEffect:expand()
 		end,
 		onClose = function()
 			BlurController.release(BLUR_KEY)
-			fovEffect:restore()
 		end,
 	})
 	janitor:Add(panel, "Destroy")
@@ -109,19 +103,14 @@ function SettingsFeature.start(menuController: any): any
 		local creditsContainer = creditsFrame:WaitForChild("Container") :: Frame
 		local creditsCloseBtn = creditsContainer:WaitForChild("CloseBtn") :: GuiButton
 
-		local creditsFov = CameraFovEffect.new()
-		janitor:Add(creditsFov, "Destroy")
-
 		local resetCreditsClose = MenuHover.bindButton(creditsCloseBtn, janitor)
 
 		local creditsPanel = PanelController.new(menuController, creditsFrame, nil, nil, {
 			onOpen = function()
 				BlurController.acquire(CREDITS_BLUR_KEY)
-				creditsFov:expand()
 			end,
 			onClose = function()
 				BlurController.release(CREDITS_BLUR_KEY)
-				creditsFov:restore()
 			end,
 		})
 		janitor:Add(creditsPanel, "Destroy")

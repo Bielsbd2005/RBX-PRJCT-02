@@ -17,18 +17,21 @@
 	  • AddXP(player, amount): cascading tier-up con cap.
 	  • Hook OnKill(player) llamado desde WeaponsSystem (inyectado).
 	  • ClaimTier(player, tier): valida y otorga la recompensa única del tier.
-	  • PromptPremium(player) + ProcessReceipt(receiptInfo): compra del Premium
-	    vía MarketplaceService developer product. Idempotente vía
-	    DataService:IsReceiptProcessed.
+	  • PromptPremium(player) / PromptSkip(player): compra del Premium y del
+	    Skip con GEMS — chequeo de saldo + cobro y grant en un único BatchUpdate
+	    atómico sobre Stats.Gems (mismo patrón que ShopService). Sin receipt.
+	  • ProcessReceipt(receiptInfo): flujo LEGACY de developer products Robux,
+	    dormido mientras los ProductId de la season sean 0 (ver
+	    BattlePassConfig.Season). Idempotente vía DataService:IsReceiptProcessed.
 ]]
 
 local Players = game:GetService("Players")
-local MarketplaceService = game:GetService("MarketplaceService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Network   = require(Shared.networking.Network)
 local BattlePassConfig = require(Shared.constants.BattlePassConfig)
+local Currency = require(Shared.constants.Currency)
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
 
 local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
@@ -429,7 +432,7 @@ function BattlePassService:ClaimTier(player: Player, tierLevel: number): ()
 end
 
 -- ────────────────────────────────────────────────────────────
--- PREMIUM (Robux developer product)
+-- PREMIUM (compra con Gems)
 -- ────────────────────────────────────────────────────────────
 
 local _bpFunnelSessionByUserId: { [number]: string } = {}
@@ -438,12 +441,14 @@ local _bpFunnelCounter = 0
 --[[
 	Embudo de conversión a Premium. La taxonomía vive aquí, junto al código que
 	la dispara, para que añadir un paso sea un cambio de un solo archivo.
+	Con la compra en Gems no hay prompt externo que esperar: el embudo se reduce
+	a click → cobro OK, y el drop entre 1 y 2 mide exactamente "quiso pero no
+	tenía Gems" — la señal que dispara la compra de packs.
 ]]
 local BP_PREMIUM_FUNNEL = "BattlePassPremium"
 local BP_PREMIUM_STEP_NAMES: { [number]: string } = {
 	[1] = "ClickedBuyPremium",
-	[2] = "PromptShown",
-	[3] = "Purchased",
+	[2] = "Purchased",
 }
 
 local function _bpPremiumStep(player: Player, step: number, sessionId: string?)
@@ -452,8 +457,9 @@ end
 
 function BattlePassService:PromptPremium(player: Player): ()
 	local season = BattlePassConfig.GetActiveSeason()
-	if season.PremiumProductId == 0 then
-		warn("[BattlePassService] PremiumProductId no configurado para season", season.Id)
+	local price = season.PremiumGemPrice
+	if type(price) ~= "number" or price <= 0 then
+		warn("[BattlePassService] PremiumGemPrice no configurado para season", season.Id)
 		_respond(player, false, "PremiumUnavailable", 0)
 		return
 	end
@@ -463,7 +469,11 @@ function BattlePassService:PromptPremium(player: Player): ()
 	end
 
 	local profile = _dataService:GetProfile(player)
-	if profile and profile.Data and profile.Data.BattlePass and profile.Data.BattlePass.PremiumOwned == true then
+	if not profile or not profile.Data then
+		_respond(player, false, "ProfileUnavailable", 0)
+		return
+	end
+	if profile.Data.BattlePass and profile.Data.BattlePass.PremiumOwned == true then
 		_respond(player, false, "AlreadyOwned", 0)
 		return
 	end
@@ -473,21 +483,40 @@ function BattlePassService:PromptPremium(player: Player): ()
 	_bpFunnelSessionByUserId[player.UserId] = sessionId
 	_bpPremiumStep(player, 1, sessionId)
 
-	pcall(function()
-		MarketplaceService:PromptProductPurchase(player, season.PremiumProductId)
-	end)
+	-- Cobro en Gems: chequeo de saldo + delta negativo en el MISMO BatchUpdate
+	-- que el grant (patrón de ShopService: el delta evita TOCTOU si otro flujo
+	-- muta el saldo entre la lectura y el write).
+	local stats = profile.Data.Stats
+	local balance: number = if stats and type(stats.Gems) == "number" then stats.Gems else 0
+	if balance < price then
+		_respond(player, false, "GemsInsufficient", 0)
+		return
+	end
+
+	local ok = _dataService:BatchUpdate(player, {
+		{ path = Currency.balancePath(Currency.GEMS), delta = -price },
+		{ path = { "BattlePass", "PremiumOwned" }, value = true },
+	})
+	if not ok then
+		_respond(player, false, "InternalError", 0)
+		return
+	end
 
 	_bpPremiumStep(player, 2, sessionId)
+	_bpFunnelSessionByUserId[player.UserId] = nil
+	TelemetryService.RecordFlow(player, "sink", "BattlePassPremium", price, season.Id, Currency.GEMS)
+	_respond(player, true, "PremiumGranted", 0)
 end
 
 -- ────────────────────────────────────────────────────────────
--- SKIP TIER (Robux developer product)
+-- SKIP TIER (compra con Gems)
 -- ────────────────────────────────────────────────────────────
 
 function BattlePassService:PromptSkip(player: Player): ()
 	local season = BattlePassConfig.GetActiveSeason()
-	if season.SkipProductId == 0 then
-		warn("[BattlePassService] SkipProductId no configurado para season", season.Id)
+	local price = season.SkipGemPrice
+	if type(price) ~= "number" or price <= 0 then
+		warn("[BattlePassService] SkipGemPrice no configurado para season", season.Id)
 		_respond(player, false, "SkipUnavailable", 0)
 		return
 	end
@@ -502,17 +531,50 @@ function BattlePassService:PromptSkip(player: Player): ()
 		return
 	end
 
+	local state = profile.Data.BattlePass
+
 	-- Si ya completó la season, no tiene sentido cobrar por un skip.
 	local maxTier = BattlePassConfig.GetMaxTier(season)
-	local currentTier = math.max(1, math.floor(profile.Data.BattlePass.CurrentTier or 1))
+	local currentTier = math.max(1, math.floor(state.CurrentTier or 1))
 	if currentTier > maxTier then
 		_respond(player, false, "SeasonCompleted", currentTier)
 		return
 	end
 
-	pcall(function()
-		MarketplaceService:PromptProductPurchase(player, season.SkipProductId)
-	end)
+	local stats = profile.Data.Stats
+	local balance: number = if stats and type(stats.Gems) == "number" then stats.Gems else 0
+	if balance < price then
+		_respond(player, false, "GemsInsufficient", 0)
+		return
+	end
+
+	-- Mismo tier-up que el _grantSkip del flujo de receipts (ajusta TotalXPEarned
+	-- para que _deriveTierFromTotalXP no cape la elegibilidad del claim), con el
+	-- cobro de Gems dentro del MISMO BatchUpdate atómico. Sin GrantedSkips: aquí
+	-- no hay receipt que idempotentizar — cada request cobrada ES una compra
+	-- (el ACTION_COOLDOWN del listener absorbe el doble-click accidental).
+	local currentXP = math.max(0, math.floor(state.XP or 0))
+	local totalXP = math.max(0, math.floor(state.TotalXPEarned or 0))
+	local tierDef = BattlePassConfig.GetTier(season, currentTier)
+	if not tierDef then
+		_respond(player, false, "InternalError", 0)
+		return
+	end
+	local xpToFill = math.max(0, tierDef.XPRequired - currentXP)
+
+	local ok = _dataService:BatchUpdate(player, {
+		{ path = Currency.balancePath(Currency.GEMS), delta = -price },
+		{ path = { "BattlePass", "CurrentTier" },   value = currentTier + 1 },
+		{ path = { "BattlePass", "XP" },            value = 0 },
+		{ path = { "BattlePass", "TotalXPEarned" }, value = totalXP + xpToFill },
+	})
+	if not ok then
+		_respond(player, false, "InternalError", 0)
+		return
+	end
+
+	TelemetryService.RecordFlow(player, "sink", "BattlePassSkip", price, season.Id, Currency.GEMS)
+	_respond(player, true, "SkipGranted", currentTier + 1)
 end
 
 -- Aplica un skip de 1 tier. Idempotente per-receipt vía GrantedSkips[purchaseId].
@@ -633,8 +695,10 @@ function BattlePassService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchas
 		if not _dataService:ForceSave(player) then
 			return Enum.ProductPurchaseDecision.NotProcessedYet
 		end
+		-- Paso 2 = "Purchased" (el embudo es de 2 pasos desde la compra en Gems;
+		-- este path legacy reporta el mismo paso final para no romper la serie).
 		local sessionId = _bpFunnelSessionByUserId[player.UserId]
-		_bpPremiumStep(player, 3, sessionId)
+		_bpPremiumStep(player, 2, sessionId)
 		_bpFunnelSessionByUserId[player.UserId] = nil
 
 		TelemetryService.RecordPurchase({

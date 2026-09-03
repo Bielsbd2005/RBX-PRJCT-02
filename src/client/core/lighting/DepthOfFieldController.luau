@@ -142,19 +142,36 @@ local function _adoptDof(dof: DepthOfFieldEffect)
 	_apply()
 end
 
+-- Los handlers NO se fían de la instancia que llega en el evento: con
+-- SignalBehavior = Deferred (el default) corren DESPUÉS de todo el swap de effects
+-- del preset, así que ese `child` puede estar ya desparentado — p. ej. el effect
+-- original que restore() repone y el apply() siguiente vuelve a apartar en el mismo
+-- frame. Adoptarlo dejaría _dof apuntando a un effect fuera de Lighting. El evento
+-- solo sirve de disparador: el estado se resuelve siempre contra Lighting vivo.
+local function _resyncDof()
+	local current = Lighting:FindFirstChildOfClass("DepthOfFieldEffect")
+	if current == nil then
+		_dof = nil
+		return
+	end
+	if current ~= _dof then
+		_adoptDof(current)
+	else
+		-- Mismo effect: re-afirmamos Enabled por si el swap lo dejó como lo trae
+		-- autorado el preset.
+		_apply()
+	end
+end
+
 Lighting.ChildAdded:Connect(function(child)
 	if child:IsA("DepthOfFieldEffect") then
-		_adoptDof(child)
+		_resyncDof()
 	end
 end)
 
 Lighting.ChildRemoved:Connect(function(child)
-	if child == _dof then
-		_dof = nil
-		local replacement = Lighting:FindFirstChildOfClass("DepthOfFieldEffect")
-		if replacement then
-			_adoptDof(replacement)
-		end
+	if child:IsA("DepthOfFieldEffect") then
+		_resyncDof()
 	end
 end)
 

@@ -98,12 +98,14 @@ local function resolveMapPresetNode(): Instance?
 	return nil
 end
 
--- Aplica el preset leyendo el atributo del nodo (no-op si el nodo no existe o no
--- lleva atributo — ScenePresetController.applyFrom ya degrada con gracia).
-local function applyScenePreset(node: Instance?)
+-- Aplica el preset leyendo el atributo del nodo. Devuelve true solo si el nodo
+-- existía y llevaba atributo: quien necesite garantizar el cambio de look (el
+-- lobby) debe reaccionar al false en vez de quedarse con el preset anterior.
+local function applyScenePreset(node: Instance?): boolean
 	if node then
-		ScenePresetController.applyFrom(node)
+		return ScenePresetController.applyFrom(node)
 	end
+	return false
 end
 
 -- ── Helpers de resolución de GUI ──
@@ -222,7 +224,14 @@ function MatchFeature.start(menuController: any): any
 	local lightingGeneration = 0
 	local function applyLobbyLighting()
 		lightingGeneration += 1
-		applyScenePreset(resolveLobbyPresetNode())
+		if applyScenePreset(resolveLobbyPresetNode()) then
+			return
+		end
+		-- Sin preset de lobby aplicable, volver al menú dejaría activo el preset del
+		-- mapa (o el del locker): el lobby heredaría su lighting y su DoF. Restaurar
+		-- el look base del place es el fallback correcto.
+		warn("[MatchFeature] No se pudo aplicar el preset del lobby (falta Workspace.Cameras.lobby o su atributo LightingPreset); se restaura el lighting base.")
+		ScenePresetController.restore()
 	end
 	local function applyMapLighting()
 		lightingGeneration += 1
@@ -254,7 +263,8 @@ function MatchFeature.start(menuController: any): any
 
 	applyLobbyLighting()
 	-- DOF de fondo del menú: encendido al arrancar (estamos en Lobby) y alternado
-	-- por fase abajo. El locker lo suprime mientras usa su propio ShowcaseDOF.
+	-- por fase abajo. El DoF concreto lo aporta el preset activo (el locker trae el
+	-- suyo); este controller solo decide si está encendido.
 	DepthOfFieldController.setEnabled(true)
 	-- Controles táctiles por defecto (joystick): ocultos al arrancar (Lobby) y solo
 	-- visibles en partida activa. Se alternan junto al resto del estado de fase.

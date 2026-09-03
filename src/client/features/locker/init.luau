@@ -41,6 +41,7 @@ local StoreProducts = require(Shared.constants.StoreProducts)
 local UITheme = require(Client.core.ui.UITheme)
 local NavTabController = require(Client.core.ui.NavTabController)
 local Confetti = require(Client.core.ui.Confetti)
+local Notify = require(Client.core.ui.NotificationController)
 
 local LockerFeature = {}
 
@@ -155,15 +156,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local lockerFolder = Workspace:WaitForChild("Locker")
 
 	-- Lighting por atributo: el look del Locker lo lleva Workspace.Locker
-	-- (LightingPreset="Locker") y el de vuelta al menú lo lleva
-	-- Workspace.Cameras.lobby. Ningún nombre de preset vive en código.
-	local function applyLobbyPreset()
-		local cameras = Workspace:FindFirstChild("Cameras")
-		local lobbyNode = if cameras then cameras:FindFirstChild("lobby") else nil
-		if lobbyNode then
-			ScenePresetController.applyFrom(lobbyNode)
-		end
-	end
+	-- (LightingPreset="Locker") y la vuelta al lobby es la política compartida de
+	-- ScenePresetController.applyLobbyOrRestore (misma que usa el BattlePass).
 	local dummySpawn = lockerFolder:WaitForChild("DummySpawn")
 	-- Anclas del preview de armas por ROL, no por arma: el arma de la categoría
 	-- activa se va a la mesa y la otra a la pared (WeaponPreviewController las
@@ -477,26 +471,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		currentlyPreviewingEffectId = nil
 	end
 
-	-- Reposiciona cada Part1 a la pose canónica del Motor6D
-	-- (Part0.CFrame * C0 * C1:Inverse). Si el template guardado en RS tiene
-	-- partes desplazadas físicamente (ej: Transform aplicado al guardar), el
-	-- ragdoll aparece deformado al destruir los Motor6Ds. 4 pasadas cubren la
-	-- profundidad del rig R15 (HRP → LowerTorso → UpperTorso → extremidades →
-	-- manos/pies).
-	local function snapPartsToCanonicalPose(char: Model)
-		local motors = {}
-		for _, m in char:GetDescendants() do
-			if m:IsA("Motor6D") and m.Part0 and m.Part1 then
-				table.insert(motors, m)
-			end
-		end
-		for _ = 1, 4 do
-			for _, m in motors do
-				m.Part1.CFrame = m.Part0.CFrame * m.C0 * m.C1:Inverse()
-			end
-		end
-	end
-
 	local function spawnKillEffectDummy()
 		destroyKillEffectDummy()
 		local clone = killEffectDummyTemplate:Clone()
@@ -507,7 +481,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end
 		clone.Parent = lockerFolder
 		LockerUtils.placePreviewCharacter(clone, dummySpawn)
-		snapPartsToCanonicalPose(clone)
+		LockerUtils.snapPartsToCanonicalPose(clone)
 
 		-- Anclar HRP para que el dummy no caiga por gravedad antes del clic.
 		-- El killEffect desancla todo en su paso final (Utils.anchor false).
@@ -1698,25 +1672,32 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 		-- Condiciones de compra: nivel, inventario, wraps de desafío y saldo (si
 		-- falta saldo se ofrece el pack que mejor encaja en vez de comprar).
+		-- Cada rechazo avisa por toast: el botón de compra sigue visible cuando
+		-- el ítem está bloqueado, así que sin notificación el click no da feedback.
 		local function canPurchase(item: LockerCatalogItem): boolean
 			if pendingShopAction then
 				return false
 			end
 
 			if getCurrentLevel() < item.LevelRequired then
+				Notify.warning(`You need level {item.LevelRequired} to buy this item.`)
 				return false
 			end
 
 			if isItemOwned(item) then
+				Notify.warning("You already own this item.")
 				return false
 			end
 
 			if item.KillGoal ~= nil and item.KillGoal > 0 then
 				-- Los wraps de desafío de kills no se compran.
+				Notify.warning(`Unlock this wrap with {item.KillGoal} kills.`)
 				return false
 			end
 
 			if getBalanceFor(item) < item.Price then
+				local currencyName = if CurrencyMod.resolve(item.Currency) == CurrencyMod.GEMS then "Gems" else "Cash"
+				Notify.warning(`Not enough {currencyName}. You need {UIUtils.formatCashAmount(item.Price)}.`)
 				promptBestFitPack(item)
 				return false
 			end
@@ -1910,6 +1891,11 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 				Confetti.Rain(lockerFrame)
 			end
 		else
+			-- El server ya manda el motivo en inglés; el fallback cubre un payload
+			-- sin mensaje (p.ej. un rechazo nuevo que no lo rellene).
+			local message = if response.message ~= "" then response.message else "That purchase couldn't be completed."
+			Notify.warning(message)
+
 			task.defer(function()
 				if resolvedAction and resolvedAction.kind == "buy" and selectedMainCategory and selectedNavKey then
 					populateMainContentForNavItem(selectedMainCategory, selectedNavKey, resolvedAction.item.qualifiedId)
@@ -2084,7 +2070,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		clearItemGrid()
 		destroyKillEffectDummy()
 		lockerFrame.Visible = false
-		applyLobbyPreset()
+		ScenePresetController.applyLobbyOrRestore("[Locker]")
 	end
 
 	if lockerBtn then
@@ -2116,13 +2102,16 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		if not lockerFrame.Visible and isOpen then
 			isOpen = false
 			restoreLockerSceneState(true)
-			applyLobbyPreset()
+			ScenePresetController.applyLobbyOrRestore("[Locker]")
 		end
 	end), "Disconnect")
 
 	janitor:Add(function()
 		if isOpen then
 			restoreLockerSceneState()
+			-- Igual que closeLockerGui: el preset del Locker no puede sobrevivir al
+			-- feature, o el lobby se queda con su lighting (y su DoF).
+			ScenePresetController.applyLobbyOrRestore("[Locker]")
 		end
 	end, true)
 

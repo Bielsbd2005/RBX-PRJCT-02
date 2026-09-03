@@ -193,6 +193,24 @@ function ScenePresetController.restore()
 	table.clear(stashedOriginals)
 end
 
+-- Vuelta al look del lobby: aplica el preset autorado en Workspace.Cameras.lobby
+-- y, si ese nodo no existe o no lleva atributo, restaura el lighting base —
+-- quedarse con el preset del panel activo en el menú es peor que perder el look
+-- del lobby. Compartido por todos los paneles con cámara propia (Locker,
+-- BattlePass): la política de "cómo se vuelve al lobby" vive aquí, no copiada en
+-- cada feature. `warnPrefix` etiqueta el aviso con el panel que cierra.
+function ScenePresetController.applyLobbyOrRestore(warnPrefix: string?)
+	local cameras = game:GetService("Workspace"):FindFirstChild("Cameras")
+	local lobbyNode = if cameras then cameras:FindFirstChild("lobby") else nil
+	if lobbyNode and ScenePresetController.applyFrom(lobbyNode) then
+		return
+	end
+	warn(
+		`{warnPrefix or "[ScenePresetController]"} No se pudo aplicar el preset del lobby (falta Workspace.Cameras.lobby o su atributo LightingPreset); se restaura el lighting base.`
+	)
+	ScenePresetController.restore()
+end
+
 -- Preset activo (o nil). Útil para debugging / tests.
 function ScenePresetController.getActive(): string?
 	return activePresetName

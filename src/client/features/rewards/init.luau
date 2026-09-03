@@ -35,7 +35,6 @@ local Network = require(Shared.networking.Network)
 local DataController = require(Client.core.data.DataController)
 local PanelController = require(Client.core.ui.PanelController)
 local BlurController = require(Client.core.ui.BlurController)
-local CameraFovEffect = require(Client.core.ui.CameraFovEffect)
 local Notify = require(Client.core.ui.NotificationController)
 
 local BLUR_KEY = "Rewards"
@@ -78,19 +77,15 @@ function RewardsFeature.start(menuController: any): any
 	local redeemBtn = redeemContainer:WaitForChild("RedeemBtn") :: GuiButton
 	local codeTextBox = redeemContainer:WaitForChild("TextBox") :: TextBox
 
-	local fovEffect = CameraFovEffect.new()
-	janitor:Add(fovEffect, "Destroy")
 
 	local panel = PanelController.new(menuController, frame, menuBtn, closeBtn, {
 		onOpen = function()
 			BlurController.acquire(BLUR_KEY)
-			fovEffect:expand()
 			-- Empezar siempre con el input de código limpio al (re)entrar.
 			codeTextBox.Text = ""
 		end,
 		onClose = function()
 			BlurController.release(BLUR_KEY)
-			fovEffect:restore()
 		end,
 	})
 	janitor:Add(panel, "Destroy")
@@ -126,7 +121,7 @@ function RewardsFeature.start(menuController: any): any
 
 		local groupId = getGroupId()
 		if groupId <= 0 then
-			Notify.warning("Esta experiencia no pertenece a un grupo.")
+			Notify.warning("This experience isn't linked to a group.")
 			return
 		end
 
@@ -140,7 +135,7 @@ function RewardsFeature.start(menuController: any): any
 		task.delay(RESPONSE_TIMEOUT, function()
 			if token == likeToken and likePending then
 				setLikePending(false)
-				Notify.warning("Sin respuesta del servidor.")
+				Notify.warning("No response from the server. Try again.")
 			end
 		end)
 
@@ -154,7 +149,7 @@ function RewardsFeature.start(menuController: any): any
 
 		local code = codeTextBox.Text
 		if code == "" then
-			Notify.warning("Escribe un código para canjear.")
+			Notify.warning("Enter a code to redeem.")
 			return
 		end
 
@@ -164,7 +159,7 @@ function RewardsFeature.start(menuController: any): any
 		task.delay(RESPONSE_TIMEOUT, function()
 			if token == codeToken and codePending then
 				setCodePending(false)
-				Notify.warning("Sin respuesta del servidor.")
+				Notify.warning("No response from the server. Try again.")
 			end
 		end)
 

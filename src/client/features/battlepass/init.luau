@@ -2,29 +2,66 @@
 --[[
 	BattlePassFeature (Client)
 
-	Panel del Battle Pass (una recompensa por nivel, FREE o PASS). Se abre como
-	los demás paneles (PanelController + blur + FOV, sin cambio de cámara).
+	Panel del Battle Pass (una recompensa por nivel, FREE o PASS). A diferencia de
+	los paneles con blur, este salta a su propia cámara (Workspace.Cameras.<CAMERA_TARGET>)
+	tapando el corte con un fundido a negro liso (ScreenFade), y aplica el preset
+	de iluminación autorado en esa parte — de ahí sale el DepthOfField que
+	desenfoca el fondo, igual que en el Locker.
 
-	GUI (PlayerGui.UserInterface.BattlePass.Main):
-	  Header.CloseBtn / Header.Title  ("SEASON 0 (BETA)")
-	  Timer                            ("Ends in X, X")
-	  Progress.Bar.Fill / Progress.ActualLevel / Progress.XP
+	GUI (PlayerGui.UserInterface.BattlePass, con `Main` intermedio OPCIONAL: si
+	ese frame existe se usa como raíz y si no se leen los hijos del panel):
+	  CloseBtn (root)                 -- fallback opcional: Header.CloseBtn
 	  Nav.Back (.Indicator) / Nav.Next (.Indicator) / Nav.Info  ("1/8")
-	  SkipLevelBtn                     (compra Robux: +1 nivel)
-	  PurchaseBtn                      (compra Robux: premium / PASS)
-	  Path."1".."8" (cada item):
-	    Type                            -- FREE/PASS/CLAIM (+ UIGradient para PASS); oculto si claimed
-	    Content.Image                   -- recompensa no-wrap (ImageLabel)
-	    Content.Viewport.Viewport       -- recompensa wrap (ViewportFrame 3D)
-	    Content.Viewport.Description    -- cantidad de cash o tipo de item ("Hat")
-	    Content.UIGradient              -- habilitado si el nivel es PASS
-	    Content.Footer.Container.Frame  -- estado claimed/no-claimed
-	      .Status                       -- "CLAIMED" / "LVL X" / "XP/OBJ"
+	  SkipLevelBtn                     (compra con Gems: +1 nivel)
+	  PurchaseBtn                      (compra con Gems: premium / PASS)
+	  Path."1".."8" (cada item, GuiButton):
+	    Container.Level                 -- nivel del slot ("Lvl. 5"); se oculta en
+	                                       el slot del nivel actual, que lo pinta
+	                                       CurrentLevel
+	    Container.LevelReward
+	      .ViewportReward               -- recompensa wrap (ViewportFrame 3D)
+	      .ImageReward                  -- resto de recompensas (ImageLabel)
+	      .Value                        -- tipo de recompensa ("Cash", "Gems",
+	                                       "Hat", "Body"…)
+	      .Glow                         -- OPCIONAL: resplandor teñido con el color
+	                                       de rareza de la recompensa (oscuro si
+	                                       ya está reclamada)
+	      .Footer.Status.Locked         -- visible mientras el nivel no se pueda
+	                                       reclamar (ni reclamado ni reclamable)
+	    Container.Type                  -- OPCIONAL: FREE/PASS, o CLAIMED (fondo
+	                                       oscuro) si ya se reclamó
+	    Container.Claim                 -- OPCIONAL: visible solo mientras la
+	                                       recompensa se pueda reclamar
+	    …LevelReward.Check              -- OPCIONAL: visible si está reclamado
+	  CurrentLevel                      -- OPCIONAL: plantilla del slot del nivel
+	                                       actual (.Fill = progreso del nivel,
+	                                       .Level = "Lvl. 5"). Se clona UNA vez al
+	                                       arrancar y el clon se reparenta al
+	                                       Container que toque en cada render: un
+	                                       único CanvasGroup vivo en vez de uno
+	                                       por slot, y cero instancias creadas
+	                                       mientras el panel está abierto.
+
+	Todos los nodos se resuelven con FindFirstChild y se pintan solo si existen:
+	la GUI se edita en Studio y este feature no debe romperse porque falte uno.
+
+	El preview grande de la derecha es hoy solo `ImagePreview` (ImageLabel): el
+	ViewportPreview 3D se quitó de la GUI, así que un wrap seleccionado se
+	previsualiza con su `Image` de ItemsConfig (si no tiene, no hay preview).
+	Los slots SÍ siguen renderizando wraps en 3D en su propio ViewportReward.
+
+	Además, la recompensa seleccionada se enseña en el decorado de la escena
+	(ScenePreview), cada clase en su peana de Workspace.BattlePass: hats y faces en
+	HeadSpawn, wraps en WrapSpawn, bodies y kill effects en DummySpawn, y lo que no
+	tiene modelo 3D (cash, gems) en la carta de CardSpawn. Solo se ve la peana de lo
+	seleccionado, y el relevo entre ellas va animado.
 ]]
 
 local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
 
 local Client = script.Parent.Parent
 local Packages = ReplicatedStorage:WaitForChild("Packages")
@@ -33,37 +70,67 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Janitor = require(Packages.janitor) :: any
 local Fusion = require(Packages.fusion) :: any
 local PanelController = require(Client.core.ui.PanelController)
-local BlurController = require(Client.core.ui.BlurController)
-local CameraFovEffect = require(Client.core.ui.CameraFovEffect)
+local InteractiveScaleTween = require(Client.core.ui.animators.InteractiveScaleTween)
+local LockerCameraController = require(Client.core.camera.LockerCameraController)
+local CameraLock = require(Client.core.camera.CameraLock)
+local ScenePresetController = require(Client.core.lighting.ScenePresetController)
+local ScreenFade = require(Client.core.ui.ScreenFade)
 local DataController = require(Client.core.data.DataController)
 local Notify = require(Client.core.ui.NotificationController)
-local UIUtils = require(Client.core.ui.UIUtils)
+local UITheme = require(Client.core.ui.UITheme)
 local Network = require(Shared.networking.Network)
 local BattlePassConfig = require(Shared.constants.BattlePassConfig)
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
+local LockerConfig = require(Shared.constants.LockerConfig)
+local WeaponCategoryMod = require(Shared.constants.WeaponCategory)
 local WeaponWrapPreviewer = require(Client.features.locker.Previewers.WeaponWrapPreviewer)
+local ScenePreview = require(script.ScenePreview)
 
-local BLUR_KEY = "BattlePass"
 local SLOTS_PER_PAGE = 8
 
--- Type (FREE/PASS/CLAIM). FREE y PASS comparten colores; PASS añade gradient.
-local TYPE_BG_TRANSPARENCY = 0.6
-local TYPE_DARK_BG = Color3.fromRGB(0, 0, 0)
-local TYPE_WHITE_TEXT = Color3.fromRGB(255, 255, 255)
-local TYPE_CLAIM_COLOR = Color3.fromRGB(195, 252, 165)
+-- Cámara del panel: la parte de Workspace.Cameras a la que viaja la cámara al
+-- abrir el pase. El look (DoF incluido) sale del atributo LightingPreset de esa
+-- misma parte, igual que Workspace.Cameras.lobby lleva el del menú: ningún
+-- nombre de preset vive en código.
+local CAMERA_TARGET = "battlepass"
+local CAMERA_LOCK_OWNER = "battlepass"
 
--- Footer.Frame por estado.
-local FOOTER_CLAIMED_BG = Color3.fromRGB(179, 254, 155)
-local FOOTER_UNCLAIMED_BG = Color3.fromRGB(34, 34, 35)
-local STATUS_CLAIMED_COLOR = Color3.fromRGB(0, 0, 0)
-local STATUS_UNCLAIMED_COLOR = Color3.fromRGB(255, 255, 255)
+-- Texto oscuro sobre los fondos claros del slot (Type y Level).
+local UI_DARK_TEXT = Color3.fromRGB(34, 34, 34)
+
+-- Type (FREE/PASS/CLAIMED): fondo plano y opaco. Sin gradients y sin
+-- transparencia — el color es el color. CLAIMED invierte el esquema: fondo
+-- oscuro con texto claro.
+local TYPE_PREMIUM_BG = Color3.fromRGB(255, 196, 0)
+local TYPE_FREE_BG = Color3.fromRGB(255, 255, 255)
+local TYPE_CLAIMED_BG = Color3.fromRGB(34, 34, 34)
+local TYPE_CLAIMED_TEXT = Color3.fromRGB(255, 255, 255)
+
+-- LevelReward.Glow: oscuro (apagado) una vez reclamado, y el color de rareza de
+-- la recompensa mientras no lo esté. La paleta es la misma que la de los cards
+-- del locker (UITheme.LockerRarityGlow), para que un mismo item no brille de dos
+-- colores distintos según el panel donde lo mires.
+local GLOW_CLAIMED_COLOR = Color3.fromRGB(34, 34, 34)
+local RARITY_GLOW = UITheme.LockerRarityGlow
+local RARITY_FALLBACK = "Common"
+
+-- Nivel del slot en Container.Level (y en CurrentLevel.Level para el actual).
+local STATUS_LEVEL_FORMAT = "Lvl. %d"
+
+-- Container.Level: el FONDO va dorado en los niveles ya superados y blanco en
+-- los que aún no se han alcanzado; el texto se queda oscuro en ambos. El nivel
+-- actual no usa este label (lo pinta CurrentLevel).
+local LEVEL_PASSED_BG = Color3.fromRGB(255, 196, 0)
+local LEVEL_LOCKED_BG = Color3.fromRGB(255, 255, 255)
+
+-- Arma por defecto del preview de un wrap GLOBAL (no va atado a ningún arma):
+-- se enseña sobre la principal del jugador, que es la que más mira.
+local WRAP_PREVIEW_CATEGORY = WeaponCategoryMod.MAIN
+local LOADOUT_SLOT_BY_WEAPON = LockerConfig.CategoryToLoadoutSlot :: { [string]: string }
 
 -- Imagen/viewport de la recompensa cuando ya está reclamada.
 local CLAIMED_IMG_COLOR = Color3.fromRGB(89, 89, 89)
 local CLAIMED_IMG_TRANSPARENCY = 0.3
-
--- Margen a la derecha del Progress.Bar.Fill en progreso parcial.
-local FILL_RIGHT_MARGIN = 8
 
 -- Repoblar páginas: cada slot (su Container) entra deslizándose desde abajo.
 local SLOT_STAGGER_DELAY = 0.04
@@ -74,20 +141,23 @@ local STAGGER_ENTER_OFFSET = 30
 local SELECTED_LIFT_PIXELS = 12
 local SELECT_MOVE_INFO = TweenInfo.new(0.18, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 
+-- Hover del slot: un pelín más marcado que en los slots de MapVote (1.02) porque
+-- estas cards son más pequeñas —ocho por página— y ahí un 2% no se lee.
+local SLOT_HOVER_SCALE = 1.05
+local SLOT_CLICK_SCALE = 0.97
+
 -- Preview grande del item seleccionado (entra deslizándose desde abajo).
 local PREVIEW_LIFT_PIXELS = 24
 local PREVIEW_TWEEN_INFO = TweenInfo.new(0.28, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
--- Poll del timer: lento lejos del deadline, rápido (cada minuto) en la última hora.
-local TIMER_POLL_SLOW = 3600
-local TIMER_POLL_FAST = 60
-
--- Etiqueta de tipo de item para la Description (categoría → singular).
+-- Etiqueta de tipo para LevelReward.Value (categoría → singular). "Body" en vez
+-- de "Outfit" para hablar el mismo idioma que el nav del locker, donde la
+-- categoría Outfits se llama Body (LockerConfig.ITEMS_CONFIG_BY_NAV).
 local CATEGORY_LABEL: { [string]: string } = {
-	Hats = "Hat",
+	Outfits = "Body",
 	Faces = "Face",
+	Hats = "Hat",
 	KillEffects = "Kill Effect",
-	Outfits = "Outfit",
 	WeaponWraps = "Wrap",
 	Main = "Weapon",
 	Special = "Weapon",
@@ -114,18 +184,62 @@ local function _rewardImage(reward: BattlePassConfig.Reward): string
 	return reward.Icon or (if def and type(def.Image) == "string" then def.Image else "")
 end
 
--- Texto de Description: cantidad de cash, o el tipo de item (p. ej. "Hat").
-local function _rewardDescription(reward: BattlePassConfig.Reward): string
-	if reward.Kind == "Cash" then
-		return UIUtils.formatCashAmount(reward.Amount or 0)
+-- Rareza de la recompensa para teñir el Glow. Cash/Gems no son items del
+-- catálogo y no tienen rareza: caen al fallback.
+local function _rewardRarity(reward: BattlePassConfig.Reward): string
+	if reward.Kind ~= "Item" then
+		return RARITY_FALLBACK
 	end
-	if reward.Kind == "Gems" then
-		return UIUtils.formatCashAmount(reward.Amount or 0) .. " Gems"
+	local catalog = ItemsConfig[reward.Category]
+	local def = if type(catalog) == "table" then catalog[reward.ItemId] else nil
+	if type(def) == "table" and type(def.Rarity) == "string" then
+		return def.Rarity
 	end
+	return RARITY_FALLBACK
+end
+
+-- Texto de LevelReward.Value: el TIPO de recompensa ("Cash", "Gems", "Hat",
+-- "Body"…), no su cantidad. `Reward.Label` lo sobrescribe si el tier trae uno.
+local function _rewardValueText(reward: BattlePassConfig.Reward): string
 	if reward.Label then
 		return reward.Label
 	end
-	return CATEGORY_LABEL[reward.Category or ""] or (reward.Category or "")
+	if reward.Kind == "Cash" or reward.Kind == "Gems" then
+		return reward.Kind
+	end
+	local category = reward.Category or ""
+	return CATEGORY_LABEL[category] or category
+end
+
+-- Arma sobre la que se pinta el wrap en el viewport del slot:
+--   · wrap de un arma concreta (WeaponCategory/WeaponId) → ESA arma.
+--   · wrap global → el arma que el jugador lleve equipada en WRAP_PREVIEW_CATEGORY,
+--     para que lo vea sobre la suya; sin loadout devuelve id nil y el previewer
+--     cae solo al modelo "Default" de esa categoría.
+-- El nombre visible se devuelve además del id porque los modelos de
+-- Shared.Locker.weapons.* pueden estar nombrados por uno o por el otro.
+local function _wrapPreviewWeapon(reward: BattlePassConfig.Reward): (string, string?, string?)
+	local category: string
+	local weaponId: string?
+
+	if WeaponCategoryMod.isValid(reward.WeaponCategory) then
+		category = reward.WeaponCategory :: string
+		weaponId = if type(reward.WeaponId) == "string" and reward.WeaponId ~= "" then reward.WeaponId else nil
+	else
+		category = WRAP_PREVIEW_CATEGORY
+		local loadout = Fusion.peek(DataController.Loadout)
+		local slot = LOADOUT_SLOT_BY_WEAPON[category]
+		local equipped = if type(loadout) == "table" and slot then loadout[slot] else nil
+		weaponId = if type(equipped) == "string" and equipped ~= "" then equipped else nil
+	end
+
+	local catalog = ItemsConfig[category]
+	local def = if type(catalog) == "table" and weaponId then catalog[weaponId] else nil
+	local displayName = if type(def) == "table" and type(def.Name) == "string" and def.Name ~= ""
+		then def.Name
+		else nil
+
+	return category, weaponId, displayName
 end
 
 -- ────────────────────────────────────────────────────────────
@@ -133,15 +247,24 @@ end
 type SlotRefs = {
 	frame: GuiObject,
 	container: GuiObject,
+	-- LevelReward.ImageReward / .ViewportReward: la recompensa se pinta en uno u
+	-- otro (wrap → viewport 3D, resto → imagen) y el que no se usa se oculta.
 	image: ImageLabel?,
 	viewport: ViewportFrame?,
-	description: TextLabel?,
-	contentGradient: UIGradient?,
-	footerFrame: GuiObject?,
-	status: TextLabel?,
+	-- LevelReward.Value: cantidad de una recompensa de moneda.
+	value: TextLabel?,
+	rewardGradient: UIGradient?,
+	-- LevelReward.Glow: resplandor teñido por rareza (verde si está reclamado).
+	glow: GuiObject?,
+	-- Container.Level: nivel del slot ("Lvl. 5"). Se oculta en el slot del nivel
+	-- actual: ahí lo pinta el clon de CurrentLevel, que trae su propio label.
+	levelLabel: TextLabel?,
+	-- Footer.Status.Locked: candado mientras el nivel no se pueda reclamar.
+	locked: GuiObject?,
+	-- Claim: visible solo mientras la recompensa esté lista para reclamar.
+	claim: GuiObject?,
 	typeLabel: TextLabel?,
-	typeGradient: UIGradient?,
-	-- Content.Check: visible solo si el item del tier está reclamado.
+	-- Check: visible solo si el item del tier está reclamado.
 	check: ImageLabel?,
 }
 
@@ -155,33 +278,80 @@ local function _resolveSlot(pathFolder: Instance, index: number): SlotRefs?
 	local containerNode = frame:FindFirstChild("Container")
 	local container: GuiObject = if containerNode and containerNode:IsA("GuiObject") then containerNode else frame
 
-	local content = container:FindFirstChild("Content")
-	local imageNode = content and content:FindFirstChild("Image")
-	local viewportNode = content and content:FindFirstChild("Viewport")
-	local descriptionNode = content and content:FindFirstChild("Description")
-	local contentGradientNode = if content then content:FindFirstChildOfClass("UIGradient") else nil
-	local checkNode = content and content:FindFirstChild("Check")
+	local reward = container:FindFirstChild("LevelReward")
+	local imageNode = reward and reward:FindFirstChild("ImageReward")
+	local viewportNode = reward and reward:FindFirstChild("ViewportReward")
+	local valueNode = reward and reward:FindFirstChild("Value")
+	local rewardGradientNode = if reward then reward:FindFirstChildOfClass("UIGradient") else nil
+	local glowNode = reward and reward:FindFirstChild("Glow")
+	local checkNode = reward and reward:FindFirstChild("Check")
 
-	local footer = content and content:FindFirstChild("Footer")
-	local footerContainer = footer and footer:FindFirstChild("Container")
-	local footerFrameNode = footerContainer and footerContainer:FindFirstChild("Frame")
-	local statusNode = footerFrameNode and footerFrameNode:FindFirstChild("Status")
+	local footer = reward and reward:FindFirstChild("Footer")
+	local status = footer and footer:FindFirstChild("Status")
+	local lockedNode = status and status:FindFirstChild("Locked")
 
-	local typeNode = container:FindFirstChild("Type")
+	-- Level cuelga del Container; fallback al viejo Footer.Status.Value por si la
+	-- GUI todavía no está migrada.
+	local levelNode = container:FindFirstChild("Level") or (status and status:FindFirstChild("Value"))
+
+	-- Type y Claim son opcionales y pueden colgar del Container o del propio
+	-- LevelReward.
+	local typeNode = container:FindFirstChild("Type") or (reward and reward:FindFirstChild("Type"))
+	local claimNode = container:FindFirstChild("Claim") or (reward and reward:FindFirstChild("Claim"))
 
 	return {
 		frame = frame,
 		container = container,
 		image = if imageNode and imageNode:IsA("ImageLabel") then imageNode else nil,
 		viewport = if viewportNode and viewportNode:IsA("ViewportFrame") then viewportNode else nil,
-		description = if descriptionNode and descriptionNode:IsA("TextLabel") then descriptionNode else nil,
-		contentGradient = contentGradientNode,
-		footerFrame = if footerFrameNode and footerFrameNode:IsA("GuiObject") then footerFrameNode else nil,
-		status = if statusNode and statusNode:IsA("TextLabel") then statusNode else nil,
+		value = if valueNode and valueNode:IsA("TextLabel") then valueNode else nil,
+		rewardGradient = rewardGradientNode,
+		glow = if glowNode and glowNode:IsA("GuiObject") then glowNode else nil,
+		levelLabel = if levelNode and levelNode:IsA("TextLabel") then levelNode else nil,
+		locked = if lockedNode and lockedNode:IsA("GuiObject") then lockedNode else nil,
+		claim = if claimNode and claimNode:IsA("GuiObject") then claimNode else nil,
 		typeLabel = if typeNode and typeNode:IsA("TextLabel") then typeNode else nil,
-		typeGradient = if typeNode then typeNode:FindFirstChildOfClass("UIGradient") else nil,
 		check = if checkNode and checkNode:IsA("ImageLabel") then checkNode else nil,
 	}
+end
+
+-- UIScale escala alrededor del AnchorPoint del nodo: con el (0,0) por defecto de
+-- Studio la card crece hacia abajo y a la derecha en vez de desde su centro. Se
+-- recentra el AnchorPoint compensando la Position con medio tamaño PROPIO, así
+-- que la card se queda exactamente donde estaba y lo único que cambia es desde
+-- dónde crece. Devuelve false si no se puede tocar sin descolocarla.
+--
+-- La compensación se hace con la Size (no con AbsoluteSize) para que siga siendo
+-- independiente de la resolución; a cambio, deja de ser exacta si un constraint
+-- decide el tamaño real. En ese caso —y si la Position la manda un layout— se
+-- deja el nodo como está: una card medio desplazada es mucho peor que una card
+-- que crece desde la esquina.
+local function _centerScaleAnchor(node: GuiObject): boolean
+	local anchor = node.AnchorPoint
+	if anchor.X == 0.5 and anchor.Y == 0.5 then
+		return true
+	end
+
+	local parent = node.Parent
+	if parent and parent:IsA("GuiObject") and parent:FindFirstChildWhichIsA("UILayout") then
+		return false
+	end
+	if node:FindFirstChildWhichIsA("UIAspectRatioConstraint") or node:FindFirstChildWhichIsA("UISizeConstraint") then
+		return false
+	end
+
+	local dx = 0.5 - anchor.X
+	local dy = 0.5 - anchor.Y
+	local size = node.Size
+	local pos = node.Position
+	node.Position = UDim2.new(
+		pos.X.Scale + size.X.Scale * dx,
+		pos.X.Offset + size.X.Offset * dx,
+		pos.Y.Scale + size.Y.Scale * dy,
+		pos.Y.Offset + size.Y.Offset * dy
+	)
+	node.AnchorPoint = Vector2.new(0.5, 0.5)
+	return true
 end
 
 -- ────────────────────────────────────────────────────────────
@@ -199,7 +369,11 @@ function BattlePassFeature.start(menuController: any): any
 		return janitor
 	end
 	local frame = frameNode :: GuiObject
-	local main = frame:WaitForChild("Main")
+	-- `Main` es opcional: la GUI puede colgar Header/Nav/Path
+	-- directamente del panel. Sin WaitForChild a propósito — esperar un frame
+	-- que ya no existe dejaría el feature colgado para siempre.
+	local mainNode = frame:FindFirstChild("Main")
+	local main: Instance = if mainNode then mainNode else frame
 
 	-- Botón de apertura en Menu.Container.FamePass
 	local container = menuGui:FindFirstChild("Container")
@@ -215,26 +389,11 @@ function BattlePassFeature.start(menuController: any): any
 	local navIndicatorNode = navTarget and navTarget:FindFirstChild("Indicator")
 	local navIndicator: GuiObject? = if navIndicatorNode and navIndicatorNode:IsA("GuiObject") then navIndicatorNode else nil
 
-	-- Header.
+	-- Header. CloseBtn cuelga hoy directo de BattlePass (root), no de Header;
+	-- fallback a Header.CloseBtn por si la GUI aún no está migrada.
 	local header = main:FindFirstChild("Header")
-	local closeNode = header and header:FindFirstChild("CloseBtn")
+	local closeNode = frame:FindFirstChild("CloseBtn") or (header and header:FindFirstChild("CloseBtn"))
 	local closeBtn: GuiButton? = if closeNode and closeNode:IsA("GuiButton") then closeNode else nil
-	local titleNode = header and header:FindFirstChild("Title")
-	local titleLabel: TextLabel? = if titleNode and titleNode:IsA("TextLabel") then titleNode else nil
-
-	-- Timer.
-	local timerNode = main:FindFirstChild("Timer")
-	local timerLabel: TextLabel? = if timerNode and timerNode:IsA("TextLabel") then timerNode else nil
-
-	-- Progress (Bar.Fill / ActualLevel / XP).
-	local progress = main:FindFirstChild("Progress")
-	local progressBar = progress and progress:FindFirstChild("Bar")
-	local progressFillNode = progressBar and progressBar:FindFirstChild("Fill")
-	local progressFill: GuiObject? = if progressFillNode and progressFillNode:IsA("GuiObject") then progressFillNode else nil
-	local actualLevelNode = progress and progress:FindFirstChild("ActualLevel")
-	local actualLevel: TextLabel? = if actualLevelNode and actualLevelNode:IsA("TextLabel") then actualLevelNode else nil
-	local xpNode = progress and progress:FindFirstChild("XP")
-	local xpLabel: TextLabel? = if xpNode and xpNode:IsA("TextLabel") then xpNode else nil
 
 	-- Nav (Back / Next / Info).
 	local navFolder = main:FindFirstChild("Nav")
@@ -257,18 +416,71 @@ function BattlePassFeature.start(menuController: any): any
 			slots[i] = _resolveSlot(pathFolder, i)
 		end
 	else
-		warn("[BattlePassFeature] BattlePass.Main.Path no existe")
+		warn("[BattlePassFeature] BattlePass.Path no existe")
 	end
 
-	-- Preview grande del item seleccionado: ImagePreview (no-wraps) / ViewportPreview (wraps).
+	-- Hover/click de los niveles. Se escala el Container (nodo "InteractiveScale"),
+	-- NO su Position: la posición del Container ya la mueven el stagger de entrada
+	-- y el lift de selección, y escala y posición son propiedades distintas, así
+	-- que el hover convive con ambos sin pelearse por el mismo tween.
+	--
+	-- El AnchorPoint se recentra ANTES de nada: aquí, y no al abrir, porque el
+	-- stagger cachea la Position de reposo la primera vez que anima y debe cachear
+	-- ya la compensada.
+	--
+	-- Se enlaza UNA vez aquí y no en render(): el hover no depende del nivel que
+	-- muestre el slot, y render() corre con cada cambio de estado.
+	local canHover = UserInputService.MouseEnabled and not UserInputService.TouchEnabled
+	local anchorFixFailed = false
+	for i = 1, SLOTS_PER_PAGE do
+		local refs = slots[i]
+		if refs and refs.frame:IsA("GuiButton") then
+			if not _centerScaleAnchor(refs.container) then
+				anchorFixFailed = true
+			end
+			InteractiveScaleTween.bindButton(refs.frame :: GuiButton, janitor, {
+				scaleTarget = refs.container,
+				enableHover = canHover,
+				hoverScale = SLOT_HOVER_SCALE,
+				clickScale = SLOT_CLICK_SCALE,
+			})
+		end
+	end
+	if anchorFixFailed then
+		warn(
+			"[BattlePassFeature] Algún Container de Path no se puede recentrar por código (lo posiciona un layout o su tamaño lo decide un constraint): el hover crecerá desde la esquina. Ponle AnchorPoint 0.5,0.5 en Studio."
+		)
+	end
+
+	-- CurrentLevel: plantilla del slot del nivel actual. Se clona UNA vez y el
+	-- clon se reparenta al Container que toque en cada render — mover un hijo de
+	-- padre es una asignación, mientras que clonar por página crearía y
+	-- destruiría un CanvasGroup en cada tick de XP (render() corre con cada
+	-- cambio de estado, no solo al paginar).
+	local currentLevelTemplate = main:FindFirstChild("CurrentLevel") or frame:FindFirstChild("CurrentLevel")
+	local currentLevel: GuiObject? = nil
+	local currentFill: GuiObject? = nil
+	local currentLevelLabel: TextLabel? = nil
+	if currentLevelTemplate and currentLevelTemplate:IsA("GuiObject") then
+		-- La plantilla no se renderiza nunca: solo se clona.
+		(currentLevelTemplate :: GuiObject).Visible = false
+		local clone = (currentLevelTemplate :: GuiObject):Clone()
+		clone.Visible = false
+		clone.Parent = frame
+		janitor:Add(clone, "Destroy")
+		currentLevel = clone
+		local fillNode = clone:FindFirstChild("Fill")
+		currentFill = if fillNode and fillNode:IsA("GuiObject") then fillNode else nil
+		local levelNode = clone:FindFirstChild("Level")
+		currentLevelLabel = if levelNode and levelNode:IsA("TextLabel") then levelNode else nil
+	end
+
+	-- Preview grande del item seleccionado. Solo imagen: el ViewportPreview 3D
+	-- ya no está en la GUI, así que un wrap se previsualiza con su `Image`.
 	local imagePreviewNode = main:FindFirstChild("ImagePreview")
 	local imagePreview: (ImageLabel | ImageButton)? = if imagePreviewNode
 			and (imagePreviewNode:IsA("ImageLabel") or imagePreviewNode:IsA("ImageButton"))
 		then imagePreviewNode :: any
-		else nil
-	local viewportPreviewNode = main:FindFirstChild("ViewportPreview")
-	local viewportPreview: ViewportFrame? = if viewportPreviewNode and viewportPreviewNode:IsA("ViewportFrame")
-		then viewportPreviewNode
 		else nil
 
 	-- ── Estado / season ──────────────────────────────────────
@@ -277,17 +489,85 @@ function BattlePassFeature.start(menuController: any): any
 	local pageCount = math.max(1, math.ceil(maxTier / SLOTS_PER_PAGE))
 	local currentPage = 0
 	local isOpen = false
+	-- Si la apertura en curso saltó a la cámara del pase: lo decide `onOpen` y lo
+	-- lee `onClose` para deshacer exactamente lo que se hizo.
+	local cameraActive = false
 
-	if titleLabel then
-		titleLabel.Text = season.Name
+	-- ── Cámara + iluminación ─────────────────────────────────
+	-- Sin blur a propósito: el desenfoque del fondo lo da el DepthOfField del
+	-- preset de la cámara, no el BlurController.
+	--
+	-- La cámara se resuelve PEREZOSAMENTE, en cada apertura, y con FindFirstChild:
+	--   · Perezosamente porque `start` corre durante el bootstrap del cliente,
+	--     cuando el mapa puede no haber replicado todavía y Workspace.Cameras no
+	--     existir aún. Resolverla ahí de una vez dejaba el panel sin cámara para
+	--     el resto de la sesión si el jugador entraba y abría el pase rápido.
+	--   · Con FindFirstChild y no WaitForChild porque LockerCameraController.new
+	--     hace WaitForChild sin timeout: un nombre que no exista dejaría el
+	--     feature colgado para siempre en vez de abrir el panel sin cámara.
+	local cameraController: any = nil
+	local fade: any = nil
+	local warnedMissingCamera = false
+
+	local function findCameraPart(): BasePart?
+		local camerasFolder = Workspace:FindFirstChild("Cameras")
+		local part = if camerasFolder then camerasFolder:FindFirstChild(CAMERA_TARGET) else nil
+		return if part and part:IsA("BasePart") then part :: BasePart else nil
 	end
 
-	-- ── Blur + FOV (como los demás paneles) ──────────────────
-	local fovEffect = CameraFovEffect.new()
-	janitor:Add(fovEffect, "Destroy")
+	-- Devuelve el controller si la cámara ya ha replicado, o nil (y el panel se
+	-- abre sin cámara, como hasta ahora). El aviso sale UNA sola vez: si la parte
+	-- falta de verdad, cada apertura repetiría el mismo warn.
+	local function ensureCameraController(): any
+		if cameraController then
+			return cameraController
+		end
+		if not findCameraPart() then
+			if not warnedMissingCamera then
+				warnedMissingCamera = true
+				warn(`[BattlePassFeature] Falta Workspace.Cameras.{CAMERA_TARGET} (o no es un BasePart); el panel se abre sin cámara`)
+			end
+			return nil
+		end
+		cameraController = LockerCameraController.new(CAMERA_TARGET)
+		janitor:Add(cameraController, "Destroy")
+		-- El salto de cámara va tapado por un fundido a negro liso, así que se
+		-- hace de golpe (apply/restore instantáneos): un travelling detrás del
+		-- negro solo sería una espera. Singleton compartido vía playerGui — igual
+		-- que IrisTransition, no se suma al janitor.
+		fade = ScreenFade.new(playerGui)
+		return cameraController
+	end
+
+	-- Look de la escena. Preferimos el preset autorado en la propia parte de
+	-- cámara (atributo LightingPreset, como Workspace.Cameras.lobby); si no lo
+	-- lleva, caemos al de Workspace.Locker, que es de donde sale el DepthOfField
+	-- del locker. Así el pase tiene el DoF del locker sin tocar Studio, y el día
+	-- que quieras un look propio basta con ponerle el atributo a la cámara.
+	local function applyPassPreset()
+		local cameraPart = findCameraPart()
+		if cameraPart and ScenePresetController.applyFrom(cameraPart) then
+			return
+		end
+		local lockerNode = Workspace:FindFirstChild("Locker")
+		if lockerNode and ScenePresetController.applyFrom(lockerNode) then
+			return
+		end
+		warn(`[BattlePassFeature] Sin preset de iluminación: ni Workspace.Cameras.{CAMERA_TARGET} ni Workspace.Locker llevan atributo LightingPreset`)
+	end
+
+	-- ── Decorado 3D ──────────────────────────────────────────
+	-- Prueba la recompensa seleccionada en las peanas de Workspace.BattlePass:
+	-- hats y faces en HeadSpawn, wraps en WrapSpawn. Se construye solo en la
+	-- primera apertura, y si al place le faltan las anclas no hace nada: el panel
+	-- funciona igual, solo sin decorado.
+	local scenePreview = ScenePreview.new()
+	janitor:Add(scenePreview, "Destroy")
 
 	-- ── Wrap previews por slot ───────────────────────────────
-	type WrapEntry = { wrapId: string, janitor: any, viewport: ViewportFrame }
+	-- previewKey = wrap + arma sobre la que se pinta: si cambia cualquiera de los
+	-- dos hay que rehacer el viewport.
+	type WrapEntry = { previewKey: string, janitor: any, viewport: ViewportFrame }
 	local wrapBySlot: { [GuiObject]: WrapEntry } = {}
 	local function clearWrap(slotFrame: GuiObject)
 		local entry = wrapBySlot[slotFrame]
@@ -392,22 +672,38 @@ function BattlePassFeature.start(menuController: any): any
 	end, true)
 
 	-- ── Preview del item seleccionado ────────────────────────
+	-- Entra deslizándose desde abajo. Una recompensa sin imagen (p. ej. un wrap
+	-- sin `Image` en ItemsConfig, que antes se veía en el ViewportPreview 3D)
+	-- oculta el preview en vez de dejar puesta la del item anterior.
 	local imagePreviewRest: UDim2? = nil
-	local viewportPreviewRest: UDim2? = nil
-	local previewWrapEntry: { wrapId: string, janitor: any }? = nil
-	local function clearPreviewWrap()
-		if previewWrapEntry then
-			previewWrapEntry.janitor:Destroy()
-			previewWrapEntry = nil
-		end
-	end
-	janitor:Add(clearPreviewWrap, true)
 
-	-- No-wrap → ImagePreview (assetId). Entra deslizándose desde abajo.
-	local function showImagePreview(image: string)
+	-- Última recompensa empujada a la escena 3D: el observer de Loadout la reenvía
+	-- cuando cambia el arma equipada, para que un wrap global seleccionado se
+	-- recoloque sobre el arma nueva sin esperar a otro clic.
+	local lastSceneReward: BattlePassConfig.Reward? = nil
+
+	-- Decorado de la escena: qué peana sale con cada clase de recompensa lo decide
+	-- ScenePreview. Aquí solo se le pasa lo que él no puede deducir — el arma sobre
+	-- la que va un wrap (sale del loadout) y la imagen del premio para la carta.
+	local function pushScenePreview(reward: BattlePassConfig.Reward)
+		lastSceneReward = reward
+		local weaponCategory, weaponId, weaponName = _wrapPreviewWeapon(reward)
+		scenePreview:setReward(reward, {
+			weaponCategory = weaponCategory,
+			weaponId = weaponId,
+			weaponName = weaponName,
+			wrapId = if _isWrapReward(reward) then reward.ItemId else nil,
+			image = _rewardImage(reward),
+		})
+	end
+
+	local function showRewardPreview(reward: BattlePassConfig.Reward)
+		pushScenePreview(reward)
 		if not imagePreview then return end
-		if viewportPreview then
-			viewportPreview.Visible = false
+		local image = _rewardImage(reward)
+		if image == "" then
+			imagePreview.Visible = false
+			return
 		end
 		if imagePreviewRest == nil then
 			imagePreviewRest = imagePreview.Position
@@ -417,52 +713,6 @@ function BattlePassFeature.start(menuController: any): any
 		imagePreview.Visible = true
 		imagePreview.Position = UDim2.new(rest.X.Scale, rest.X.Offset, rest.Y.Scale, rest.Y.Offset + PREVIEW_LIFT_PIXELS)
 		TweenService:Create(imagePreview, PREVIEW_TWEEN_INFO, { Position = rest }):Play()
-	end
-
-	-- Wrap → ViewportPreview (3D). Reusa el render si es el mismo wrap.
-	local function showViewportPreview(wrapId: string)
-		if not viewportPreview then return end
-		local wrapsCatalog = ItemsConfig.WeaponWraps
-		local wrapDef = if type(wrapsCatalog) == "table" then wrapsCatalog[wrapId] else nil
-		if type(wrapDef) ~= "table" then return end
-		if imagePreview then
-			imagePreview.Visible = false
-		end
-		if viewportPreviewRest == nil then
-			viewportPreviewRest = viewportPreview.Position
-		end
-		local rest = viewportPreviewRest :: UDim2
-
-		if not previewWrapEntry or previewWrapEntry.wrapId ~= wrapId then
-			clearPreviewWrap()
-			local previewJanitor = Janitor.new()
-			local ok = WeaponWrapPreviewer.Render(viewportPreview, {
-				TextureID = wrapDef.TextureID,
-				BaseColor = wrapDef.BaseColor,
-				Material = wrapDef.Material,
-				isAnimated = wrapDef.isAnimated,
-				StudsPerTile = wrapDef.StudsPerTile,
-			}, previewJanitor)
-			if ok then
-				WeaponWrapPreviewer.reframeCentered(viewportPreview)
-				previewWrapEntry = { wrapId = wrapId, janitor = previewJanitor }
-			else
-				previewJanitor:Destroy()
-				return
-			end
-		end
-
-		viewportPreview.Visible = true
-		viewportPreview.Position = UDim2.new(rest.X.Scale, rest.X.Offset, rest.Y.Scale, rest.Y.Offset + PREVIEW_LIFT_PIXELS)
-		TweenService:Create(viewportPreview, PREVIEW_TWEEN_INFO, { Position = rest }):Play()
-	end
-
-	local function showRewardPreview(reward: BattlePassConfig.Reward)
-		if _isWrapReward(reward) then
-			showViewportPreview(reward.ItemId :: string)
-		else
-			showImagePreview(_rewardImage(reward))
-		end
 	end
 
 	-- Sin selección: el preview muestra el item 8 (último) de la página actual.
@@ -494,44 +744,6 @@ function BattlePassFeature.start(menuController: any): any
 		end
 		showPageDefaultPreview()
 	end
-
-	-- ── Timer ────────────────────────────────────────────────
-	local timerRunning = true
-	local function updateTimer(): number
-		if not timerLabel then return TIMER_POLL_SLOW end
-		if season.EndsAt <= 0 then
-			timerLabel.Visible = false
-			return TIMER_POLL_SLOW
-		end
-		local remaining = season.EndsAt - os.time()
-		local text = UIUtils.formatTimeLeft(remaining)
-		if text == "" then
-			timerLabel.Visible = false
-			return TIMER_POLL_SLOW
-		end
-		timerLabel.Visible = true
-		timerLabel.Text = text
-		return if remaining > TIMER_POLL_SLOW then TIMER_POLL_SLOW else TIMER_POLL_FAST
-	end
-	updateTimer()
-	local timerThread
-	if timerLabel and season.EndsAt > 0 then
-		timerThread = task.spawn(function()
-			while timerRunning do
-				task.wait(updateTimer())
-			end
-		end)
-	end
-	janitor:Add(function()
-		timerRunning = false
-		-- Cancelar el thread: si la temporada termina a >1h vista, updateTimer
-		-- devuelve TIMER_POLL_SLOW=3600 y el thread dormiría hasta 1h tras el
-		-- cleanup (reteniendo upvalues) antes de releer timerRunning y salir.
-		if timerThread then
-			pcall(task.cancel, timerThread)
-			timerThread = nil
-		end
-	end, true)
 
 	-- ── Claim helpers ────────────────────────────────────────
 	local function isClaimable(level: number, state: any): boolean
@@ -583,35 +795,20 @@ function BattlePassFeature.start(menuController: any): any
 	end
 	janitor:Add(clearSlotConnections, true)
 
-	local function paintType(refs: SlotRefs, isPremium: boolean, isClaimable_: boolean, isClaimed: boolean)
+	local function paintType(refs: SlotRefs, isPremium: boolean, isClaimed: boolean)
 		local typeLabel = refs.typeLabel
 		if not typeLabel then return end
 
-		if isClaimed then
-			typeLabel.Visible = false
-			if refs.typeGradient then
-				refs.typeGradient.Enabled = false
-			end
-			return
-		end
-
 		typeLabel.Visible = true
-		typeLabel.BackgroundTransparency = TYPE_BG_TRANSPARENCY
 
-		if isClaimable_ then
-			typeLabel.Text = "CLAIM"
-			typeLabel.TextColor3 = TYPE_CLAIM_COLOR
-			typeLabel.BackgroundColor3 = TYPE_CLAIM_COLOR
-			if refs.typeGradient then
-				refs.typeGradient.Enabled = false
-			end
+		if isClaimed then
+			typeLabel.Text = "CLAIMED"
+			typeLabel.TextColor3 = TYPE_CLAIMED_TEXT
+			typeLabel.BackgroundColor3 = TYPE_CLAIMED_BG
 		else
 			typeLabel.Text = if isPremium then "PASS" else "FREE"
-			typeLabel.TextColor3 = TYPE_WHITE_TEXT
-			typeLabel.BackgroundColor3 = TYPE_DARK_BG
-			if refs.typeGradient then
-				refs.typeGradient.Enabled = isPremium
-			end
+			typeLabel.TextColor3 = UI_DARK_TEXT
+			typeLabel.BackgroundColor3 = if isPremium then TYPE_PREMIUM_BG else TYPE_FREE_BG
 		end
 	end
 
@@ -623,23 +820,35 @@ function BattlePassFeature.start(menuController: any): any
 			end
 			refs.viewport.Visible = true
 			local wrapId = reward.ItemId :: string
+			-- El arma va en la clave: un wrap global se enseña sobre el arma
+			-- equipada, y esa puede cambiar con el panel abierto.
+			local weaponCategory, weaponId, weaponName = _wrapPreviewWeapon(reward)
+			local previewKey = `{wrapId}|{weaponCategory}|{weaponId or ""}`
 			local existing = wrapBySlot[refs.frame]
-			if not existing or existing.wrapId ~= wrapId or existing.viewport ~= refs.viewport then
+			if not existing or existing.previewKey ~= previewKey or existing.viewport ~= refs.viewport then
 				clearWrap(refs.frame)
 				local wrapsCatalog = ItemsConfig.WeaponWraps
 				local wrapDef = if type(wrapsCatalog) == "table" then wrapsCatalog[wrapId] else nil
 				if type(wrapDef) == "table" then
 					local previewJanitor = Janitor.new()
-					local ok = WeaponWrapPreviewer.Render(refs.viewport, {
+					local ok, usedWeapon = WeaponWrapPreviewer.Render(refs.viewport, {
 						TextureID = wrapDef.TextureID,
 						BaseColor = wrapDef.BaseColor,
 						Material = wrapDef.Material,
 						isAnimated = wrapDef.isAnimated,
 						StudsPerTile = wrapDef.StudsPerTile,
+						PreviewWeaponCategory = weaponCategory,
+						PreviewWeaponId = weaponId,
+						PreviewWeaponDisplayName = weaponName,
 					}, previewJanitor)
 					if ok then
-						WeaponWrapPreviewer.reframeCentered(refs.viewport)
-						wrapBySlot[refs.frame] = { wrapId = wrapId, janitor = previewJanitor, viewport = refs.viewport }
+						-- Render ya deja el arma encuadrada como en las cards de arma
+						-- del locker; recentrar solo hace falta si no se encontró el
+						-- modelo y se pintó el bloque genérico.
+						if not usedWeapon then
+							WeaponWrapPreviewer.reframeCentered(refs.viewport)
+						end
+						wrapBySlot[refs.frame] = { previewKey = previewKey, janitor = previewJanitor, viewport = refs.viewport }
 					else
 						previewJanitor:Destroy()
 					end
@@ -656,9 +865,11 @@ function BattlePassFeature.start(menuController: any): any
 			end
 		end
 
-		-- Description (cash / tipo).
-		if refs.description then
-			refs.description.Text = _rewardDescription(reward)
+		-- Value: el tipo de recompensa. Vacío solo si la categoría no se reconoce.
+		if refs.value then
+			local text = _rewardValueText(reward)
+			refs.value.Text = text
+			refs.value.Visible = text ~= ""
 		end
 
 		-- Reclamada → imagen/viewport gris semitransparente.
@@ -676,24 +887,64 @@ function BattlePassFeature.start(menuController: any): any
 		if refs.check then
 			refs.check.Visible = isClaimed
 		end
+
+		-- Glow: se apaga al reclamar, rareza de la recompensa en el resto de casos.
+		local glow = refs.glow
+		if glow then
+			local color = if isClaimed
+				then GLOW_CLAIMED_COLOR
+				else (RARITY_GLOW[_rewardRarity(reward)] or RARITY_GLOW[RARITY_FALLBACK])
+			if color then
+				if glow:IsA("ImageLabel") or glow:IsA("ImageButton") then
+					glow.ImageColor3 = color
+				else
+					glow.BackgroundColor3 = color
+				end
+			end
+		end
 	end
 
-	local function paintFooter(refs: SlotRefs, realLevel: number, currentTier: number, currentXP: number, isClaimed: boolean, tierDef: BattlePassConfig.Tier)
-		if refs.footerFrame then
-			refs.footerFrame.BackgroundColor3 = if isClaimed then FOOTER_CLAIMED_BG else FOOTER_UNCLAIMED_BG
+	-- Footer.Status.Locked: el candado se va en cuanto el nivel deja de estar
+	-- bloqueado, sea porque ya se reclamó o porque está listo para reclamar.
+	-- Claim: solo en la ventana entre ambas cosas (isClaimable ya excluye lo
+	-- reclamado, lo bloqueado y el PASS sin comprar).
+	local function paintFooter(refs: SlotRefs, isClaimed: boolean, isClaimable_: boolean)
+		if refs.locked then
+			refs.locked.Visible = not isClaimed and not isClaimable_
 		end
-		if not refs.status then return end
+		if refs.claim then
+			refs.claim.Visible = isClaimable_
+		end
+	end
 
-		if isClaimed then
-			refs.status.Text = "CLAIMED"
-			refs.status.TextColor3 = STATUS_CLAIMED_COLOR
-		else
-			refs.status.TextColor3 = STATUS_UNCLAIMED_COLOR
-			if realLevel == currentTier then
-				refs.status.Text = tostring(currentXP) .. "/" .. tostring(tierDef.XPRequired)
-			else
-				refs.status.Text = "LVL " .. tostring(realLevel)
-			end
+	-- Nivel del slot. El slot del nivel actual cede su Container.Level al clon de
+	-- CurrentLevel, que trae su propio label y una barra `Fill` con el progreso
+	-- dentro del nivel. El clon ya lleva el LayoutOrder de la plantilla, así que
+	-- cae en el hueco del Level que sustituye.
+	local function paintLevel(refs: SlotRefs, realLevel: number, currentLevelTier: number, ratio: number)
+		local isCurrent = realLevel == currentLevelTier
+		-- El label propio solo se cede si el clon de CurrentLevel existe y va a
+		-- sustituirlo: la plantilla es OPCIONAL, y sin ella ocultarlo dejaría al
+		-- tier actual como el único slot sin indicador de nivel.
+		local replacedByCurrent = isCurrent and currentLevel ~= nil
+		if refs.levelLabel then
+			refs.levelLabel.Text = STATUS_LEVEL_FORMAT:format(realLevel)
+			refs.levelLabel.Visible = not replacedByCurrent
+			refs.levelLabel.TextColor3 = UI_DARK_TEXT
+			refs.levelLabel.BackgroundColor3 = if realLevel < currentLevelTier
+				then LEVEL_PASSED_BG
+				else LEVEL_LOCKED_BG
+		end
+		if not (isCurrent and currentLevel) then return end
+		local node = currentLevel :: GuiObject
+		node.Parent = refs.container
+		node.Visible = true
+		if currentLevelLabel then
+			currentLevelLabel.Text = STATUS_LEVEL_FORMAT:format(realLevel)
+		end
+		if currentFill then
+			local size = currentFill.Size
+			currentFill.Size = UDim2.new(ratio, 0, size.Y.Scale, size.Y.Offset)
 		end
 	end
 
@@ -706,21 +957,11 @@ function BattlePassFeature.start(menuController: any): any
 		local currentXP = math.max(0, math.floor(state.XP or 0))
 		local complete = currentTier > maxTier
 
-		-- Progreso global.
+		-- Progreso dentro del nivel actual: solo alimenta CurrentLevel.Fill (el
+		-- Progress global de arriba se quitó de la GUI).
 		local activeTier = BattlePassConfig.GetTier(season, math.min(currentTier, maxTier))
 		local needed = if activeTier then activeTier.XPRequired else 100
 		local ratio = if complete then 1 else math.clamp(currentXP / math.max(1, needed), 0, 1)
-		if progressFill then
-			local size = progressFill.Size
-			local widthOffset = if ratio > 0 and ratio < 1 then -FILL_RIGHT_MARGIN else 0
-			progressFill.Size = UDim2.new(ratio, widthOffset, size.Y.Scale, size.Y.Offset)
-		end
-		if actualLevel then
-			actualLevel.Text = tostring(math.clamp(currentTier, 1, maxTier))
-		end
-		if xpLabel then
-			xpLabel.Text = if complete then "MAX" else (tostring(currentXP) .. "/" .. tostring(needed))
-		end
 
 		if pageLabel then
 			pageLabel.Text = tostring(currentPage + 1) .. "/" .. tostring(pageCount)
@@ -730,6 +971,13 @@ function BattlePassFeature.start(menuController: any): any
 		end
 
 		clearSlotConnections()
+
+		-- El nivel actual puede no caer en esta página: se oculta de entrada y
+		-- solo el slot que le corresponda lo reparenta y lo vuelve a mostrar.
+		if currentLevel then
+			(currentLevel :: GuiObject).Visible = false
+		end
+		local displayTier = math.clamp(currentTier, 1, maxTier)
 
 		for i = 1, SLOTS_PER_PAGE do
 			local refs = slots[i]
@@ -749,12 +997,13 @@ function BattlePassFeature.start(menuController: any): any
 			local claimable = isClaimable(realLevel, state)
 
 			paintContent(refs, tierDef.Reward, isClaimed)
-			paintType(refs, tierDef.Premium, claimable, isClaimed)
-			paintFooter(refs, realLevel, currentTier, currentXP, isClaimed, tierDef)
+			paintType(refs, tierDef.Premium, isClaimed)
+			paintFooter(refs, isClaimed, claimable)
+			paintLevel(refs, realLevel, displayTier, ratio)
 
-			-- Content.UIGradient: habilitado en niveles PASS.
-			if refs.contentGradient then
-				refs.contentGradient.Enabled = tierDef.Premium
+			-- LevelReward.UIGradient: habilitado en niveles PASS.
+			if refs.rewardGradient then
+				refs.rewardGradient.Enabled = tierDef.Premium
 			end
 
 			-- Click → marca seleccionado (preview) + claim si reclamable.
@@ -768,19 +1017,10 @@ function BattlePassFeature.start(menuController: any): any
 					Network.BattlePass.ClaimTier.Send({ tier = realLevel })
 				end
 			end
-			-- Los slots son GuiButton → Activated (ratón + táctil); fallback a InputBegan.
-			local conn: RBXScriptConnection
+			-- Path."1".."8" es un GuiButton en Studio: Activated cubre ratón y táctil.
 			if refs.frame:IsA("GuiButton") then
-				conn = (refs.frame :: GuiButton).Activated:Connect(onSlotClick)
-			else
-				conn = refs.frame.InputBegan:Connect(function(input: InputObject)
-					if input.UserInputType == Enum.UserInputType.MouseButton1
-						or input.UserInputType == Enum.UserInputType.Touch then
-						onSlotClick()
-					end
-				end)
+				table.insert(slotConnections, (refs.frame :: GuiButton).Activated:Connect(onSlotClick))
 			end
-			table.insert(slotConnections, conn)
 		end
 
 		-- Indicadores de Back/Next: reclamables fuera de la página actual.
@@ -799,28 +1039,74 @@ function BattlePassFeature.start(menuController: any): any
 		return math.clamp(math.floor((tier - 1) / SLOTS_PER_PAGE), 0, pageCount - 1)
 	end
 
-	-- ── Panel (como settings: blur + fov, sin cámara) ─────────
+	-- ── Panel (cámara propia + preset de iluminación, sin blur) ─
 	local panel = PanelController.new(menuController, frame, menuBtn, closeBtn, {
 		onOpen = function()
 			isOpen = true
-			BlurController.acquire(BLUR_KEY)
-			fovEffect:expand()
-			currentPage = pageForCurrentTier()
-			resetSelection()
-			render()
-			playPageStagger()
-			applyDefaultSelection()
+
+			local function presentPanel()
+				currentPage = pageForCurrentTier()
+				resetSelection()
+				render()
+				playPageStagger()
+				scenePreview:show()
+				-- Viste la cabeza: applyDefaultSelection acaba en showRewardPreview.
+				applyDefaultSelection()
+			end
+
+			-- La apertura manda: si la cámara ya replicó, se usa aunque no
+			-- estuviera al arrancar el feature. El cierre mira este flag y no el
+			-- controller, para que un panel abierto sin cámara se cierre sin
+			-- fundido aunque la parte haya llegado mientras estaba abierto.
+			cameraActive = ensureCameraController() ~= nil
+			if cameraActive then
+				CameraLock.acquire(CAMERA_LOCK_OWNER)
+				-- El animator ya dejó `frame` Visible=true (y arrancó su propio
+				-- tween de apertura) antes de llegar aquí: lo tapamos hasta que la
+				-- pantalla esté completamente negra, para que el jugador no vea el
+				-- panel —ni su stagger de entrada— con la cámara vieja detrás.
+				frame.Visible = false
+				fade:cover(function()
+					cameraController:apply(true)
+					applyPassPreset()
+					frame.Visible = true
+					presentPanel()
+					fade:reveal()
+				end)
+			else
+				presentPanel()
+			end
 		end,
 		onClose = function()
 			isOpen = false
-			BlurController.release(BLUR_KEY)
-			fovEffect:restore()
+			-- La cabeza se retira detrás del negro (o al momento si no hay cámara):
+			-- quitarla antes del fundido se vería desaparecer en plena escena.
+			if cameraActive then
+				-- PanelController ya remostró el menú del lobby antes de llegar aquí
+				-- (su animator de cierre es instantáneo). Lo volvemos a ocultar en
+				-- el mismo frame —sin parpadeo, ambas cosas son `gui.Enabled`— para
+				-- que no se vea sobre la cámara del pase mientras funde a negro.
+				menuController:hide()
+				fade:cover(function()
+					ScenePresetController.applyLobbyOrRestore("[BattlePassFeature]")
+					cameraController:restore()
+					CameraLock.release(CAMERA_LOCK_OWNER)
+					scenePreview:hide()
+					-- Mismo guard que PanelController: si en medio de la transición
+					-- se abrió otro panel, el menú no debe reaparecer debajo.
+					if not menuController:hasOpenPanel() then
+						menuController:show()
+					end
+					fade:reveal()
+				end)
+			else
+				scenePreview:hide()
+			end
 			-- Liberar los wraps animados para que sus texturas dejen de
 			-- actualizarse cada Heartbeat mientras el panel está cerrado.
 			for slotFrame in wrapBySlot do
 				clearWrap(slotFrame)
 			end
-			clearPreviewWrap()
 		end,
 	})
 	janitor:Add(panel, "Destroy")
@@ -872,13 +1158,24 @@ function BattlePassFeature.start(menuController: any): any
 		if type(data) ~= "table" then return end
 		if data.success then
 			if data.message == "OK" then
-				Notify.success("Recompensa reclamada")
+				Notify.success("Reward claimed!")
 			elseif data.message == "PremiumGranted" then
-				Notify.success("Premium desbloqueado")
+				Notify.success("Premium unlocked!")
 			elseif data.message == "SkipGranted" then
-				Notify.success("Nivel saltado")
+				Notify.success("Tier skipped!")
 			end
 		else
+			-- Fallos accionables por el jugador → notificación; el resto, log.
+			-- "GemsInsufficient" es el momento clave del embudo: el jugador quiso
+			-- comprar (premium o skip) y le faltan Gems — el copy apunta a la
+			-- tienda, donde viven los packs.
+			if data.message == "GemsInsufficient" then
+				Notify.warning("Not enough Gems. Get more in the store.")
+			elseif data.message == "AlreadyOwned" then
+				Notify.warning("You already own the Premium pass.")
+			elseif data.message == "SeasonCompleted" then
+				Notify.warning("You already completed the season.")
+			end
 			warn(("[BattlePassFeature] Response: %s (tier=%s)"):format(tostring(data.message), tostring(data.tier)))
 		end
 	end), true)
@@ -898,6 +1195,19 @@ function BattlePassFeature.start(menuController: any): any
 		janitor:Add(obs:onBind(function()
 			render()
 			updateNavButton()
+		end), true)
+		-- Los previews de wraps GLOBALES van sobre el arma equipada, así que un
+		-- cambio de loadout con el panel abierto tiene que repintar slots y escena
+		-- — la previewKey por sí sola detecta el arma nueva pero nadie la relee.
+		local loadoutObs = scope:Observer(DataController.Loadout :: any)
+		janitor:Add(loadoutObs:onBind(function()
+			if not isOpen then
+				return
+			end
+			render()
+			if lastSceneReward then
+				pushScenePreview(lastSceneReward)
+			end
 		end), true)
 	end)
 
