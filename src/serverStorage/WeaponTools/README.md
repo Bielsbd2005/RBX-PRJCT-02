@@ -28,3 +28,12 @@ de la Tool. Sin definición, la Tool no se instancia como arma.
 `CurrentAmmo` e `IsReloading` los escribe BaseWeapon en runtime, así que no se
 autoran en la Tool. `Shotgun` y `OptimalRange` sí son de la Tool: los leen el
 crosshair y el auto-aim.
+
+## Modelo de display
+
+La Tool es la ÚNICA copia autorada de la geometría del arma. El modelo que
+enseñan el locker y el holster (`Shared.Locker.weapons.<Category>.<WeaponId>`)
+se genera desde el `WeaponModel` de la Tool al ejecutar
+`tools/weapons/StudioMigration.luau`; no lo montes a mano. Por eso el
+`WeaponModel` debe ser un `Model` con `PrimaryPart` seteado: el wrap se pinta
+sobre esa parte, tanto en la Tool empuñada como en el display.
