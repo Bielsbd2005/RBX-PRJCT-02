@@ -264,10 +264,10 @@ General sanity before anything: no red errors in **Output** on join, and
 ## 5. WEAPONS CONFIG MIGRATION (Configuration → Shared/constants/WeaponsConfig)
 
 Prereq: run `tools/weapons/StudioMigration.luau` from the Studio command bar
-(stamps `WeaponCategory`/`WeaponId` on each `ServerStorage.WeaponTools` Tool and
-removes what the definition now covers: its legacy `Configuration`, the
-`WeaponType`/`CurrentAmmo`/`IsReloading` attributes and the `AmmoType` value),
-then save the place. Re-run it whenever you add a weapon.
+(stamps `WeaponCategory` on each `ServerStorage.WeaponTools` Tool and removes
+what is now redundant: its legacy `Configuration`, the `WeaponId`, `WeaponType`,
+`CurrentAmmo` and `IsReloading` attributes, and the `AmmoType` value), then save
+the place. Re-run it whenever you add a weapon.
 
 - ✅ **Boot clean**: no `[WeaponsConfig]` errors (Studio fails fast on a bad key/type)
   and no `[BaseWeapon] ... Configuration obsoleta` warns (those mean the migration
@@ -291,7 +291,11 @@ then save the place. Re-run it whenever you add a weapon.
 - ✅ **Bots**: a bot with a catalog weapon (e.g. Sniper) fires at that weapon's
   cadence; the client renders its tracers/sounds (Tool resolves its definition).
 - ✅ **Both "Default" weapons**: Main/Default and Special/Default resolve to their own
-  category (attribute-based identity), hotbar slots are correct.
+  category via the `WeaponCategory` attribute (the weapon id is the Tool's name, so
+  without it both would look identical), hotbar slots are correct.
+- ✅ **Bots without AR-NPC**: the legacy `ReplicatedStorage.AR-NPC` fallback is gone.
+  Every bot spawns holding a catalog weapon and shoots. No `[BotAI] ... sin arma`
+  warns in Output.
 - 🔁 **No definition, no weapon**: a Tool tagged `WeaponsSystemWeapon` with no definition
   (e.g. a prototype outside `WeaponTools`) logs one `[WeaponsSystem]` warn and is not
   instantiated; nothing else breaks.

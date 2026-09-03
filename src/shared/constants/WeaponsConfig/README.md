@@ -21,10 +21,10 @@ WeaponsConfig/
    `ItemsConfig` y el nombre del Tool en `ServerStorage.WeaponTools.<Category>`.
 2. Declara `WeaponType` (`BulletWeapon` | `BowWeapon`) y en `Config` sólo las
    claves que difieran del default. Claves y defaults: `Schema.luau`.
-3. El Tool de Studio ya no lleva `Configuration`; sólo necesita los atributos
-   `WeaponCategory` y `WeaponId` (los estampa `tools/weapons/StudioMigration.luau`
-   y, en cada clon, `LoadoutService` / `BotAI`). `CurrentAmmo` e `IsReloading`
-   tampoco se autoran: los escribe BaseWeapon al instanciar el arma.
+3. El Tool de Studio ya no lleva `Configuration`; sólo necesita el atributo
+   `WeaponCategory` (lo estampa `tools/weapons/StudioMigration.luau`, y de nuevo
+   `LoadoutService` en cada clon). El id es el NOMBRE del Tool. `CurrentAmmo` e
+   `IsReloading` tampoco se autoran: los escribe BaseWeapon al instanciar el arma.
 
 Una clave mal escrita o con tipo incorrecto **falla en Studio** al arrancar
 (en producción es un `warn`). Un Tool sin definición **no se instancia** como

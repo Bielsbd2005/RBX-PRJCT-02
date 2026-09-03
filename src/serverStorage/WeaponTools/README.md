@@ -21,9 +21,9 @@ Cada Tool clonada se marca con el atributo `MatchLoadoutTool=true` para limpiarl
 La Tool **no** lleva `Configuration`: daño, cadencia, recoil, VFX, etc. viven en
 `src/shared/constants/WeaponsConfig/Definitions/<Category>/<WeaponId>.luau`
 (ver el README de esa carpeta). La Tool sólo aporta geometría, sonidos,
-animaciones, el tag `WeaponsSystemWeapon` y los atributos de identidad
-`WeaponCategory` / `WeaponId` (`tools/weapons/StudioMigration.luau` los
-estampa). Sin definición, la Tool no se instancia como arma.
+animaciones, el tag `WeaponsSystemWeapon` y el atributo `WeaponCategory`
+(`tools/weapons/StudioMigration.luau` lo estampa); el id del arma es el NOMBRE
+de la Tool. Sin definición, la Tool no se instancia como arma.
 
 `CurrentAmmo` e `IsReloading` los escribe BaseWeapon en runtime, así que no se
 autoran en la Tool. `Shotgun` y `OptimalRange` sí son de la Tool: los leen el

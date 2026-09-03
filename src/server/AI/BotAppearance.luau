@@ -175,7 +175,7 @@ function BotAppearance.roll(personality: BotPersonality.Personality): BotAppeara
 	-- Filtra cada pool por las rarities permitidas por la personality.
 	-- Si tras el filtro un pool queda vacío, _pickRandom devuelve nil y el
 	-- código aguas abajo lo trata como "sin override" (face stays template
-	-- default, wrap stays AR-NPC default, hat se omite).
+	-- default, wrap stays el del template, hat se omite).
 	local hatPool    = BotPersonality.filterByRarity(_hatPool,    "Hats",        personality)
 	local facePool   = BotPersonality.filterByRarity(_facePool,   "Faces",       personality)
 	local wrapPool   = BotPersonality.filterByRarity(_wrapPool,   "WeaponWraps", personality)
@@ -199,7 +199,7 @@ function BotAppearance.roll(personality: BotPersonality.Personality): BotAppeara
 end
 
 --- Tool template real del arma (la misma que clonan los jugadores) por id.
---- nil/ausente → BotAI cae al template legacy AR-NPC.
+--- nil/ausente → el bot se queda sin arma (BotAI avisa).
 function BotAppearance.findWeaponTemplate(weaponId: string?): Tool?
 	if not weaponId or weaponId == "" then
 		return nil

@@ -15,11 +15,14 @@
 	  • DisplayStats  — stats derivados para UI (locker), sin red.
 
 	Identidad de un Tool en runtime:
-	  Los templates de ServerStorage.WeaponTools y los clones que reparte el
-	  servidor (LoadoutService, BotAI) llevan los atributos `WeaponCategory` y
-	  `WeaponId` (ver StampTool). Como respaldo (Tools colocadas a mano para
-	  probar) se acepta sólo Tool.Name, buscando en Main y luego Special. Un
-	  Tool sin definición no se instancia como arma (WeaponsSystem avisa).
+	  El id es el NOMBRE del Tool: el resto del código ya lo asume (LoadoutService
+	  busca el template, equipa y sube de nivel por nombre). Lo único que hace
+	  falta aparte es la categoría, porque la carpeta se pierde al clonar el arma
+	  a la mochila y el cliente no ve ServerStorage: va en el atributo
+	  `WeaponCategory` (ver StampTool), y sin él "Default" sería ambiguo (existe
+	  en Main y en Special). Como respaldo, un Tool sin atributo se busca por
+	  nombre en Main y luego en Special. Un Tool sin definición no se instancia
+	  como arma (WeaponsSystem avisa).
 
 	Validación:
 	  Al cargar se valida cada definición contra el esquema. En Studio un
@@ -42,9 +45,8 @@ export type RegisteredWeapon = Types.RegisteredWeapon
 
 local WeaponsConfig = {}
 
--- Atributos que identifican el arma de un Tool clonado (los estampa el server).
+-- Atributo que fija la categoría del arma de un Tool (el id es su nombre).
 WeaponsConfig.CATEGORY_ATTRIBUTE = "WeaponCategory"
-WeaponsConfig.ID_ATTRIBUTE = "WeaponId"
 
 WeaponsConfig.Schema = Schema
 
@@ -190,28 +192,27 @@ end
 
 -- ── Identidad de Tools ───────────────────────────────────────
 
---- Estampa la identidad en un Tool clonado para que cliente y servidor la resuelvan igual.
-function WeaponsConfig.StampTool(tool: Instance, category: string, weaponId: string)
+--- Fija la categoría en un Tool para que cliente y servidor resuelvan lo mismo.
+function WeaponsConfig.StampTool(tool: Instance, category: string)
 	tool:SetAttribute(WeaponsConfig.CATEGORY_ATTRIBUTE, category)
-	tool:SetAttribute(WeaponsConfig.ID_ATTRIBUTE, weaponId)
 end
 
 --[[
-	Resuelve (category, weaponId) de un Tool. Orden:
-	  1. Atributos WeaponCategory + WeaponId.
-	  2. Tool.Name buscado en Main y luego en Special (Tools sin estampar).
-	Devuelve nil, nil si no hay ninguna definición que encaje.
+	Resuelve (category, weaponId) de un Tool. El id es siempre su nombre; la
+	categoría sale del atributo y, si no lo lleva, de buscar ese nombre en Main
+	y luego en Special. Devuelve nil, nil si no hay definición que encaje.
 ]]
 function WeaponsConfig.ResolveToolIdentity(tool: Instance): (string?, string?)
+	local weaponId = tool.Name
+
 	local category = tool:GetAttribute(WeaponsConfig.CATEGORY_ATTRIBUTE)
-	local weaponId = tool:GetAttribute(WeaponsConfig.ID_ATTRIBUTE)
-	if type(category) == "string" and type(weaponId) == "string" and WeaponsConfig.Get(category, weaponId) then
+	if type(category) == "string" and WeaponsConfig.Get(category, weaponId) then
 		return category, weaponId
 	end
 
 	for _, candidate in WeaponCategory.ALL do
-		if WeaponsConfig.Get(candidate, tool.Name) then
-			return candidate, tool.Name
+		if WeaponsConfig.Get(candidate, weaponId) then
+			return candidate, weaponId
 		end
 	end
 

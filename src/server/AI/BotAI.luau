@@ -18,7 +18,6 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local TeamUtils = require(Shared.utils.TeamUtils)
 local BotConfig = require(Shared.constants.BotConfig)
 local WeaponsConfig = require(Shared.constants.WeaponsConfig)
-local WeaponCategory = require(Shared.constants.WeaponCategory)
 local BotPersonalities = require(Shared.constants.BotPersonalities)
 local AssetIds = require(Shared.constants.AssetIds)
 local CollisionGroups = require(Shared:WaitForChild("CollisionGroups"))
@@ -70,27 +69,6 @@ local function _getWeaponDataRemote(): RemoteEvent?
 	if remote and remote:IsA("RemoteEvent") then
 		_weaponDataRemote = remote
 		return remote
-	end
-	return nil
-end
-
-local _weaponTemplate: Tool? = nil
-
---[[
-@desc Obtiene y cachea el template AR-NPC legacy.
-@desc Hoy es solo el FALLBACK: los bots clonan el arma real de su identity
-@desc (BotAppearance.findWeaponTemplate); esto cubre identities sin weaponId
-@desc (catálogo de WeaponTools vacío) y mantiene el comportamiento histórico.
-@return Tool? Tool base de NPC o nil si no existe/no es Tool.
-]]
-local function _getWeaponTemplate(): Tool?
-	if _weaponTemplate and _weaponTemplate.Parent then
-		return _weaponTemplate
-	end
-	local tpl = ReplicatedStorage:FindFirstChild("AR-NPC")
-	if tpl and tpl:IsA("Tool") then
-		_weaponTemplate = tpl
-		return tpl
 	end
 	return nil
 end
@@ -345,7 +323,7 @@ end
 @param fakeUserId number? Identificador de bot para kill attribution.
 @param wrapId string? Id de wrap visual aplicado al arma del bot.
 @param combatOverrides CombatOverrides? Skill de la personality (D1); nil = perfil global.
-@param weaponId string? Arma del catálogo Main rolleada en la identity; nil = AR-NPC legacy.
+@param weaponId string? Arma del catálogo Main rolleada en la identity.
 @return BotAIInstance Instancia lista para Start.
 ]]
 function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?, wrapId: string?, combatOverrides: BotPersonalities.CombatOverrides?, weaponId: string?): BotAIInstance
@@ -419,28 +397,24 @@ end
 @desc Clona, equipa y registra el arma del bot.
 @desc Prefiere la Tool REAL del weaponId de la identity (mismos templates que
 @desc los jugadores → tracers/sonidos/wrap correctos por arma vía el
-@desc WeaponsSystem del cliente) con fallback al AR-NPC legacy.
+@desc WeaponsSystem del cliente).
 @desc También aplica wrap visual y cachea TipAttachment para el cálculo de origen.
 @return nil
 ]]
 function BotAI:_setupTool()
-	local catalogTemplate = BotAppearance.findWeaponTemplate(self._weaponId)
-	local toolTemplate = catalogTemplate or _getWeaponTemplate()
+	-- El clon hereda del template los atributos de identidad (WeaponCategory) y
+	-- el tag, así que el WeaponsSystem lo resuelve igual que el arma de un
+	-- jugador, sin estampar nada aquí.
+	local toolTemplate = BotAppearance.findWeaponTemplate(self._weaponId)
 	if not toolTemplate then
 		warn(string.format(
-			"[BotAI] %s sin arma: ni WeaponTools.Main.%s ni ReplicatedStorage.AR-NPC disponibles. El bot no disparará.",
+			"[BotAI] %s sin arma: no existe ServerStorage.WeaponTools.Main.%s. El bot no disparará.",
 			self._dummy.Name,
 			tostring(self._weaponId)
 		))
 		return
 	end
 	local tool = toolTemplate:Clone()
-	local catalogWeaponId = self._weaponId
-	if catalogTemplate and catalogWeaponId then
-		-- Misma identidad que estampa LoadoutService a los jugadores: así el
-		-- WeaponsSystem (server y clientes) resuelve la definición del arma.
-		WeaponsConfig.StampTool(tool, WeaponCategory.MAIN, catalogWeaponId)
-	end
 	BotAppearance.applyWrapToTool(tool, self._wrapId)
 	tool.Parent = self._dummy
 	if not CollectionService:HasTag(tool, WEAPON_TAG) then

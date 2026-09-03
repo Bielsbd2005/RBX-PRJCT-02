@@ -748,7 +748,7 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 
 	local wrapId = if identity.appearance then identity.appearance.wrapId else nil
 	-- Weapon rolled with the identity (stable across respawns, like the rest
-	-- of the appearance); nil falls back to the legacy AR-NPC inside BotAI.
+	-- of the appearance).
 	local weaponId = if identity.appearance then identity.appearance.weaponId else nil
 	-- D1: combat skill from the identity's personality tier; nil combat block
 	-- (or unknown id) falls back to the global BotConfig.Combat profile.

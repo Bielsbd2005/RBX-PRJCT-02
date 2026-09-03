@@ -5,19 +5,19 @@
 	ejecutarlo es la forma de dar de alta un arma nueva creada en Studio.
 
 	Qué hace, por cada Tool de ServerStorage.WeaponTools.<Category>.<Id>:
-	  1. Estampa los atributos `WeaponCategory` y `WeaponId` (identidad que
-	     WeaponsConfig resuelve en runtime; los clones la heredan).
+	  1. Estampa el atributo `WeaponCategory` (el id es el nombre del Tool). Es
+	     lo único que no se puede deducir del clon en runtime, porque la carpeta
+	     se pierde al clonar el arma a la mochila; los clones lo heredan.
 	  2. Elimina lo que la definición ya cubre SI existe una definición para esa
 	     arma en Shared.constants.WeaponsConfig: la `Configuration` legacy, el
 	     atributo `WeaponType` (el tipo lo dicta la definición), el StringValue
 	     `AmmoType` (nadie lo lee) y los atributos `CurrentAmmo` / `IsReloading`
 	     (los escribe BaseWeapon en runtime desde la definición, escalados por
-	     nivel; autorarlos a mano solo servía para que se desincronizaran).
+	     nivel; autorarlos a mano solo servía para que se desincronizaran) y el
+	     `WeaponId` que estampaban versiones anteriores de este script.
 	     Si no existe definición, no toca nada y avisa: esa Tool no se
 	     instanciará como arma hasta tenerla.
-	  3. ReplicatedStorage["AR-NPC"] (fallback legacy de bots) se estampa como
-	     Main/Default: su Configuration era idéntica.
-	  4. Lista cualquier otra Tool con el tag WeaponsSystemWeapon fuera de
+	  3. Lista cualquier otra Tool con el tag WeaponsSystemWeapon fuera de
 	     WeaponTools (prototipos sueltos) para que decidas si migrarla,
 	     quitarle el tag o borrarla.
 
@@ -62,13 +62,13 @@ local function migrateTool(tool, category, weaponId)
 		return
 	end
 
-	-- Mismos atributos que estampa WeaponsConfig.StampTool en runtime.
+	-- Mismo atributo que estampa WeaponsConfig.StampTool en runtime.
 	tool:SetAttribute("WeaponCategory", category)
-	tool:SetAttribute("WeaponId", weaponId)
+	-- Redundantes: el id es el nombre del Tool, el tipo lo dicta la definición,
+	-- y CurrentAmmo/IsReloading los escribe BaseWeapon al instanciar el arma
+	-- (CurrentAmmo = AmmoCapacity de la definición, ya escalado por nivel).
+	tool:SetAttribute("WeaponId", nil)
 	tool:SetAttribute("WeaponType", nil)
-	-- Los pone BaseWeapon al instanciar el arma (CurrentAmmo = AmmoCapacity de
-	-- la definición, ya escalado por WeaponLevel). Autorados aquí solo eran una
-	-- copia a mano que se desincronizaba al duplicar Tools.
 	tool:SetAttribute("CurrentAmmo", nil)
 	tool:SetAttribute("IsReloading", nil)
 	if configuration then
@@ -97,16 +97,11 @@ for _, category in { "Main", "Special" } do
 	end
 end
 
-local legacyBotTool = ReplicatedStorage:FindFirstChild("AR-NPC")
-if legacyBotTool and legacyBotTool:IsA("Tool") then
-	migrateTool(legacyBotTool, "Main", "Default")
-end
-
 -- Tools con el tag del WeaponsSystem fuera del catálogo: no tienen definición
 -- y no se instanciarán. Migrarlas a WeaponTools, quitarles el tag o borrarlas.
 local CollectionService = game:GetService("CollectionService")
 for _, tagged in CollectionService:GetTagged("WeaponsSystemWeapon") do
-	if tagged:IsA("Tool") and not tagged:IsDescendantOf(root) and tagged ~= legacyBotTool then
+	if tagged:IsA("Tool") and not tagged:IsDescendantOf(root) then
 		warn(string.format("[Migration] Tool suelta con tag WeaponsSystemWeapon: %s (sin definición; no se instanciará).", tagged:GetFullName()))
 	end
 end

@@ -589,7 +589,8 @@ end
 
 --[[
 	Carga la config del arma desde WeaponsConfig (Shared/constants/WeaponsConfig),
-	resolviendo la identidad del Tool por atributos (ver WeaponsConfig.StampTool).
+	resolviendo el arma por el nombre del Tool y su atributo de categoría (ver
+	WeaponsConfig.ResolveToolIdentity).
 	WeaponsSystem.createWeaponForInstance ya garantiza que hay definición; si
 	aun así faltara, el arma queda con los defaults de cada getConfigValue.
 ]]

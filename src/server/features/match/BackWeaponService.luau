@@ -15,8 +15,8 @@
 	Detección de equipado:
 	  Roblox reparenta la Tool Backpack→Character al equipar, y eso replica al
 	  servidor, así que `character.ChildAdded` es señal suficiente y no hace
-	  falta ningún remote. La categoría se lee del atributo
-	  `MatchLoadoutCategory` que estampa LoadoutService al clonar.
+	  falta ningún remote. La categoría se lee del atributo `WeaponCategory` que
+	  estampa LoadoutService al clonar (el mismo que usa WeaponsConfig).
 
 	Gamepass:
 	  El holster es el beneficio del gamepass `StoreProducts.GamePasses.ByName
@@ -34,6 +34,7 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local CosmeticsTemplates = require(Shared.Locker.CosmeticsTemplates)
 local StoreProducts = require(Shared.constants.StoreProducts)
 local WeaponCategory = require(Shared.constants.WeaponCategory)
+local WeaponsConfig = require(Shared.constants.WeaponsConfig)
 local GamePassService = require(script.Parent.Parent.Parent.core.GamePassService)
 
 local BackWeaponService = {}
@@ -48,7 +49,7 @@ local BACK_WEAPON_CLONE_NAME = "BackWeaponModel"
 -- holster al apuntar, igual que hace con los hats del loadout.
 local BACK_WEAPON_CLONE_ATTRIBUTE = "BackWeaponClone"
 local BACK_WEAPON_CATEGORY_ATTRIBUTE = "BackWeaponCategory"
-local LOADOUT_CATEGORY_ATTRIBUTE = "MatchLoadoutCategory"
+local LOADOUT_CATEGORY_ATTRIBUTE = WeaponsConfig.CATEGORY_ATTRIBUTE
 
 -- Gamepass que desbloquea el holster (ver cabecera).
 local BACK_WEAPON_PASS = StoreProducts.GamePasses.ByName.BackWeapon

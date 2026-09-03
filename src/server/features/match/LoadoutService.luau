@@ -28,11 +28,6 @@ local BODIES_ROOT_NAME = "Bodies"
 local DEFAULT_BODY_ID = "Default"
 local MATCH_BODY_CLONE_ATTRIBUTE = "MatchBodyClone"
 local MATCH_LOADOUT_TOOL_ATTRIBUTE = "MatchLoadoutTool"
--- Categoría de la slot ("Main"/"Special") estampada en la Tool. El nombre de la
--- Tool es el weaponId, que no basta: el mismo id puede existir en ambos
--- catálogos (p.ej. "Default"). BackWeaponService lo lee para saber qué arma
--- cuelga de la espalda.
-local MATCH_LOADOUT_CATEGORY_ATTRIBUTE = "MatchLoadoutCategory"
 local MATCH_LOADOUT_HAT_ATTRIBUTE = "MatchLoadoutHat"
 
 -- ── Helpers internos ─────────────────────────────────────────
@@ -188,10 +183,13 @@ local function _grantMatchLoadoutTools(
 		local backpackClone = template:Clone()
 		CosmeticsTemplates.applyWeaponWrapToTool(backpackClone, wrapId)
 		backpackClone:SetAttribute(MATCH_LOADOUT_TOOL_ATTRIBUTE, true)
-		backpackClone:SetAttribute(MATCH_LOADOUT_CATEGORY_ATTRIBUTE, loadoutCategory)
-		-- Identidad canónica (WeaponCategory/WeaponId): BaseWeapon, Hotbar y BotAI
-		-- resuelven con ella la definición de WeaponsConfig en cliente y servidor.
-		WeaponsConfig.StampTool(backpackClone, loadoutCategory, weaponId)
+		-- Categoría de la slot ("Main"/"Special"). El nombre de la Tool es el
+		-- weaponId, que no basta: el mismo id existe en los dos catálogos
+		-- ("Default"). Con ella, BaseWeapon y el Hotbar resuelven la definición de
+		-- WeaponsConfig en cliente y servidor, y BackWeaponService sabe qué arma
+		-- cuelga de la espalda. Se reestampa aunque el template ya la traiga:
+		-- aquí la categoría es autoritativa.
+		WeaponsConfig.StampTool(backpackClone, loadoutCategory)
 		-- Nivel de arma (1..5) derivado de las kills acumuladas con esa arma.
 		-- BaseWeapon lee este atributo para escalar daño/cadencia/recarga/cargador.
 		backpackClone:SetAttribute(WeaponLevelConfig.ATTRIBUTE, LoadoutService.GetWeaponLevel(profileData, loadoutCategory, weaponId))
