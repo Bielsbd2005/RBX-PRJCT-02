@@ -7,10 +7,8 @@
 	espejo del que usan BaseWeapon/BulletWeapon en sus `getConfigValue(...)`:
 	el runtime sigue leyendo su propio default como último recurso, así que si
 	cambias uno aquí, cámbialo también allí (o al revés). El esquema es la
-	referencia documentada y lo que valida el registro (WeaponsConfig/init) y
-	el generador (tools/weapons/dump-weapon-definitions.luau).
-
-	Sin dependencias de Roblox: lune lo requiere fuera de Studio.
+	referencia documentada y lo que valida el registro (WeaponsConfig/init) al
+	cargar cada definición.
 ]]
 
 export type ValueType = "number" | "integer" | "string" | "boolean"

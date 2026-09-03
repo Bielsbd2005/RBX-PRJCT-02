@@ -24,3 +24,7 @@ La Tool **no** lleva `Configuration`: daño, cadencia, recoil, VFX, etc. viven e
 animaciones, el tag `WeaponsSystemWeapon` y los atributos de identidad
 `WeaponCategory` / `WeaponId` (`tools/weapons/StudioMigration.luau` los
 estampa). Sin definición, la Tool no se instancia como arma.
+
+`CurrentAmmo` e `IsReloading` los escribe BaseWeapon en runtime, así que no se
+autoran en la Tool. `Shotgun` y `OptimalRange` sí son de la Tool: los leen el
+crosshair y el auto-aim.

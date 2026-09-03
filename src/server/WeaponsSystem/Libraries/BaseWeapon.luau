@@ -92,12 +92,14 @@ function BaseWeapon:doInitialSetup()
 		self:onChildAdded(child)
 	end
 
-	-- CurrentAmmo attribute must be created by user on the Tool (number type)
-	if selfClass.CanBeReloaded then
-		local currentAmmo = self.instance:GetAttribute("CurrentAmmo")
-		if currentAmmo == nil then
-			warn(string.format("[BaseWeapon] Missing CurrentAmmo attribute on %s. Create it as a number attribute in Studio.", self.instance:GetFullName()))
-		end
+	-- Cargador lleno al entrar en juego. Lo escribe el SERVIDOR desde la
+	-- definición (getConfigValue ya aplica el escalado por WeaponLevel) y
+	-- replica al cliente, que lo pinta en el hotbar. Así el Tool de Studio no
+	-- necesita traer CurrentAmmo autorado: antes ese número era una copia a mano
+	-- del AmmoCapacity que se desincronizaba al duplicar Tools (una recortada de
+	-- 2 cartuchos arrancaba con 5) y nunca reflejaba el nivel del arma.
+	if selfClass.CanBeReloaded and IsServer then
+		self.instance:SetAttribute("CurrentAmmo", self:getConfigValue("AmmoCapacity", 30))
 	end
 
 	self.connections.ancestryChanged = self.instance.AncestryChanged:Connect(function() self:onAncestryChanged() end)

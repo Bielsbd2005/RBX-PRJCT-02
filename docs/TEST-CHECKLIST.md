@@ -263,9 +263,11 @@ General sanity before anything: no red errors in **Output** on join, and
 
 ## 5. WEAPONS CONFIG MIGRATION (Configuration → Shared/constants/WeaponsConfig)
 
-Prereq: run `tools/weapons/StudioMigration.luau` from the Studio command bar once
+Prereq: run `tools/weapons/StudioMigration.luau` from the Studio command bar
 (stamps `WeaponCategory`/`WeaponId` on each `ServerStorage.WeaponTools` Tool and
-removes its legacy `Configuration`), then save the place.
+removes what the definition now covers: its legacy `Configuration`, the
+`WeaponType`/`CurrentAmmo`/`IsReloading` attributes and the `AmmoType` value),
+then save the place. Re-run it whenever you add a weapon.
 
 - ✅ **Boot clean**: no `[WeaponsConfig]` errors (Studio fails fast on a bad key/type)
   and no `[BaseWeapon] ... Configuration obsoleta` warns (those mean the migration
@@ -278,6 +280,14 @@ removes its legacy `Configuration`), then save the place.
   instantly (no round-trip) and match the definition; compare bars vs equipped
   weapon still colour up/down; level scaling still applies with kills.
 - ✅ **Hotbar ammo**: magazine capacity matches `AmmoCapacity` (× WeaponLevel).
+- ✅ **Full magazine on spawn**: every weapon spawns loaded to its definition's
+  capacity, with no reload animation on first equip. Watch the four weapons whose
+  Tools were duplicated and carried a stale authored `CurrentAmmo`: Tommy (50),
+  Short (2), Special Default (12), Laser (20). At weapon level 5 the starting
+  count should be the scaled capacity (AK: 42), not the base one.
+- ✅ **No phantom weapons**: nothing in `ServerStorage.WeaponTools` or
+  `ReplicatedStorage` is instantiated as a live weapon at startup (previously each
+  template became one on the server and on every client).
 - ✅ **Bots**: a bot with a catalog weapon (e.g. Sniper) fires at that weapon's
   cadence; the client renders its tracers/sounds (Tool resolves its definition).
 - ✅ **Both "Default" weapons**: Main/Default and Special/Default resolve to their own

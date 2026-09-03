@@ -23,27 +23,23 @@ WeaponsConfig/
    claves que difieran del default. Claves y defaults: `Schema.luau`.
 3. El Tool de Studio ya no lleva `Configuration`; sólo necesita los atributos
    `WeaponCategory` y `WeaponId` (los estampa `tools/weapons/StudioMigration.luau`
-   y, en cada clon, `LoadoutService` / `BotAI`).
+   y, en cada clon, `LoadoutService` / `BotAI`). `CurrentAmmo` e `IsReloading`
+   tampoco se autoran: los escribe BaseWeapon al instanciar el arma.
 
 Una clave mal escrita o con tipo incorrecto **falla en Studio** al arrancar
 (en producción es un `warn`). Un Tool sin definición **no se instancia** como
 arma: WeaponsSystem avisa y la ignora.
-
-## Regenerar desde un place
-
-```bash
-lune run tools/weapons/dump-weapon-definitions.luau <ruta al .rbxl> [--dry-run]
-```
-
-Lee las `Configuration` de `ServerStorage.WeaponTools` del place y reescribe
-las definiciones. Sólo emite claves presentes en el esquema; el resto las lista
-como descartadas.
 
 ## Runtime
 
 - `BaseWeapon:loadConfigFromDefinition()` vuelca `Config` en `configValues`;
   `getConfigValue(key, default)` y el escalado por nivel (`WeaponLevelConfig`)
   no cambian.
+- El servidor arranca el arma con el cargador lleno (`CurrentAmmo` =
+  `AmmoCapacity` de la definición, escalado por nivel) y replica el atributo al
+  cliente para el hotbar.
+- Los Tools que viven en un almacén (`ServerStorage`, `ReplicatedStorage`) son
+  templates: `WeaponsSystem.onWeaponAdded` los ignora aunque lleven el tag.
 - `WeaponsSystem.createWeaponForInstance` toma `WeaponType` de la definición;
   el Tool ya no necesita ese atributo.
 - `Hotbar` y `BotAI` leen `AmmoCapacity` / `ShotCooldown` vía

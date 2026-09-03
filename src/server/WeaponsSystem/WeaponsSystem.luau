@@ -3,6 +3,17 @@ local function _isDescendantOfStarterGear(instance: Instance): boolean
 	-- W10: nativo en lugar de loop manual sobre la ancestría.
 	return instance:FindFirstAncestorOfClass("StarterGear") ~= nil
 end
+
+-- Un Tool que vive en un almacén (ServerStorage.WeaponTools, ReplicatedStorage)
+-- es un TEMPLATE: nadie lo empuña. El tag `WeaponsSystemWeapon` viaja en el
+-- template, así que sin este filtro cada arma del catálogo se instanciaba
+-- también como arma fantasma —en el servidor y en cada cliente— con sus
+-- conexiones, sus sonidos pooleados y sus escrituras de atributos sobre el
+-- propio template.
+local function _isWeaponTemplate(instance: Instance): boolean
+	return instance:FindFirstAncestorOfClass("ServerStorage") ~= nil
+		or instance:FindFirstAncestorOfClass("ReplicatedStorage") ~= nil
+end
 local CollectionService = game:GetService("CollectionService")
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
@@ -730,7 +741,7 @@ function WeaponsSystem.onWeaponAdded(weaponInstance)
 	end
 
 	-- StarterGear tools are templates for respawn and should not be initialized as active weapons.
-	if _isDescendantOfStarterGear(weaponInstance) then
+	if _isDescendantOfStarterGear(weaponInstance) or _isWeaponTemplate(weaponInstance) then
 		return
 	end
 

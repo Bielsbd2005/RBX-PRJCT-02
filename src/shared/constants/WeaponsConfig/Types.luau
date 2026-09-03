@@ -12,8 +12,7 @@
 	                         definición pueda declararse con su tipo real.
 
 	Todas las claves son opcionales: una definición sólo escribe lo que
-	difiere del default (ver Schema.luau). Este módulo no tiene lógica para que
-	lune (tools/weapons) y Studio puedan requerirlo por igual.
+	difiere del default (ver Schema.luau).
 ]]
 
 export type WeaponCategory = "Main" | "Special"

@@ -1,7 +1,7 @@
 --!strict
--- Generado por tools/weapons/dump-weapon-definitions.luau a partir de
--- ServerStorage.WeaponTools.Main.AK. Editar a mano es válido: este
--- fichero ES la fuente de verdad. Claves y defaults: WeaponsConfig/Schema.luau.
+-- Main/AK. Migrado desde la Configuration del Tool
+-- ServerStorage.WeaponTools.Main.AK, que ya no la lleva: este fichero ES
+-- la fuente de verdad. Claves y defaults: WeaponsConfig/Schema.luau.
 local Types = require(script.Parent.Parent.Parent.Types)
 
 return {

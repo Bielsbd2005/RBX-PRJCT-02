@@ -1,16 +1,20 @@
 --[[
 	tools/weapons/StudioMigration.luau
-	Pegar en la barra de comandos de Studio (una sola vez) tras haber generado
-	las definiciones con tools/weapons/dump-weapon-definitions.luau y haber
-	sincronizado con Rojo.
+	Pegar en la barra de comandos de Studio tras crear/editar definiciones en
+	Definitions/<Category>/<Id>.luau y haber sincronizado con Rojo. Volver a
+	ejecutarlo es la forma de dar de alta un arma nueva creada en Studio.
 
 	Qué hace, por cada Tool de ServerStorage.WeaponTools.<Category>.<Id>:
 	  1. Estampa los atributos `WeaponCategory` y `WeaponId` (identidad que
 	     WeaponsConfig resuelve en runtime; los clones la heredan).
-	  2. Elimina la `Configuration` legacy y el atributo `WeaponType` SI existe
-	     una definición para esa arma en Shared.constants.WeaponsConfig (el tipo
-	     lo dicta la definición). Si no existe, no toca nada y avisa: esa Tool
-	     no se instanciará como arma hasta tener definición.
+	  2. Elimina lo que la definición ya cubre SI existe una definición para esa
+	     arma en Shared.constants.WeaponsConfig: la `Configuration` legacy, el
+	     atributo `WeaponType` (el tipo lo dicta la definición), el StringValue
+	     `AmmoType` (nadie lo lee) y los atributos `CurrentAmmo` / `IsReloading`
+	     (los escribe BaseWeapon en runtime desde la definición, escalados por
+	     nivel; autorarlos a mano solo servía para que se desincronizaran).
+	     Si no existe definición, no toca nada y avisa: esa Tool no se
+	     instanciará como arma hasta tenerla.
 	  3. ReplicatedStorage["AR-NPC"] (fallback legacy de bots) se estampa como
 	     Main/Default: su Configuration era idéntica.
 	  4. Lista cualquier otra Tool con el tag WeaponsSystemWeapon fuera de
@@ -62,6 +66,11 @@ local function migrateTool(tool, category, weaponId)
 	tool:SetAttribute("WeaponCategory", category)
 	tool:SetAttribute("WeaponId", weaponId)
 	tool:SetAttribute("WeaponType", nil)
+	-- Los pone BaseWeapon al instanciar el arma (CurrentAmmo = AmmoCapacity de
+	-- la definición, ya escalado por WeaponLevel). Autorados aquí solo eran una
+	-- copia a mano que se desincronizaba al duplicar Tools.
+	tool:SetAttribute("CurrentAmmo", nil)
+	tool:SetAttribute("IsReloading", nil)
 	if configuration then
 		configuration:Destroy()
 	end
