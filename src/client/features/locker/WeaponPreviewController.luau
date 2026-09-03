@@ -18,6 +18,7 @@ local WeaponCategoryMod = require(ReplicatedStorage:WaitForChild("Shared"):WaitF
 local ItemDefaults = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("ItemDefaults"))
 local LockerCategory = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("LockerCategory"))
 local LockerMainCategory = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("LockerMainCategory"))
+local LockerUtils = require(script.Parent.LockerUtils)
 
 local SELECTED_WEAPON_RISE_TWEEN_INFO = TweenInfo.new(0.06, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local SELECTED_WEAPON_RISE_HEIGHT = 0.28
@@ -762,6 +763,10 @@ function WeaponPreviewController:_applyForCategory(category: string, itemId: str
 		local loadout = self._options.getCurrentLoadout()
 		local resolvedWrapId = resolveWeaponWrap(loadout, previewCategory, resolvedWeaponId, self._options.ownsWeaponWrap)
 		self:_applyWrap(clonedWeapon, previewCategory, resolvedWrapId)
+		-- Contorno solo si NO está bloqueada: el bloqueo ya trae su propio Highlight
+		-- (relleno oscuro + contorno blanco), y un segundo Highlight encima no lo
+		-- sustituye, se suma.
+		LockerUtils.applyPreviewOutline(clonedWeapon)
 	end
 
 	self._activePreviewByCategory[category] = clonedWeapon

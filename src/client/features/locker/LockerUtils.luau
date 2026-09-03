@@ -4,6 +4,43 @@
 
 local LockerUtils = {}
 
+-- Contorno de los previews 3D: negro y sin relleno. Los valores son los del
+-- personaje del lobby (LobbyCharacterPreview), para que una misma pieza se recorte
+-- igual la mires donde la mires.
+local PREVIEW_OUTLINE_NAME = "PreviewHighlight"
+local PREVIEW_OUTLINE_COLOR = Color3.fromRGB(0, 0, 0)
+local PREVIEW_OUTLINE_TRANSPARENCY = 0.1
+
+-- Pinta el contorno sobre un preview (arma del locker, arma o body del pase).
+-- Reutiliza el Highlight que el asset ya traiga en vez de amontonar otro: dos
+-- Highlight sobre lo mismo se suman y el contorno sale más grueso de lo que toca.
+-- La búsqueda es recursiva a propósito: el pase envuelve el arma en un Model
+-- contenedor, así que un Highlight que venga dentro del asset queda un nivel más
+-- abajo y una búsqueda de hijos directos no lo vería.
+function LockerUtils.applyPreviewOutline(previewInstance: Instance)
+	local existing = previewInstance:FindFirstChildWhichIsA("Highlight", true)
+	local highlight: Highlight
+	if existing then
+		highlight = existing
+	else
+		highlight = Instance.new("Highlight")
+		highlight.Name = PREVIEW_OUTLINE_NAME
+		highlight.DepthMode = Enum.HighlightDepthMode.Occluded
+		highlight.Parent = previewInstance
+	end
+
+	-- Adornee explícito: el preview puede ser un Model o un BasePart suelto.
+	if previewInstance:IsA("Model") or previewInstance:IsA("BasePart") then
+		highlight.Adornee = previewInstance :: any
+	end
+
+	highlight.FillTransparency = 1
+	highlight.FillColor = PREVIEW_OUTLINE_COLOR
+	highlight.OutlineColor = PREVIEW_OUTLINE_COLOR
+	highlight.OutlineTransparency = PREVIEW_OUTLINE_TRANSPARENCY
+	highlight.Enabled = true
+end
+
 -- Animation cacheada por id: LoadAnimation copia la data del asset, así que
 -- reutilizar la misma instancia evita crear y destruir un Instance por preview
 -- (el locker rehace previews en cada cambio de selección).
@@ -42,6 +79,25 @@ function LockerUtils.placePreviewCharacter(previewModel: Model, spawnTarget: Ins
 	end
 
 	previewModel:MoveTo((spawnTarget :: BasePart).Position)
+end
+
+-- Reposiciona cada Part1 a la pose canónica del Motor6D
+-- (Part0.CFrame * C0 * C1:Inverse). Si el template guardado en RS tiene partes
+-- desplazadas físicamente (ej: Transform aplicado al guardar), el ragdoll aparece
+-- deformado al destruir los Motor6Ds. 4 pasadas cubren la profundidad del rig R15
+-- (HRP → LowerTorso → UpperTorso → extremidades → manos/pies).
+function LockerUtils.snapPartsToCanonicalPose(char: Model)
+	local motors = {}
+	for _, m in char:GetDescendants() do
+		if m:IsA("Motor6D") and m.Part0 and m.Part1 then
+			table.insert(motors, m)
+		end
+	end
+	for _ = 1, 4 do
+		for _, m in motors do
+			m.Part1.CFrame = m.Part0.CFrame * m.C0 * m.C1:Inverse()
+		end
+	end
 end
 
 function LockerUtils.playPreviewIdleAnimation(previewModel: Model, ownerJanitor: any, animationId: string)

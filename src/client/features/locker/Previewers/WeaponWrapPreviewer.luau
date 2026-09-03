@@ -26,17 +26,23 @@ local WeaponWrapPreviewer = {}
 local DEFAULT_WRAP_STUDS_PER_TILE = 3
 local WRAP_TEXTURE_SCROLL_SPEED_U = 1
 local WRAP_TEXTURE_SCROLL_SPEED_V = 0
-local FOV_IDEAL = 30
+local FOV_IDEAL = 27
 local DISTANCIA_MULTIPLIER = 0.52
-local DESPLAZAMIENTO_X = 0.2
-local ROTACION_X = 0
-local ROTACION_Y = 130
-local ROTACION_Z = -12
+-- Orientación del modelo y de la cámara, calibradas en Studio (son los valores
+-- de la propiedad Orientation tal cual: fromEulerAnglesYXZ es el mismo orden
+-- Y→X→Z que usa Roblox para Orientation).
+local ROTACION_X = 20
+local ROTACION_Y = 35
+local ROTACION_Z = 20
 local orientacionFija = CFrame.fromEulerAnglesYXZ(
     math.rad(ROTACION_X),
     math.rad(ROTACION_Y),
     math.rad(ROTACION_Z)
 )
+-- La cámara mira de frente al modelo con un yaw de 4°, en vez de apuntar al
+-- centro exacto: ese pelín de giro es lo que descentra el arma en la card.
+local CAMARA_ROTACION_Y = 4
+local orientacionCamara = CFrame.fromEulerAnglesYXZ(0, math.rad(CAMARA_ROTACION_Y), 0)
 
 local WEAPON_WRAP_TEXTURE_FACE_BY_NAME = {
     ScrollTexture_Back = Enum.NormalId.Back,
@@ -319,12 +325,44 @@ function WeaponWrapPreviewer.reframeCentered(vp: ViewportFrame): ()
     )
 end
 
-function WeaponWrapPreviewer.Render(viewportNode: ViewportFrame, item: WeaponWrapPreviewItem, previewJanitor: any): boolean
+-- StudsPerTile que se usa cuando el wrap no trae uno. Público porque quien pinte
+-- un wrap sobre un modelo ESCALADO tiene que multiplicarlo por la escala para que
+-- se vea con el mismo tamaño de tile que en el viewport.
+WeaponWrapPreviewer.DEFAULT_STUDS_PER_TILE = DEFAULT_WRAP_STUDS_PER_TILE
+
+-- Template del arma de PreviewWeapon* (sin clonar), o nil si no hay ninguna
+-- resoluble. Para pintar un arma fuera de un ViewportFrame — el mundo, por
+-- ejemplo— sin repetir aquí la búsqueda en Shared.Locker.weapons.*.
+function WeaponWrapPreviewer.resolveWeaponTemplate(item: WeaponWrapPreviewItem): Instance?
+    return resolveWeaponTemplate(item)
+end
+
+-- Aplica el aspecto del wrap (textura/color/material, scroll animado incluido)
+-- sobre un clon ya existente: el MISMO camino que usa Render dentro del viewport,
+-- para que un wrap se vea igual en el mundo que en la card. Devuelve false si el
+-- clon no tiene una parte donde pintar.
+function WeaponWrapPreviewer.applyAppearance(instance: Instance, item: WeaponWrapPreviewItem, previewJanitor: any): boolean
+    local primaryPart = getWrapPreviewPrimaryPart(instance)
+    if not primaryPart then
+        return false
+    end
+    applyWrapAppearanceToPrimaryPart(primaryPart, item, previewJanitor)
+    return true
+end
+
+-- Devuelve (ok, usedWeaponTemplate). El segundo valor dice si se pintó el arma
+-- (PreviewWeapon* resueltos) o el bloque genérico `Wrap`: el encuadre que deja
+-- Render es el de las cards de arma, así que quien pinte el genérico es quien
+-- debe llamar después a `reframeCentered`. Los callers que solo miran el primer
+-- valor siguen funcionando igual.
+function WeaponWrapPreviewer.Render(viewportNode: ViewportFrame, item: WeaponWrapPreviewItem, previewJanitor: any): (boolean, boolean)
     local worldModel = Instance.new("WorldModel")
     worldModel.Parent = viewportNode
     previewJanitor:Add(worldModel, "Destroy")
 
-    local previewTemplate = resolveWeaponTemplate(item) or wrapPreviewTemplate
+    local weaponTemplate = resolveWeaponTemplate(item)
+    local usedWeaponTemplate = weaponTemplate ~= nil
+    local previewTemplate = weaponTemplate or wrapPreviewTemplate
     -- Clonamos desde la copia preprocesada (todos los BaseParts ya anchored).
     -- Roblox preserva Anchored en el Clone; el iterar GetDescendants en
     -- cada Render era pago por las 30+ cards visibles del locker.
@@ -335,7 +373,7 @@ function WeaponWrapPreviewer.Render(viewportNode: ViewportFrame, item: WeaponWra
 
     local previewPrimaryPart = getWrapPreviewPrimaryPart(clonedWrap)
     if not previewPrimaryPart then
-        return false
+        return false, usedWeaponTemplate
     end
 
     applyWrapAppearanceToPrimaryPart(previewPrimaryPart, item, previewJanitor)
@@ -353,7 +391,7 @@ function WeaponWrapPreviewer.Render(viewportNode: ViewportFrame, item: WeaponWra
         modelCenter = clonedWrap.CFrame
         updatedSize = clonedWrap.Size
     else
-        return false
+        return false, usedWeaponTemplate
     end
 
     local cam = Instance.new("Camera")
@@ -367,13 +405,10 @@ function WeaponWrapPreviewer.Render(viewportNode: ViewportFrame, item: WeaponWra
     local baseDistance = (maxDimension / 2) / math.tan(halfFov)
     local finalDistance = baseDistance * DISTANCIA_MULTIPLIER
 
-    cam.CFrame = CFrame.new(
-        modelCenter.Position + Vector3.new(0, 0, finalDistance),
-        modelCenter.Position
-    ) * CFrame.new(-DESPLAZAMIENTO_X, 0, 0)
+    cam.CFrame = CFrame.new(modelCenter.Position + Vector3.new(0, 0, finalDistance)) * orientacionCamara
 
     viewportNode.Visible = true
-    return true
+    return true, usedWeaponTemplate
 end
 
 return WeaponWrapPreviewer
