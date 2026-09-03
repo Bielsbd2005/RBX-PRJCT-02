@@ -84,6 +84,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 
 	local DataService = require(serverRoot.core.data.DataService)
 	local RewardService = require(serverRoot.core.RewardService)
+	local GamePassService = require(serverRoot.core.GamePassService)
 	local ShopService = require(serverRoot.features.shop.ShopService)
 	local SettingsService = require(serverRoot.features.settings.SettingsService)
 	local RewardsService = require(serverRoot.features.rewards.RewardsService)
@@ -97,6 +98,12 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	local TrainingDummyService = require(serverRoot.features.testing.TrainingDummyService)
 
 	DataService:Start()
+
+	-- Antes que las features: el prefetch de posesión de gamepasses tarda una
+	-- llamada web, y quien pregunta (bonus VIP de resultados, holster del arma)
+	-- lo hace sin bloquear. Cuanto antes se pueble el caché, menos beneficios se
+	-- quedan apagados en los primeros segundos de sesión.
+	GamePassService.Start()
 
 	--[[
 		TelemetryService antes que RewardService por el mismo motivo que
@@ -293,12 +300,28 @@ function ServerBootstrap.start(serverRoot: Script): ()
 			-- Cualquier service futuro (Achievements, Quests, etc.) puede
 			-- subscribirse aquí sin tocar WeaponsSystem.luau.
 			if WeaponsSystem.Killed and WeaponsSystem.Killed.Event then
-				WeaponsSystem.Killed.Event:Connect(function(killer: Player, _victimHum: Humanoid, _weaponName: string, _wasHeadshot: boolean)
+				WeaponsSystem.Killed.Event:Connect(function(killer: Player, _victimHum: Humanoid, _weaponName: string, wasHeadshot: boolean)
+					-- Dailies: siguen la señal cruda a propósito — su payout está
+					-- acotado por diseño (3 tareas al día), no necesitan cap. OnKill
+					-- lleva dentro la racha de bajas; el headshot es su propia tarea.
 					if (DailyTasksService :: any).OnKill then
 						pcall(function() (DailyTasksService :: any):OnKill(killer) end)
 					end
+					if wasHeadshot and (DailyTasksService :: any).OnHeadshot then
+						pcall(function() (DailyTasksService :: any):OnHeadshot(killer) end)
+					end
+					-- Battle Pass: respeta el MatchXPCap igual que el XP de cuenta.
+					-- Sin este guard, farmear kills capaba el XP de nivel pero seguía
+					-- subiendo el pase sin límite: una season (~660 kills) se cerraba
+					-- en ~2h de feeding, con sus Gems y exclusivas incluidas.
+					-- El check va DENTRO del pcall: si `killer` llegara nil (kill de
+					-- entorno) no debe tumbar el handler de la señal.
 					if (BattlePassService :: any).OnKill then
-						pcall(function() (BattlePassService :: any):OnKill(killer) end)
+						pcall(function()
+							if not MatchService:IsXPCapReached(killer) then
+								(BattlePassService :: any):OnKill(killer)
+							end
+						end)
 					end
 				end)
 			end
