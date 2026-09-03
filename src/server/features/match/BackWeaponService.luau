@@ -6,11 +6,14 @@
 
 	Por qué el modelo y no la Tool:
 	  ServerStorage.WeaponTools.<cat>.<id> es la Tool funcional — Handle,
-	  Configuration, sonidos, scripts y el tag `WeaponsSystemWeapon` que hace
-	  que WeaponsSystem la instancie como arma viva. Clonarla para algo que
-	  sólo se mira pagaría todo eso (y registraría un arma fantasma). El
-	  holster usa Shared.Locker.weapons.<cat>.<id>, geometría pura, la misma
-	  que ya usan los previews del locker.
+	  sonidos, animaciones y el tag `WeaponsSystemWeapon` que hace que
+	  WeaponsSystem la instancie como arma viva. Clonarla para algo que sólo se
+	  mira pagaría todo eso (y registraría un arma fantasma). Además vive en
+	  ServerStorage, que no replica: el locker no la vería. El holster usa
+	  Shared.Locker.weapons.<cat>.<id>, geometría pura, la misma que ya usan los
+	  previews del locker — y que se GENERA desde el `WeaponModel` de esa misma
+	  Tool (tools/weapons/StudioMigration.luau), así que no hay dos copias que
+	  puedan desincronizarse.
 
 	Detección de equipado:
 	  Roblox reparenta la Tool Backpack→Character al equipar, y eso replica al
