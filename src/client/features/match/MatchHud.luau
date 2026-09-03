@@ -5,13 +5,16 @@
 	va ganando, fichas de jugadores, cash/level, y tracking de kills/deaths/bots.
 
 	Estructura esperada, toda bajo el frame `MatchHud.Container`:
-		Cash.Value · Level.{Value, Bar.Fill} · GlobalKillFeedContainer.Template
+		GlobalKillFeedContainer.Template
+		(Cash.Value y Level.{Value, Bar.Fill} son opcionales: ya no están en el
+		 asset, el cash in-match se ve en el popup Stats)
 		MainFrame.Timer
 		MainFrame.{ATeamBar, BTeamBar}.{Fill, Value}
 		MainFrame.{ATeamIndicator, BTeamIndicator}   (spritesheet 2x2)
 		MainFrame.{ATeamPlayers, BTeamPlayers}.Template.Value
 	Los popups (LevelUp, Maestry) los resuelve MatchNotificationsQueue, también
-	bajo Container.
+	bajo Container; el de ganancias (Stats.{CoinsFrame.Value, CoinsSpawn}), que
+	entra y sale por la izquierda en cada kill, lo lleva StatsCoinsPopup.
 ]]
 
 local Players = game:GetService("Players")
@@ -25,6 +28,7 @@ local GameConfig = require(Shared.GameConfig)
 local UIUtils = require(script.Parent.Parent.Parent.core.ui.UIUtils)
 local Janitor = require(ReplicatedStorage:WaitForChild("Packages").janitor) :: any
 local MatchNotificationsQueue = require(script.Parent.MatchNotificationsQueue)
+local StatsCoinsPopup = require(script.Parent.StatsCoinsPopup)
 local GlobalKillFeed = require(script.Parent.GlobalKillFeed)
 
 -- ── Colores ──────────────────────────────────────────────────
@@ -241,8 +245,12 @@ local function _resolveHudRefs(matchHudGui: ScreenGui?): HudRefs
 
 	local container = matchHudGui:WaitForChild("Container") :: Frame
 	local mainFrame = container:WaitForChild("MainFrame") :: Frame
-	local cash = container:WaitForChild("Cash") :: Frame
-	local level = container:WaitForChild("Level") :: Frame
+	-- Cash y Level ya no están en el HUD de partida (el cash in-match se ve en el
+	-- popup Stats). Se resuelven opcionalmente: si el asset los trae, se siguen
+	-- pintando; si no, updateCashLevel salta esos campos.
+	local cash = container:FindFirstChild("Cash")
+	local level = container:FindFirstChild("Level")
+	local levelBar = if level then level:FindFirstChild("Bar") else nil
 
 	local teamABar = mainFrame:WaitForChild("ATeamBar") :: Frame
 	local teamBBar = mainFrame:WaitForChild("BTeamBar") :: Frame
@@ -263,9 +271,9 @@ local function _resolveHudRefs(matchHudGui: ScreenGui?): HudRefs
 		teamBBarValue = teamBBar:WaitForChild("Value") :: TextLabel,
 		teamAIndicator = mainFrame:WaitForChild("ATeamIndicator") :: ImageLabel,
 		teamBIndicator = mainFrame:WaitForChild("BTeamIndicator") :: ImageLabel,
-		cashValue = cash:WaitForChild("Value") :: TextLabel,
-		levelValue = level:WaitForChild("Value") :: TextLabel,
-		levelBarFill = level:WaitForChild("Bar"):WaitForChild("Fill") :: GuiObject,
+		cashValue = if cash then cash:FindFirstChild("Value") :: TextLabel? else nil,
+		levelValue = if level then level:FindFirstChild("Value") :: TextLabel? else nil,
+		levelBarFill = if levelBar then levelBar:FindFirstChild("Fill") :: GuiObject? else nil,
 		version = versionLabel,
 		teamAPlayersFrame = teamAPlayers,
 		teamBPlayersFrame = teamBPlayers,
@@ -300,6 +308,24 @@ function MatchHud.new(matchHudGui: ScreenGui?): any
 	-- jugadores (ATeamPlayers/BTeamPlayers); reaparecen al vaciarse la cola.
 	self._notificationsQueue:setOnNotifyingChanged(function(notifying)
 		self:_setTeamPlayersHidden(notifying)
+	end)
+	-- Popup de ganancias (Container.Stats): lo dispara updateCashLevel cuando el
+	-- cash sube durante la partida (kill / headshot / asistencia).
+	self._statsCoinsPopup = StatsCoinsPopup.new(matchHudGui)
+	-- Último cash visto en DataController; nil hasta la primera lectura para no
+	-- animar el total inicial como si fuera una ganancia.
+	self._lastCashSeen = nil :: number?
+	-- Total que el popup tiene pintado ahora mismo = cash real − lo reservado por
+	-- desafíos aún sin entregar (ver reserveChallengeCash).
+	self._lastVisibleCash = nil :: number?
+	self._reservedChallengeCash = 0
+	self._pendingCash = 0
+	self._cashFlushQueued = false
+	self._hudEnabled = false
+	-- El popup del desafío completado suelta sus monedas hacia Stats; devolvemos
+	-- lo que tarda el vuelo para que no se retire antes de que aterricen.
+	self._notificationsQueue:setOnChallengeReward(function(spawnNode: ImageLabel, amount: number): number?
+		return self:_deliverChallengeCash(spawnNode, amount)
 	end)
 
 	if matchHudGui then
@@ -391,6 +417,7 @@ end
 -- ── API pública ──────────────────────────────────────────────
 
 function MatchHud:setEnabled(enabled: boolean)
+	self._hudEnabled = enabled
 	if self._gui then
 		self._gui.Enabled = enabled
 	end
@@ -398,6 +425,19 @@ function MatchHud:setEnabled(enabled: boolean)
 		self:_clearTimerEffects()
 		-- Corta el bucle del spritesheet mientras el HUD no está en pantalla.
 		self:_setWinningTeam(nil)
+		-- Sin partida no hay ganancias que enseñar: corta monedas en vuelo y deja
+		-- el frame fuera de pantalla para la siguiente. Las reservas de premios que
+		-- se hayan quedado sin entregar (popup cortado a medias) se liberan aquí
+		-- para que el label vuelva a cuadrar con el cash real.
+		self._reservedChallengeCash = 0
+		if self._statsCoinsPopup then
+			self._statsCoinsPopup:hideImmediate()
+			local cash = self._lastCashSeen
+			if cash then
+				self._lastVisibleCash = cash
+				self._statsCoinsPopup:setCash(cash)
+			end
+		end
 	end
 end
 
@@ -570,6 +610,7 @@ end
 -- Tipos públicos exportados desde MatchNotificationsQueue. Se re-exportan
 -- aquí para mantener la API estable de MatchHud (callers usan estos tipos).
 export type MasteryProgress = MatchNotificationsQueue.MasteryProgress
+export type DailyTaskProgress = MatchNotificationsQueue.DailyTaskProgress
 
 -- Las animaciones de notificación (LevelUp / BPLevelUp / Maestry + confetti
 -- + slide context) viven en MatchNotificationsQueue. Mantenemos delegadores
@@ -593,13 +634,58 @@ function MatchHud:playMasteryAnimation(progress: MasteryProgress)
 	end
 end
 
+function MatchHud:playDailyTaskAnimation(progress: DailyTaskProgress)
+	if self._notificationsQueue then
+		self._notificationsQueue:playDailyTaskAnimation(progress)
+	end
+end
+
+--- Aparta `amount` de la próxima subida de cash: ese dinero NO lo anima el popup
+--- de Stats por su cuenta, lo entrega el popup del desafío volando sus monedas
+--- (ver _deliverChallengeCash). Se llama al detectar el desafío completado, en la
+--- misma tanda de datos en la que llega el cash.
+function MatchHud:reserveChallengeCash(amount: number)
+	local reserved = math.max(0, math.floor(if type(amount) == "number" then amount else 0))
+	if reserved <= 0 then
+		return
+	end
+	self._reservedChallengeCash += reserved
+end
+
+--- Entrega un premio reservado: las monedas salen de `spawnNode` (el CoinsSpawn
+--- del popup del desafío) y al aterrizar suben el total de Stats. Devuelve la
+--- duración del vuelo.
+function MatchHud:_deliverChallengeCash(spawnNode: ImageLabel, amount: number): number
+	local popup = self._statsCoinsPopup
+	if not popup then
+		return 0
+	end
+	local claimed = math.max(0, math.floor(if type(amount) == "number" then amount else 0))
+	self._reservedChallengeCash = math.max(0, self._reservedChallengeCash - claimed)
+
+	local cash = self._lastCashSeen or 0
+	local visibleCash = math.max(0, cash - self._reservedChallengeCash)
+	local previousVisible = self._lastVisibleCash or visibleCash
+	self._lastVisibleCash = visibleCash
+	-- Si el cash del premio todavía no llegó (o nunca se reservó), volamos igual
+	-- las monedas del importe: el popup satura en su total y no se pasa de largo.
+	local delta = if visibleCash > previousVisible then visibleCash - previousVisible else claimed
+	return popup:addCashFrom(delta, visibleCash, spawnNode)
+end
+
 function MatchHud:updateCashLevel(stats: any)
 	local refs = self._hudRefs
 
+	local cash = if stats and type(stats.Cash) == "number" then math.max(0, math.floor(stats.Cash)) else 0
 	if refs.cashValue then
-		local cash = if stats and type(stats.Cash) == "number" then stats.Cash else 0
 		refs.cashValue.Text = UIUtils.formatCashAmount(cash)
 	end
+
+	-- Ganancias in-match: cualquier subida de cash con el HUD en pantalla entra
+	-- por el popup Stats. El disparo se difiere (ver _flushCash) porque el premio
+	-- de un desafío llega en la misma tanda que su reserva.
+	self._pendingCash = cash
+	self:_scheduleCashFlush()
 
 	if refs.levelValue then
 		local level = if stats and type(stats.Level) == "number" then math.max(0, math.floor(stats.Level)) else 0
@@ -611,6 +697,49 @@ function MatchHud:updateCashLevel(stats: any)
 		local xpToNext = if stats and type(stats.XPToNextLevel) == "number" then math.max(0, math.floor(stats.XPToNextLevel)) else 0
 		local fillRatio = if xpToNext > 0 then math.min(1, math.max(0, currentXP / xpToNext)) else 0
 		_setHorizontalFill(refs.levelBarFill, fillRatio)
+	end
+end
+
+-- El cash y el estado de los desafíos llegan en el MISMO BatchUpdate del server, y
+-- no está definido cuál de los dos listeners corre antes. Por eso no animamos en el
+-- acto: diferimos al final del ciclo, cuando las reservas de premios de esta misma
+-- tanda ya están registradas y sabemos qué parte de la subida entrega el popup del
+-- desafío y qué parte anima Stats por su cuenta.
+function MatchHud:_scheduleCashFlush()
+	if self._cashFlushQueued or self._destroyed then
+		return
+	end
+	self._cashFlushQueued = true
+	task.defer(function()
+		self._cashFlushQueued = false
+		if not self._destroyed then
+			self:_flushCash()
+		end
+	end)
+end
+
+function MatchHud:_flushCash()
+	local popup = self._statsCoinsPopup
+	if not popup then
+		return
+	end
+
+	local cash = self._pendingCash
+	self._lastCashSeen = cash
+	-- Lo reservado aún sin entregar no cuenta como visible; y el total visible
+	-- nunca baja por una reserva (si el premio se reserva antes de que llegue su
+	-- cash, el label se queda quieto en vez de descontar).
+	local previousVisible = self._lastVisibleCash
+	local visibleCash = math.max(0, cash - self._reservedChallengeCash)
+	if previousVisible and visibleCash < previousVisible and cash >= previousVisible then
+		visibleCash = previousVisible
+	end
+	self._lastVisibleCash = visibleCash
+
+	if previousVisible and visibleCash > previousVisible and self._hudEnabled then
+		popup:addCash(visibleCash - previousVisible, visibleCash)
+	else
+		popup:setCash(visibleCash)
 	end
 end
 
@@ -1049,6 +1178,10 @@ function MatchHud:destroy()
 	if self._notificationsQueue then
 		self._notificationsQueue:destroy()
 		self._notificationsQueue = nil
+	end
+	if self._statsCoinsPopup then
+		self._statsCoinsPopup:destroy()
+		self._statsCoinsPopup = nil
 	end
 	if self._janitor then
 		self._janitor:Destroy()

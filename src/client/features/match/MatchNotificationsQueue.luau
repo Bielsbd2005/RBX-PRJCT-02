@@ -7,14 +7,25 @@
 	frames y sus posiciones originales se cachean por instancia.
 
 	Frames esperados bajo `MatchHud.Container`, igual que el resto del HUD:
-		LevelUp.{Title, TitleBG, Level, LevelBG}
-		Maestry.{Title, Value, Bar.Fill, Reward.ItemViewport}
+		LevelUp.{Title, Level}
+		Maestry.{Title, Value, Bar.Fill, CoinsSpawn, Reward.{ItemViewport, Image}}
+		(Reward.Image es del asset: solo se enseña/esconde, nunca se le cambia el
+		 Image; con desafíos diarios el fondo del Reward se pone transparente)
+
+	El frame Maestry lo comparten dos cosas, que solo se diferencian en el nodo de
+	Reward que se enseña: la maestría de arma (preview 3D del wrap en
+	`Reward.ItemViewport`) y los desafíos diarios (icono plano en `Reward.Image`).
+	Al completar un desafío la barra se llena del todo y `CoinsSpawn` suelta las
+	monedas del premio hacia el popup de Stats (vía el callback de
+	setOnChallengeReward, que lo wirea MatchHud).
 
 	API:
 		MatchNotificationsQueue.new(matchHudGui: ScreenGui?)
 		:playLevelUpAnimation(newLevel: number)
 		:playBattlePassLevelUpAnimation(newLevel: number)
 		:playMasteryAnimation(progress: MasteryProgress)
+		:playDailyTaskAnimation(progress: DailyTaskProgress)
+		:setOnChallengeReward(callback)
 		:destroy()
 ]]
 
@@ -47,6 +58,17 @@ export type MasteryProgress = {
 	material: Enum.Material?,
 	animated: boolean?,
 	studsPerTile: number?,
+}
+
+-- Progreso de un desafío diario hacia su objetivo. `name` es el título del
+-- desafío y `rewardCash` el premio que vuela en monedas hacia Stats cuando
+-- `isComplete`. La imagen del premio es la que ya trae Reward.Image en el asset.
+export type DailyTaskProgress = {
+	current: number,
+	target: number,
+	name: string,
+	isComplete: boolean?,
+	rewardCash: number?,
 }
 
 -- ── Constantes ───────────────────────────────────────────────
@@ -110,6 +132,20 @@ local MASTERY_CONFETTI_COLORS = {
 -- Tween de la barra de progreso de maestría (se rellena tras entrar el frame).
 local MASTERY_BAR_TWEEN_INFO = TweenInfo.new(0.6, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
 
+-- Desafíos diarios: paleta verde-dorada (progreso hecho + premio en cash).
+local DAILY_CONFETTI_COLORS = {
+	Color3.fromRGB(60, 200, 90),
+	Color3.fromRGB(120, 230, 140),
+	Color3.fromRGB(255, 205, 70),
+	Color3.fromRGB(255, 235, 150),
+	Color3.fromRGB(30, 160, 70),
+}
+-- Los popups de progreso saltan a cada avance del contador (una kill puede mover
+-- varias tareas), así que aguantan menos que un level up. El de completado se va
+-- enseguida tras aterrizar las monedas: el protagonismo pasa a Stats.
+local DAILY_PROGRESS_HOLD_SECONDS = 2.6
+local DAILY_COMPLETE_HOLD_SECONDS = 1.0
+
 
 
 -- Calcula el tamaño objetivo de un Fill horizontal para un ratio [0,1], cacheando
@@ -129,6 +165,41 @@ local function _targetFillSize(fillNode: GuiObject, ratio: number): UDim2
 	end
 	local nextScale = baseScale + ((1 - baseScale) * clampedRatio)
 	return UDim2.new(nextScale, baseOffset, currentSize.Y.Scale, currentSize.Y.Offset)
+end
+
+-- El nodo Reward del frame Maestry aloja las dos formas de premio: el preview 3D
+-- del wrap (ItemViewport) y la imagen del desafío diario (Image). En modo desafío
+-- se enseña la Image — la que trae el asset, no se le cambia el Image — y el fondo
+-- del propio Reward se va a transparente (el plato gris solo tiene sentido detrás
+-- del preview 3D). El BackgroundTransparency de fábrica se cachea en un atributo
+-- para restaurarlo al volver al modo maestría.
+local function _setRewardMode(rewardNode: Instance, mode: "viewport" | "image")
+	local image = rewardNode:FindFirstChild("Image")
+	if image and image:IsA("GuiObject") then
+		image.Visible = mode == "image"
+	end
+
+	if not rewardNode:IsA("GuiObject") then
+		return
+	end
+	local reward = rewardNode :: GuiObject
+	local baseTransparency = reward:GetAttribute("BaseBackgroundTransparency")
+	if type(baseTransparency) ~= "number" then
+		baseTransparency = reward.BackgroundTransparency
+		reward:SetAttribute("BaseBackgroundTransparency", baseTransparency)
+	end
+	reward.BackgroundTransparency = if mode == "image" then 1 else baseTransparency :: number
+end
+
+-- CoinsSpawn es a la vez origen y sprite de las monedas del premio: se oculta al
+-- resolverlo (misma convención que los `Template` del HUD) y se clona por moneda.
+local function _resolveCoinsSpawn(frame: GuiObject): ImageLabel?
+	local node = frame:FindFirstChild("CoinsSpawn")
+	if node and node:IsA("ImageLabel") then
+		node.Visible = false
+		return node
+	end
+	return nil
 end
 
 -- Preview 3D de un wrap dentro de un ViewportFrame, con el MISMO encuadre que las
@@ -159,14 +230,12 @@ local function _renderWrapPreview(itemViewport: ViewportFrame, wrap: any): any
 	return previewJanitor
 end
 
--- Escribe el mismo texto en un label y en su copia de sombra (`<name>BG`): el
--- asset duplica Title/Level desplazados para simular sombra, así que los dos
--- tienen que ir sincronizados. Recorremos descendientes para no depender de si
--- la sombra es hermana o padre del label.
-local function _setLabelWithShadow(frame: GuiObject, name: string, text: string)
-	local shadowName = name .. "BG"
+-- Escribe el texto en el TextLabel `name` del popup. Recorremos descendientes en
+-- vez de indexar la jerarquía porque el asset anida Title/Level a distinta
+-- profundidad según el frame (y así tampoco importa si se reordenan).
+local function _setLabel(frame: GuiObject, name: string, text: string)
 	for _, descendant in frame:GetDescendants() do
-		if descendant:IsA("TextLabel") and (descendant.Name == name or descendant.Name == shadowName) then
+		if descendant:IsA("TextLabel") and descendant.Name == name then
 			descendant.Text = text
 		end
 	end
@@ -192,7 +261,18 @@ function MatchNotificationsQueue.new(matchHudGui: ScreenGui?): any
 	-- LevelUp lo comparten el level up de cuenta y el del pase, así que basta una.
 	self._levelUpOriginalPosition = nil :: UDim2?
 	self._maestryOriginalPosition = nil :: UDim2?
+	-- Entrega del premio de un desafío completado: MatchHud lo wirea al popup de
+	-- Stats. Devuelve cuánto tarda el vuelo de las monedas para esperarlo antes de
+	-- retirar el popup.
+	self._onChallengeReward = nil :: ((spawnNode: ImageLabel, amount: number) -> number?)?
 	return self
+end
+
+--- Registra quién se lleva las monedas del premio (spawnNode + cash).
+function MatchNotificationsQueue:setOnChallengeReward(
+	callback: ((spawnNode: ImageLabel, amount: number) -> number?)?
+)
+	self._onChallengeReward = callback
 end
 
 -- Los popups cuelgan de MatchHud.Container igual que el resto del HUD; se pintan
@@ -256,10 +336,19 @@ end
 
 -- Patrón común de notificación: cachea la posición original del frame, lo mete
 -- fuera de pantalla (arriba), lo muestra, desliza dentro, opcionalmente lanza
--- confeti y corre `afterShown`, mantiene `LEVEL_UP_HOLD_SECONDS`, y sale. `cacheKey`
--- es el campo de self donde se cachea la Position original. Bloquea hasta terminar
--- (se llama dentro del runFn de la cola).
-function MatchNotificationsQueue:_playFrameSlide(frame: GuiObject, cacheKey: string, confettiColors: { Color3 }?, spawnDuration: number?, afterShown: (() -> ())?)
+-- confeti y corre `afterShown`, mantiene `holdSeconds` (por defecto
+-- LEVEL_UP_HOLD_SECONDS), y sale. `cacheKey` es el campo de self donde se cachea
+-- la Position original. Bloquea hasta terminar (se llama dentro del runFn de la
+-- cola), así que un `afterShown` que bloquee (p. ej. esperando a que aterricen las
+-- monedas) retrasa el hold en vez de solaparse con él.
+function MatchNotificationsQueue:_playFrameSlide(
+	frame: GuiObject,
+	cacheKey: string,
+	confettiColors: { Color3 }?,
+	spawnDuration: number?,
+	afterShown: (() -> ())?,
+	holdSeconds: number?
+)
 	local matchHudGui = self._gui
 	local originalPosition = (self :: any)[cacheKey]
 	if not originalPosition then
@@ -295,7 +384,7 @@ function MatchNotificationsQueue:_playFrameSlide(frame: GuiObject, cacheKey: str
 		afterShown()
 	end
 
-	task.wait(LEVEL_UP_HOLD_SECONDS)
+	task.wait(holdSeconds or LEVEL_UP_HOLD_SECONDS)
 
 	local tweenOut = TweenService:Create(frame, LEVEL_UP_TWEEN_OUT_INFO, { Position = aboveScreenPosition })
 	tweenOut:Play()
@@ -305,17 +394,17 @@ function MatchNotificationsQueue:_playFrameSlide(frame: GuiObject, cacheKey: str
 	frame.Position = originalPosition
 end
 
--- Level up de cuenta y de pase comparten el frame Container.LevelUp: Title/TitleBG
--- dicen de cuál se trata y Level/LevelBG el nivel alcanzado. Solo cambian título y
--- paleta (que comparten confeti y fuegos artificiales).
+-- Level up de cuenta y de pase comparten el frame Container.LevelUp: Title dice de
+-- cuál se trata y Level el nivel alcanzado. Solo cambian título y paleta (que
+-- comparten confeti y fuegos artificiales).
 function MatchNotificationsQueue:_playLevelUpFrame(newLevel: number, title: string, palette: { Color3 })
 	self:_enqueue(function(onDone)
 		local container = self:_resolveContainer()
 		if not container then onDone() return end
 		local frame = container:WaitForChild("LevelUp") :: GuiObject
 
-		_setLabelWithShadow(frame, "Title", title)
-		_setLabelWithShadow(frame, "Level", tostring(math.max(0, math.floor(newLevel))))
+		_setLabel(frame, "Title", title)
+		_setLabel(frame, "Level", tostring(math.max(0, math.floor(newLevel))))
 
 		local matchHudGui = self._gui
 		if matchHudGui then
@@ -359,6 +448,9 @@ function MatchNotificationsQueue:playMasteryAnimation(progress: MasteryProgress)
 		valueLabel.Text = UIUtils.formatProgressValue(current, target)
 
 		local rewardNode = frame:WaitForChild("Reward")
+		-- El frame lo comparte con los desafíos diarios: aquí manda el preview 3D,
+		-- así que se esconde la Image y vuelve el fondo del Reward.
+		_setRewardMode(rewardNode, "viewport")
 		local itemViewport = rewardNode:WaitForChild("ItemViewport") :: ViewportFrame
 		local previewJanitor: any = _renderWrapPreview(itemViewport, progress)
 
@@ -378,6 +470,75 @@ function MatchNotificationsQueue:playMasteryAnimation(progress: MasteryProgress)
 			previewJanitor:Cleanup()
 		end
 		itemViewport.CurrentCamera = nil
+
+		onDone()
+	end)
+end
+
+-- Desafío diario → el mismo frame Container.Maestry: Title lleva el título del
+-- desafío, Value el "actual/objetivo", Reward.Image el icono de la tarea y Bar.Fill
+-- se rellena con tween hasta el ratio. Al completarlo (isComplete) la barra llega
+-- al 100%, salta el confeti y las monedas del premio salen de CoinsSpawn hacia el
+-- popup de Stats, que las cuenta al aterrizar.
+function MatchNotificationsQueue:playDailyTaskAnimation(progress: DailyTaskProgress)
+	self:_enqueue(function(onDone)
+		local container = self:_resolveContainer()
+		if not container then onDone() return end
+		local frame = container:WaitForChild("Maestry") :: GuiObject
+
+		local target = math.max(1, math.floor(progress.target))
+		local isComplete = progress.isComplete == true
+		local current = math.clamp(math.floor(progress.current), 0, target)
+		if isComplete then
+			current = target
+		end
+		local ratio = current / target
+
+		local titleLabel = frame:WaitForChild("Title") :: TextLabel
+		titleLabel.Text = progress.name
+
+		local valueLabel = frame:WaitForChild("Value") :: TextLabel
+		valueLabel.RichText = true
+		valueLabel.Text = UIUtils.formatProgressValue(current, target)
+
+		-- Desafío diario: se ve la Image del asset (sin tocarla) y el fondo del
+		-- Reward se va a transparente.
+		_setRewardMode(frame:WaitForChild("Reward"), "image")
+
+		local barNode = frame:WaitForChild("Bar")
+		local barFill = barNode:WaitForChild("Fill") :: GuiObject
+		barFill.Size = _targetFillSize(barFill, 0)
+
+		local coinsSpawn = _resolveCoinsSpawn(frame)
+		local rewardCash = math.max(0, math.floor(tonumber(progress.rewardCash) or 0))
+		local confettiColors = if isComplete then DAILY_CONFETTI_COLORS else nil
+		local holdSeconds = if isComplete then DAILY_COMPLETE_HOLD_SECONDS else DAILY_PROGRESS_HOLD_SECONDS
+
+		self:_playFrameSlide(frame, "_maestryOriginalPosition", confettiColors, 0.4, function()
+			local barTween = TweenService:Create(barFill, MASTERY_BAR_TWEEN_INFO, {
+				Size = _targetFillSize(barFill, ratio),
+			})
+			barTween:Play()
+			if not isComplete then
+				return
+			end
+
+			-- Completado: en cuanto la barra acaba de llenarse salen las monedas del
+			-- premio. Bloqueamos hasta que aterrizan para que el hold empiece
+			-- después (ver _playFrameSlide).
+			task.wait(MASTERY_BAR_TWEEN_INFO.Time)
+			if self._destroyed then
+				return
+			end
+
+			local deliverReward = self._onChallengeReward
+			if deliverReward and coinsSpawn and rewardCash > 0 and not self._destroyed then
+				local flightSeconds = deliverReward(coinsSpawn, rewardCash)
+				if type(flightSeconds) == "number" and flightSeconds > 0 then
+					task.wait(flightSeconds)
+				end
+			end
+		end, holdSeconds)
 
 		onDone()
 	end)
