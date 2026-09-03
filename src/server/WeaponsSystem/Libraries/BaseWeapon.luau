@@ -11,7 +11,6 @@ local AutoAimSystem = require(script.Parent:WaitForChild("AutoAimSystem"))
 local WeaponsNetwork = require(script.Parent:WaitForChild("WeaponsNetwork"))
 local PewEffect = require(script.Parent:WaitForChild("PewEffect"))
 local SharedConstants = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants")
-local WeaponLevelConfig = require(SharedConstants:WaitForChild("WeaponLevelConfig"))
 local WeaponsConfig = require(SharedConstants:WaitForChild("WeaponsConfig"))
 
 -- DEBUG: forzar comportamiento de autoshoot de movil tambien en PC.
@@ -93,11 +92,10 @@ function BaseWeapon:doInitialSetup()
 	end
 
 	-- Cargador lleno al entrar en juego. Lo escribe el SERVIDOR desde la
-	-- definición (getConfigValue ya aplica el escalado por WeaponLevel) y
-	-- replica al cliente, que lo pinta en el hotbar. Así el Tool de Studio no
-	-- necesita traer CurrentAmmo autorado: antes ese número era una copia a mano
-	-- del AmmoCapacity que se desincronizaba al duplicar Tools (una recortada de
-	-- 2 cartuchos arrancaba con 5) y nunca reflejaba el nivel del arma.
+	-- definición y replica al cliente, que lo pinta en el hotbar. Así el Tool de
+	-- Studio no necesita traer CurrentAmmo autorado: antes ese número era una
+	-- copia a mano del AmmoCapacity que se desincronizaba al duplicar Tools (una
+	-- recortada de 2 cartuchos arrancaba con 5).
 	if selfClass.CanBeReloaded and IsServer then
 		self.instance:SetAttribute("CurrentAmmo", self:getConfigValue("AmmoCapacity", 30))
 	end
@@ -441,17 +439,6 @@ function BaseWeapon:getConfigValue(valueName, defaultValue)
 		value = self.configValues[valueName]
 	else
 		value = defaultValue
-	end
-
-	-- Escalado por nivel de arma (1..5). Sólo afecta a stats whitelisted en
-	-- WeaponLevelConfig (daño, cadencia, recarga, cargador). El nivel viaja como
-	-- atributo `WeaponLevel` en el Tool (lo escribe el servidor; se replica), así
-	-- que cliente y servidor calculan el MISMO valor escalado de forma determinista.
-	if WeaponLevelConfig.IsScaledStat(valueName) then
-		local level = self.instance and self.instance:GetAttribute(WeaponLevelConfig.ATTRIBUTE)
-		if type(level) == "number" and level > 1 then
-			value = WeaponLevelConfig.ApplyScaling(valueName, value, level)
-		end
 	end
 
 	return value

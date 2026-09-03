@@ -278,13 +278,12 @@ the place. Re-run it whenever you add a weapon.
   `Definitions/<Category>/<Id>.luau`.
 - ✅ **Locker stats panel**: select each weapon → Damage/FireRate/Reload/Ammo show
   instantly (no round-trip) and match the definition; compare bars vs equipped
-  weapon still colour up/down; level scaling still applies with kills.
-- ✅ **Hotbar ammo**: magazine capacity matches `AmmoCapacity` (× WeaponLevel).
+  weapon still colour up/down.
+- ✅ **Hotbar ammo**: magazine capacity matches `AmmoCapacity`.
 - ✅ **Full magazine on spawn**: every weapon spawns loaded to its definition's
   capacity, with no reload animation on first equip. Watch the four weapons whose
   Tools were duplicated and carried a stale authored `CurrentAmmo`: Tommy (50),
-  Short (2), Special Default (12), Laser (20). At weapon level 5 the starting
-  count should be the scaled capacity (AK: 42), not the base one.
+  Short (2), Special Default (12), Laser (20).
 - ✅ **No phantom weapons**: nothing in `ServerStorage.WeaponTools` or
   `ReplicatedStorage` is instantiated as a live weapon at startup (previously each
   template became one on the server and on every client).

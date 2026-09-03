@@ -30,7 +30,7 @@ end
 -- ── BaseWeapon ───────────────────────────────────────────────
 -- Claves que entiende cualquier arma (las lee BaseWeapon / WeaponsSystem).
 Schema.Base = {
-	AmmoCapacity = key("integer", 30, "Balas por cargador. Escala con WeaponLevel."),
+	AmmoCapacity = key("integer", 30, "Balas por cargador."),
 	ReloadTime = key("number", 2, "Segundos de recarga."),
 	ReloadAnimation = key("string", "RifleReload", "Track de animación de recarga."),
 	RunAnimation = key("string", "Run", "Track de animación al esprintar."),
@@ -63,11 +63,11 @@ Schema.Bullet = {
 	BeamWidth1 = key("number", 1.8, "Ancho final del beam del trazador."),
 
 	-- Daño
-	HitDamage = key("number", 10, "Daño por impacto directo. Escala con WeaponLevel."),
+	HitDamage = key("number", 10, "Daño por impacto directo."),
 	FullDamageDistance = key("number", 1000, "Hasta esta distancia el daño es completo."),
 	ZeroDamageDistance = key("number", 10000, "A esta distancia el daño llega a cero (falloff lineal)."),
 	ExplodeOnImpact = key("boolean", false, "Explota al impactar (usa Blast*)."),
-	BlastDamage = key("number", 100, "Daño en el centro de la explosión. Escala con WeaponLevel."),
+	BlastDamage = key("number", 100, "Daño en el centro de la explosión."),
 	BlastRadius = key("number", 8, "Radio de la explosión (studs)."),
 	BlastPressure = key("number", 10000, "Presión de la explosión (física)."),
 
@@ -81,8 +81,8 @@ Schema.Bullet = {
 	NumDischargeCompleteParticles = key("integer", 25, "Partículas al completar la descarga."),
 
 	-- Recoil / feel
-	RecoilMin = key("number", 0.05, "Recoil mínimo por disparo. Escala (baja) con WeaponLevel."),
-	RecoilMax = key("number", 0.5, "Recoil máximo acumulado. Escala (baja) con WeaponLevel."),
+	RecoilMin = key("number", 0.05, "Recoil mínimo por disparo."),
+	RecoilMax = key("number", 0.5, "Recoil máximo acumulado."),
 	RecoilDecay = key("number", 0.825, "Factor de decaimiento del recoil por frame."),
 	RecoilDelayTime = key("number", 0.07, "Segundos antes de empezar a recuperar el recoil."),
 	ShakeIntensity = key("number", 0.16, "Intensidad del shake de cámara al disparar."),

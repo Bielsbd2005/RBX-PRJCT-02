@@ -33,11 +33,10 @@ arma: WeaponsSystem avisa y la ignora.
 ## Runtime
 
 - `BaseWeapon:loadConfigFromDefinition()` vuelca `Config` en `configValues`;
-  `getConfigValue(key, default)` y el escalado por nivel (`WeaponLevelConfig`)
-  no cambian.
+  `getConfigValue(key, default)` no cambia.
 - El servidor arranca el arma con el cargador lleno (`CurrentAmmo` =
-  `AmmoCapacity` de la definición, escalado por nivel) y replica el atributo al
-  cliente para el hotbar.
+  `AmmoCapacity` de la definición) y replica el atributo al cliente para el
+  hotbar.
 - Los Tools que viven en un almacén (`ServerStorage`, `ReplicatedStorage`) son
   templates: `WeaponsSystem.onWeaponAdded` los ignora aunque lleven el tag.
 - `WeaponsSystem.createWeaponForInstance` toma `WeaponType` de la definición;

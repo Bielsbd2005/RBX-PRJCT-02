@@ -15,7 +15,6 @@ local UserInputService = game:GetService("UserInputService")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 
 local ItemsConfig = require(Shared.constants.ItemsConfig)
-local WeaponLevelConfig = require(Shared.constants.WeaponLevelConfig)
 local WeaponsConfig = require(Shared.constants.WeaponsConfig)
 
 local WeaponsSystemFolder = script.Parent.Parent.Parent
@@ -83,16 +82,14 @@ local function getCategoryByToolName(toolName)
 end
 
 -- Capacidad del cargador de un Tool: AmmoCapacity de su definición en
--- WeaponsConfig (o el default del esquema), escalada por su atributo WeaponLevel.
+-- WeaponsConfig (o el default del esquema).
 local function getToolAmmoCapacity(tool: Instance?): number
 	if not tool then
 		return 0
 	end
-	local base = tonumber(WeaponsConfig.GetValueForTool(tool, "AmmoCapacity"))
+	return tonumber(WeaponsConfig.GetValueForTool(tool, "AmmoCapacity"))
 		or tonumber(WeaponsConfig.Schema.GetDefault("BulletWeapon", "AmmoCapacity"))
 		or 0
-	local level = tool:GetAttribute(WeaponLevelConfig.ATTRIBUTE)
-	return tonumber(WeaponLevelConfig.ApplyScaling("AmmoCapacity", base, level)) or base
 end
 
 function Hotbar.new(weaponsGui: any)

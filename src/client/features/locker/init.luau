@@ -27,7 +27,6 @@ local NavStaggerController = require(Client.core.ui.NavStaggerController)
 local UIUtils = require(Client.core.ui.UIUtils)
 local ItemsConfig = require(Shared.constants.ItemsConfig)
 local AssetIds = require(Shared.constants.AssetIds)
-local WeaponLevelConfig = require(Shared.constants.WeaponLevelConfig)
 local WeaponDisplayStats = require(Shared.constants.WeaponsConfig.DisplayStats)
 local LockerConfig = require(Shared.constants.LockerConfig)
 local WeaponCategoryMod = require(Shared.constants.WeaponCategory)
@@ -1024,14 +1023,13 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 	-- ── Panel de stats del arma (Locker.Stats) ───────────────────
 	-- Los stats de combate viven en Shared (WeaponsConfig), así que se derivan
-	-- en local (WeaponDisplayStats) sin red. Son valores BASE; el escalado por
-	-- nivel se aplica aquí con las WeaponKills locales. El panel compara la
-	-- SELECCIONADA contra la EQUIPADA (delta bar verde/rojo).
+	-- en local (WeaponDisplayStats) sin red. El panel compara la SELECCIONADA
+	-- contra la EQUIPADA (delta bar verde/rojo).
 	local weaponStatsPanel = WeaponStatsPanel.new(lockerFrame, janitor)
 
 	type WeaponBaseStats = WeaponDisplayStats.WeaponDisplayStats
-	-- Valores escalados por nivel + sus fills 0..1 (para comparar y mostrar).
-	type ScaledStats = {
+	-- Valores a pintar + sus fills 0..1 (para comparar y mostrar).
+	type DisplayStats = {
 		damage: number,
 		fireRate: number,
 		reload: number,
@@ -1047,27 +1045,11 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	-- Token del debounce: invalida renders pendientes al cambiar de selección.
 	local statsRenderToken = 0
 
-	local function getWeaponKillsFor(category: WeaponCategory, weaponId: string): number
-		local weaponKills = Fusion.peek(DataController.WeaponKills) :: any
-		if type(weaponKills) ~= "table" then
-			return 0
-		end
-		local categoryKills = weaponKills[category]
-		if type(categoryKills) ~= "table" then
-			return 0
-		end
-		local value = tonumber(categoryKills[weaponId])
-		return if value and value > 0 then math.floor(value) else 0
-	end
-
-	-- Escala los stats base al nivel del arma y calcula sus fills 0..1 (las barras
-	-- se normalizan contra los rangos del arsenal; reload invertido = menos mejor).
-	local function scaledStatsFor(base: WeaponBaseStats, level: number): ScaledStats
-		-- HitDamage y BlastDamage escalan con el mismo factor, así que aplicar la
-		-- clave "HitDamage" al daño efectivo es correcto sea balístico o explosivo.
-		local damage = WeaponLevelConfig.ApplyScaling("HitDamage", base.damage, level)
-		local ammo = WeaponLevelConfig.ApplyScaling("AmmoCapacity", base.ammoCapacity, level)
-		-- Cadencia y recarga NO escalan con nivel.
+	-- Calcula los fills 0..1 de los stats de un arma (las barras se normalizan
+	-- contra los rangos del arsenal; reload invertido = menos mejor).
+	local function displayStatsFor(base: WeaponBaseStats): DisplayStats
+		local damage = base.damage
+		local ammo = base.ammoCapacity
 		local fireRate = base.fireRate
 		local reload = base.reloadTime
 		return {
@@ -1093,7 +1075,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		return "equal"
 	end
 
-	local function buildStatsModel(sel: ScaledStats, eq: ScaledStats): WeaponStatsPanel.StatsModel
+	local function buildStatsModel(sel: DisplayStats, eq: DisplayStats): WeaponStatsPanel.StatsModel
 		return {
 			Damage = {
 				value = sel.damage,
@@ -1139,9 +1121,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		local eqId = getEquippedWeaponByCategory(category :: WeaponCategory)
 		local eqBase = WeaponDisplayStats.Get(category, eqId)
 
-		local selLevel = WeaponLevelConfig.GetLevelForKills(getWeaponKillsFor(category :: WeaponCategory, selId))
-		local eqLevel = WeaponLevelConfig.GetLevelForKills(getWeaponKillsFor(category :: WeaponCategory, eqId))
-		weaponStatsPanel:setStats(buildStatsModel(scaledStatsFor(selBase, selLevel), scaledStatsFor(eqBase, eqLevel)))
+		weaponStatsPanel:setStats(buildStatsModel(displayStatsFor(selBase), displayStatsFor(eqBase)))
 	end
 
 	-- Item seleccionado: no-arma ⇒ oculta el panel. Arma ⇒ debounce 0.06s y
@@ -1867,9 +1847,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 				dirtyWhileClosed = true
 				return
 			end
-			-- Si el arma seleccionada (o su equipada de referencia) subió de nivel
-			-- por kills, re-escalar y re-animar (los valores base están cacheados).
-			tryRenderStats()
 			if selectedMainCategory == LockerMainCategory.ARSENAL and selectedNavKey == LockerCategory.WEAPON_WRAPS then
 				local selectedQualifiedId = if selectedCatalogItem then selectedCatalogItem.qualifiedId else nil
 				populateMainContentForNavItem(selectedMainCategory, selectedNavKey, selectedQualifiedId)

@@ -6,9 +6,6 @@
 	namespace Network.WeaponStats: al vivir la config en Shared, el cliente
 	calcula esto en local sin round-trip.
 
-	Valores BASE (nivel 1). El escalado por nivel (WeaponLevelConfig) lo aplica
-	quien pinta, con las kills del jugador.
-
 	  • damage       — BlastDamage si el arma explota al impactar, si no HitDamage.
 	  • fireRate     — balas por minuto = 60 / ShotCooldown.
 	  • reloadTime   — segundos de recarga.
