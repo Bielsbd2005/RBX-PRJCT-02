@@ -39,7 +39,7 @@ export type GameConfigType = {
 }
 
 local GameConfig: GameConfigType = {
-	VoteDuration = 15,
+	VoteDuration = 3,
 	RandomVoteKey = "__RANDOM__",
 	EndResultsDuration = 10,
 	RespawnCooldown = 1,
@@ -56,8 +56,16 @@ local GameConfig: GameConfigType = {
 	-- Más allá de este tiempo, el kill se considera "muerte natural" / no atribuible.
 	-- Consumida por MatchService (PvP) y AIService (bots) para mantener atribución uniforme.
 	KillAttributionWindow = 2,
+	-- Caps anti-farm POR PARTIDA, calibrados para morder en el MISMO punto
+	-- (~33 kills con headshot: Cash 15/kill → 500; XP 40/kill → ~1.300). Son un
+	-- backstop contra feeding/farmeo, no un límite de juego normal (una partida
+	-- buena ronda las 10-15 kills). El XPCap anterior (800) saltaba a las 20
+	-- kills — castigaba partidas reales buenas mientras el CashCap ni se
+	-- inmutaba. Si se cambia uno hay que recalcular el otro con los rates de
+	-- ActionRewards; tras el launch, recalibrar ambos con el p95 real de
+	-- kills/partida del dashboard.
 	MatchCashCap = 500,
-	MatchXPCap = 800,
+	MatchXPCap = 1300,
 	Teams = {
 		A = {
 			Name = "TeamA",
