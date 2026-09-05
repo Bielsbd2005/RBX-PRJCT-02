@@ -13,7 +13,7 @@
 
 	Al mostrar el alert se OCULTA el menú (menuController:hide). El Shade y su
 	blur de fondo van por atributo: el ShadeController pinta el overlay y activa
-	el blur al hacerse visible el frame, siempre que GiftAlert tenga `Shade=true`
+	el blur al hacerse visible el frame, siempre que GiftAlert tenga `ShadeColor`
 	puesto en Studio (como el resto de paneles — este feature no toca ni el shade
 	ni el blur). Al retraerse (claim, sin más regalos, o al romperse las
 	condiciones) se restaura el menú, salvo que una partida o un panel se hayan

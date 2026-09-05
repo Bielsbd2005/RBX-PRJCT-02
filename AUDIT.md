@@ -115,7 +115,7 @@ Bot hits are a dice roll (`Precision`) taken before any trajectory exists; damag
 
 #### D5. Inline tuning magic numbers — **[FIXED]** · Low
 Target-memory grace `now + 3`, retaliation window `+ 4`, range extensions `DetectRange + 20` / `+ 15` lived inline in `BotAI.luau` while everything else is centralized in `BotConfig`.
-**Fix applied:** moved to `BotConfig.Combat` as `TargetMemoryGrace`, `RetaliationWindow`, `ForcedTargetRangeBonus`, `GraceRangeBonus` (same values — no behavior change).
+**Fix applied:** moved to `BotConfig.Combat` as `TargetMemoryGrace`, `RetaliationWindow`, `ForcedTargetRangeBonus`, `GraceRangeBonus` (same values — no behavior change). Later retuned: `ForcedTargetRangeBonus` replaced by the absolute `RetaliationRange`, plus `PlayerPriorityBias`, engagement distance band and `ChaseStandoffDistance` (see BotConfig comments).
 
 ---
 

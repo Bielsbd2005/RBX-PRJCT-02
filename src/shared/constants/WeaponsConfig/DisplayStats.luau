@@ -10,8 +10,8 @@
 	  • fireRate     — balas por minuto = 60 / ShotCooldown.
 	  • reloadTime   — segundos de recarga.
 	  • ammoCapacity — tamaño del cargador.
-	Más los rangos del arsenal (damageMax / fireRateMax / reloadMin) para
-	normalizar barras 0..1 sin números mágicos.
+	Más los rangos del arsenal (damageMax / fireRateMax / reloadMin / ammoMax)
+	para normalizar barras 0..1 sin números mágicos.
 ]]
 
 local WeaponsConfig = require(script.Parent)
@@ -27,6 +27,7 @@ export type Ranges = {
 	damageMax: number,
 	fireRateMax: number,
 	reloadMin: number,
+	ammoMax: number,
 }
 
 export type WeaponDisplayStats = BaseStats & Ranges
@@ -97,12 +98,13 @@ function DisplayStats.GetRanges(): Ranges
 		return _ranges
 	end
 
-	local damageMax, fireRateMax, reloadMin = 1, 1, math.huge
+	local damageMax, fireRateMax, reloadMin, ammoMax = 1, 1, math.huge, 1
 	for category, weapons in WeaponsConfig.GetAll() do
 		for weaponId in weapons do
 			local stats = DisplayStats.GetBase(category, weaponId)
 			damageMax = math.max(damageMax, stats.damage)
 			fireRateMax = math.max(fireRateMax, stats.fireRate)
+			ammoMax = math.max(ammoMax, stats.ammoCapacity)
 			if stats.reloadTime > 0 then
 				reloadMin = math.min(reloadMin, stats.reloadTime)
 			end
@@ -116,6 +118,7 @@ function DisplayStats.GetRanges(): Ranges
 		damageMax = damageMax,
 		fireRateMax = fireRateMax,
 		reloadMin = reloadMin,
+		ammoMax = ammoMax,
 	})
 	_ranges = ranges
 	return ranges
@@ -133,6 +136,7 @@ function DisplayStats.Get(category: string, weaponId: string): WeaponDisplayStat
 		damageMax = ranges.damageMax,
 		fireRateMax = ranges.fireRateMax,
 		reloadMin = ranges.reloadMin,
+		ammoMax = ranges.ammoMax,
 	}
 end
 

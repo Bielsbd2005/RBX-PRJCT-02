@@ -137,7 +137,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local janitor = Janitor.new()
 	local fusionScope = Fusion.scoped(Fusion)
 	local navItemsJanitor = Janitor.new()
-	local autoOpenOnStart = options and options.autoOpen == true
 	janitor:Add(function()
 		Fusion.doCleanup(fusionScope)
 	end, true)
@@ -177,6 +176,12 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 	local tableWeaponSpawn = resolveWeaponAnchor("TableSpawn", "MainSpawn")
 	local wallWeaponSpawn = resolveWeaponAnchor("WallSpawn", "SpecialSpawn")
+	-- Los stats del arma ya no viven en la GUI del locker, sino en un BillboardGui
+	-- del mundo bajo Workspace.Locker.Stats (ver WeaponStatsPanel).
+	local weaponStatsAnchor = lockerFolder:WaitForChild("Stats", 10)
+	if not weaponStatsAnchor then
+		warn("[Locker] Ancla del billboard de stats no encontrada: Workspace.Locker.Stats")
+	end
 
 	-- Botón de apertura en Menu.Container.Locker
 	local container = menuGui:FindFirstChild("Container")
@@ -227,9 +232,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		return button:FindFirstChildWhichIsA("TextLabel", true)
 	end
 
-	-- Panel de acción (compra / bloqueo). Hay DOS frames de idéntica estructura:
-	-- ActionFrame (ítems normales) y WeaponActionFrame (armas, con su tamaño/posición
-	-- propios). showActionFrameForItem enruta según la categoría del ítem.
+	-- Panel de acción (compra / bloqueo). Un único frame, ActionFrame, para todos
+	-- los ítems (armas incluidas).
 	--   <Frame>.Title.Text.Title / .Subtitle  → título y subtítulo
 	--   <Frame>.Title.Icon                     → icono (candado / compra)
 	--   <Frame>**.ActionBtn                    → botón de acción (búsqueda recursiva)
@@ -265,14 +269,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	local actionPanel = makeActionPanel(lockerFrame:WaitForChild("ActionFrame") :: GuiObject)
-	-- WeaponActionFrame: misma estructura que ActionFrame, con su tamaño/posición
-	-- propios (deja sitio al panel de stats). Geometría que pediste; ajústala aquí.
-	local weaponActionFrame = lockerFrame:WaitForChild("WeaponActionFrame") :: GuiObject
-	weaponActionFrame.Size = UDim2.new(0.229, 0, 0.143, 0)
-	weaponActionFrame.Position = UDim2.new(0.137, 0, 0.804, 0)
-	local weaponActionPanel = makeActionPanel(weaponActionFrame)
-	-- Panel de acción actualmente visible (nil = ninguno).
-	local activeActionPanel: ActionPanel? = nil
+	-- ¿Está el ActionFrame desplegado ahora mismo?
+	local isActionFrameVisible = false
 	-- Botón separado (fuera del ActionFrame) para personalizar los wraps de un arma poseída.
 	-- El nav de armas (Locker.WeaponNav) agrupa las acciones específicas del arma y
 	-- se muestra al seleccionar un arma poseída. El botón de wraps vive dentro; su
@@ -287,21 +285,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end
 	end
 
-	-- HUD de monedas: el Locker monta una copia del Stats del Menu
-	-- (Stats.CoinsFrame.Value + Stats.GemsFrame.Value opcional). El panel de stats
-	-- del arma vive aparte, en Locker.WeaponStats. Todo opcional: sin HUD montado el
-	-- locker funciona igual, solo no pinta el cash.
-	local statsHud = lockerFrame:FindFirstChild("Stats")
-	local coinsFrame = if statsHud then statsHud:FindFirstChild("CoinsFrame") else nil
-	local coinsValueNode = if coinsFrame then coinsFrame:FindFirstChild("Value") else nil
-	local cashValueLabel = if coinsValueNode and coinsValueNode:IsA("TextLabel") then coinsValueNode else nil
-	local statsHudNode = if statsHud and statsHud:IsA("GuiObject") then statsHud :: GuiObject else nil
-	local gemsFrame = if statsHudNode then statsHudNode:FindFirstChild("GemsFrame") else nil
-	local gemsValueNode = if gemsFrame then gemsFrame:FindFirstChild("Value") else nil
-	local gemsValueLabel = if gemsValueNode and gemsValueNode:IsA("TextLabel") then gemsValueNode else nil
-	if not cashValueLabel then
-		warn("[Locker] HUD de cash no encontrado (Stats.CoinsFrame.Value) dentro de Locker")
-	end
+	-- El HUD de monedas ya no lo monta el Locker: Menu y Locker comparten el
+	-- ScreenGui LobbyStats, que pinta y muestra MenuController.
 	local cameraController = LockerCameraController.new("weapons")
 	janitor:Add(cameraController, "Destroy")
 	lockerFrame.Visible = false
@@ -371,11 +356,25 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	--   "owned"   → wraps que posees en el inventario
 	local wrapsView = "owned"
 
+	-- Panel de stats del arma: billboard en el mundo, así que se construye pronto
+	-- (setWrapsMode y selectItem lo ocultan). El constructor lo deja apagado.
+	local weaponStatsPanel = WeaponStatsPanel.new(weaponStatsAnchor, janitor)
+
+	-- El HUD de monedas (LobbyStats) es compartido y por defecto sigue al Menu,
+	-- que el Locker esconde al abrirse. Mientras el Locker está abierto es él
+	-- quien manda: visible, salvo en la vista de wraps (pantalla limpia). Al
+	-- cerrarse devuelve el control al Menu (nil).
+	local function syncSharedStatsHud()
+		menuController:setStatsHudOverride(if isOpen then not isWrapsMode else nil)
+	end
+
 	local function setWrapsMode(enabled: boolean)
 		isWrapsMode = enabled
-		if statsHudNode then
-			statsHudNode.Visible = not enabled
+		-- La vista de wraps zooma sobre la mesa: el billboard de stats sobra ahí.
+		if enabled then
+			weaponStatsPanel:hide()
 		end
+		syncSharedStatsHud()
 		if nav then nav.Visible = not enabled end
 		-- Entrar al modo wraps oculta el WeaponNav; al salir, updateActionFrameForSelected
 		-- lo vuelve a mostrar si toca.
@@ -394,11 +393,9 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	actionPanel.frame.Visible = false
-	weaponActionPanel.frame.Visible = false
 	wrapsButton.Visible = false
 	nav1Template.Visible = false
 	actionPanel.frame.Position = actionPanel.hiddenPosition
-	weaponActionPanel.frame.Position = weaponActionPanel.hiddenPosition
 
 	local function getOptionalString(value: any): string?
 		if type(value) == "string" and value ~= "" then
@@ -583,7 +580,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 	janitor:Add(function()
 		actionPanel.activeTween = cancelTween(actionPanel.activeTween)
-		weaponActionPanel.activeTween = cancelTween(weaponActionPanel.activeTween)
 		activePurchaseButtonScaleTween = cancelTween(activePurchaseButtonScaleTween)
 		activePurchaseButtonStrokeTween = cancelTween(activePurchaseButtonStrokeTween)
 		cancelTweenMap(activeNavSizeTweens)
@@ -945,8 +941,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	local function showActionFrameForItem(item: LockerCatalogItem)
-		-- Armas → WeaponActionFrame; resto → ActionFrame (misma estructura).
-		local panel = if isWeaponCategory(item.Category) then weaponActionPanel else actionPanel
+		local panel = actionPanel
 		local isLevelLocked = getCurrentLevel() < item.LevelRequired
 
 		if isLevelLocked then
@@ -969,18 +964,14 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		panel.button.Active = not isLevelLocked
 		panel.button.Selectable = not isLevelLocked
 
-		-- Si había otro panel visible (cambio arma↔no-arma), deslízalo fuera.
-		if activeActionPanel and activeActionPanel ~= panel then
-			tweenPanel(activeActionPanel, false)
-		end
-		activeActionPanel = panel
+		isActionFrameVisible = true
 		tweenPanel(panel, true)
 	end
 
 	local function hideActionFrame()
-		if activeActionPanel then
-			tweenPanel(activeActionPanel, false)
-			activeActionPanel = nil
+		if isActionFrameVisible then
+			isActionFrameVisible = false
+			tweenPanel(actionPanel, false)
 		end
 	end
 
@@ -1021,11 +1012,11 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		return equippedItem == item.id
 	end
 
-	-- ── Panel de stats del arma (Locker.Stats) ───────────────────
+	-- ── Panel de stats del arma (billboard Workspace.Locker.Stats) ───
 	-- Los stats de combate viven en Shared (WeaponsConfig), así que se derivan
 	-- en local (WeaponDisplayStats) sin red. El panel compara la SELECCIONADA
-	-- contra la EQUIPADA (delta bar verde/rojo).
-	local weaponStatsPanel = WeaponStatsPanel.new(lockerFrame, janitor)
+	-- contra la EQUIPADA (delta bar verde/rojo). `weaponStatsPanel` se construye
+	-- arriba, junto a setWrapsMode.
 
 	type WeaponBaseStats = WeaponDisplayStats.WeaponDisplayStats
 	-- Valores a pintar + sus fills 0..1 (para comparar y mostrar).
@@ -1037,6 +1028,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		damageFill: number,
 		fireRateFill: number,
 		reloadFill: number,
+		ammoFill: number,
 	}
 	-- Arma seleccionada ahora (category/id, "" si ninguna). Se compara contra la
 	-- equipada de su misma categoría.
@@ -1061,6 +1053,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			fireRateFill = if base.fireRateMax > 0 then fireRate / base.fireRateMax else 0,
 			-- Recarga: menos es mejor → barra más llena = recarga más rápida.
 			reloadFill = if reload > 0 then base.reloadMin / reload else 1,
+			ammoFill = if base.ammoMax > 0 then ammo / base.ammoMax else 0,
 		}
 	end
 
@@ -1100,13 +1093,19 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			},
 			Ammo = {
 				value = sel.ammo,
-				fill = 0, -- Ammo no tiene barra
-				compareFill = 0,
+				fill = sel.ammoFill,
+				compareFill = eq.ammoFill,
 				delta = sel.ammo - eq.ammo,
-				-- Más munición = mejor: el delta en fill equivale al signo del valor.
-				dir = dirFromFill(sel.ammo, eq.ammo),
+				dir = dirFromFill(sel.ammoFill, eq.ammoFill),
 			},
 		}
+	end
+
+	-- El billboard vive en el mundo: sólo debe verse mientras la cámara está en la
+	-- previsualización de armas (Arsenal). En Character/Effects y en la vista de
+	-- wraps (que zooma sobre la mesa) queda oculto.
+	local function isWeaponPreviewContext(): boolean
+		return isOpen and not isWrapsMode and selectedMainCategory == LockerMainCategory.ARSENAL
 	end
 
 	-- Renderiza la comparación seleccionada-vs-equipada.
@@ -1114,6 +1113,11 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		local category = statsSelectedCategory
 		local selId = statsSelectedId
 		if category == "" or selId == "" then
+			return
+		end
+
+		if not isWeaponPreviewContext() then
+			weaponStatsPanel:hide()
 			return
 		end
 
@@ -1127,7 +1131,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	-- Item seleccionado: no-arma ⇒ oculta el panel. Arma ⇒ debounce 0.06s y
 	-- renderiza (evita ráfagas al scrollear: sólo el arma donde uno se detiene).
 	local function requestWeaponStatsForItem(item: LockerCatalogItem?)
-		if not item or not isWeaponCategory(item.Category) then
+		if not item or not isWeaponCategory(item.Category) or not isWeaponPreviewContext() then
 			statsSelectedCategory = ""
 			statsSelectedId = ""
 			weaponStatsPanel:hide()
@@ -1491,6 +1495,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		setSelectedMainCategory(selectedKey)
 		cameraController:setTargetPartName(CAMERA_TARGET_BY_MAIN_CATEGORY[selectedKey])
 		if selectedKey ~= LockerMainCategory.ARSENAL then
+			-- Otra cámara (Character/Effects): fuera el billboard de stats.
+			weaponStatsPanel:hide()
 			restoreEquippedWeaponPreviews()
 		end
 		populateNavButtons(selectedKey)
@@ -1527,20 +1533,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			})
 		end
 		populateNav1(definitions, selectedMainCategory)
-	end
-
-	-- El nivel ya no se pinta aquí: el LevelContainer del Locker desapareció y el
-	-- HUD copiado del Menu solo trae monedas.
-	local function updateStatsUi()
-		local stats = getCurrentStats()
-		if cashValueLabel then
-			cashValueLabel.Text = UIUtils.formatCashAmount(stats.Cash)
-		end
-
-		if gemsValueLabel then
-			-- `or 0` cubre el perfil que aún no pasó por Reconcile (igual que MenuController).
-			gemsValueLabel.Text = UIUtils.formatCashAmount(stats.Gems or 0)
-		end
 	end
 
 	navTemplate.Visible = false
@@ -1667,8 +1659,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			end
 		end
 
-		-- Wiring de hover/escala/click + handler de compra de un botón de acción.
-		-- Se aplica al ActionBtn de AMBOS frames (ActionFrame y WeaponActionFrame).
+		-- Wiring de hover/escala/click + handler de compra del ActionBtn del
+		-- ActionFrame (único panel de acción).
 		local function setupActionButton(button: GuiButton)
 			button.Active = true
 			button.Selectable = true
@@ -1741,7 +1733,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end
 
 		setupActionButton(actionPanel.button)
-		setupActionButton(weaponActionPanel.button)
 	end
 
 	-- Sub-pestañas dentro de wraps: Maestry (desafíos) / Owned.
@@ -1833,7 +1824,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 		local statsObserver = fusionScope:Observer(DataController.Stats)
 		janitor:Add(statsObserver:onBind(function()
-			updateStatsUi()
 			if not isOpen then
 				dirtyWhileClosed = true
 				return
@@ -1896,6 +1886,11 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	-- Al cerrar, la cámara vuelve al lobby con un travelling; en teardown del feature
 	-- se restaura al instante (animateCamera nil/false).
 	local function restoreLockerSceneState(animateCamera: boolean?)
+		weaponStatsPanel:hide()
+		-- Todas las salidas pasan por aquí (close, Visible=false y teardown del
+		-- feature), incluidas las que no llaman a setWrapsMode: soltar el HUD
+		-- compartido sin condiciones o se quedaría forzado ya en el lobby.
+		menuController:setStatsHudOverride(nil)
 		restoreEquippedWeaponPreviews()
 		-- Soltar el preview del personaje del lobby: vuelve a mostrar lo equipado y
 		-- LobbyFeature retoma el control de los cambios de loadout.
@@ -1959,6 +1954,9 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		-- (travelling) hasta Workspace.Cameras.character.
 		cameraController:apply()
 		lockerFrame.Visible = true
+		-- Antes de esconder el Menu: si no, el HUD compartido se iría con él
+		-- durante un frame antes de que el Locker se lo quede.
+		syncSharedStatsHud()
 		setMenuVisibleInstant(false)
 		ScenePresetController.applyFrom(lockerFolder)
 		nav1Stagger:play()
@@ -2030,7 +2028,11 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end
 	end, true)
 
-	if autoOpenOnStart then
+	-- `autoOpen` se lee AQUÍ, no al entrar: el locker ya se arranca solo al iniciar
+	-- el juego (ClientBootstrap) y ese arranque tarda — hay WaitForChild de por medio.
+	-- Si el jugador pulsa Locker mientras tanto, el bootstrap marca la opción sobre
+	-- la misma tabla y el clic no se pierde.
+	if options and options.autoOpen == true then
 		task.defer(openLockerGui)
 	end
 

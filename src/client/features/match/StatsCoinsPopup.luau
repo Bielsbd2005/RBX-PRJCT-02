@@ -2,13 +2,15 @@
 --[[
 	StatsCoinsPopup.luau
 	Popup de ganancias in-match. Cada vez que el jugador gana cash (kill,
-	headshot, asistencia) el frame `MatchHud.Container.Stats` entra deslizando
+	headshot, asistencia) el frame `MatchStats.Stats` entra deslizando
 	desde la izquierda, escupe monedas desde `Stats.CoinsSpawn` hacia
 	`Stats.CoinsFrame.Value` y va sumando la ganancia al total conforme cada
 	moneda aterriza. Tras un beat sin ganancias nuevas se va por la izquierda.
 
-	Estructura esperada (Stats cuelga de la raíz del ScreenGui, hermano de
-	Container; también se acepta dentro de Container):
+	Vive en su PROPIO ScreenGui (`StarterGui.MatchStats`), no en el del HUD: lo
+	enciende y apaga MatchHud:setEnabled junto al resto de la partida. Estructura
+	esperada (Stats cuelga de la raíz del ScreenGui; se sigue aceptando dentro de
+	un Container por si el asset viejo lo trae así):
 		Stats.CoinsFrame.Value   TextLabel con el cash total
 		Stats.CoinsSpawn         ImageLabel: punto de salida Y sprite de las
 		                         monedas (se clona por moneda). Se oculta al
@@ -21,7 +23,7 @@
 	quedan por encima vía ZIndex.
 
 	API:
-		StatsCoinsPopup.new(matchHudGui: ScreenGui?)
+		StatsCoinsPopup.new(matchStatsGui: ScreenGui?)
 		:setCash(total: number)             -- sincroniza el label sin animar
 		:addCash(delta: number, total: number)
 		:addCashFrom(delta, total, spawnNode) -- monedas desde OTRO nodo (p. ej.
@@ -74,10 +76,9 @@ local COIN_SPIN_MAX = 50 -- grados
 local VALUE_POP_TWEEN_INFO = TweenInfo.new(0.09, Enum.EasingStyle.Quad, Enum.EasingDirection.Out, 0, true)
 local VALUE_POP_SCALE = 1.16
 
--- `layer` es el padre de Stats: un Frame si Stats cuelga de Container, o el
--- propio ScreenGui en el layout actual (Stats es hermano de Container). Ahí es
--- donde se clonan las monedas, así que la geometría tiene que funcionar con los
--- dos casos.
+-- `layer` es el padre de Stats: el propio ScreenGui MatchStats en el layout
+-- actual, o un Frame si el asset lo trae dentro de un Container. Ahí es donde se
+-- clonan las monedas, así que la geometría tiene que funcionar con los dos casos.
 type PopupRefs = {
 	frame: GuiObject,
 	layer: Instance,
@@ -173,9 +174,9 @@ end
 local StatsCoinsPopup = {}
 StatsCoinsPopup.__index = StatsCoinsPopup
 
-function StatsCoinsPopup.new(matchHudGui: ScreenGui?): any
+function StatsCoinsPopup.new(matchStatsGui: ScreenGui?): any
 	local self = setmetatable({}, StatsCoinsPopup)
-	self._gui = matchHudGui
+	self._gui = matchStatsGui
 	self._destroyed = false
 	self._janitor = Janitor.new()
 	self._refs = nil :: PopupRefs?

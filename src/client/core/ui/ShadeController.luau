@@ -12,15 +12,16 @@
 		  CanvasGroup    ← imagen/gradiente (GroupTransparency desvanece su contenido)
 		    ImageLabel, UIGradient, ...
 
-	Atributos (se definen en Studio sobre el frame del panel):
-		Shade       : boolean  → si true, mostrar el overlay mientras el frame esté visible.
-		ShadeColor  : Color3   → color para `Shade.Background.BackgroundColor3` (opcional).
+	Atributo (se define en Studio sobre el frame del panel):
+		ShadeColor : Color3 → su sola presencia activa el overlay mientras el frame
+		                      esté visible, y da el color de `Background`/`Shadow`.
+		                      Sin el atributo, el frame no dispara shade.
 
 	Aparición/desaparición animadas con tween de transparencia: se desvanece
 	`Background.BackgroundTransparency` y `CanvasGroup.GroupTransparency` entre sus
 	valores diseñados (estado visible) y 1 (oculto). No toca el `Shade` en sí.
 
-	Blur: todo frame con Shade lleva blur de fondo, así que el blur va atado al
+	Blur: todo frame con ShadeColor lleva blur de fondo, así que el blur va atado al
 	overlay — se activa cuando el Shade se muestra y se suelta cuando se oculta,
 	vía BlurController (refcount, key única "Shade"). Los frames que usan Shade
 	NO necesitan tocar el blur ellos mismos.
@@ -34,7 +35,6 @@ local Packages = ReplicatedStorage:WaitForChild("Packages")
 local Janitor = require(Packages.janitor) :: any
 local BlurController = require(script.Parent.BlurController)
 
-local SHADE_ATTRIBUTE = "Shade"
 local COLOR_ATTRIBUTE = "ShadeColor"
 -- Key del refcount de blur para el overlay del Shade.
 local BLUR_KEY = "Shade"
@@ -73,12 +73,10 @@ function ShadeController.start(_menuController: any?): any
 	-- Fijar el ZIndex una sola vez para que el overlay quede siempre detrás.
 	shade.ZIndex = SHADE_ZINDEX
 
-	-- Transparencias y colores "visibles" diseñados en Studio: se desvanece entre éstas y 1.
+	-- Transparencias "visibles" diseñadas en Studio: se desvanece entre éstas y 1.
 	local bgVisible = background.BackgroundTransparency
-	local defaultBgColor = background.BackgroundColor3
 	local canvasVisible = if canvas then canvas.GroupTransparency else 0
 	local shadowVisible = if shadow then shadow.BackgroundTransparency else 0
-	local defaultShadowColor = if shadow then shadow.BackgroundColor3 else nil
 
 	-- Estado inicial: oculto.
 	background.BackgroundTransparency = 1
@@ -127,17 +125,17 @@ function ShadeController.start(_menuController: any?): any
 		return bgTween
 	end
 
-	local function show(color: Color3?)
-		background.BackgroundColor3 = color or defaultBgColor
+	local function show(color: Color3)
+		background.BackgroundColor3 = color
 		if shadow then
-			shadow.BackgroundColor3 = color or (defaultShadowColor :: Color3)
+			shadow.BackgroundColor3 = color
 		end
 		if shown then
 			return
 		end
 		shown = true
 
-		-- El blur acompaña al Shade (todo frame con Shade lo lleva).
+		-- El blur acompaña al Shade (todo frame con ShadeColor lo lleva).
 		BlurController.acquire(BLUR_KEY)
 
 		shade.Visible = true
@@ -166,17 +164,23 @@ function ShadeController.start(_menuController: any?): any
 
 	local function refresh()
 		local top: GuiObject? = nil
+		local topColor: Color3? = nil
 		for _, frame in tracked do
-			if frame.Visible and frame:GetAttribute(SHADE_ATTRIBUTE) == true then
-				if not top or frame.ZIndex > top.ZIndex then
-					top = frame
-				end
+			if not frame.Visible then
+				continue
+			end
+			local color = frame:GetAttribute(COLOR_ATTRIBUTE)
+			if typeof(color) ~= "Color3" then
+				continue
+			end
+			if not top or frame.ZIndex > top.ZIndex then
+				top = frame
+				topColor = color :: Color3
 			end
 		end
 
-		if top then
-			local color = top:GetAttribute(COLOR_ATTRIBUTE)
-			show(if typeof(color) == "Color3" then color else nil)
+		if topColor then
+			show(topColor)
 		else
 			hide()
 		end
@@ -187,10 +191,9 @@ function ShadeController.start(_menuController: any?): any
 			return
 		end
 		table.insert(tracked, frame)
-		-- Tanto un cambio de visibilidad como de los atributos Shade / ShadeColor re-evalúan el overlay,
-		-- así que activar/desactivar Shade o cambiar su color en runtime funciona sin más cableado.
+		-- Tanto un cambio de visibilidad como del atributo ShadeColor re-evalúan el overlay,
+		-- así que poner/quitar ShadeColor o cambiar su color en runtime funciona sin más cableado.
 		janitor:Add(frame:GetPropertyChangedSignal("Visible"):Connect(refresh), "Disconnect")
-		janitor:Add(frame:GetAttributeChangedSignal(SHADE_ATTRIBUTE):Connect(refresh), "Disconnect")
 		janitor:Add(frame:GetAttributeChangedSignal(COLOR_ATTRIBUTE):Connect(refresh), "Disconnect")
 	end
 

@@ -8,13 +8,16 @@
 	de iluminación autorado en esa parte — de ahí sale el DepthOfField que
 	desenfoca el fondo, igual que en el Locker.
 
-	GUI (PlayerGui.UserInterface.BattlePass, con `Main` intermedio OPCIONAL: si
-	ese frame existe se usa como raíz y si no se leen los hijos del panel):
+	GUI (PlayerGui.UserInterface.BattlePass, con `Content` intermedio OPCIONAL: si
+	ese frame existe se usa como raíz y si no se leen los hijos del panel. Se
+	acepta el nombre antiguo `Main`, y cada nodo se busca primero ahí y después en
+	la raíz del panel, así que da igual de cuál de los dos cuelgue):
 	  CloseBtn (root)                 -- fallback opcional: Header.CloseBtn
 	  Nav.Back (.Indicator) / Nav.Next (.Indicator) / Nav.Info  ("1/8")
 	  SkipLevelBtn                     (compra con Gems: +1 nivel)
 	  PurchaseBtn                      (compra con Gems: premium / PASS)
-	  Path."1".."8" (cada item, GuiButton):
+	  PathContainer."1".."8" (cada item, GuiButton; nombre antiguo `Path`, y se
+	  acepta también que envuelva un `Path` con los slots dentro):
 	    Container.Level                 -- nivel del slot ("Lvl. 5"); se oculta en
 	                                       el slot del nivel actual, que lo pinta
 	                                       CurrentLevel
@@ -369,11 +372,23 @@ function BattlePassFeature.start(menuController: any): any
 		return janitor
 	end
 	local frame = frameNode :: GuiObject
-	-- `Main` es opcional: la GUI puede colgar Header/Nav/Path
-	-- directamente del panel. Sin WaitForChild a propósito — esperar un frame
-	-- que ya no existe dejaría el feature colgado para siempre.
-	local mainNode = frame:FindFirstChild("Main")
+	-- El frame intermedio es opcional: la GUI puede colgar Header/Nav/PathContainer
+	-- directamente del panel. Hoy se llama `Content`; se acepta el nombre antiguo
+	-- `Main` por si el place todavía no está migrado. Sin WaitForChild a propósito
+	-- — esperar un frame que ya no existe dejaría el feature colgado para siempre.
+	local mainNode = frame:FindFirstChild("Content") or frame:FindFirstChild("Main")
 	local main: Instance = if mainNode then mainNode else frame
+
+	-- Los nodos del panel se buscan primero bajo el intermedio y después en la
+	-- raíz: al reorganizar la GUI en Studio se mueven de nivel con facilidad, y
+	-- este feature no debe romperse por eso.
+	local function findPanelChild(name: string): Instance?
+		local found = main:FindFirstChild(name)
+		if found then
+			return found
+		end
+		return if main ~= frame then frame:FindFirstChild(name) else nil
+	end
 
 	-- Botón de apertura en Menu.Container.FamePass
 	local container = menuGui:FindFirstChild("Container")
@@ -391,12 +406,12 @@ function BattlePassFeature.start(menuController: any): any
 
 	-- Header. CloseBtn cuelga hoy directo de BattlePass (root), no de Header;
 	-- fallback a Header.CloseBtn por si la GUI aún no está migrada.
-	local header = main:FindFirstChild("Header")
+	local header = findPanelChild("Header")
 	local closeNode = frame:FindFirstChild("CloseBtn") or (header and header:FindFirstChild("CloseBtn"))
 	local closeBtn: GuiButton? = if closeNode and closeNode:IsA("GuiButton") then closeNode else nil
 
 	-- Nav (Back / Next / Info).
-	local navFolder = main:FindFirstChild("Nav")
+	local navFolder = findPanelChild("Nav")
 	local backBtn = navFolder and navFolder:FindFirstChild("Back")
 	local nextBtn = navFolder and navFolder:FindFirstChild("Next")
 	local pageLabelNode = navFolder and navFolder:FindFirstChild("Info")
@@ -405,18 +420,24 @@ function BattlePassFeature.start(menuController: any): any
 	local nextIndicator = if nextBtn then nextBtn:FindFirstChild("Indicator") else nil
 
 	-- Skip + Purchase (Premium) opcional.
-	local skipBtn = main:FindFirstChild("SkipLevelBtn")
-	local purchaseBtn = main:FindFirstChild("PurchaseBtn")
+	local skipBtn = findPanelChild("SkipLevelBtn")
+	local purchaseBtn = findPanelChild("PurchaseBtn")
 
-	-- Path slots 1..8.
-	local pathFolder = main:FindFirstChild("Path")
+	-- Slots 1..8, bajo PathContainer (nombre antiguo: Path). Si el nodo que
+	-- encontramos no lleva los slots directamente sino que envuelve un `Path`,
+	-- bajamos un nivel: así valen tanto "PathContainer.1..8" como
+	-- "PathContainer.Path.1..8" sin tocar código al reorganizar la GUI.
+	local pathFolder = findPanelChild("PathContainer") or findPanelChild("Path")
+	if pathFolder and not pathFolder:FindFirstChild("1") then
+		pathFolder = pathFolder:FindFirstChild("Path") or pathFolder
+	end
 	local slots: { SlotRefs? } = {}
 	if pathFolder then
 		for i = 1, SLOTS_PER_PAGE do
 			slots[i] = _resolveSlot(pathFolder, i)
 		end
 	else
-		warn("[BattlePassFeature] BattlePass.Path no existe")
+		warn("[BattlePassFeature] BattlePass.PathContainer no existe")
 	end
 
 	-- Hover/click de los niveles. Se escala el Container (nodo "InteractiveScale"),
@@ -448,7 +469,7 @@ function BattlePassFeature.start(menuController: any): any
 	end
 	if anchorFixFailed then
 		warn(
-			"[BattlePassFeature] Algún Container de Path no se puede recentrar por código (lo posiciona un layout o su tamaño lo decide un constraint): el hover crecerá desde la esquina. Ponle AnchorPoint 0.5,0.5 en Studio."
+			"[BattlePassFeature] Algún Container de PathContainer no se puede recentrar por código (lo posiciona un layout o su tamaño lo decide un constraint): el hover crecerá desde la esquina. Ponle AnchorPoint 0.5,0.5 en Studio."
 		)
 	end
 
@@ -457,7 +478,7 @@ function BattlePassFeature.start(menuController: any): any
 	-- padre es una asignación, mientras que clonar por página crearía y
 	-- destruiría un CanvasGroup en cada tick de XP (render() corre con cada
 	-- cambio de estado, no solo al paginar).
-	local currentLevelTemplate = main:FindFirstChild("CurrentLevel") or frame:FindFirstChild("CurrentLevel")
+	local currentLevelTemplate = findPanelChild("CurrentLevel")
 	local currentLevel: GuiObject? = nil
 	local currentFill: GuiObject? = nil
 	local currentLevelLabel: TextLabel? = nil
@@ -477,7 +498,7 @@ function BattlePassFeature.start(menuController: any): any
 
 	-- Preview grande del item seleccionado. Solo imagen: el ViewportPreview 3D
 	-- ya no está en la GUI, así que un wrap se previsualiza con su `Image`.
-	local imagePreviewNode = main:FindFirstChild("ImagePreview")
+	local imagePreviewNode = findPanelChild("ImagePreview")
 	local imagePreview: (ImageLabel | ImageButton)? = if imagePreviewNode
 			and (imagePreviewNode:IsA("ImageLabel") or imagePreviewNode:IsA("ImageButton"))
 		then imagePreviewNode :: any

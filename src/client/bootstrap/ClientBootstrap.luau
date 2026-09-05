@@ -151,8 +151,15 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 	local lockerFeatureModule: any = nil
 	local lockerFeatureBooting = false
 	local lockerLazyConnection: RBXScriptConnection? = nil
+	-- Tabla compartida a propósito: LockerFeature.start lee `autoOpen` al final de
+	-- su arranque, así que un clic llegado mientras bootea todavía abre el locker.
+	local lockerFeatureOptions = { autoOpen = false }
 
 	local function bootLockerFeature(openImmediately: boolean): ()
+		if openImmediately then
+			lockerFeatureOptions.autoOpen = true
+		end
+
 		if lockerFeatureHandle or lockerFeatureBooting then
 			return
 		end
@@ -161,9 +168,7 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 
 		local success, result = pcall(function()
 			lockerFeatureModule = lockerFeatureModule or require(clientRoot.features.locker)
-			return lockerFeatureModule.start(menuController, {
-				autoOpen = openImmediately,
-			})
+			return lockerFeatureModule.start(menuController, lockerFeatureOptions)
 		end)
 
 		lockerFeatureBooting = false
@@ -182,6 +187,20 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 		end
 	end
 
+	-- El locker arranca con el juego, cerrado. Su start() es quien coloca las armas
+	-- equipadas en Workspace.Locker (TableSpawn/WallSpawn) y quien apaga el
+	-- BillboardGui de stats (Locker.Stats.Part.BillboardGui). Booteándolo sólo al
+	-- primer clic, hasta entonces la mesa salía vacía y el billboard se veía tal
+	-- cual viene del place. Diferido para no competir con el resto del arranque.
+	task.defer(function()
+		if not _started or not _janitor then
+			return
+		end
+		bootLockerFeature(false)
+	end)
+
+	-- El clic sigue conectado como red de seguridad: cubre la ventana en la que el
+	-- locker aún está booteando y el reintento si ese arranque falló.
 	local lockerButton = findLockerButton(menuController:getGui())
 	if lockerButton then
 		lockerLazyConnection = lockerButton.MouseButton1Click:Connect(function()
@@ -196,9 +215,9 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 		end, true)
 	else
 		-- Sin botón Locker en el menú (se quitó la barra inferior): el locker
-		-- queda dormido en vez de bootear sin forma de abrirlo. Si más adelante
-		-- se agrega un GuiButton llamado "Locker" en cualquier parte del menú,
-		-- findLockerButton lo tomará y se booteará on-click, sin tocar código.
+		-- igualmente arranca arriba — las armas y el billboard no dependen de que
+		-- se pueda abrir. Aquí sólo nos quedamos sin el enganche de apertura; el
+		-- propio LockerFeature conecta el botón si existe cuando él arranca.
 	end
 end
 

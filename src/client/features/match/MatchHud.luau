@@ -13,8 +13,10 @@
 		MainFrame.{ATeamIndicator, BTeamIndicator}   (spritesheet 2x2)
 		MainFrame.{ATeamPlayers, BTeamPlayers}.Template.Value
 	Los popups (LevelUp, Maestry) los resuelve MatchNotificationsQueue, también
-	bajo Container; el de ganancias (Stats.{CoinsFrame.Value, CoinsSpawn}), que
-	entra y sale por la izquierda en cada kill, lo lleva StatsCoinsPopup.
+	bajo MainFrame. El de ganancias (Stats.{CoinsFrame.Value, CoinsSpawn}), que
+	entra y sale por la izquierda en cada kill, lo lleva StatsCoinsPopup y vive en
+	un ScreenGui aparte (`StarterGui.MatchStats.Stats`): MatchHud.new lo recibe
+	como segundo argumento y setEnabled lo enciende/apaga junto al HUD.
 ]]
 
 local Players = game:GetService("Players")
@@ -287,9 +289,10 @@ end
 local MatchHud = {}
 MatchHud.__index = MatchHud
 
-function MatchHud.new(matchHudGui: ScreenGui?): any
+function MatchHud.new(matchHudGui: ScreenGui?, matchStatsGui: ScreenGui?): any
 	local self = setmetatable({}, MatchHud)
 	self._gui = matchHudGui
+	self._statsGui = matchStatsGui
 	self._hudRefs = _resolveHudRefs(matchHudGui)
 	self._localUserId = Players.LocalPlayer.UserId
 	self._destroyed = false
@@ -309,9 +312,10 @@ function MatchHud.new(matchHudGui: ScreenGui?): any
 	self._notificationsQueue:setOnNotifyingChanged(function(notifying)
 		self:_setTeamPlayersHidden(notifying)
 	end)
-	-- Popup de ganancias (Container.Stats): lo dispara updateCashLevel cuando el
-	-- cash sube durante la partida (kill / headshot / asistencia).
-	self._statsCoinsPopup = StatsCoinsPopup.new(matchHudGui)
+	-- Popup de ganancias (MatchStats.Stats, ScreenGui propio): lo dispara
+	-- updateCashLevel cuando el cash sube durante la partida (kill / headshot /
+	-- asistencia).
+	self._statsCoinsPopup = StatsCoinsPopup.new(matchStatsGui)
 	-- Último cash visto en DataController; nil hasta la primera lectura para no
 	-- animar el total inicial como si fuera una ganancia.
 	self._lastCashSeen = nil :: number?
@@ -408,6 +412,9 @@ function MatchHud.new(matchHudGui: ScreenGui?): any
 	if matchHudGui then
 		matchHudGui.Enabled = false
 	end
+	if matchStatsGui then
+		matchStatsGui.Enabled = false
+	end
 
 	self:resetMatchState()
 
@@ -420,6 +427,11 @@ function MatchHud:setEnabled(enabled: boolean)
 	self._hudEnabled = enabled
 	if self._gui then
 		self._gui.Enabled = enabled
+	end
+	-- El popup de ganancias vive en su propio ScreenGui (MatchStats), así que
+	-- acompaña al HUD en cada encendido/apagado.
+	if self._statsGui then
+		self._statsGui.Enabled = enabled
 	end
 	if not enabled then
 		self:_clearTimerEffects()

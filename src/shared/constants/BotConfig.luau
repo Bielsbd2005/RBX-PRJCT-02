@@ -55,8 +55,14 @@ export type BotConfigType = {
 		MaxLosChecksPerEval: number,
 		TargetMemoryGrace: number,
 		RetaliationWindow: number,
-		ForcedTargetRangeBonus: number,
+		RetaliationRange: number,
 		GraceRangeBonus: number,
+		PlayerPriorityBias: number,
+		FarPrecisionMult: number,
+		MinEngageDistance: number,
+		MaxEngageDistance: number,
+		ChaseStandoffDistance: number,
+		ChaseResumeDistance: number,
 		ShotBroadcastRange: number,
 		ShotBroadcastLodDistance: number,
 		ShotBroadcastLodDivisor: number,
@@ -121,7 +127,9 @@ local BotConfig: BotConfigType = {
 	},
 
 	Combat = {
-		DetectRange = 35,
+		-- 35 → 45. Con 35 (siete alturas de personaje) un jugador parado a
+		-- media distancia quedaba fuera del radar y "los bots me ignoran".
+		DetectRange = 45,
 		FireRate = 0.1,           -- compartido VsPlayer/VsBot (igual que ShotCooldown del arma real)
 		Precision = 40,           -- % de balas que impactan (0..100)
 
@@ -148,10 +156,42 @@ local BotConfig: BotConfigType = {
 		MaxLosChecksPerEval = 3,   -- cap de raycasts por _getBestTarget. Candidates ya sorted por distancia → los 3 más cercanos cubren el 99% de casos reales. Worst case antes: 5+ raycasts × 16 bots × 10Hz = 800/seg.
 
 		-- D5: tuning que antes vivía inline en BotAI.luau.
-		TargetMemoryGrace = 3,       -- seg que un target perdido sigue "recordado" (CHASE sin LoS)
-		RetaliationWindow = 4,       -- seg que un bot dañado fuerza targeting a su atacante
-		ForcedTargetRangeBonus = 20, -- studs extra sobre DetectRange para mantener el forced target
+		-- Memoria/represalia: 3/4 → 6/8. Con 3s un bot que perdía la LoS un
+		-- instante (otro bot cruzando) te olvidaba y se iba a patrullar.
+		TargetMemoryGrace = 6,       -- seg que un target perdido sigue "recordado" (CHASE sin LoS)
+		RetaliationWindow = 8,       -- seg que un bot dañado fuerza targeting a su atacante. Cada impacto lo renueva.
+		-- Rango ABSOLUTO (no bonus sobre DetectRange) dentro del cual un bot
+		-- mantiene, ve y dispara a quien le hizo daño. Antes era
+		-- DetectRange+20 = 55 studs y la LoS se cortaba en DetectRange, así
+		-- que dispararle a un bot desde lejos no producía reacción alguna.
+		RetaliationRange = 150,
 		GraceRangeBonus = 15,        -- studs extra sobre DetectRange para mantener el target en memoria
+		-- Prioridad a humanos: al ordenar candidatos, un jugador cuenta como
+		-- si estuviera este número de studs más cerca. Con 30 y DetectRange
+		-- 45 un jugador visible gana casi siempre frente a un bot, y el bot
+		-- no "se distrae" con NPCs cuando hay un humano delante.
+		PlayerPriorityBias = 30,
+		-- Multiplicador de Precision cuando el objetivo está más allá de
+		-- DetectRange (solo ocurre en represalia). Que devuelvan fuego desde
+		-- lejos, pero no con la misma letalidad que a media distancia.
+		FarPrecisionMult = 0.6,
+		-- Banda de distancia en ATTACK. Por debajo de Min el strafe lleva
+		-- componente de retroceso; por encima de Max, de aproximación; en
+		-- medio es lateral puro. Antes el avance era un 20% aleatorio sin
+		-- mirar la distancia, y el bot acababa pegado al jugador.
+		MinEngageDistance = 12,
+		MaxEngageDistance = 30,
+		-- En CHASE (objetivo recordado sin LoS) el bot NO hace path hasta la
+		-- posición exacta del objetivo: a menos de esta distancia corta la
+		-- navegación y hace strafe para buscar ángulo. Caminar hasta el
+		-- cuerpo del jugador lo empujaba, el Navigator lo leía como "sin
+		-- progreso" y el StuckDetector escalaba (lateral → repath → salto →
+		-- teleport): el "bot bugueado" al chocar contigo.
+		ChaseStandoffDistance = 10,
+		-- Histéresis del standoff: una vez dentro, solo se retoma el path
+		-- hacia el objetivo al superar esta distancia (> MinEngageDistance,
+		-- para que el retroceso del strafe no lo devuelva al path enseguida).
+		ChaseResumeDistance = 18,
 
 		-- Broadcast de disparos de bots a clientes (BotAI ATTACK). Cada evento
 		-- WeaponFired que recibe un cliente corre la simulación completa de la

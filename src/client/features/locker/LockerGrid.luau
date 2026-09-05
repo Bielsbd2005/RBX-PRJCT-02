@@ -64,8 +64,6 @@ type ItemGridCardRefs = {
 	glowNode: GuiObject?,
 	rarityGradientNode: UIGradient?,
 	appliedRarity: string?,
-	buttonStroke: UIStroke?,
-	hasButtonStrokeCached: boolean?,
 }
 
 type LockerGridCallbacks = {
@@ -104,7 +102,6 @@ export type LockerGrid = {
 	Populate: (self: LockerGrid, items: { LockerCatalogItem }, selectedQualifiedId: string?, templateKey: TemplateKey?) -> (),
 	PlayStagger: (self: LockerGrid) -> (),
 	RefreshVisibleState: (self: LockerGrid, notifySelection: boolean?) -> (),
-	_getButtonStroke: (self: LockerGrid, button: GuiButton) -> UIStroke?,
 	_buildGridCardRefs: (self: LockerGrid, card: GuiObject, templateKey: TemplateKey) -> ItemGridCardRefs,
 	_getGridCardRefs: (self: LockerGrid, card: GuiObject) -> ItemGridCardRefs,
 	_acquireGridCard: (self: LockerGrid, templateKey: TemplateKey) -> GuiObject,
@@ -139,8 +136,6 @@ local STATUS_ICON_LOCKED = AssetIds.Images.LockerLocked
 local STATUS_ICON_CASH = AssetIds.Images.LockerStatusCash
 local STATUS_ICON_GEMS = AssetIds.Images.LockerStatusGems
 local CURRENCY_GEMS = "Gems"
-local STROKE_DEFAULT = UITheme.StrokeDefault
-local STROKE_WHITE = UITheme.StrokeHover
 -- Glow + gradiente de la card por rareza. Rarezas sin entrada (legacy
 -- Uncommon/Rare aún no re-tieradas) caen al visual de Common.
 local RARITY_GLOW = UITheme.LockerRarityGlow
@@ -191,24 +186,6 @@ function LockerGrid.new(
 	self._populateJanitor = Janitor.new()
 	self._janitor:Add(self._populateJanitor, "Destroy")
 	return self
-end
-
-function LockerGrid:_getButtonStroke(button: GuiButton): UIStroke?
-	local card = self._gridCardByButton[button]
-	if card then
-		local refs = self._cachedGridCardRefs[card]
-		if refs then
-			if refs.hasButtonStrokeCached then
-				return refs.buttonStroke
-			end
-			local stroke = button:FindFirstChildOfClass("UIStroke")
-			refs.buttonStroke = if stroke and stroke:IsA("UIStroke") then stroke else nil
-			refs.hasButtonStrokeCached = true
-			return refs.buttonStroke
-		end
-	end
-	local stroke = button:FindFirstChildOfClass("UIStroke")
-	return if stroke and stroke:IsA("UIStroke") then stroke else nil
 end
 
 function LockerGrid:_buildGridCardRefs(card: GuiObject, templateKey: TemplateKey): ItemGridCardRefs
@@ -401,7 +378,6 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 
 	local isOwned = self._callbacks.isItemOwned(item)
 	local isEquipped = self._callbacks.isItemEquipped(item)
-	local isSelectedButton = button == self._selectedCatalogButton
 
 	if refs.templateKey == "wraps" then
 		self:_syncWrapPreviewVisibility(card, item, isOwned)
@@ -443,20 +419,6 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 			end
 		end
 
-		local stroke = self:_getButtonStroke(button)
-		if not stroke then
-			return
-		end
-
-		if isSelectedButton and not isOwned then
-			stroke.Enabled = false
-			stroke.Transparency = 1
-			return
-		end
-
-		stroke.Enabled = true
-		stroke.Transparency = 0
-		stroke.Color = if isEquipped then STROKE_WHITE else STROKE_DEFAULT
 		return
 	end
 
@@ -479,21 +441,6 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 
 	-- Status.Icon: candado si está bloqueado por nivel, moneda si está a la venta.
 	applyStatusIcon(refs.statusIconNode, resolveStatusIcon(item, isLevelLocked, isOwned))
-
-	local stroke = self:_getButtonStroke(button)
-	if not stroke then
-		return
-	end
-
-	if isSelectedButton and not isOwned then
-		stroke.Enabled = false
-		stroke.Transparency = 1
-		return
-	end
-
-	stroke.Enabled = true
-	stroke.Transparency = 0
-	stroke.Color = if isEquipped then STROKE_WHITE else STROKE_DEFAULT
 end
 
 function LockerGrid:_setSelectedButton(targetButton: GuiButton)

@@ -65,7 +65,10 @@ local RETURN_TO_MENU_TIMEOUT = 8
 -- (por tiempo o por puntuación cercana al límite) para evitar el "pop" al cortar
 -- a la cámara de Resultados.
 local RESULTS_PRELOAD_LEAD_SECONDS = 5
-local RESULTS_PRELOAD_SCORE_LEAD = 20
+-- Proporcional a WinScoreLimit: 20/240 era el ~8% final de la ronda. Con el
+-- limite en 75 hay que bajarlo a 6 para precargar en ese mismo tramo; dejarlo
+-- en 20 arrancaba la precarga al 73% del marcador, en casi todas las rondas.
+local RESULTS_PRELOAD_SCORE_LEAD = 6
 -- Tras Results se espera a que arranque la votación para abrirla automáticamente;
 -- si no llega en este tiempo (no se pudo iniciar), se vuelve al menú.
 local VOTE_AUTO_TIMEOUT = 8
@@ -305,7 +308,18 @@ function MatchFeature.start(menuController: any): any
 	end
 
 	local matchHudGui = playerGui:FindFirstChild("MatchHud")
-	local hud = MatchHud.new(if matchHudGui and matchHudGui:IsA("ScreenGui") then matchHudGui else nil)
+	-- El popup de ganancias (Stats) salió del HUD a su propio ScreenGui; el HUD lo
+	-- enciende y apaga con el resto de la partida.
+	local matchStatsGui = playerGui:FindFirstChild("MatchStats")
+	if matchStatsGui and matchStatsGui:IsA("ScreenGui") then
+		-- Un reclonado en cada respawn dejaría al popup apuntando a un frame
+		-- destruido (sus refs se cachean al resolverlas).
+		matchStatsGui.ResetOnSpawn = false
+	end
+	local hud = MatchHud.new(
+		if matchHudGui and matchHudGui:IsA("ScreenGui") then matchHudGui else nil,
+		if matchStatsGui and matchStatsGui:IsA("ScreenGui") then matchStatsGui else nil
+	)
 	janitor:Add(hud, "destroy")
 	hud:setScores(0, 0, GameConfig.MaxRoundDuration)
 

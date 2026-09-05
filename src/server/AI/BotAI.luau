@@ -142,6 +142,8 @@ end
 
 local FOV_COS = math.cos(math.rad(BotConfig.Combat.FOVDegrees / 2))
 local DETECT_RANGE2 = BotConfig.Combat.DetectRange ^ 2
+local RETALIATION_RANGE2 = BotConfig.Combat.RetaliationRange ^ 2
+local PLAYER_PRIORITY_BIAS = BotConfig.Combat.PlayerPriorityBias
 -- Gate del apuntado: AlignOrientation.CFrame replica a todos los clientes en
 -- cada escritura, y el FSM lo escribía a 20Hz por bot aunque la dirección no
 -- hubiera cambiado. Solo se reescribe si el look vector gira más de 2°.
@@ -262,7 +264,7 @@ export type BotAIInstance = typeof(setmetatable({} :: {
 	_fireReadyAt: number,
 	_combatCycleEndAt: number,
 	_combatMoveDir: Vector3,
-	_targetCandidates: { { char: Model, d: number } },
+	_targetCandidates: { { char: Model, d: number, score: number, root: BasePart } },
 	_tool: Tool?,
 	_tipAttachment: Attachment?,
 	_wrapId: string?,
@@ -578,9 +580,11 @@ end
 @desc Esta validación evita disparos a través de cobertura y prioriza combate justo.
 @param target Model Character objetivo.
 @param preResolvedRoot BasePart? HRP opcional ya resuelto para evitar lookup.
+@param maxRange number? Alcance del rayo; por defecto DetectRange. La
+@param maxRange represalia pasa RetaliationRange para poder devolver fuego de lejos.
 @return boolean true si existe LoS directa al target.
 ]]
-function BotAI:_canSeeTarget(target: Model, preResolvedRoot: BasePart?): boolean
+function BotAI:_canSeeTarget(target: Model, preResolvedRoot: BasePart?, maxRange: number?): boolean
 	local targetRoot = preResolvedRoot or target:FindFirstChild("HumanoidRootPart")
 	if not targetRoot then
 		return false
@@ -590,7 +594,7 @@ function BotAI:_canSeeTarget(target: Model, preResolvedRoot: BasePart?): boolean
 	local targetPos = (targetRoot :: BasePart).Position + EYE_OFFSET
 	local direction = targetPos - origin
 
-	if direction.Magnitude > BotConfig.Combat.DetectRange then
+	if direction.Magnitude > (maxRange or BotConfig.Combat.DetectRange) then
 		return false
 	end
 
@@ -671,14 +675,24 @@ function BotAI:_getBestTarget(): (Model?, boolean, BasePart?)
 		local protectedUntil = char:GetAttribute("SpawnProtectedUntil")
 		if type(protectedUntil) == "number" and protectedUntil > now then continue end
 
+		-- Prioridad a humanos: un jugador ordena como si estuviera
+		-- PlayerPriorityBias studs más cerca. Los MaxLosChecksPerEval
+		-- raycasts se gastan primero en él, así que un bot NPC más cercano
+		-- ya no "tapa" al jugador en el sort.
+		local score = d
+		if char:GetAttribute("FakeUserId") == nil then
+			score -= PLAYER_PRIORITY_BIAS
+		end
+
 		candidateCount += 1
 		local c = candidates[candidateCount]
 		if c then
 			c.char = char
 			c.d = d
+			c.score = score
 			c.root = root :: BasePart
 		else
-			candidates[candidateCount] = { char = char, d = d, root = root :: BasePart }
+			candidates[candidateCount] = { char = char, d = d, score = score, root = root :: BasePart }
 		end
 	end
 
@@ -691,7 +705,7 @@ function BotAI:_getBestTarget(): (Model?, boolean, BasePart?)
 		return nil, false, nil
 	end
 
-	table.sort(candidates, function(a, b) return a.d < b.d end)
+	table.sort(candidates, function(a, b) return a.score < b.score end)
 
 	local maxChecks = math.min(candidateCount, BotConfig.Combat.MaxLosChecksPerEval)
 	for i = 1, maxChecks do
@@ -783,9 +797,10 @@ function BotAI:_getForcedTarget(): Model?
 		self._forcedTarget = nil
 		return nil
 	end
-	local rangeExt = BotConfig.Combat.DetectRange + BotConfig.Combat.ForcedTargetRangeBonus
+	-- Rango absoluto de represalia (no DetectRange+bonus): quien te dispara
+	-- desde lejos sigue siendo objetivo mientras esté en el mapa a tiro.
 	local fd = self._rootPart.Position - (root :: BasePart).Position
-	if fd:Dot(fd) > rangeExt * rangeExt then
+	if fd:Dot(fd) > RETALIATION_RANGE2 then
 		self._forcedTarget = nil
 		return nil
 	end
@@ -814,7 +829,9 @@ function BotAI:_evaluateTarget(now: number)
 		-- lugar de pagar FindFirstChild por tick durante los 4s de retaliación.
 		resolvedRoot = self._forcedTargetRoot
 		resolvedHum = self._forcedTargetHum
-		isVisible = self:_canSeeTarget(forced, resolvedRoot)
+		-- LoS a rango de represalia: si me disparan desde 100 studs, devuelvo
+		-- fuego desde 100 studs en vez de ir a CHASE hasta entrar en DetectRange.
+		isVisible = self:_canSeeTarget(forced, resolvedRoot, BotConfig.Combat.RetaliationRange)
 	else
 		local current = self._currentTarget
 		local fastPath = false
@@ -844,6 +861,20 @@ function BotAI:_evaluateTarget(now: number)
 		end
 		if not fastPath then
 			potentialTarget, isVisible, resolvedRoot = self:_getBestTarget()
+			-- Stickiness: si el objetivo que acabo de perder de vista es un
+			-- JUGADOR todavía en memoria, no lo cambio por un bot NPC que
+			-- pase por delante — sigo en CHASE hacia el humano. Solo otro
+			-- jugador visible (o la represalia, arriba) puede desplazarlo.
+			if potentialTarget
+				and current
+				and potentialTarget ~= current
+				and now < self._targetGraceUntil
+				and self._currentTargetPlayer ~= nil
+				and potentialTarget:GetAttribute("FakeUserId") ~= nil then
+				potentialTarget = nil
+				isVisible = false
+				resolvedRoot = nil
+			end
 		end
 	end
 
@@ -917,6 +948,65 @@ function BotAI:_evaluateTarget(now: number)
 		self._currentTargetHum = nil
 		self._currentTargetPlayer = nil
 	end
+end
+
+--[[
+@desc Rerollea el ciclo de movimiento de combate (pausa o paso) cuando el
+@desc actual expira, aplicando la banda de distancia de BotConfig.Combat:
+@desc   • dist < MinEngageDistance  → paso lateral + retroceso (nunca pausa:
+@desc     quedarse quieto pegado al jugador es justo lo que queremos evitar).
+@desc   • dist > MaxEngageDistance  → paso lateral + aproximación.
+@desc   • en medio                  → lateral puro o pausa según personality.
+@desc También lo usa CHASE a distancia de standoff para buscar ángulo sin
+@desc hacer path hasta el cuerpo del objetivo.
+@param now number os.clock() de la iteración.
+@param targetPos Vector3 Posición del objetivo.
+@param dist number Distancia XZ al objetivo.
+@return nil
+]]
+function BotAI:_updateCombatMove(now: number, targetPos: Vector3, dist: number)
+	if now < self._combatCycleEndAt then
+		return
+	end
+	local combat = self._combat
+	local tooClose = dist < BotConfig.Combat.MinEngageDistance
+	local tooFar = dist > BotConfig.Combat.MaxEngageDistance
+
+	if not tooClose and not tooFar and math.random() < combat.CombatPauseChance then
+		self._combatMoveDir = Vector3.zero
+		local lo = combat.CombatPauseMin
+		local hi = combat.CombatPauseMax
+		self._combatCycleEndAt = now + lo + math.random() * (hi - lo)
+		return
+	end
+
+	local toTarget = targetPos - self._rootPart.Position
+	toTarget = Vector3.new(toTarget.X, 0, toTarget.Z)
+	local right = toTarget:Cross(Vector3.new(0, 1, 0))
+	if right.Magnitude > 0.01 and toTarget.Magnitude > 0.01 then
+		right = right.Unit
+		local lateralSign = if math.random() < 0.5 then -1 else 1
+		local lateral = lateralSign * (0.7 + math.random() * 0.3)
+		local forward = 0
+		if tooClose then
+			-- Retroceder abre distancia; el lateral evita que sea una
+			-- marcha atrás en línea recta contra la pared de detrás.
+			forward = -(0.6 + math.random() * 0.3)
+		elseif tooFar then
+			forward = 0.5 + math.random() * 0.3
+		end
+		local dir = right * lateral + toTarget.Unit * forward
+		if dir.Magnitude > 0.01 then
+			self._combatMoveDir = dir.Unit
+		else
+			self._combatMoveDir = right
+		end
+	else
+		self._combatMoveDir = Vector3.zero
+	end
+	local lo = combat.CombatStepMin
+	local hi = combat.CombatStepMax
+	self._combatCycleEndAt = now + lo + math.random() * (hi - lo)
 end
 
 --[[
@@ -1090,6 +1180,13 @@ function BotAI:Start(
 		if attackerUserId == self._fakeUserId then return end -- self-damage
 		local attackerModel = _findAttackerModel(attackerUserId, self._aliveTargets, self._dummy, self._botModelByFakeUserId)
 		if attackerModel and attackerModel ~= self._dummy then
+			-- Un bot NPC que me dispara NO me roba el objetivo si ya estoy
+			-- enfrentando a un jugador (visible o en memoria). Antes la
+			-- represalia pisaba al humano y el bot "se distraía" con otro bot
+			-- en mitad del duelo. Un jugador atacante sí desplaza a otro.
+			if attackerUserId < 0 and self._currentTargetPlayer ~= nil then
+				return
+			end
 			self._forcedTarget = attackerModel
 			-- Resolve once here so _getForcedTarget doesn't pay two child
 			-- lookups per evaluation while the retaliation window is open.
@@ -1110,6 +1207,8 @@ function BotAI:Start(
 		-- que la primera escritura tras (re)activar el apuntado siempre pasa.
 		local lastAimDir: Vector3 = Vector3.zero
 		local previousState: string = STATES.PATROL
+		-- true mientras CHASE está en standoff (strafe sin path). Ver la rama CHASE.
+		local chaseStandoff = false
 
 		-- El rig entra al Workspace por encima del pad de spawn y cae. Pedir el
 		-- primer path desde un origen en el aire hace que ComputeAsync devuelva
@@ -1179,6 +1278,9 @@ function BotAI:Start(
 			else
 				currentState = STATES.PATROL
 			end
+			if currentState ~= STATES.CHASE then
+				chaseStandoff = false
+			end
 
 			local isPlayer = false
 			if currentTarget then
@@ -1197,40 +1299,18 @@ function BotAI:Start(
 				self:_setNavPhase("attack")
 
 				local now = os.clock()
-				if now >= self._combatCycleEndAt then
-					-- D1: strafe cadence per personality (Noob pauses more,
-					-- Whale strafes more).
-					if math.random() < self._combat.CombatPauseChance then
-						self._combatMoveDir = Vector3.zero
-						local lo = self._combat.CombatPauseMin
-						local hi = self._combat.CombatPauseMax
-						self._combatCycleEndAt = now + lo + math.random() * (hi - lo)
-					else
-						local toTarget = targetPos - rootPart.Position
-						local right = toTarget:Cross(Vector3.new(0, 1, 0))
-						if right.Magnitude > 0.01 then
-							right = right.Unit
-							local lateralSign = if math.random() < 0.5 then -1 else 1
-							local lateral = lateralSign * (0.7 + math.random() * 0.3)
-							local forward = 0
-							if math.random() < 0.2 then
-								local forwardSign = if math.random() < 0.5 then -1 else 1
-								forward = forwardSign * (0.25 + math.random() * 0.25)
-							end
-							local dir = right * lateral + toTarget.Unit * forward
-							if dir.Magnitude > 0.01 then
-								self._combatMoveDir = dir.Unit
-							else
-								self._combatMoveDir = right
-							end
-						else
-							self._combatMoveDir = Vector3.zero
-						end
-						local lo = self._combat.CombatStepMin
-						local hi = self._combat.CombatStepMax
-						self._combatCycleEndAt = now + lo + math.random() * (hi - lo)
-					end
+				local flatDelta = targetPos - rootPart.Position
+				local targetDist = Vector3.new(flatDelta.X, 0, flatDelta.Z).Magnitude
+				-- Si el ciclo actual es una pausa o un paso sin retroceso y el
+				-- objetivo se nos ha echado encima, cortarlo ya: la banda de
+				-- distancia solo se evalúa al rerollear y un paso dura ≤1.8s.
+				if targetDist < BotConfig.Combat.MinEngageDistance
+					and self._combatMoveDir:Dot(flatDelta) >= 0 then
+					self._combatCycleEndAt = 0
 				end
+				-- D1: strafe cadence per personality (Noob pauses more,
+				-- Whale strafes more) + banda de distancia.
+				self:_updateCombatMove(now, targetPos, targetDist)
 				local enteredAttack = previousState ~= STATES.ATTACK
 				if enteredAttack or self._combatMoveDir ~= lastAppliedMoveDir then
 					humanoid:Move(self._combatMoveDir, false)
@@ -1260,6 +1340,11 @@ function BotAI:Start(
 					local speed = targetRoot.AssemblyLinearVelocity.Magnitude
 					local stillness = 1 - math.clamp(speed / threshold, 0, 1)
 					precision = math.min(100, precision + bonus * stillness)
+				end
+				-- Más allá de DetectRange solo se llega por represalia: que
+				-- devuelva fuego, pero con menos puntería.
+				if targetDist > BotConfig.Combat.DetectRange then
+					precision *= BotConfig.Combat.FarPrecisionMult
 				end
 
 				if os.clock() - lastShotTime > fireRate
@@ -1353,9 +1438,49 @@ function BotAI:Start(
 				-- inalcanzable y se eliminó. El Navigator silencia las llamadas
 				-- repetidas al mismo dest mientras camina, así que llamar
 				-- goTo a 20Hz es barato.
-				self:_setNavPhase("chase-path")
-				if self._navigator then
-					self._navigator:goTo(targetPos)
+				local flatDelta = targetPos - rootPart.Position
+				local targetDist = Vector3.new(flatDelta.X, 0, flatDelta.Z).Magnitude
+				-- Histéresis: entra en standoff por debajo de ChaseStandoffDistance
+				-- y solo vuelve a hacer path por encima de ChaseResumeDistance.
+				-- Sin ella el bot alternaba "path hasta el jugador" / "retroceder"
+				-- cada ~1s, con un ComputeAsync por ciclo.
+				local wantStandoff = targetDist < BotConfig.Combat.ChaseStandoffDistance
+					or (chaseStandoff and targetDist < BotConfig.Combat.ChaseResumeDistance)
+				if wantStandoff then
+					-- Ya estoy encima del objetivo y aun así no lo veo (otro
+					-- bot en medio, desnivel, un prop). Hacer path hasta su
+					-- posición exacta solo sirve para empujarlo y disparar el
+					-- StuckDetector. Corto la navegación y busco ángulo con
+					-- el mismo strafe de combate (a esta distancia siempre
+					-- lleva componente de retroceso).
+					self:_setNavPhase("chase-standoff")
+					if not chaseStandoff then
+						chaseStandoff = true
+						-- Una sola vez: cancel() escribe Move(zero) y pisaría
+						-- el strafe si se llamara a 20Hz. Cancela también un
+						-- compute pendiente (isMoving aún false).
+						if self._navigator then
+							self._navigator:cancel()
+						end
+						lastAppliedMoveDir = Vector3.new(math.huge, 0, 0)
+					end
+					self:_updateCombatMove(os.clock(), targetPos, targetDist)
+					if self._combatMoveDir ~= lastAppliedMoveDir then
+						humanoid:Move(self._combatMoveDir, false)
+						lastAppliedMoveDir = self._combatMoveDir
+					end
+				else
+					self:_setNavPhase("chase-path")
+					if chaseStandoff then
+						-- Salida del standoff: Move es sticky y el walk loop
+						-- del Navigator no escribe nada hasta que llega el path.
+						chaseStandoff = false
+						humanoid:Move(Vector3.zero, false)
+						lastAppliedMoveDir = Vector3.new(math.huge, 0, 0)
+					end
+					if self._navigator then
+						self._navigator:goTo(targetPos)
+					end
 				end
 
 				task.wait(0.05)

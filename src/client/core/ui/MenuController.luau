@@ -58,9 +58,12 @@ export type MenuController = {
 	_janitor: any,
 	_fusionScope: any,
 	_hudRefs: HudRefs,
+	_lobbyStatsGui: ScreenGui?,
+	_statsHudOverride: boolean?,
 	_missionSlots: { MissionSlot },
 	_openPanels: { [Instance]: boolean },
 	getGui: (self: MenuController) -> ScreenGui,
+	setStatsHudOverride: (self: MenuController, visible: boolean?) -> (),
 	hide: (self: MenuController) -> (),
 	show: (self: MenuController) -> (),
 	isHidden: (self: MenuController) -> boolean,
@@ -88,9 +91,11 @@ local function asFrame(inst: Instance?): Frame?
 	return if inst and inst:IsA("Frame") then inst else nil
 end
 
--- Estructura del HUD bajo Menu.Container:
---   Container.Stats.CoinsFrame.Value  → efectivo actual (coins/cash)
---   Container.Stats.GemsFrame.Value   → gems actuales (opcional)
+-- El HUD de monedas ya no vive en Menu ni en Locker: los dos comparten el
+-- ScreenGui LobbyStats, cuyo nodo Stats se pasa aquí como `statsNode`.
+--   <statsNode>.CoinsFrame.Value      → efectivo actual (coins/cash)
+--   <statsNode>.GemsFrame.Value       → gems actuales (opcional)
+-- El resto sigue bajo Menu.Container:
 --   Container.TopFrame.Level.Current  → nivel actual
 --   Container.TopFrame.Level.Next     → siguiente nivel
 --   Container.TopFrame.Level.Bar.Fill → progreso de XP hacia el siguiente nivel
@@ -98,10 +103,9 @@ end
 --   Container.FamePass.Timer          → tiempo restante ("Ends in X, Y")
 --   Container.FamePass.Level          → nivel en formato "Lv. X"
 --   Container.FamePass.Bar.Fill       → progreso de tier del BattlePass
-local function resolveHudRefs(menuGui: ScreenGui): HudRefs
+local function resolveHudRefs(menuGui: ScreenGui, statsNode: Instance?): HudRefs
 	local container = menuGui:FindFirstChild("Container")
 	local topFrame = container and container:FindFirstChild("TopFrame")
-	local statsNode = container and container:FindFirstChild("Stats")
 	local famePassNode = container and container:FindFirstChild("FamePass")
 
 	-- 1. Cash (el frame en el GUI se llama "CoinsFrame")
@@ -323,19 +327,46 @@ function MenuController.new(): MenuController
 		starterMenu.ResetOnSpawn = false
 	end
 
+	-- HUD de monedas compartido por el Menu y el Locker (ninguno tiene ya su
+	-- propio Stats). Igual que el Menu, no debe resetearse al respawnear: si se
+	-- reclonara, las referencias de _hudRefs quedarían apuntando a nodos muertos.
+	local lobbyStatsNode = playerGui:WaitForChild("LobbyStats", 10)
+	local lobbyStatsGui = if lobbyStatsNode and lobbyStatsNode:IsA("ScreenGui")
+		then lobbyStatsNode :: ScreenGui
+		else nil
+	if lobbyStatsGui then
+		lobbyStatsGui.ResetOnSpawn = false
+	else
+		warn("[MenuController] No se encontró el ScreenGui LobbyStats — el HUD de monedas no se pintará")
+	end
+	local starterLobbyStats = StarterGui:FindFirstChild("LobbyStats")
+	if starterLobbyStats and starterLobbyStats:IsA("ScreenGui") then
+		starterLobbyStats.ResetOnSpawn = false
+	end
+	local lobbyStatsNodeStats = if lobbyStatsGui then lobbyStatsGui:FindFirstChild("Stats") else nil
+
 	local self = setmetatable({}, MenuController) :: any
 
 	self._gui = menuGui
+	self._lobbyStatsGui = lobbyStatsGui
+	self._statsHudOverride = nil
 	self._janitor = Janitor.new()
 	self._fusionScope = Fusion.scoped(Fusion)
 	self._animator = MenuAnimator.new(menuGui)
 	self._hover = MenuHover.new(menuGui)
-	self._hudRefs = resolveHudRefs(menuGui)
+	self._hudRefs = resolveHudRefs(menuGui, lobbyStatsNodeStats)
 	self._missionSlots = resolveMissionSlots(menuGui)
 	self._openPanels = {}
 	self._stateChangeListeners = {} :: { () -> () }
 
 	bindMenuButtonHovers(menuGui, self._janitor)
+
+	-- El Menu se oculta también por fuera de :hide() (MatchMenu apaga el ScreenGui
+	-- durante la partida), así que seguimos su Enabled además del estado interno.
+	self._janitor:Add(menuGui:GetPropertyChangedSignal("Enabled"):Connect(function()
+		self:_syncStatsHud()
+	end), "Disconnect")
+	self:_syncStatsHud()
 
 	self._janitor:Add(self._animator, "Destroy")
 	self._janitor:Add(self._hover, "Destroy")
@@ -409,6 +440,26 @@ end
 
 function MenuController:getGui(): ScreenGui
 	return self._gui
+end
+
+-- El HUD de monedas (LobbyStats) es un ScreenGui aparte, así que no se oculta
+-- solo con el Menu. Por defecto sigue al Menu: como todo panel llama a :hide()
+-- al abrirse, cualquier otra GUI (BattlePass, Gifting, …) y la partida lo dejan
+-- oculto sin hacer nada. El Locker, que también quiere el HUD arriba con el Menu
+-- escondido, se apropia de él con setStatsHudOverride.
+function MenuController:_syncStatsHud(): ()
+	local gui = self._lobbyStatsGui
+	if not gui then
+		return
+	end
+	local override = self._statsHudOverride
+	gui.Enabled = if override ~= nil then override else self._gui.Enabled
+end
+
+--- Fuerza la visibilidad del HUD compartido. `nil` devuelve el control al Menu.
+function MenuController:setStatsHudOverride(visible: boolean?): ()
+	self._statsHudOverride = visible
+	self:_syncStatsHud()
 end
 
 function MenuController:_fireStateChanged(): ()

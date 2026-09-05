@@ -6,7 +6,7 @@
 	completar). Extraído de MatchHud para que ese módulo no orqueste tanto. Los
 	frames y sus posiciones originales se cachean por instancia.
 
-	Frames esperados bajo `MatchHud.Container`, igual que el resto del HUD:
+	Frames esperados bajo `MatchHud.Container.MainFrame`, junto al resto del HUD:
 		LevelUp.{Title, Level}
 		Maestry.{Title, Value, Bar.Fill, CoinsSpawn, Reward.{ItemViewport, Image}}
 		(Reward.Image es del asset: solo se enseña/esconde, nunca se le cambia el
@@ -275,13 +275,16 @@ function MatchNotificationsQueue:setOnChallengeReward(
 	self._onChallengeReward = callback
 end
 
--- Los popups cuelgan de MatchHud.Container igual que el resto del HUD; se pintan
--- encima sin ocultar nada, así que solo necesitan el Container.
+-- Los popups cuelgan de MatchHud.Container.MainFrame igual que el resto del HUD;
+-- se pintan encima sin ocultar nada, así que solo necesitan ese frame. Se acepta
+-- MainFrame colgando directo del ScreenGui por si el asset pierde el Container.
 function MatchNotificationsQueue:_resolveContainer(): GuiObject?
-	if not self._gui then
+	local gui = self._gui
+	if not gui then
 		return nil
 	end
-	return self._gui:WaitForChild("Container") :: GuiObject
+	local root: Instance = gui:WaitForChild("Container", 5) or gui
+	return root:WaitForChild("MainFrame") :: GuiObject
 end
 
 -- Registra un callback que recibe `true` cuando empieza a haber notificaciones y
@@ -394,7 +397,7 @@ function MatchNotificationsQueue:_playFrameSlide(
 	frame.Position = originalPosition
 end
 
--- Level up de cuenta y de pase comparten el frame Container.LevelUp: Title dice de
+-- Level up de cuenta y de pase comparten el frame MainFrame.LevelUp: Title dice de
 -- cuál se trata y Level el nivel alcanzado. Solo cambian título y paleta (que
 -- comparten confeti y fuegos artificiales).
 function MatchNotificationsQueue:_playLevelUpFrame(newLevel: number, title: string, palette: { Color3 })
@@ -425,7 +428,7 @@ function MatchNotificationsQueue:playBattlePassLevelUpAnimation(newLevel: number
 	self:_playLevelUpFrame(newLevel, BATTLEPASS_LEVEL_UP_TITLE, BATTLEPASS_LEVEL_UP_CONFETTI_COLORS)
 end
 
--- Maestría de arma → frame Container.Maestry. Title lleva el nombre del desafío,
+-- Maestría de arma → frame MainFrame.Maestry. Title lleva el nombre del desafío,
 -- Value el "actual/objetivo", Bar.Fill se rellena con tween hasta el ratio, y
 -- Reward.ItemViewport muestra el preview del wrap (siguiente tier o el recién
 -- ganado). Solo lanza confeti al completar un tier (progress.isComplete).
@@ -475,7 +478,7 @@ function MatchNotificationsQueue:playMasteryAnimation(progress: MasteryProgress)
 	end)
 end
 
--- Desafío diario → el mismo frame Container.Maestry: Title lleva el título del
+-- Desafío diario → el mismo frame MainFrame.Maestry: Title lleva el título del
 -- desafío, Value el "actual/objetivo", Reward.Image el icono de la tarea y Bar.Fill
 -- se rellena con tween hasta el ratio. Al completarlo (isComplete) la barra llega
 -- al 100%, salta el confeti y las monedas del premio salen de CoinsSpawn hacia el

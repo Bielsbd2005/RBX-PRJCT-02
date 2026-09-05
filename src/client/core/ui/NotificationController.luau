@@ -27,10 +27,17 @@
 	opaco), usando GroupTransparency si es CanvasGroup. Las plantillas quedan
 	ocultas y fuera del Stack para no estorbar el layout; el Stack se crea una vez
 	y se reutiliza (reload-safe).
+
+	El Stack lleva además un UIScale "DeviceScale" proporcional al viewport (ver
+	`computeDeviceScale`), para que el toast tenga un tamaño razonable tanto en un
+	teléfono como en un monitor grande. Se recalcula al rotar el dispositivo o
+	redimensionar la ventana.
 ]]
 
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
 
 local SHOW_SCALE = TweenInfo.new(0.36, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 local SHOW_FADE = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
@@ -39,6 +46,36 @@ local HIDE_FADE = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirectio
 local HOLD_TIME = 2.5
 local MAX_VISIBLE = 2
 local STACK_PADDING = 6
+
+-- ── Escalado por dispositivo ─────────────────────────────────
+-- Las plantillas del asset están medidas en offsets sobre un viewport de diseño
+-- de 1920x1080. Tal cual, en un teléfono (viewport ~900x420) el toast se come un
+-- tercio de la pantalla, y en un monitor grande queda diminuto. El Stack lleva
+-- por eso su propio UIScale, proporcional al viewport.
+--
+-- Va en el Stack y no en cada toast porque el UIScale del toast ya lo usa la
+-- animación de entrada/salida (0 → 1 → 0): Roblox solo aplica un UIScale por
+-- objeto, pero el del ancestro y el del descendiente se multiplican, así que
+-- ambos conviven sin pisarse. Al colgar del Stack también escala el padding del
+-- UIListLayout, y las plantillas (que viven fuera del Stack) se quedan intactas.
+local REFERENCE_VIEWPORT = Vector2.new(1920, 1080)
+-- Mezcla entre tamaño fijo en píxeles (0) y totalmente proporcional al viewport
+-- (1). Seguir el viewport al 100% deja el texto ilegible en un teléfono, así que
+-- solo aplicamos parte de la diferencia. Cuanto más alto, más encogen las
+-- pantallas pequeñas (el escritorio a 1080p se queda en 1 sea cual sea el peso).
+local VIEWPORT_SCALE_WEIGHT = 0.8
+-- En táctil la pantalla se mira desde más lejos y el dedo tapa parte del toast:
+-- un empujón extra sobre lo que dicte el viewport.
+local TOUCH_SCALE_BOOST = 1.15
+-- Suelo pensado para teléfonos, que es donde el ratio de viewport toca fondo.
+local MIN_DEVICE_SCALE = 0.5
+-- Tope por arriba: el frame Notifications del asset puede venir ajustado (y con
+-- ClipsDescendants), así que no lo desbordamos en pantallas muy grandes.
+local MAX_DEVICE_SCALE = 1.25
+
+-- Misma heurística que TouchControlsController/BlurController: táctil "de
+-- verdad", no un portátil con pantalla táctil y ratón.
+local IS_TOUCH = UserInputService.TouchEnabled and not UserInputService.MouseEnabled
 
 type Entry = {
 	root: GuiObject,
@@ -58,6 +95,8 @@ local _stack: GuiObject? = nil
 local _templates: { [string]: GuiObject } = {}
 local _active: { Entry } = {}
 local _order = 0
+local _deviceScale: UIScale? = nil
+local _viewportConn: RBXScriptConnection? = nil
 
 local present: (kind: string, text: string) -> ()
 local dismiss: (entry: Entry) -> ()
@@ -95,6 +134,59 @@ local function setFaded(entry: Entry)
 	end
 end
 
+-- Escala del Stack para el viewport actual. Tomamos el MENOR de los dos ejes para
+-- que un toast ancho tampoco se salga por los lados en un teléfono; el resultado
+-- se acota para no encoger hasta lo ilegible ni desbordar el frame del asset.
+local function computeDeviceScale(): number
+	local camera = Workspace.CurrentCamera
+	local viewport = if camera then camera.ViewportSize else Vector2.zero
+	if viewport.X <= 0 or viewport.Y <= 0 then
+		-- Durante una transición la cámara puede reportar 0: dejamos el diseño
+		-- base y ya reajustará el listener de ViewportSize.
+		return 1
+	end
+
+	local ratio = math.min(viewport.X / REFERENCE_VIEWPORT.X, viewport.Y / REFERENCE_VIEWPORT.Y)
+	local scale = 1 + (VIEWPORT_SCALE_WEIGHT * (ratio - 1))
+	if IS_TOUCH then
+		scale *= TOUCH_SCALE_BOOST
+	end
+	return math.clamp(scale, MIN_DEVICE_SCALE, MAX_DEVICE_SCALE)
+end
+
+local function applyDeviceScale()
+	local node = _deviceScale
+	if node then
+		node.Scale = computeDeviceScale()
+	end
+end
+
+-- El viewport cambia al rotar el móvil o redimensionar la ventana, y la cámara
+-- entera puede sustituirse (respawn, cinemáticas), así que reenganchamos el
+-- listener en cada cambio de CurrentCamera en vez de conectarlo una sola vez.
+local function watchViewport()
+	if _viewportConn then
+		_viewportConn:Disconnect()
+		_viewportConn = nil
+	end
+	local camera = Workspace.CurrentCamera
+	if camera then
+		_viewportConn = camera:GetPropertyChangedSignal("ViewportSize"):Connect(applyDeviceScale)
+	end
+	applyDeviceScale()
+end
+
+local function ensureDeviceScale(stack: GuiObject): UIScale
+	local existing = stack:FindFirstChild("DeviceScale")
+	if existing and existing:IsA("UIScale") then
+		return existing
+	end
+	local created = Instance.new("UIScale")
+	created.Name = "DeviceScale"
+	created.Parent = stack
+	return created
+end
+
 local function buildStack(notifications: GuiObject): GuiObject
 	local existing = notifications:FindFirstChild("Stack")
 	if existing and existing:IsA("GuiObject") then
@@ -105,7 +197,11 @@ local function buildStack(notifications: GuiObject): GuiObject
 	stack.Name = "Stack"
 	stack.BackgroundTransparency = 1
 	stack.Size = UDim2.fromScale(1, 1)
-	stack.Position = UDim2.fromScale(0, 0)
+	-- Anclado arriba y al centro (equivalente a 0,0 mientras la escala es 1): así
+	-- el UIScale crece y encoge el Stack alrededor de donde salen los toasts, en
+	-- vez de arrastrarlos hacia la derecha.
+	stack.AnchorPoint = Vector2.new(0.5, 0)
+	stack.Position = UDim2.fromScale(0.5, 0)
 
 	local layout = Instance.new("UIListLayout")
 	layout.FillDirection = Enum.FillDirection.Vertical
@@ -146,7 +242,11 @@ local function init(): boolean
 		end
 	end
 
-	_stack = buildStack(notifications)
+	local stack = buildStack(notifications)
+	_stack = stack
+	_deviceScale = ensureDeviceScale(stack)
+	watchViewport()
+	Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(watchViewport)
 	return next(_templates) ~= nil
 end
 
