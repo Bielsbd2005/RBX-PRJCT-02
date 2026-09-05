@@ -153,6 +153,18 @@ type CombatStats = {
 }
 
 type Round = {
+	--[[
+		Identificador de la partida, compartido por TODAS las series que la
+		describen: el MATCH_END, la votación que eligió su mapa y los bonus de
+		fin de partida que pagó.
+
+		Antes se generaba en el instante de emitir el MATCH_END y no se
+		guardaba en ninguna parte, así que kills, faucets `MatchEnd::*` y
+		votación no compartían ni una columna: preguntas como "cuánto Cash
+		pagó esta partida" o "el mapa más votado, ¿es el que más recompensa?"
+		no tenían respuesta con la instrumentación puesta.
+	]]
+	matchId: string,
 	-- os.time() del arranque de la ronda. Sólo lo usa la telemetría, para
 	-- poder distinguir una partida que acabó por marcador de una que agotó
 	-- MaxRoundDuration: la proporción entre ambas dice si la economía de
@@ -185,8 +197,25 @@ type Round = {
 
 local _round: Round? = nil
 
+--[[
+	El matchId se acuña al abrir la votación, no al crear la ronda: la
+	votación es el primer hecho de la partida y tiene que poder etiquetarse con
+	el mismo id que el MATCH_END que llegará minutos después.
+]]
+local _pendingMatchId = ""
+
+local function _newMatchId(): string
+	local ok, guid = pcall(function()
+		return HttpService:GenerateGUID(false)
+	end)
+	return if ok and type(guid) == "string" then guid else tostring(os.clock())
+end
+
 local function _newRound(): Round
+	local matchId = if _pendingMatchId ~= "" then _pendingMatchId else _newMatchId()
+	_pendingMatchId = ""
 	return {
+		matchId = matchId,
 		startedAt = os.time(),
 		scoreA = 0,
 		scoreB = 0,
@@ -293,6 +322,9 @@ end
 local function _enterVoting()
 	_phase = "Voting"
 	_phaseGeneration += 1
+	-- La partida empieza aquí a efectos de telemetría: el MAP_VOTE que sale de
+	-- esta votación y el MATCH_END de la ronda que decida llevan este mismo id.
+	_pendingMatchId = _newMatchId()
 	-- StartVote escribe las opciones/votos en el snapshot ANTES de que aquí se
 	-- publique la fase — los clientes ven "Voting" con las opciones ya legibles.
 	if not VotingService:StartVote() then
@@ -488,10 +520,32 @@ local function _hasProfile(player: Player): boolean
 	return _dataService ~= nil and _dataService:GetProfile(player) ~= nil
 end
 
+-- Cupo de recompensa disponible AHORA MISMO en la ronda en curso. El cap de
+-- GameConfig es el tope de una ronda COMPLETA y aqui se devenga linealmente a
+-- lo largo de MaxRoundDuration, partiendo de un colchon inicial
+-- (MatchCapGraceFraction) para que las primeras kills no salgan capadas.
+--
+-- Era un cap plano por ronda, y funcionaba mientras toda ronda duraba 480s.
+-- Con WinScoreLimit en 75 las palizas se cortan antes, y un cap plano habria
+-- convertido ese corte en un agujero de farmeo: una ronda cortada a los 5-6
+-- minutos concedia el mismo cupo entero que una de 8, y al caber mas rondas
+-- por hora el techo por hora subia. Devengado, ese techo se mantiene plano
+-- dure lo que dure la ronda (ver la cuenta en GameConfig).
+local function _capAllowance(fullCap: number): number
+	local round = _round
+	if not round then
+		return fullCap
+	end
+	local grace = GameConfig.MatchCapGraceFraction
+	local full = math.max(1, GameConfig.MaxRoundDuration)
+	local elapsed = math.clamp(os.time() - round.startedAt, 0, full)
+	return fullCap * (grace + (1 - grace) * (elapsed / full))
+end
+
 -- Audit mobile: signature acepta Player directo en lugar de userId. Antes el
--- kill chain (línea ~519+) ya tenía `attacker` resuelto y la función hacía
--- GetPlayerByUserId redundante por cada call (Kill + Headshot?). Ahora 1 lookup
--- en el caller, reusado.
+-- kill chain (_grantActionRewardsToAttacker, abajo) ya tenía `attacker`
+-- resuelto y la función hacía GetPlayerByUserId redundante por cada call
+-- (Kill + Headshot?). Ahora 1 lookup en el caller, reusado.
 -- L14 fix: el cap de cash y el de XP son INDEPENDIENTES. Antes esto era un
 -- AND-gate (`_isMatchCapReached` exigía AMBOS capados para frenar cualquier
 -- grant), así que un jugador capado en una moneda seguía ganando la otra hasta
@@ -502,13 +556,13 @@ end
 local function _isCashCapReached(userId: number): boolean
 	local round = _round
 	local earned = if round then round.cashEarnedByUserId[userId] or 0 else 0
-	return earned >= GameConfig.MatchCashCap
+	return earned >= _capAllowance(GameConfig.MatchCashCap)
 end
 
 local function _isXPCapReached(userId: number): boolean
 	local round = _round
 	local earned = if round then round.xpEarnedByUserId[userId] or 0 else 0
-	return earned >= GameConfig.MatchXPCap
+	return earned >= _capAllowance(GameConfig.MatchXPCap)
 end
 
 local function _grantActionRewardsToAttacker(attacker: Player?, action: string, weaponId: string?)
@@ -1108,6 +1162,45 @@ local function _ensureActiveMapContainer(): BasePart
 end
 
 --[[
+	Congela los equipos de los bots mientras el roster todavía existe.
+
+	HAY QUE LLAMARLA ANTES DE `_AIService:OnRoundEnd()`: ese despawn hace
+	`table.clear(_identityByFakeUserId)` y `table.clear(_teamByFakeUserId)`
+	(AI/init.luau), así que `GetBotRoster()` devuelve `{}` a partir de ese
+	punto. La telemetría se emite 140 líneas más abajo, ya con el roster
+	vacío: sin equipo, cada bot caía por el filtro `team == "A" or "B"` y en
+	una ronda sólo de bots el roster quedaba vacío, la guarda `#players == 0`
+	abortaba el evento ENTERO y la partida no se registraba en ninguna parte.
+	Medido: 312 votaciones de mapa y 1 sola partida en 90 días.
+]]
+-- Cuenta las claves de un map. Los de esta ronda son por participante, así
+-- que nunca son grandes; sólo alimentan el diagnóstico del MATCH_END.
+local function _countKeys(t: { [any]: any }): number
+	local n = 0
+	for _ in t do
+		n += 1
+	end
+	return n
+end
+
+local function _captureBotTeams(): { [number]: string }
+	local botTeams: { [number]: string } = {}
+	if not _AIService then
+		return botTeams
+	end
+
+	local ok, roster = pcall(function()
+		return _AIService:GetBotRoster()
+	end)
+	if ok and type(roster) == "table" then
+		for _, bot in roster do
+			botTeams[bot.fakeUserId] = bot.team
+		end
+	end
+	return botTeams
+end
+
+--[[
 	Emite MATCH_END: una fila por ronda y una por participante.
 
 	Se llama en el desmontaje, ANTES de _clearActiveMap() y de _round = nil,
@@ -1123,10 +1216,13 @@ end
 	crítica de spawn. Cruzarlo con el resultado es lo que produce el win rate
 	por arma — la señal que distingue un arma rota de una simplemente popular.
 ]]
-local function _emitMatchEndTelemetry()
+local function _emitMatchEndTelemetry(botTeams: { [number]: string }): string?
 	local round = _round
-	if not round or _activeMapName == "" then
-		return
+	if not round then
+		return "sin ronda activa"
+	end
+	if _activeMapName == "" then
+		return "sin mapa activo"
 	end
 
 	local winningTeam = if round.scoreA > round.scoreB
@@ -1136,20 +1232,8 @@ local function _emitMatchEndTelemetry()
 
 	local reachedLimit = round.scoreA >= GameConfig.WinScoreLimit or round.scoreB >= GameConfig.WinScoreLimit
 
-	-- Equipos de los bots: el roster es la única fuente, porque los bots no
-	-- tienen PlayerSession.
-	local botTeams: { [number]: string } = {}
-	if _AIService then
-		local ok, roster = pcall(function()
-			return _AIService:GetBotRoster()
-		end)
-		if ok and type(roster) == "table" then
-			for _, bot in roster do
-				botTeams[bot.fakeUserId] = bot.team
-			end
-		end
-	end
-
+	-- Los equipos de los bots llegan congelados desde antes del despawn: el
+	-- roster ya no existe a estas alturas (ver `_captureBotTeams`).
 	local players = {}
 	for participantId, stats in round.statsByUserId do
 		local isBot = participantId < 0
@@ -1187,19 +1271,31 @@ local function _emitMatchEndTelemetry()
 	end
 
 	if #players == 0 then
-		return
+		return ("ningún participante con equipo (%d en el marcador, %d bots congelados)"):format(
+			_countKeys(round.statsByUserId),
+			_countKeys(botTeams)
+		)
 	end
 
 	TelemetryService.Enqueue("MATCH_END", {
-		matchId = HttpService:GenerateGUID(false),
+		matchId = round.matchId,
 		mapName = _activeMapName,
 		durationSeconds = math.max(0, os.time() - round.startedAt),
 		scoreA = round.scoreA,
 		scoreB = round.scoreB,
 		winningTeam = winningTeam,
 		endReason = if reachedLimit then "score" else "timeout",
+		-- El límite que produjo ese endReason. Sin su valor, una ronda de hace
+		-- tres meses y una de hoy no son comparables si alguien tocó la config.
+		winScoreLimit = GameConfig.WinScoreLimit,
+		-- Cuántos de los participantes eran bots. Se sabía (el roster está
+		-- justo arriba) y no se emitía, así que separar rondas de relleno de
+		-- rondas reales obligaba a contar filas en el backend.
+		botCount = _countKeys(botTeams),
 		players = players,
 	})
+
+	return nil
 end
 
 local function _clearActiveMap()
@@ -1290,6 +1386,15 @@ function _enterResults(winnerTeam: string)
 		PhaseEndsAt = MatchSnapshot.now() + GameConfig.EndResultsDuration,
 		Phase = "Results",
 	})
+
+	-- El despawn de abajo vacía el roster de bots, y la telemetría de fin de
+	-- ronda lo necesita. Se congela aquí, que es la última línea en la que
+	-- todavía existe.
+	local botTeams = _captureBotTeams()
+
+	-- Se copia porque el reparto de recompensas corre en `task.defer`, después
+	-- de que el desmontaje ponga `_round = nil`.
+	local matchId = round.matchId
 
 	-- Despawnear bots inmediatamente al finalizar la ronda.
 	if _AIService then
@@ -1406,7 +1511,7 @@ function _enterResults(winnerTeam: string)
 			-- jugador no vea la pantalla de Resultados (esté en el menú u otra pantalla).
 			local results = resultsByUserId[userId]
 			if results then
-				MatchResultsService:GrantCash(player, results.cash)
+				MatchResultsService:GrantCash(player, results.cash, matchId)
 			end
 		end
 	end)
@@ -1436,7 +1541,19 @@ function _enterResults(winnerTeam: string)
 
 	-- Telemetría ANTES de desmontar: es la última ventana en la que el mapa,
 	-- el marcador y las stats de ronda siguen existiendo.
-	pcall(_emitMatchEndTelemetry)
+	--
+	-- El pcall sigue ahí (un fallo de telemetría no puede impedir el
+	-- desmontaje de la ronda), pero ya no es MUDO: durante tres meses este
+	-- evento no se emitió ni una vez y no hubo un solo aviso en el Output,
+	-- porque tanto el error como los tres `return` tempranos salían en
+	-- silencio. Una caída sostenida de MATCH_END sólo se notaba en el
+	-- dashboard, semanas después, como partidas que faltaban.
+	local emitOk, emitResult = pcall(_emitMatchEndTelemetry, botTeams)
+	if not emitOk then
+		warn(("[MatchService] MATCH_END no se emitió (error): %s"):format(tostring(emitResult)))
+	elseif emitResult ~= nil then
+		warn(("[MatchService] MATCH_END no se emitió: %s"):format(tostring(emitResult)))
+	end
 
 	-- Desmontar la ronda: mapa, listeners de muerte, campos de scope ronda de
 	-- las sesiones y el objeto Round entero (no hay tablas que "limpiar": la
@@ -2057,6 +2174,11 @@ function MatchService:Start(dataService: DataService): ()
 				return
 			end
 			_enterLoading(winnerMapName)
+		end,
+		-- El id lo acuña `_enterVoting`, así que para cuando la votación
+		-- termina ya identifica a la ronda que va a arrancar.
+		currentMatchId = function(): string
+			return _pendingMatchId
 		end,
 	})
 

@@ -21,6 +21,12 @@
 	  • ROBUX_PURCHASE— transaccional, desde los tres caminos de ProcessReceipt.
 	  • SERVER_FLUSH  — agregado por servidor cada ServerFlushSeconds.
 	  • FUNNEL_STEP   — un paso de embudo (onboarding, BP Premium).
+	  • ITEM_PURCHASE — transaccional, desde ShopService: la compra con el nivel,
+	                    el tiempo jugado y el saldo del jugador EN ESE INSTANTE.
+	  • LEVEL_UP      — transaccional, desde DataService.LeveledUp: el instante
+	                    exacto de cada subida de nivel. Sin él la progresión sólo
+	                    se puede reconstruir restando SESSION_END consecutivos,
+	                    que da el nivel al SALIR y nunca el ritmo real.
 	Las features encolan además los suyos vía `Enqueue` (MATCH_END, MAP_VOTE).
 
 	ACUMULADOR: los flujos de cash no se envían uno a uno (serían miles). Se
@@ -52,7 +58,7 @@ export type FlowDirection = "source" | "sink"
 	balance económico— quedaría inservible.
 ]]
 export type Currency = "Cash" | "Gems"
-export type PurchaseKind = "CashPack" | "GemPack" | "BattlePassPremium" | "SkipTier" | "Gift"
+export type PurchaseKind = "CashPack" | "GemPack" | "BattlePassPremium" | "SkipTier" | "Gift" | "GamePass"
 
 export type PurchasePayload = {
 	userId: number,
@@ -63,6 +69,33 @@ export type PurchasePayload = {
 	cashGranted: number,
 	kind: PurchaseKind,
 	receiverUserId: number?,
+}
+
+--[[
+	Compra de un ítem de tienda con el ESTADO del jugador en ese instante.
+
+	El acumulador de flujos ya registra la compra (Shop::<categoría>, itemId,
+	precio), pero agregada por día y sin nivel ni tiempo jugado: con eso se sabe
+	QUÉ se vendió, no CUÁNDO en la vida del jugador. Este evento es el dato que
+	valida una escalera de precios — "un Rare debería costar ~1,75 h" sólo se
+	comprueba mirando a qué hora y a qué nivel se compra de verdad.
+
+	`timePlayedSeconds` lo completa RecordItemPurchase con la sesión en curso:
+	Stats.TimePlayedSeconds sólo se incrementa al cerrar sesión, así que a mitad
+	de partida va atrasado exactamente lo que dura la sesión actual.
+]]
+export type ItemPurchasePayload = {
+	userId: number,
+	category: string,
+	itemId: string,
+	price: number,
+	currency: Currency,
+	level: number,
+	xp: number,
+	timePlayedSeconds: number,
+	balanceBefore: number,
+	weaponCategory: string?,
+	weaponId: string?,
 }
 
 --[[
@@ -115,6 +148,7 @@ local _botCountProvider: (() -> number)? = nil
 
 local _queue: { any } = {}
 local _droppedEvents = 0
+local _droppedCritical = 0
 local _accumulators: { [number]: Accumulator } = {}
 local _combatAccumulators: { [number]: CombatAccumulator } = {}
 
@@ -211,12 +245,57 @@ end
 -- ────────────────────────────────────────────────────────────
 
 --[[
-	Encola con tope duro. Al desbordar se descarta el evento MÁS VIEJO: ante
-	saturación preferimos datos frescos a datos completos. Los descartes se
-	cuentan y viajan en el siguiente SERVER_FLUSH para que el backend sepa que
-	su serie tiene un hueco (un hueco conocido es infinitamente mejor que uno
-	silencioso).
+	Eventos IRREEMPLAZABLES: los que no se pueden reconstruir desde ninguna otra
+	fuente si se pierden.
+
+	  • SESSION_END / SERVER_FLUSH portan acumuladores DRENADOS — `_drainAccumulator`
+	    resetea al leer, así que ese delta viaja exactamente una vez.
+	  • ROBUX_PURCHASE / ITEM_PURCHASE / LEVEL_UP / MATCH_END son transaccionales:
+	    describen un hecho puntual que no vuelve a ocurrir.
+
+	El resto (MAP_VOTE, FUNNEL_STEP) son observaciones repetidas: perder una
+	votación de doce deja la serie casi igual; perder un SESSION_END borra la
+	economía entera de una sesión.
 ]]
+local IRREPLACEABLE_EVENTS: { [string]: boolean } = {
+	SESSION_END = true,
+	SERVER_FLUSH = true,
+	ROBUX_PURCHASE = true,
+	ITEM_PURCHASE = true,
+	LEVEL_UP = true,
+	MATCH_END = true,
+}
+
+--[[
+	Encola con tope duro. Al desbordar se descarta POR IMPORTANCIA, no por
+	antigüedad.
+
+	Antes se tiraba siempre el más viejo, y eso hacía la pérdida SESGADA: bajo
+	presión (backend caído, circuito abierto) los primeros en caer eran los
+	MATCH_END, ITEM_PURCHASE y ROBUX_PURCHASE del principio de la ventana —
+	justo los que no se pueden reconstruir. Un pico sostenido por encima de
+	4 ev/s vaciaba la cabeza de la cola en menos de un minuto.
+
+	Ahora se busca el descarte entre los eventos reemplazables (el más viejo de
+	ellos) y sólo si no queda ninguno se sacrifica uno irreemplazable, que se
+	cuenta aparte: `droppedCritical` en el SERVER_FLUSH distingue "faltan
+	votaciones" de "falta dinero", que son dos incidentes muy distintos.
+]]
+local function _dropOne()
+	for index = 1, #_queue do
+		local event = _queue[index]
+		if not IRREPLACEABLE_EVENTS[event.type] then
+			table.remove(_queue, index)
+			_droppedEvents += 1
+			return
+		end
+	end
+
+	table.remove(_queue, 1)
+	_droppedEvents += 1
+	_droppedCritical += 1
+end
+
 local function _enqueue(eventType: string, payload: any)
 	if not TelemetryConfig.Enabled then
 		return
@@ -228,12 +307,15 @@ local function _enqueue(eventType: string, payload: any)
 	payload.placeId = game.PlaceId
 	payload.jobId = game.JobId
 	payload.gameVersion = TelemetryConfig.GameVersion
+	-- La versión REAL del binario publicado. `gameVersion` es una constante
+	-- escrita a mano que nadie actualiza al desplegar; sin ésta no se puede
+	-- atribuir un cambio de balance a la versión que lo introdujo.
+	payload.placeVersion = game.PlaceVersion
 
 	table.insert(_queue, payload)
 
 	while #_queue > TelemetryConfig.QueueMaxEvents do
-		table.remove(_queue, 1)
-		_droppedEvents += 1
+		_dropOne()
 	end
 end
 
@@ -362,6 +444,26 @@ end
 -- CONSTRUCCIÓN DE EVENTOS
 -- ────────────────────────────────────────────────────────────
 
+--[[
+	Claves numéricas de un map, ordenadas. `bp.Claimed` viaja de Luau a JSON
+	como objeto con claves string ("12"), y un array ordenado de números es lo
+	que el backend puede guardar e histogramar directamente.
+]]
+local function _sortedNumericKeys(t: any): { number }
+	local keys: { number } = {}
+	if type(t) ~= "table" then
+		return keys
+	end
+	for key in t do
+		local n = tonumber(key)
+		if n then
+			table.insert(keys, n)
+		end
+	end
+	table.sort(keys)
+	return keys
+end
+
 local function _countKeys(t: any): number
 	if type(t) ~= "table" then
 		return 0
@@ -397,6 +499,16 @@ local function _buildSessionEnd(player: Player): any?
 		payload.joinCount = meta.JoinCount
 		payload.createdAt = meta.CreatedAt
 		payload.country = meta.Country
+		-- La versión con la que se jugó ESTA sesión y la de la primera. Ambas
+		-- están en el perfil desde siempre; simplemente no viajaban, y sin
+		-- ellas el único marcador de versión era la constante `gameVersion`,
+		-- escrita a mano y nunca actualizada.
+		payload.clientVersion = meta.LastClientVersion
+		payload.firstSessionVersion = meta.FirstSessionVersion
+		-- Momento del load. Con `createdAt` da los días de vida del jugador y,
+		-- entre sesiones consecutivas, los días de ausencia — retención sin
+		-- ningún join en el backend.
+		payload.lastSeen = meta.LastSeen
 		payload.balances = { cash = stats.Cash, gems = stats.Gems or 0 }
 		payload.lifetime = {
 			totalCashEarned = stats.TotalCashEarned,
@@ -429,6 +541,10 @@ local function _buildSessionEnd(player: Player): any?
 			losses = stats.Losses or 0,
 			friendsInvited = stats.FriendsInvited or 0,
 			xp = stats.XP or 0,
+			-- El DENOMINADOR de `xp`. `xp` es XP DENTRO del nivel actual, no
+			-- acumulada: sin cuánto pedía ese nivel, el progreso fraccionario
+			-- no es reconstruible salvo replicando LevelingConfig en el backend.
+			xpToNextLevel = stats.XPToNextLevel or 0,
 		}
 
 		-- Kills acumuladas por arma (las que ya alimentan la maestría de wraps
@@ -449,7 +565,50 @@ local function _buildSessionEnd(player: Player): any?
 			totalXPEarned = bp.TotalXPEarned,
 			premiumOwned = bp.PremiumOwned,
 			claimedCount = _countKeys(bp.Claimed),
+			-- Progreso DENTRO del tier actual: cuánto le faltaba al jugador
+			-- para el siguiente cuando cerró. `currentTier` solo dice el
+			-- peldaño; esto dice si lo abandonó recién empezado o a un paso.
+			xp = bp.XP or 0,
+			-- QUÉ tiers reclamó, no cuántos. El recuento no dice DÓNDE se
+			-- abandona el pase, que es la única pregunta que decide si el
+			-- calendario de recompensas está bien repartido.
+			claimedTiers = _sortedNumericKeys(bp.Claimed),
+			grantedSkips = _countKeys(bp.GrantedSkips),
 		}
+
+		-- Racha de login: se calcula en cada load (DataService) y hasta ahora
+		-- no salía del servidor. Es la métrica de retención diaria más barata
+		-- que tiene el juego y no costaba nada emitirla.
+		local streak = data.LoginStreak
+		if streak then
+			payload.loginStreak = {
+				current = streak.Current or 0,
+				best = streak.Best or 0,
+			}
+		end
+
+		-- Cuántos ítems posee por categoría: mide saturación del catálogo (un
+		-- jugador que ya lo tiene todo deja de tener sinks donde gastar).
+		local inventory = data.Inventory
+		if inventory then
+			local owned: { [string]: number } = {}
+			for category, items in inventory do
+				if type(items) == "table" then
+					owned[category] = _countKeys(items)
+				end
+			end
+			payload.inventoryCounts = owned
+		end
+
+		-- Arma equipada al salir. En MATCH_END sólo viaja para quien sigue en
+		-- el servidor al cerrar la ronda; aquí llega siempre.
+		local loadout = data.Loadout
+		if loadout then
+			payload.loadout = {
+				mainWeapon = loadout.MainWeapon or "",
+				specialWeapon = loadout.SpecialWeapon or "",
+			}
+		end
 	end
 
 	_accumulators[userId] = nil
@@ -494,6 +653,8 @@ local function _buildServerFlush(): any
 
 	local dropped = _droppedEvents
 	_droppedEvents = 0
+	local droppedCritical = _droppedCritical
+	_droppedCritical = 0
 
 	return {
 		uptimeSeconds = math.floor(os.clock() - _serverStartClock),
@@ -503,6 +664,16 @@ local function _buildServerFlush(): any
 		-- separarlos y toda métrica de combate queda contaminada.
 		botCount = botCount,
 		droppedEvents = dropped,
+		-- Cuántos de esos descartes eran irreemplazables (dinero, sesiones,
+		-- partidas). `droppedEvents > 0` con esto a cero es ruido; con esto
+		-- por encima de cero hay un agujero real en la contabilidad.
+		droppedCritical = droppedCritical,
+		-- Salud del propio pipeline. Un servidor con el circuito abierto sigue
+		-- emitiendo SERVER_FLUSH con datos incompletos y hasta ahora el backend
+		-- no tenía forma de saberlo: leía el hueco como una caída de actividad.
+		queueSize = #_queue,
+		consecutiveFailures = _consecutiveFailures,
+		circuitOpen = _isCircuitOpen(),
 		economyByUser = if hasAny then economyByUser else nil,
 		combatByUser = if hasCombat then combatByUser else nil,
 	}
@@ -529,6 +700,19 @@ local function _recordFlow(
 		return
 	end
 	if not player or type(amount) ~= "number" or amount <= 0 then
+		return
+	end
+	-- Una dirección desconocida NO puede caer en faucets por defecto: invertir
+	-- un sumidero convierte gasto en ingreso y da la vuelta al balance de la
+	-- economía sin ningún aviso. El tipo `FlowDirection` sólo protege en
+	-- análisis estático; esto protege en ejecución.
+	if direction ~= "source" and direction ~= "sink" then
+		warn(
+			("[Telemetry] dirección de flujo inválida %q en %q: el movimiento se descarta"):format(
+				tostring(direction),
+				transactionType
+			)
+		)
 		return
 	end
 
@@ -594,6 +778,70 @@ function TelemetryService.RecordItem(player: Player, transactionType: string, it
 		return
 	end
 	_recordFlow(player, "source", transactionType, 1, itemId, "Items")
+end
+
+--[[
+	RecordXP: XP concedida por una acción.
+
+	Va por el acumulador bajo la pseudo-moneda "XP", el mismo convenio que usa
+	`RecordItem` con "Items": al formar parte de la clave, la XP NUNCA se suma a
+	los faucets de Cash ni contamina el Faucet/Sink ratio.
+
+	Por qué hacía falta: el juego concede XP en casi cada acción y no la
+	registraba en ninguna parte. `RewardService.Award` sólo llamaba a telemetría
+	cuando el cash era > 0, así que una acción de sólo XP era invisible. La
+	consecuencia práctica es que el ritmo de XP por hora —el que decide a qué
+	nivel se desbloquea cada ítem del catálogo— era un número DE DISEÑO que
+	nadie podía contrastar con lo que ocurre de verdad.
+]]
+function TelemetryService.RecordXP(player: Player, transactionType: string, amount: number, itemSku: string?)
+	_recordFlow(player, "source", transactionType, amount, itemSku, "XP")
+end
+
+--[[
+	RecordLevelUp: una subida de nivel, con el instante en que ocurrió.
+
+	Evento suelto y no acumulador: lo que importa es CUÁNDO se cruza cada nivel
+	(con las horas jugadas y el nivel de partida), y agregarlo por día perdería
+	exactamente eso. Son pocos por jugador —cruzar el nivel 55 lleva horas—, así
+	que el coste en requests es despreciable.
+
+	`timePlayedSeconds` incluye la sesión en curso por el mismo motivo que en
+	ITEM_PURCHASE: el contador del perfil sólo se incrementa al cerrar sesión.
+]]
+function TelemetryService.RecordLevelUp(
+	player: Player,
+	fromLevel: number,
+	toLevel: number,
+	xpGained: number,
+	source: string?
+)
+	if not TelemetryConfig.Enabled or not _started then
+		return
+	end
+	if not player or type(fromLevel) ~= "number" or type(toLevel) ~= "number" then
+		return
+	end
+
+	local acc = _accumulators[player.UserId]
+	local sessionSeconds = if acc then math.max(0, os.time() - acc.startedAt) else 0
+
+	local timePlayed = 0
+	local profile = _dataService and _dataService:GetProfile(player)
+	local data = profile and (profile :: any).Data
+	if data and data.Stats then
+		timePlayed = data.Stats.TimePlayedSeconds or 0
+	end
+
+	_enqueue("LEVEL_UP", {
+		userId = player.UserId,
+		fromLevel = fromLevel,
+		toLevel = toLevel,
+		xpGained = xpGained,
+		source = source,
+		timePlayedSeconds = timePlayed + sessionSeconds,
+		sessionSeconds = sessionSeconds,
+	})
 end
 
 --[[
@@ -706,10 +954,92 @@ function TelemetryService.RecordPurchase(payload: PurchasePayload)
 	})
 end
 
+--[[
+	RecordItemPurchase: una compra de tienda con el estado del jugador.
+
+	Va por `_enqueue` y no por el acumulador a propósito: el acumulador agrega
+	por clave y perdería justo lo que este evento existe para conservar (el
+	instante, el nivel y el tiempo jugado de CADA compra). Las compras son
+	pocas —una por ítem y jugador, porque el juego rechaza recomprar— así que
+	el coste en requests es despreciable.
+
+	Sin `purchaseId` de Roblox no hay clave natural: el `eventId` del sobre es
+	la idempotencia, y el backend lo usa como PK.
+]]
+function TelemetryService.RecordItemPurchase(player: Player, payload: ItemPurchasePayload)
+	if not TelemetryConfig.Enabled or not _started then
+		return
+	end
+	if type(payload) ~= "table" or not player then
+		return
+	end
+
+	-- La sesión en curso aún no está sumada al perfil (se suma al salir).
+	local acc = _accumulators[player.UserId]
+	local sessionSeconds = if acc then math.max(0, os.time() - acc.startedAt) else 0
+
+	_enqueue("ITEM_PURCHASE", {
+		userId = player.UserId,
+		category = payload.category,
+		itemId = payload.itemId,
+		price = payload.price,
+		currency = payload.currency,
+		level = payload.level,
+		xp = payload.xp,
+		timePlayedSeconds = (payload.timePlayedSeconds or 0) + sessionSeconds,
+		sessionSeconds = sessionSeconds,
+		balanceBefore = payload.balanceBefore,
+		weaponCategory = payload.weaponCategory,
+		weaponId = payload.weaponId,
+	})
+end
+
 -- Escotilla genérica para eventos futuros sin tocar este módulo.
 function TelemetryService.Enqueue(eventType: string, payload: any)
 	if type(payload) == "table" then
 		_enqueue(eventType, payload)
+	end
+end
+
+--[[
+	Moneda de bienvenida de un jugador nuevo.
+
+	`DataTemplate` da Cash (y potencialmente Gems) a todo perfil recién creado.
+	Ese saldo aparece por `Reconcile`, sin pasar por `RewardService` ni por
+	ninguna llamada a telemetría: cada alta inyectaba moneda que el balance del
+	dashboard nunca veía entrar. Con pocos jugadores es ruido; con una campaña
+	de adquisición es la mayor fuente de inflación del juego, y era invisible.
+
+	Se lee del perfil recién cargado en vez de de la plantilla a propósito: si
+	mañana el grant cambia, el faucet sigue diciendo la verdad sin tocar nada.
+
+	NO se toca `TotalCashEarned` (que arranca en 0 mientras el saldo arranca en
+	150). Sumarlo cuadraría el supply, pero ese contador alimenta el "Coin
+	ganado jugando" del que sale el ritmo por hora que calibra los precios, y
+	un regalo de bienvenida no es grind: inflaría la tasa justo en las primeras
+	horas, que son las que más pesan en la escalera. El cuadre correcto es
+	restar este faucet en el backend, donde ya viaja con etiqueta propia.
+]]
+local function _recordNewPlayerGrant(player: Player)
+	local profile = _dataService and _dataService:GetProfile(player)
+	local data = profile and (profile :: any).Data
+	if not data or not data.Metadata or not data.Stats then
+		return
+	end
+	-- JoinCount lo incrementa DataService en el load, así que 1 es la primera
+	-- sesión de la vida del perfil (y también la primera tras un /resetdata,
+	-- que es justo cuando se reinyecta el grant).
+	if data.Metadata.JoinCount ~= 1 then
+		return
+	end
+
+	local cash = data.Stats.Cash
+	if type(cash) == "number" and cash > 0 then
+		_recordFlow(player, "source", "NewPlayerGrant", cash, nil, "Cash")
+	end
+	local gems = data.Stats.Gems
+	if type(gems) == "number" and gems > 0 then
+		_recordFlow(player, "source", "NewPlayerGrant", gems, nil, "Gems")
 	end
 end
 
@@ -737,6 +1067,14 @@ function TelemetryService.Start(dataService: DataService, botCountProvider: (() 
 		if not _accumulators[player.UserId] then
 			_accumulators[player.UserId] = _newAccumulator()
 		end
+		_recordNewPlayerGrant(player)
+	end)
+
+	-- Subidas de nivel. DataService las emite como signal en vez de llamar
+	-- aquí directamente porque `core.data` no puede requerir este módulo: éste
+	-- ya requiere aquél y el ciclo no compilaría.
+	dataService.LeveledUp:Connect(function(player: Player, fromLevel: number, toLevel: number, xpGained: number, source: string?)
+		pcall(TelemetryService.RecordLevelUp, player, fromLevel, toLevel, xpGained, source)
 	end)
 
 	-- ProfileUnloading dispara tanto en el unload normal como dentro del
@@ -793,8 +1131,12 @@ function TelemetryService.Start(dataService: DataService, botCountProvider: (() 
 		end
 
 		-- 2. Recoger acumuladores huérfanos (jugadores sin SESSION_END emitido).
+		-- Se encola AUNQUE no haya economía que reportar: este flush es el
+		-- único portador de `droppedEvents`, y exigir movimientos de cash
+		-- hacía que el recuento de descartes del último tramo se perdiera
+		-- justo en el cierre, que es cuando más eventos se pierden.
 		local ok, payload = pcall(_buildServerFlush)
-		if ok and payload and payload.economyByUser then
+		if ok and payload then
 			_enqueue("SERVER_FLUSH", payload)
 		end
 
@@ -820,6 +1162,9 @@ function TelemetryService.Destroy()
 	_shuttingDown = false
 	table.clear(_queue)
 	table.clear(_accumulators)
+	-- El de combate se quedaba fuera: tras un Destroy/Start las kills de la
+	-- vida anterior del servicio se atribuían a la sesión nueva.
+	table.clear(_combatAccumulators)
 end
 
 return TelemetryService

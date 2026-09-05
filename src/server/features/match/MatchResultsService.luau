@@ -246,12 +246,23 @@ function MatchResultsService:BuildResults(player: Player, ctx: MatchContext): Ma
 	}
 end
 
--- Concede el cash NO bloqueado del paquete. Los bonus VIP que el jugador no
--- posee llegan con locked=true → no se conceden (solo se muestran como upsell).
-function MatchResultsService:GrantCash(player: Player, cash: { ResultsRewards.ResolvedCashReward })
+--[[
+	Concede el cash NO bloqueado del paquete. Los bonus VIP que el jugador no
+	posee llegan con locked=true → no se conceden (solo se muestran como upsell).
+
+	`matchId` viaja hasta la telemetría como sku del movimiento: es lo que
+	permite sumar cuánto Cash pagó UNA partida concreta y cruzarlo con su mapa,
+	su duración y su marcador. Sin él, los faucets `MatchEnd::*` y el evento de
+	fin de partida eran dos series sin ninguna clave en común.
+]]
+function MatchResultsService:GrantCash(
+	player: Player,
+	cash: { ResultsRewards.ResolvedCashReward },
+	matchId: string?
+)
 	for _, entry in cash do
 		if not entry.locked and entry.cash > 0 then
-			RewardService.AwardCash(player, entry.cash, "MatchEnd::" .. entry.id)
+			RewardService.AwardCash(player, entry.cash, "MatchEnd::" .. entry.id, matchId)
 		end
 	end
 end

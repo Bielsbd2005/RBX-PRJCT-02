@@ -332,11 +332,51 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 	if success then
 		_markCooldown(player, "buy")
 
+		--[[
+			Forzar el guardado ANTES de registrar la compra.
+
+			`BatchUpdate` sólo escribe en el perfil EN MEMORIA: el guardado real
+			es el autosave de ProfileStore, hasta 30 s después. Si el servidor
+			caía en esa ventana, el evento ya había salido (o salía con el
+			flush de cierre) y la compra no existía al volver a entrar: un sink
+			fantasma que restaba de la masa monetaria del dashboard un dinero
+			que el jugador seguía teniendo, y un ítem vendido que nadie poseía.
+
+			Los caminos de receipts de Robux ya hacían esto; la tienda, que es
+			donde ocurre la mayoría de las transacciones del juego, no.
+
+			Si el Save falla se registra igual y se avisa: el jugador YA tiene
+			el ítem y el saldo descontado en memoria, así que callarse el
+			movimiento crearía el error contrario (un sink real que no aparece).
+		]]
+		if not _dataService:ForceSave(player) then
+			warn(("[ShopService] compra de %s por %s registrada sin guardado confirmado"):format(
+				tostring(data.itemId),
+				player.Name
+			))
+		end
+
 		-- `itemId` viaja como campo propio (no concatenado al transactionType):
 		-- la vista de Shop necesita desglose por ítem, y así el backend no tiene
 		-- que parsear claves compuestas.
 		TelemetryService.RecordFlow(player, "sink", "Shop::" .. data.category, price, data.itemId, currency)
 		TelemetryService.RecordItem(player, "ShopItem::" .. data.category, data.itemId)
+		-- El estado del jugador EN la compra: es lo que valida la escalera de
+		-- precios (a qué nivel y con cuántas horas se compra cada cosa). El
+		-- acumulador de arriba no lo conserva: agrega por día.
+		TelemetryService.RecordItemPurchase(player, {
+			userId = player.UserId,
+			category = data.category,
+			itemId = data.itemId,
+			price = price,
+			currency = currency,
+			level = playerLevel,
+			xp = profile.Data.Stats.XP or 0,
+			timePlayedSeconds = profile.Data.Stats.TimePlayedSeconds or 0,
+			balanceBefore = currentBalance,
+			weaponCategory = weaponCategoryForWraps,
+			weaponId = weaponIdForWraps,
+		})
 
 		Network.Shop.Response.SendTo({
 			success = true,

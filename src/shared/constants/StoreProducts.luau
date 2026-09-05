@@ -98,6 +98,7 @@ export type GamePassDefinition = {
 export type GamePassCatalog = {
 	InOrder: { GamePassDefinition },
 	ByName: { [string]: GamePassDefinition },
+	ByPassId: { [number]: GamePassDefinition },
 }
 
 export type Catalog<T> = {
@@ -251,6 +252,11 @@ local function buildGamePasses(passes: { any }): GamePassCatalog
 	return table.freeze({
 		InOrder = table.freeze(inOrder),
 		ByName = table.freeze(byName),
+		-- El índice ya se construía para detectar PassId repetidos y se tiraba.
+		-- Se expone porque `PromptGamePassPurchaseFinished` sólo entrega el
+		-- passId: sin este mapa, registrar la compra obligaba a recorrer la
+		-- lista entera en cada evento.
+		ByPassId = table.freeze(byPassId),
 	})
 end
 

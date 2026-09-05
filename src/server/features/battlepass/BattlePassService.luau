@@ -244,6 +244,88 @@ local function _rewardToOp(reward: BattlePassConfig.Reward): { path: { string },
 	return nil
 end
 
+-- Precio de tienda de un ítem del catálogo y la moneda en la que se paga.
+-- 0 si no existe o no tiene precio (exclusivas del pase, Default…).
+local function _shopPriceOf(category: string, itemId: string): (number, Currency.Currency)
+	local catalog = ItemsConfig[category]
+	local def = if type(catalog) == "table" then catalog[itemId] else nil
+	if type(def) ~= "table" then
+		return 0, Currency.CASH
+	end
+	local price = if type(def.Price) == "number" then math.max(0, math.floor(def.Price)) else 0
+	return price, Currency.resolve(def.Currency)
+end
+
+--[[
+	Atajo ya recorrido. Si el jugador YA tiene el ítem que regala el tier
+	(lo compró en la tienda antes de llegar aquí), GrantItem es idempotente y
+	el tier valía exactamente cero — sin aviso. Con 15 de los 22 ítems de
+	tienda del pase llegando después de la hora a la que la tienda los vende
+	(auditoría 2026-09-04), eso convertía el pase en un castigo por comprar
+	pronto y en una razón para no comprar nunca lo que "ya viene".
+
+	Se devuelve el precio de tienda en su moneda: quien compró acaba igual que
+	quien esperó (el ítem y el Cash intacto). No es emisión nueva: es el Cash
+	que el jugador ya pagó. Un wrap global devuelve el precio por cada arma
+	que ya lo tenía, que es exactamente lo que la tienda cobra (vende wraps
+	por arma). nil = no había nada que compensar.
+
+	Hay que llamarlo ANTES del grant: el grant escribe Inventory a true y
+	después ya no se distingue lo comprado de lo recién concedido.
+]]
+local function _refundForOwnedReward(
+	data: any,
+	reward: BattlePassConfig.Reward
+): { amount: number, currency: Currency.Currency }?
+	if reward.Kind ~= "Item" or not reward.Category or not reward.ItemId then
+		return nil
+	end
+	local price, currency = _shopPriceOf(reward.Category, reward.ItemId)
+	if price <= 0 then
+		return nil
+	end
+	local inventory = if type(data) == "table" then data.Inventory else nil
+	if type(inventory) ~= "table" then
+		return nil
+	end
+
+	local owned = 0
+	if reward.Category == "WeaponWraps" then
+		local byWeapon = inventory.WeaponWrapsByWeapon
+		if type(byWeapon) ~= "table" then
+			return nil
+		end
+		if reward.Global == true then
+			for _, weaponCategory in { "Main", "Special" } do
+				local weapons = byWeapon[weaponCategory]
+				if type(weapons) == "table" then
+					for _, wraps in weapons do
+						if type(wraps) == "table" and wraps[reward.ItemId] == true then
+							owned += 1
+						end
+					end
+				end
+			end
+		elseif reward.WeaponCategory and reward.WeaponId then
+			local weapons = byWeapon[reward.WeaponCategory]
+			local wraps = if type(weapons) == "table" then weapons[reward.WeaponId] else nil
+			if type(wraps) == "table" and wraps[reward.ItemId] == true then
+				owned = 1
+			end
+		end
+	else
+		local category = inventory[reward.Category]
+		if type(category) == "table" and category[reward.ItemId] == true then
+			owned = 1
+		end
+	end
+
+	if owned == 0 then
+		return nil
+	end
+	return { amount = price * owned, currency = currency }
+end
+
 -- ────────────────────────────────────────────────────────────
 -- CORE: AddXP con cascading tier-up
 -- ────────────────────────────────────────────────────────────
@@ -371,6 +453,8 @@ function BattlePassService:ClaimTier(player: Player, tierLevel: number): ()
 	end
 
 	local reward = tierDef.Reward
+	-- Antes del grant, mientras aún se distingue lo comprado de lo concedido.
+	local refund = _refundForOwnedReward(profile.Data, reward)
 
 	-- Para items: granteamos ANTES de marcar claimed (GrantItem idempotente).
 	if reward.Kind == "Item" and reward.Category and reward.ItemId then
@@ -403,11 +487,35 @@ function BattlePassService:ClaimTier(player: Player, tierLevel: number): ()
 			table.insert(updates, { path = { "Stats", "TotalGemsEarned" }, delta = rewardOp.delta })
 		end
 	end
+	-- Ítem que ya se tenía: el tier paga su precio de tienda (ver _refundForOwnedReward).
+	if refund then
+		local isGems = refund.currency == Currency.GEMS
+		table.insert(updates, { path = Currency.balancePath(refund.currency), delta = refund.amount })
+		table.insert(updates, {
+			path = { "Stats", if isGems then "TotalGemsEarned" else "TotalCashEarned" },
+			delta = refund.amount,
+		})
+	end
 
 	local ok = _dataService:BatchUpdate(player, updates)
 	if not ok then
 		_respond(player, false, "SaveFailed", tierLevel)
 		return
+	end
+
+	--[[
+		Guardado durable antes de registrar: `BatchUpdate` sólo toca el perfil
+		en memoria y el autosave puede tardar hasta 30 s. Un crash en esa
+		ventana dejaba el evento emitido y la transacción inexistente (los Gems
+		volvían al saldo del jugador y el sink seguía contado en el dashboard).
+		Se registra igual si el Save falla —el jugador ya tiene el cambio en
+		memoria— pero con aviso.
+	]]
+	if not _dataService:ForceSave(player) then
+		warn(("[BattlePassService] claim del tier %d de %s registrado sin guardado confirmado"):format(
+			tierLevel,
+			player.Name
+		))
 	end
 
 	local tierSku = "Tier" .. tostring(tierLevel)
@@ -426,6 +534,12 @@ function BattlePassService:ClaimTier(player: Player, tierLevel: number): ()
 		end
 	elseif reward.Kind == "Item" and reward.Category and reward.ItemId then
 		TelemetryService.RecordItem(player, "BattlePassItem", reward.Category .. "::" .. reward.ItemId .. "::" .. tierSku)
+		-- Etiqueta propia: en el dashboard sale como faucet aparte de
+		-- BattlePassClaim, que es justo lo que hace falta para saber cuánto
+		-- Cash devuelve el pase por ítems que ya se habían comprado.
+		if refund then
+			TelemetryService.RecordFlow(player, "source", "BattlePassRefund", refund.amount, tierSku, refund.currency)
+		end
 	end
 
 	_respond(player, true, "OK", tierLevel)
@@ -502,6 +616,18 @@ function BattlePassService:PromptPremium(player: Player): ()
 		return
 	end
 
+	--[[
+		Guardado durable antes de registrar: `BatchUpdate` sólo toca el perfil
+		en memoria y el autosave puede tardar hasta 30 s. Un crash en esa
+		ventana dejaba el evento emitido y la transacción inexistente (los Gems
+		volvían al saldo del jugador y el sink seguía contado en el dashboard).
+		Se registra igual si el Save falla —el jugador ya tiene el cambio en
+		memoria— pero con aviso.
+	]]
+	if not _dataService:ForceSave(player) then
+		warn(("[BattlePassService] premium de %s registrado sin guardado confirmado"):format(player.Name))
+	end
+
 	_bpPremiumStep(player, 2, sessionId)
 	_bpFunnelSessionByUserId[player.UserId] = nil
 	TelemetryService.RecordFlow(player, "sink", "BattlePassPremium", price, season.Id, Currency.GEMS)
@@ -571,6 +697,18 @@ function BattlePassService:PromptSkip(player: Player): ()
 	if not ok then
 		_respond(player, false, "InternalError", 0)
 		return
+	end
+
+	--[[
+		Guardado durable antes de registrar: `BatchUpdate` sólo toca el perfil
+		en memoria y el autosave puede tardar hasta 30 s. Un crash en esa
+		ventana dejaba el evento emitido y la transacción inexistente (los Gems
+		volvían al saldo del jugador y el sink seguía contado en el dashboard).
+		Se registra igual si el Save falla —el jugador ya tiene el cambio en
+		memoria— pero con aviso.
+	]]
+	if not _dataService:ForceSave(player) then
+		warn(("[BattlePassService] skip de %s registrado sin guardado confirmado"):format(player.Name))
 	end
 
 	TelemetryService.RecordFlow(player, "sink", "BattlePassSkip", price, season.Id, Currency.GEMS)

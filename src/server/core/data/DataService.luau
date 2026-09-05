@@ -76,7 +76,7 @@ export type DataServiceModule = {
 	SetValue: (self: DataServiceModule, player: Player, path: { string }, value: any) -> boolean,
 	Increment: (self: DataServiceModule, player: Player, path: { string }, amount: number) -> (boolean, number),
 	IncrementWeaponKills: (self: DataServiceModule, player: Player, weaponCategory: string, weaponId: string, amount: number?) -> (boolean, number),
-	AddXP: (self: DataServiceModule, player: Player, amount: number) -> (boolean, number, number, number),
+	AddXP: (self: DataServiceModule, player: Player, amount: number, source: string?) -> (boolean, number, number, number),
 	BatchUpdate: (self: DataServiceModule, player: Player, updates: { BatchUpdateEntry }) -> boolean,
 	IsReceiptProcessed: (self: DataServiceModule, player: Player, purchaseId: string) -> boolean,
 	MarkReceiptProcessed: (self: DataServiceModule, player: Player, purchaseId: string) -> boolean,
@@ -89,6 +89,7 @@ export type DataServiceModule = {
 	Destroy: (self: DataServiceModule) -> (),
 	ProfileLoaded: RBXScriptSignal,
 	ProfileUnloading: ProfileSignal,
+	LeveledUp: RBXScriptSignal,
 }
 
 local AUTO_SAVE_INTERVAL_SECONDS = 30
@@ -151,6 +152,21 @@ local _serviceGeneration = 0
 -- ProfileLoaded sigue siendo un BindableEvent (diferido): sus consumidores
 -- pueden yieldear sin peligro porque el perfil sigue cargado cuando corren.
 local _profileLoadedBindable = Instance.new("BindableEvent")
+
+--[[
+	LeveledUp(player, fromLevel, toLevel, xpGained, source?)
+
+	El único punto del juego donde se cruza un nivel es `AddXP`, y no emitía
+	nada: la progresión sólo existía como foto en SESSION_END, así que no se
+	podía saber cuánto tarda un jugador en subir, sólo a qué nivel había
+	llegado al salir.
+
+	Es un signal y no una llamada directa a TelemetryService porque
+	`core.data` no puede requerirlo: TelemetryService ya requiere este módulo
+	y el ciclo no compilaría. Diferido (BindableEvent) a propósito: el handler
+	corre fuera de la ruta de escritura del perfil.
+]]
+local _leveledUpBindable = Instance.new("BindableEvent")
 
 --[[
 	_newProfileSignal: signal mínimo que ejecuta sus handlers EN EL ACTO.
@@ -276,6 +292,9 @@ DataService.__index = DataService
 --                              yieldear (ver _newProfileSignal).
 DataService.ProfileLoaded = _profileLoadedBindable.Event
 DataService.ProfileUnloading = _profileUnloadingSignal
+--   LeveledUp(player, from, to, xpGained, source?) — una o más subidas de
+--                              nivel ya persistidas. Diferido.
+DataService.LeveledUp = _leveledUpBindable.Event
 
 local function _isGenerationActive(generation: number): boolean
 	return _started and _serviceGeneration == generation
@@ -941,7 +960,7 @@ end
 
 	Devuelve (success, newLevel, newXP, newXPToNextLevel).
 ]]
-function DataService:AddXP(player: Player, amount: number): (boolean, number, number, number)
+function DataService:AddXP(player: Player, amount: number, source: string?): (boolean, number, number, number)
 	local profile = _profiles[player.UserId]
 	local replica = _replicas[player.UserId]
 	if not profile or not replica then
@@ -955,6 +974,7 @@ function DataService:AddXP(player: Player, amount: number): (boolean, number, nu
 
 	local stats = profile.Data.Stats
 	local level = math.max(0, math.floor(stats.Level or 0))
+	local startingLevel = level
 	local xp = math.max(0, math.floor(stats.XP or 0))
 	local xpToNext = math.max(1, math.floor(stats.XPToNextLevel or LevelingConfig.GetXPToNextLevel(level)))
 
@@ -987,6 +1007,12 @@ function DataService:AddXP(player: Player, amount: number): (boolean, number, nu
 
 	if not ok then
 		return false, 0, 0, 0
+	end
+
+	-- Sólo después de persistir: un level-up anunciado que el BatchUpdate no
+	-- guardó sería un evento de una subida que el jugador no tiene.
+	if level > startingLevel then
+		_leveledUpBindable:Fire(player, startingLevel, level, math.floor(amount), source)
 	end
 
 	return true, level, xp, xpToNext

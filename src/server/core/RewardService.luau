@@ -105,32 +105,51 @@ function RewardService.Award(
 		end
 	end
 
-	local ok = true
+	-- `cashOk` va aparte de `ok` A PROPÓSITO. Compartían variable, así que un
+	-- fallo al conceder la XP marcaba `ok = false` y suprimía el registro de
+	-- un Cash que YA se había persistido: el saldo del jugador subía y el
+	-- faucet no aparecía en ninguna parte. El balance faucet/sink del
+	-- dashboard se quedaba corto sin que nada lo dijera.
+	local cashOk = true
 	if #updates > 0 then
 		local batchOk, batchErr = pcall(function()
 			return _dataService:BatchUpdate(player, updates)
 		end)
 		if not batchOk then
 			warn(("[RewardService] BatchUpdate falló para %s (action=%s): %s"):format(player.Name, actionKey, tostring(batchErr)))
-			ok = false
+			cashOk = false
 		elseif batchErr == false then
 			-- BatchUpdate devolvió false (sin error pero sin éxito).
-			ok = false
+			cashOk = false
 		end
 	end
 
+	local ok = cashOk
+
+	local xpOk = true
 	if xpAmount > 0 then
-		local xpOk, xpErr = pcall(function()
-			_dataService:AddXP(player, xpAmount)
+		local xpCallOk, xpErr = pcall(function()
+			_dataService:AddXP(player, xpAmount, actionKey)
 		end)
-		if not xpOk then
+		if not xpCallOk then
 			warn(("[RewardService] AddXP falló para %s (action=%s): %s"):format(player.Name, actionKey, tostring(xpErr)))
 			ok = false
+			xpOk = false
 		end
 	end
 
-	if ok and cashAmount > 0 then
+	-- Se registra lo que se persistió, no lo que salió redondo del todo.
+	if cashOk and cashAmount > 0 then
 		TelemetryService.RecordFlow(player, "source", actionKey, cashAmount, itemSku, "Cash")
+	end
+
+	-- La XP se registra aparte, y no dentro de la guarda del cash: la mayoría
+	-- de acciones del catálogo dan XP sin dar Cash (asistencias, objetivos), y
+	-- todas ellas eran invisibles porque el único registro colgaba de
+	-- `cashAmount > 0`. Sin esto, el ritmo de XP por hora del que dependen los
+	-- niveles de desbloqueo del catálogo no se puede medir, sólo suponer.
+	if xpOk and xpAmount > 0 then
+		TelemetryService.RecordXP(player, actionKey, xpAmount, itemSku)
 	end
 
 	return ok, xpAmount, cashAmount
@@ -144,8 +163,14 @@ end
 
 	`sourceLabel` es el transactionType para la telemetría (p. ej.
 	"MatchEnd::Victory"). Devuelve true si se persistió.
+
+	`itemSku` es la clave con la que el movimiento se puede unir a otra serie.
+	Los bonus de fin de partida pasan ahí el `matchId` de la ronda que los
+	pagó: sin él, el Cash de fin de partida y el MATCH_END viven en dos tablas
+	que no comparten ninguna columna, y "cuánto pagó esta partida" no tiene
+	respuesta.
 ]]
-function RewardService.AwardCash(player: Player, amount: number, sourceLabel: string): boolean
+function RewardService.AwardCash(player: Player, amount: number, sourceLabel: string, itemSku: string?): boolean
 	if not _dataService or not player or type(amount) ~= "number" or amount <= 0 then
 		return false
 	end
@@ -170,7 +195,7 @@ function RewardService.AwardCash(player: Player, amount: number, sourceLabel: st
 		return false
 	end
 
-	TelemetryService.RecordFlow(player, "source", sourceLabel, amount, nil, "Cash")
+	TelemetryService.RecordFlow(player, "source", sourceLabel, amount, itemSku, "Cash")
 	return true
 end
 

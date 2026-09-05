@@ -35,6 +35,17 @@ type ActiveVoteState = {
 
 type Deps = {
 	onVoteFinished: (winnerMapName: string) -> (),
+	--[[
+		Id de la partida que esta votación está decidiendo. Lo acuña
+		MatchService al abrir la votación, así que el MAP_VOTE y el MATCH_END
+		de la ronda resultante comparten clave: sin ella no se puede responder
+		si el mapa más votado es también el que más recompensa, ni si un mapa
+		concreto acorta las partidas.
+
+		Opcional: un despliegue que no lo cablee sigue emitiendo la votación
+		igual, sólo que sin poder unirla a su partida.
+	]]
+	currentMatchId: (() -> string)?,
 }
 
 local VotingService = {}
@@ -231,8 +242,17 @@ local function _finishVote(vote: ActiveVoteState)
 		table.insert(options, { mapName = mapName, votes = votesByMap[mapName] or 0 })
 	end
 
+	local matchId = ""
+	if _deps and _deps.currentMatchId then
+		local ok, resolved = pcall(_deps.currentMatchId :: any)
+		if ok and type(resolved) == "string" then
+			matchId = resolved
+		end
+	end
+
 	TelemetryService.Enqueue("MAP_VOTE", {
 		voteId = HttpService:GenerateGUID(false),
+		matchId = matchId,
 		winnerMap = winner,
 		-- Elegibles frente a emitidos: con VoteDuration = 15s, no votar es una
 		-- señal real de indiferencia hacia los mapas ofrecidos.

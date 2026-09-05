@@ -27,6 +27,12 @@
 	Roblox y guardarla sólo abriría la puerta a que un beneficio siguiera activo
 	tras un refund.
 
+	La COMPRA sí se registra (ROBUX_PURCHASE, kind "GamePass"). Antes no: el
+	servicio no tocaba telemetría, así que los gamepasses eran el único ingreso
+	del juego que no aparecía en el dashboard — y sin embargo su consecuencia sí
+	(el faucet `MatchEnd::VIP` que paga el pase VIP en cada partida). Se veía el
+	gasto que genera un producto y no el dinero que entra por él.
+
 	En Studio hay un override para poder probar (ver STUDIO_OWNERSHIP_OVERRIDE):
 	ni las cuentas simuladas de un local server poseen nada, ni Studio deja
 	completar una compra real.
@@ -39,6 +45,8 @@ local RunService = game:GetService("RunService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local StoreProducts = require(Shared.constants.StoreProducts)
+
+local TelemetryService = require(script.Parent.TelemetryService)
 
 --[[
 	Override SÓLO de Studio, para poder probar los dos lados del gate sin una
@@ -145,6 +153,36 @@ local function _resolve(player: Player, passId: number)
 	end)
 end
 
+--[[
+	Registra la compra de un gamepass.
+
+	No hay receipt ni purchaseId: Roblox no lo entrega en este evento. La clave
+	de idempotencia se construye con userId y passId, que es exacta —un pass se
+	posee o no, no se compra dos veces— y deja al backend descartar el duplicado
+	si el evento llegara repetido.
+
+	`cashGranted = 0` es correcto y no un hueco: un gamepass no concede moneda,
+	concede un beneficio permanente. El importe que importa es el de Robux.
+]]
+local function _recordPurchase(player: Player, passId: number)
+	local pass = StoreProducts.GamePasses.ByPassId[passId]
+	if not pass then
+		-- Un pass comprado que no está en el catálogo es una compra real que no
+		-- se puede valorar: mejor saberlo que perderla en silencio.
+		warn(`[GamePassService] compra de un pass fuera del catálogo ({passId}) — se registra sin precio`)
+	end
+
+	TelemetryService.RecordPurchase({
+		userId = player.UserId,
+		purchaseId = `gamepass-{player.UserId}-{passId}`,
+		productId = passId,
+		sku = if pass then pass.Name else tostring(passId),
+		robuxPrice = if pass then pass.RobuxPrice else 0,
+		cashGranted = 0,
+		kind = "GamePass",
+	})
+end
+
 local function _track(player: Player)
 	if _ownedByUserId[player.UserId] == nil then
 		_ownedByUserId[player.UserId] = {}
@@ -229,6 +267,7 @@ function GamePassService.Start()
 	MarketplaceService.PromptGamePassPurchaseFinished:Connect(function(player, passId, wasPurchased)
 		if wasPurchased then
 			_store(player, passId, true)
+			_recordPurchase(player, passId)
 		end
 	end)
 end
