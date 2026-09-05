@@ -162,9 +162,20 @@ local TIER_COUNT = 64
 --   · Outfits: solo Gems (tienda: Tourist 100, Inmate 1.000, Jungle 2.500) o
 --     pase (Ducky, PASS 42). Ningún outfit se vende por Cash. Tourist a 100 =
 --     pack mínimo: las 50 Gems free dejan al F2P a medio pack de comprarlo.
---   · Orden global↔por-arma: un weaponWrap cuyo globalWrap cae en un tier
---     ANTERIOR es un premio vacío (el grant global ya cubre todas las armas).
---     Aquí siempre per-weapon primero (Gold 2/30 → global 54; Red 14 → 36).
+--   · UN solo wrap global por season, y es el flagship: Gold en el 54 ("oro en
+--     TODO el arsenal"). Un global se concede a las 11 armas y la tienda vende
+--     el mismo wrap por arma, así que vale 11 compras: con Neon, Red y Gold
+--     globales el track PASS valía ×129 su precio (323k Cash-eq por 500 Gems,
+--     auditoría 2026-09-04) y dejaba muertos los wraps de la tienda para quien
+--     compra el pase. Neon (26) y Red (36) pasan a por-arma. Orden: un
+--     weaponWrap cuyo global cae en un tier ANTERIOR es un premio vacío, así
+--     que per-weapon primero (Gold 2/30 → global 54).
+--   · Atajos de tienda: 15 de los 22 ítems de tienda del pase llegan DESPUÉS
+--     de la hora a la que la tienda ya los vendía (Face6: tienda 8 h, pase
+--     16 h). Se mantienen donde están —repartidos por página para que cada
+--     tramo tenga un objetivo— porque BattlePassService devuelve el precio de
+--     tienda al jugador que YA lo tenía: el tier nunca vale cero y comprar
+--     pronto no es un castigo. Quien espera y quien compra acaban igual.
 --   · Los wraps Mastery_* NO van en el pase: son recompensas de desafío de
 --     kills (KillChallenge) y meterlos aquí las haría redundantes.
 local REWARD_OVERRIDES: { [number]: Reward } = {
@@ -189,7 +200,7 @@ local REWARD_OVERRIDES: { [number]: Reward } = {
 	[24] = item("Hats", "Hat12"),                         -- PASS · Sombrero
 
 	-- Página 4 (25-32).
-	[26] = globalWrap("Wrap_Neon"),                       -- PASS · neon global
+	[26] = weaponWrap("Wrap_Neon", "Main", "AK"),      -- PASS · Neon en el AK (por arma)
 	[29] = item("Faces", "Face10"),                       -- FREE
 	[30] = weaponWrap("Wrap_Gold", "Main", "Sniper"),     -- PASS
 	[32] = gems(50),                                      -- PASS
@@ -198,7 +209,7 @@ local REWARD_OVERRIDES: { [number]: Reward } = {
 	[33] = item("Hats", "Hat13"),                         -- FREE · Shark
 	[34] = item("Hats", "Hat5"),                          -- PASS · Alaska
 	[35] = gems(25),                                      -- FREE · segunda muestra
-	[36] = globalWrap("Wrap_Red"),                        -- PASS · upgrade del 14 a global
+	[36] = weaponWrap("Wrap_Red", "Special", "Laser"), -- PASS · Crimson en el Laser (por arma)
 	[37] = item("Faces", "Face11"),                       -- FREE
 
 	-- Página 6 (41-48).
@@ -212,9 +223,28 @@ local REWARD_OVERRIDES: { [number]: Reward } = {
 	[52] = item("Hats", "Hat7"),                          -- PASS · IceCream
 	[54] = globalWrap("Wrap_Gold"),                       -- PASS · oro en TODO el arsenal
 
-	-- Página 8 (57-64): cierre de season.
-	[58] = item("Faces", "Face7"),                        -- PASS · Kitty (legendaria)
-	[62] = gems(50),                                      -- PASS
+	--[[
+		Página 8 (57-64): cierre de season.
+
+		Face7 y los Gems del 62 están INTERCAMBIADOS respecto al reparto
+		original, y no es cosmético: Face7 (Kitty) también se vende en la
+		tienda, por 20.000 Cash y nivel 55, que a los ritmos de diseño son
+		~16,7 h de juego. En el tier 58 el pase lo entregaba a las ~14,2 h, así
+		que le quitaba a la tienda un sink de 20.000 Cash y adelantaba el ítem
+		2,5 h (un 15 % del camino). En el 62 llega a las ~15,9 h: sigue siendo
+		una ventaja de quien paga el pase —que es lo que se compra— pero de
+		0,8 h en vez de 2,5, y la tienda conserva el sink para casi todos.
+
+		Se mueve en lugar de sacarlo porque sacarlo dejaría el track premium
+		sin una de sus tres piezas grandes y exigiría una exclusiva nueva con
+		arte propio. Los dos tiers son PASS, así que el intercambio no cambia
+		qué recibe el track gratuito.
+
+		El 63 (Face6, FREE) y el 64 (Crown, la exclusiva de S1) no se tocan:
+		son el cierre de cada track.
+	]]
+	[58] = gems(50),                                      -- PASS
+	[62] = item("Faces", "Face7"),                        -- PASS · Kitty (legendaria)
 	[63] = item("Faces", "Face6"),                        -- FREE · cierre del track free
 	[64] = item("Hats", "Hat3"),                          -- PASS · Crown, LA exclusiva de S1
 }
@@ -228,11 +258,13 @@ end
 --[[
 	Cash filler de los tiers sin override. PRESUPUESTO AUDITADO (2026-09-01),
 	con 30 tiers de filler (18 FREE + 12 PASS) esta fórmula reparte:
-	  FREE 4.100 + PASS 2.450 = 6.550 Cash por season ≈ UN ítem top (6.500).
+	  FREE 4.100 + PASS 2.450 = 6.550 Cash por season ≈ media Legendary
+	  (10.000-20.000 desde el recalibrado del 2026-09-04).
 	Referencias contra las que se calibró — revisar si cambia cualquiera:
-	  · Jugar hasta el final de season (~660 kills, ~10h) da ~13-16k de Cash
-	    (kills+headshots+assists ~110/partida, fin de partida ~130, dailies 65/
-	    día). El BP debe ser suplemento (~1/3), nunca el ingreso principal.
+	  · Jugar hasta el final de season (~660 kills, ~10h) da ~12k de Cash
+	    (kills+headshots+assists ~120/partida, fin de partida ~35 desde el
+	    2026-09-04, dailies 65/día). El BP debe ser suplemento (~1/3), nunca el
+	    ingreso principal.
 	  · El pack IAP grande vende 15.000 Cash por 799 R$: el track FREE jamás
 	    puede acercarse a esa cifra o nadie compra packs.
 	La fórmula anterior (100+25·(l-1), heredada de la tabla de pruebas) regalaba

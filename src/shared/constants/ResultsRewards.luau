@@ -66,12 +66,21 @@ local ResultsRewards = {}
 ResultsRewards.CashIcon = "rbxassetid://113694528712529"
 
 -- ÚNICA fuente de verdad de las recompensas de cash de fin de partida.
+--
+-- Recalibrado el 2026-09-04. Con 50/100/25/75 el fin de partida pagaba ~130
+-- Cash/partida ≈ 980 Cash/h a ritmo de diseño (7,5 partidas/h): MÁS que todo
+-- el combate (~900/h con Kill 10/HS 5/Assist 5), y ningún cálculo de precios
+-- lo contaba. Ahora ~35/partida ≈ 260/h → ~1.200 Cash/h en total, que es la
+-- tasa con la que está calibrado ItemsConfig. Son un remate visible, no la
+-- fuente principal: el jugador tiene que sentir que lo que paga es jugar bien.
+-- El VIP baja a 25 por la misma razón: +100/partida eran +750 Cash/h
+-- permanentes (un 40% de ingreso extra) por un gamepass de 100 R$.
 ResultsRewards.CashRewards = {
-	{ Id = "Match", Title = "MATCH", Condition = "Always", Cash = 50 },
-	{ Id = "Victory", Title = "VICTORY", Condition = "Victory", Cash = 100 },
-	{ Id = "Defeat", Title = "DEFEAT", Condition = "Defeat", Cash = 25 },
-	{ Id = "MVP", Title = "MVP", Condition = "MVP", Cash = 75 },
-	{ Id = "VIP", Title = "VIP PASS", Condition = "Always", Cash = 100, RequiresVIP = true },
+	{ Id = "Match", Title = "MATCH", Condition = "Always", Cash = 10 },
+	{ Id = "Victory", Title = "VICTORY", Condition = "Victory", Cash = 30 },
+	{ Id = "Defeat", Title = "DEFEAT", Condition = "Defeat", Cash = 10 },
+	{ Id = "MVP", Title = "MVP", Condition = "MVP", Cash = 20 },
+	{ Id = "VIP", Title = "VIP PASS", Condition = "Always", Cash = 25, RequiresVIP = true },
 } :: { CashRewardDef }
 
 local function _conditionMet(condition: RewardCondition, ctx: MatchContext): boolean

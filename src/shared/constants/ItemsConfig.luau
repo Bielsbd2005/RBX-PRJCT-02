@@ -55,6 +55,15 @@ export type ItemsConfigType = {
 -- ────────────────────────────────────────────────────────────
 -- DATOS
 -- ────────────────────────────────────────────────────────────
+-- Precios y LevelRequired recalibrados el 2026-09-04 (ver data/change-log.json
+-- del dashboard). Tasa de referencia: ~1.200 Cash/h y ~2.600 XP/h a ritmo de
+-- diseño (~63 kills/h, Kill 10/HS 5/Assist 5 + fin de partida ~35). Bandas:
+--   Common 150-250 (8-13 min) · Uncommon 500-1.000 (25-50 min) · Rare
+--   1.500-2.500 (1,3-2 h) · Epic 4.000-6.500 (3-5 h) · Legendary 10.000-20.000
+--   (8-17 h ≈ el pack Cash5). El nivel se deriva del precio: se desbloquea
+--   cuando ya se podía pagar. La escalera anterior se aplicó a 300 Cash/h
+--   (la tasa de un tester) y dejaba TODO el catálogo ×3-7 barato. Los
+--   WeaponWraps tienen banda propia porque se compran por arma: ver la sección.
 
 local function asset(assetId: number): string
 	return "rbxassetid://" .. tostring(assetId)
@@ -69,11 +78,11 @@ Main = {
     -- de LoadoutService/ShopService (ItemDefaults.ITEM_ID). Precio 0 y sin
     -- compra, como el Default del resto de categorías.
     Default = { Name = "Default", Price = 0,    LevelRequired = 0,  Rarity = "Common",    Image = asset(115787466520426), CanPurchase = false },
-    AK      = { Name = "AK",      Price = 100,  LevelRequired = 1,  Rarity = "Common",    Image = asset(100246140710694), CanPurchase = true },
-    Groza   = { Name = "Groza",   Price = 30,   LevelRequired = 0,  Rarity = "Common",  Image = asset(133051760713810), CanPurchase = true },
-    Tommy   = { Name = "Tommy",   Price = 400,  LevelRequired = 6,  Rarity = "Rare",      Image = asset(111814750317784), CanPurchase = true },
-    Sniper  = { Name = "Sniper",  Price = 2000, LevelRequired = 16,  Rarity = "Epic",      Image = asset(86261275288637),  CanPurchase = true },
-    Large   = { Name = "Large",   Price = 6500, LevelRequired = 32,  Rarity = "Legendary",      Image = asset(90736156284730),  CanPurchase = true },
+    AK      = { Name = "AK",      Price = 250,  LevelRequired = 3,  Rarity = "Common",    Image = asset(100246140710694), CanPurchase = true },
+    Groza   = { Name = "Groza",   Price = 150,   LevelRequired = 0,  Rarity = "Common",  Image = asset(133051760713810), CanPurchase = true },
+    Tommy   = { Name = "Tommy",   Price = 2000,  LevelRequired = 15,  Rarity = "Rare",      Image = asset(111814750317784), CanPurchase = true },
+    Sniper  = { Name = "Sniper",  Price = 5000, LevelRequired = 26,  Rarity = "Epic",      Image = asset(86261275288637),  CanPurchase = true },
+    Large   = { Name = "Large",   Price = 12500, LevelRequired = 43,  Rarity = "Legendary",      Image = asset(90736156284730),  CanPurchase = true },
 },
 
 Special = {
@@ -81,10 +90,10 @@ Special = {
     -- Arma de inicio (misma convención que Main.Default). Sin Image: el Locker
     -- cae en su thumbnail por defecto hasta que haya uno en el panel de Roblox.
     Default = { Name = "Default", Price = 0,   LevelRequired = 0,  Rarity = "Common",        CanPurchase = false },
-    Short   = { Name = "Short",   Price = 200, LevelRequired = 3,  Rarity = "Uncommon",      Image = asset(118462878872416), CanPurchase = true },
-    UZI     = { Name = "UZI",     Price = 30, LevelRequired = 0,  Rarity = "Common",         Image = asset(109948875778066), CanPurchase = true },
-    Laser   = { Name = "Laser",   Price = 1000, LevelRequired = 10,  Rarity = "Epic",      Image = asset(80482264427643),  CanPurchase = true },
-    RPG     = { Name = "RPG",     Price = 6500, LevelRequired = 32,  Rarity = "Legendary",      Image = asset(139650368086109), CanPurchase = true },
+    Short   = { Name = "Short",   Price = 650, LevelRequired = 7,  Rarity = "Uncommon",      Image = asset(118462878872416), CanPurchase = true },
+    UZI     = { Name = "UZI",     Price = 200, LevelRequired = 0,  Rarity = "Common",         Image = asset(109948875778066), CanPurchase = true },
+    Laser   = { Name = "Laser",   Price = 5000, LevelRequired = 26,  Rarity = "Epic",      Image = asset(80482264427643),  CanPurchase = true },
+    RPG     = { Name = "RPG",     Price = 12500, LevelRequired = 43,  Rarity = "Legendary",      Image = asset(139650368086109), CanPurchase = true },
 },
 
 
@@ -124,9 +133,18 @@ Special = {
 			StudsPerTile = 3,
 		},
 		-- ── Escalera Cash: colores planos → animada → material especial ──
+		-- Banda PROPIA, ≈⅓ de la del ítem de su rareza (2026-09-04). Un wrap se
+		-- compra POR ARMA (ShopService lo guarda en WeaponWrapsByWeapon), así que
+		-- vestir el arsenal principal de oro son seis compras: a 12.500 cada una
+		-- (lo que ponía la escalera de ítems) una skin de un arma costaba lo mismo
+		-- que la Large; a 4.000 las seis suman dos Legendaries, que es lo que se
+		-- lee. La rareza marca el tier de la skin, no el precio. Niveles derivados
+		-- del precio a 1.200 Cash/h · 2.600 XP/h, como el resto del catálogo. El
+		-- pase regala wraps por arma y UN global (Gold, tier 54): con tres
+		-- globales a 11 armas el track PASS valía ×129 su precio.
 		Wrap_White = {
 			Name = "Arctic",
-			Price = 65,
+			Price = 100,
 			LevelRequired = 0,
 			Rarity = "Common",
 			CanPurchase = true,
@@ -136,8 +154,8 @@ Special = {
 		},
 		Wrap_Blue = {
 			Name = "Blue Wrap",
-			Price = 100,
-			LevelRequired = 1,
+			Price = 150,
+			LevelRequired = 2,
 			Rarity = "Common",
 			CanPurchase = true,
 			BaseColor = Color3.fromRGB(57, 110, 207),
@@ -146,7 +164,7 @@ Special = {
 		},
 		Wrap_Green = {
 			Name = "Forest",
-			Price = 200,
+			Price = 250,
 			LevelRequired = 3,
 			Rarity = "Uncommon",
 			CanPurchase = true,
@@ -156,8 +174,8 @@ Special = {
 		},
 		Wrap_Coral = {
 			Name = "Coral",
-			Price = 250,
-			LevelRequired = 4,
+			Price = 400,
+			LevelRequired = 5,
 			Rarity = "Uncommon",
 			CanPurchase = true,
 			BaseColor = Color3.fromRGB(255, 120, 90),
@@ -166,8 +184,8 @@ Special = {
 		},
 		Wrap_Purple = {
 			Name = "Royal Purple",
-			Price = 400,
-			LevelRequired = 6,
+			Price = 800,
+			LevelRequired = 8,
 			Rarity = "Rare",
 			CanPurchase = true,
 			BaseColor = Color3.fromRGB(130, 70, 200),
@@ -176,8 +194,8 @@ Special = {
 		},
 		Wrap_Red  = {
 			Name = "Crimson Flow",
-			Price = 1250,
-			LevelRequired = 12,
+			Price = 1500,
+			LevelRequired = 13,
 			Rarity = "Epic",
 			CanPurchase = true,
 			TextureID = asset(86966645142772),
@@ -188,8 +206,8 @@ Special = {
 		},
 		Wrap_Neon = {
 			Name = "Neon Surge",
-			Price = 2000,
-			LevelRequired = 16,
+			Price = 2500,
+			LevelRequired = 17,
 			Rarity = "Epic",
 			CanPurchase = true,
 			BaseColor = Color3.fromRGB(0, 255, 170),
@@ -200,7 +218,7 @@ Special = {
 		Wrap_Gold = {
 			Name = "Gold Wrap",
 			Price = 4000,
-			LevelRequired = 24,
+			LevelRequired = 23,
 			Rarity = "Legendary",
 			CanPurchase = true,
 			BaseColor = Color3.fromRGB(214, 170, 55),
@@ -250,8 +268,8 @@ Special = {
 		-- subir iconos propios por efecto cuando haya arte.
 		Default   = { Name = "Default Kill",   Price = 0,   LevelRequired = 1, Rarity = "Common", Image = "rbxassetid://130437553674754", CanPurchase = false },
 		Gravity   = { Name = "Gravity Kill",   Price = 0, LevelRequired = 0, Rarity = "Rare",   Image = "rbxassetid://130437553674754", CanPurchase = false, isBPExclusive = true },
-		Explosion = { Name = "Explosion Kill", Price = 1000, LevelRequired = 10, Rarity = "Epic",   Image = "rbxassetid://130437553674754", CanPurchase = true },
-		Tornado   = { Name = "Tornado Kill",   Price = 2500, LevelRequired = 18, Rarity = "Epic",   Image = "rbxassetid://130437553674754", CanPurchase = true },
+		Explosion = { Name = "Explosion Kill", Price = 4000, LevelRequired = 23, Rarity = "Epic",   Image = "rbxassetid://130437553674754", CanPurchase = true },
+		Tornado   = { Name = "Tornado Kill",   Price = 6500, LevelRequired = 30, Rarity = "Epic",   Image = "rbxassetid://130437553674754", CanPurchase = true },
 	},
 
 	Faces = {
@@ -262,39 +280,39 @@ Special = {
 		-- desconocido) para que el catálogo renderice algo seguro y aplicarla restaure
 		-- la cara base del head. No comprable, precio 0.
 		Default = { Name = "Default",        Price = 0,  LevelRequired = 0, Rarity = "Common", Image = "rbxasset://textures/face.png", CanPurchase = false },
-		Face1   = { Name = "Classic Smile",  Price = 65,  LevelRequired = 1, Rarity = "Common",   Image = "rbxassetid://79175047578893",  CanPurchase = true },
-		Face2   = { Name = "Nervous",        Price = 200,  LevelRequired = 3, Rarity = "Uncommon",   Image = "rbxassetid://18571318923",    CanPurchase = true },
-		Face3   = { Name = "Pout",           Price = 125,  LevelRequired = 2, Rarity = "Uncommon",   Image = "rbxassetid://97580829209799", CanPurchase = true },
-		Face4   = { Name = "Kawaii",         Price = 2000,  LevelRequired = 16, Rarity = "Epic",   Image = "rbxassetid://94789972115859", CanPurchase = true },
+		Face1   = { Name = "Classic Smile",  Price = 250,  LevelRequired = 3, Rarity = "Common",   Image = "rbxassetid://79175047578893",  CanPurchase = true },
+		Face2   = { Name = "Nervous",        Price = 650,  LevelRequired = 7, Rarity = "Uncommon",   Image = "rbxassetid://18571318923",    CanPurchase = true },
+		Face3   = { Name = "Pout",           Price = 500,  LevelRequired = 6, Rarity = "Uncommon",   Image = "rbxassetid://97580829209799", CanPurchase = true },
+		Face4   = { Name = "Kawaii",         Price = 6500,  LevelRequired = 30, Rarity = "Epic",   Image = "rbxassetid://94789972115859", CanPurchase = true },
 		-- Exclusiva del Battle Pass (tier 1 FREE de S1).
 		Face5   = { Name = "Nerd",           Price = 0,  LevelRequired = 0, Rarity = "Rare",   Image = "rbxassetid://17285554126",    CanPurchase = false, isBPExclusive = true },
-		Face6   = { Name = "Deadpan",        Price = 4000,  LevelRequired = 24, Rarity = "Legendary",   Image = "rbxassetid://70391209868621", CanPurchase = true },
-		Face7   = { Name = "Kitty",          Price = 6500,  LevelRequired = 32, Rarity = "Legendary",   Image = "rbxassetid://18626918162",    CanPurchase = true },
-		Face8   = { Name = "Goofy",          Price = 30,  LevelRequired = 0, Rarity = "Common", Image = "rbxassetid://17373537487",    CanPurchase = true },
-		Face9   = { Name = "Chill",          Price = 400,  LevelRequired = 6, Rarity = "Rare",   Image = "rbxassetid://118980363558612", CanPurchase = true },
-		Face10  = { Name = "Side Eye",       Price = 250, LevelRequired = 4, Rarity = "Uncommon",   Image = "rbxassetid://18870092964",    CanPurchase = true },
-		Face11  = { Name = "Angry",          Price = 400, LevelRequired = 6, Rarity = "Rare",   Image = "rbxassetid://101878427779141", CanPurchase = true },
-		Face12  = { Name = "Menace",         Price = 1000, LevelRequired = 10, Rarity = "Epic",   Image = "rbxassetid://112166980943980", CanPurchase = true },
+		Face6   = { Name = "Deadpan",        Price = 10000,  LevelRequired = 38, Rarity = "Legendary",   Image = "rbxassetid://70391209868621", CanPurchase = true },
+		Face7   = { Name = "Kitty",          Price = 20000,  LevelRequired = 55, Rarity = "Legendary",   Image = "rbxassetid://18626918162",    CanPurchase = true },
+		Face8   = { Name = "Goofy",          Price = 150,  LevelRequired = 0, Rarity = "Common", Image = "rbxassetid://17373537487",    CanPurchase = true },
+		Face9   = { Name = "Chill",          Price = 1500,  LevelRequired = 13, Rarity = "Rare",   Image = "rbxassetid://118980363558612", CanPurchase = true },
+		Face10  = { Name = "Side Eye",       Price = 1000, LevelRequired = 10, Rarity = "Uncommon",   Image = "rbxassetid://18870092964",    CanPurchase = true },
+		Face11  = { Name = "Angry",          Price = 2500, LevelRequired = 17, Rarity = "Rare",   Image = "rbxassetid://101878427779141", CanPurchase = true },
+		Face12  = { Name = "Menace",         Price = 4000, LevelRequired = 23, Rarity = "Epic",   Image = "rbxassetid://112166980943980", CanPurchase = true },
 
 	},
 
 	Hats = {
-		Hat1 = { Name = "Bunny",          Price = 30,  LevelRequired = 0,  Rarity = "Common",    Image = "rbxassetid://117004939623250", CanPurchase = true },
-		Hat2 = { Name = "Cone",      Price = 1200, LevelRequired = 10, Rarity = "Rare",      Image = "rbxassetid://138341632720877", CanPurchase = false, isBPExclusive = true },
-		Hat3 = { Name = "Crown",        Price = 4000, LevelRequired = 20, Rarity = "Legendary", Image = "rbxassetid://119183410438332", CanPurchase = false, isBPExclusive = true },
-		Hat4 = { Name = "Squid",        Price = 500, LevelRequired = 7, Rarity = "Rare", Image = "rbxassetid://74317816532636", CanPurchase = true },
-		Hat5 = { Name = "Alaska",        Price = 1000, LevelRequired = 10, Rarity = "Epic", Image = "rbxassetid://83643028468192", CanPurchase = true },
-		Hat6 = { Name = "Drink",        Price = 1250, LevelRequired = 12, Rarity = "Epic", Image = "rbxassetid://130927276777389", CanPurchase = true },
-		Hat7 = { Name = "IceCream",        Price = 2500, LevelRequired = 18, Rarity = "Epic", Image = "rbxassetid://89103967355981", CanPurchase = true },
+		Hat1 = { Name = "Bunny",          Price = 150,  LevelRequired = 0,  Rarity = "Common",    Image = "rbxassetid://117004939623250", CanPurchase = true },
+		Hat2 = { Name = "Cone",      Price = 0, LevelRequired = 10, Rarity = "Rare",      Image = "rbxassetid://138341632720877", CanPurchase = false, isBPExclusive = true },
+		Hat3 = { Name = "Crown",        Price = 0, LevelRequired = 20, Rarity = "Legendary", Image = "rbxassetid://119183410438332", CanPurchase = false, isBPExclusive = true },
+		Hat4 = { Name = "Squid",        Price = 2500, LevelRequired = 17, Rarity = "Rare", Image = "rbxassetid://74317816532636", CanPurchase = true },
+		Hat5 = { Name = "Alaska",        Price = 4000, LevelRequired = 23, Rarity = "Epic", Image = "rbxassetid://83643028468192", CanPurchase = true },
+		Hat6 = { Name = "Drink",        Price = 5000, LevelRequired = 26, Rarity = "Epic", Image = "rbxassetid://130927276777389", CanPurchase = true },
+		Hat7 = { Name = "IceCream",        Price = 6500, LevelRequired = 30, Rarity = "Epic", Image = "rbxassetid://89103967355981", CanPurchase = true },
 		-- OJO: Image comparte assetId con Hat7 (IceCream) — subir el thumbnail
 		-- real del Spartan antes del launch o sale con imagen de helado.
-		Hat8 = { Name = "Spartan",        Price = 4000, LevelRequired = 24, Rarity = "Legendary", Image = "rbxassetid://89103967355981", CanPurchase = true },
-		Hat9 = { Name = "RaceHelmet",        Price = 6500, LevelRequired = 32, Rarity = "Legendary", Image = "rbxassetid://84090421736652", CanPurchase = true },
-		Hat10 = { Name = "Pan",        Price = 50, LevelRequired = 1, Rarity = "Common", Image = "rbxassetid://97418970357486", CanPurchase = true },
-		Hat11 = { Name = "Football",        Price = 65, LevelRequired = 1, Rarity = "Common", Image = "rbxassetid://86457108228550", CanPurchase = true },
-		Hat12 = { Name = "Sombrero",        Price = 125, LevelRequired = 2, Rarity = "Uncommon", Image = "rbxassetid://79179819137524", CanPurchase = true },
-		Hat13 = { Name = "Shark",        Price = 200, LevelRequired = 3, Rarity = "Uncommon", Image = "rbxassetid://72319063957484", CanPurchase = true },
-		Hat14 = { Name = "Unicorn",        Price = 400, LevelRequired = 6, Rarity = "Rare", Image = "rbxassetid://112312308063894", CanPurchase = true },
+		Hat8 = { Name = "Spartan",        Price = 10000, LevelRequired = 38, Rarity = "Legendary", Image = "rbxassetid://89103967355981", CanPurchase = true },
+		Hat9 = { Name = "RaceHelmet",        Price = 20000, LevelRequired = 55, Rarity = "Legendary", Image = "rbxassetid://84090421736652", CanPurchase = true },
+		Hat10 = { Name = "Pan",        Price = 200, LevelRequired = 3, Rarity = "Common", Image = "rbxassetid://97418970357486", CanPurchase = true },
+		Hat11 = { Name = "Football",        Price = 250, LevelRequired = 3, Rarity = "Common", Image = "rbxassetid://86457108228550", CanPurchase = true },
+		Hat12 = { Name = "Sombrero",        Price = 500, LevelRequired = 6, Rarity = "Uncommon", Image = "rbxassetid://79179819137524", CanPurchase = true },
+		Hat13 = { Name = "Shark",        Price = 1000, LevelRequired = 10, Rarity = "Uncommon", Image = "rbxassetid://72319063957484", CanPurchase = true },
+		Hat14 = { Name = "Unicorn",        Price = 1500, LevelRequired = 13, Rarity = "Rare", Image = "rbxassetid://112312308063894", CanPurchase = true },
 
 
 	},

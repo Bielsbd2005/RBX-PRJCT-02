@@ -342,7 +342,13 @@ local DEFAULT: PlayerProfile = {
 		Losses = 0,
 		MatchesPlayed = 0,
 		TimePlayedSeconds = 0,
-		Cash = 500,
+		-- 150 desde el 2026-09-04 (antes 500) = el peldaño más barato del catálogo
+		-- (ItemsConfig: Groza, UZI, Face8, Hat1 y Wrap_White a 150, nivel 0). El
+		-- jugador nuevo elige UNA cosa en el minuto 0 —aprende la tienda con una
+		-- decisión real— y la segunda ya se la gana jugando (~155 Cash por
+		-- partida). Con 500 se compraban las ocho Common antes de la primera
+		-- partida. Si baja el peldaño más barato, bajar esto con él.
+		Cash = 150,
 		TotalCashEarned = 0,
 		TotalCashPurchased = 0,
 		-- Arranca a 0: los Gems son premium, no se regalan de salida.
