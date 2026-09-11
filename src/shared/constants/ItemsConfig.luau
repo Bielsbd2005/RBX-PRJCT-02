@@ -67,8 +67,8 @@ export type ItemsConfigType = {
 --   deriva del precio: se desbloquea cuando ya se podía pagar. El peldaño más
 --   barato de cada categoría no pide nivel. NADA de lo que regala el pase se
 --   vende aquí (isBPExclusive = true, precio 0): los 14 ítems que estaban en
---   los dos sitios se quedan en el pase y sus peldaños los ocupan ítems nuevos,
---   reservados más abajo como comentario hasta que exista su arte. Los
+--   los dos sitios se quedan en el pase y sus peldaños los ocupan ítems nuevos
+--   PROVISIONALES (nombre e Image de relleno) que Biel sustituirá por los reales. Los
 --   WeaponWraps tienen banda propia porque se compran por arma: ver la sección.
 -- Anterior (2026-09-04): 1.200 Cash/h con 63 kills/h, bandas 150-20.000.
 
@@ -362,9 +362,10 @@ Special = {
 		Gravity   = { Name = "Gravity Kill",   Price = 0, LevelRequired = 0, Rarity = "Rare",   Image = "rbxassetid://130437553674754", CanPurchase = false, isBPExclusive = true },
 		Explosion = { Name = "Explosion Kill", Price = 0, LevelRequired = 0, Rarity = "Epic",   Image = "rbxassetid://130437553674754", CanPurchase = false, isBPExclusive = true },
 		Tornado   = { Name = "Tornado Kill",   Price = 20000, LevelRequired = 46, Rarity = "Epic",   Image = "rbxassetid://130437553674754", CanPurchase = true },
-		-- RESERVADO (2026-09-12): peldaño libre hasta que exista el arte. Descomentar
-		-- con Image/modelo reales y CanPurchase = true. Precio y nivel ya son los de la escalera. PRIORIDAD sobre caras y sombreros: sin él la categoría queda vacía por debajo de las 10 h.
-		-- KE_A = { Name = "New Kill", Price = 5000, LevelRequired = 0, Rarity = "Rare", Image = "rbxassetid://0", CanPurchase = true },
+		-- PROVISIONAL (2026-09-12): entrada real con nombre e Image de relleno; sustituir por el
+		-- ítem definitivo (mismo precio y nivel). Sin módulo en KillEffectsRegistry cae al Default.
+		-- PRIORIDAD sobre caras y sombreros: sin él la categoría queda vacía por debajo de las 10 h.
+		KE_A = { Name = "New Kill", Price = 5000, LevelRequired = 0, Rarity = "Rare", Image = "rbxassetid://0", CanPurchase = true },
 	},
 
 	Faces = {
@@ -388,14 +389,14 @@ Special = {
 		Face10  = { Name = "Side Eye",       Price = 0, LevelRequired = 0, Rarity = "Uncommon",   Image = "rbxassetid://18870092964",    CanPurchase = false, isBPExclusive = true },
 		Face11  = { Name = "Angry",          Price = 0, LevelRequired = 0, Rarity = "Rare",   Image = "rbxassetid://101878427779141", CanPurchase = false, isBPExclusive = true },
 		Face12  = { Name = "Menace",         Price = 12500, LevelRequired = 36, Rarity = "Epic",   Image = "rbxassetid://112166980943980", CanPurchase = true },
-		-- RESERVADO (2026-09-12): peldaño libre hasta que exista el arte. Descomentar
-		-- con Image/modelo reales y CanPurchase = true. Precio y nivel ya son los de la escalera.
-		-- Face13 = { Name = "Face13", Price = 2000,  LevelRequired = 12, Rarity = "Uncommon",  Image = "rbxassetid://0", CanPurchase = true },
-		-- Face14 = { Name = "Face14", Price = 2500,  LevelRequired = 14, Rarity = "Uncommon",  Image = "rbxassetid://0", CanPurchase = true },
-		-- Face15 = { Name = "Face15", Price = 6500,  LevelRequired = 25, Rarity = "Rare",      Image = "rbxassetid://0", CanPurchase = true },
-		-- Face16 = { Name = "Face16", Price = 20000, LevelRequired = 46, Rarity = "Epic",      Image = "rbxassetid://0", CanPurchase = true },
-		-- Face17 = { Name = "Face17", Price = 40000, LevelRequired = 67, Rarity = "Legendary", Image = "rbxassetid://0", CanPurchase = true },
-		-- Face18 = { Name = "Face18", Price = 65000, LevelRequired = 86, Rarity = "Legendary", Image = "rbxassetid://0", CanPurchase = true },
+		-- PROVISIONALES (2026-09-12): entradas reales con nombre e Image de relleno; sustituir por
+		-- el ítem definitivo (mismo precio y nivel). Con Image 0 la cara se aplica en blanco.
+		Face13 = { Name = "Face13", Price = 2000,  LevelRequired = 12, Rarity = "Uncommon",  Image = "rbxassetid://0", CanPurchase = true },
+		Face14 = { Name = "Face14", Price = 2500,  LevelRequired = 14, Rarity = "Uncommon",  Image = "rbxassetid://0", CanPurchase = true },
+		Face15 = { Name = "Face15", Price = 6500,  LevelRequired = 25, Rarity = "Rare",      Image = "rbxassetid://0", CanPurchase = true },
+		Face16 = { Name = "Face16", Price = 20000, LevelRequired = 46, Rarity = "Epic",      Image = "rbxassetid://0", CanPurchase = true },
+		Face17 = { Name = "Face17", Price = 40000, LevelRequired = 67, Rarity = "Legendary", Image = "rbxassetid://0", CanPurchase = true },
+		Face18 = { Name = "Face18", Price = 65000, LevelRequired = 86, Rarity = "Legendary", Image = "rbxassetid://0", CanPurchase = true },
 
 	},
 
@@ -416,15 +417,16 @@ Special = {
 		Hat12 = { Name = "Sombrero",        Price = 0, LevelRequired = 0, Rarity = "Uncommon", Image = "rbxassetid://79179819137524", CanPurchase = false, isBPExclusive = true },
 		Hat13 = { Name = "Shark",        Price = 0, LevelRequired = 0, Rarity = "Uncommon", Image = "rbxassetid://72319063957484", CanPurchase = false, isBPExclusive = true },
 		Hat14 = { Name = "Unicorn",        Price = 0, LevelRequired = 0, Rarity = "Rare", Image = "rbxassetid://112312308063894", CanPurchase = false, isBPExclusive = true },
-		-- RESERVADO (2026-09-12): peldaño libre hasta que exista el arte. Descomentar
-		-- con Image/modelo reales y CanPurchase = true. Precio y nivel ya son los de la escalera. Los hats necesitan además su Accessory (CosmeticsTemplates.findHatTemplate).
-		-- Hat15 = { Name = "Hat15", Price = 400,   LevelRequired = 4,  Rarity = "Common",    Image = "rbxassetid://0", CanPurchase = true },
-		-- Hat16 = { Name = "Hat16", Price = 1000,  LevelRequired = 8,  Rarity = "Uncommon",  Image = "rbxassetid://0", CanPurchase = true },
-		-- Hat17 = { Name = "Hat17", Price = 2500,  LevelRequired = 14, Rarity = "Uncommon",  Image = "rbxassetid://0", CanPurchase = true },
-		-- Hat18 = { Name = "Hat18", Price = 4000,  LevelRequired = 19, Rarity = "Rare",      Image = "rbxassetid://0", CanPurchase = true },
-		-- Hat19 = { Name = "Hat19", Price = 6500,  LevelRequired = 25, Rarity = "Rare",      Image = "rbxassetid://0", CanPurchase = true },
-		-- Hat20 = { Name = "Hat20", Price = 12500, LevelRequired = 36, Rarity = "Epic",      Image = "rbxassetid://0", CanPurchase = true },
-		-- Hat21 = { Name = "Hat21", Price = 25000, LevelRequired = 52, Rarity = "Epic",      Image = "rbxassetid://0", CanPurchase = true },
+		-- PROVISIONALES (2026-09-12): entradas reales con nombre e Image de relleno; sustituir por
+		-- el ítem definitivo (mismo precio y nivel). Sin Accessory en Shared (findHatTemplate) el
+		-- sombrero se equipa en datos pero no se dibuja.
+		Hat15 = { Name = "Hat15", Price = 400,   LevelRequired = 4,  Rarity = "Common",    Image = "rbxassetid://0", CanPurchase = true },
+		Hat16 = { Name = "Hat16", Price = 1000,  LevelRequired = 8,  Rarity = "Uncommon",  Image = "rbxassetid://0", CanPurchase = true },
+		Hat17 = { Name = "Hat17", Price = 2500,  LevelRequired = 14, Rarity = "Uncommon",  Image = "rbxassetid://0", CanPurchase = true },
+		Hat18 = { Name = "Hat18", Price = 4000,  LevelRequired = 19, Rarity = "Rare",      Image = "rbxassetid://0", CanPurchase = true },
+		Hat19 = { Name = "Hat19", Price = 6500,  LevelRequired = 25, Rarity = "Rare",      Image = "rbxassetid://0", CanPurchase = true },
+		Hat20 = { Name = "Hat20", Price = 12500, LevelRequired = 36, Rarity = "Epic",      Image = "rbxassetid://0", CanPurchase = true },
+		Hat21 = { Name = "Hat21", Price = 25000, LevelRequired = 52, Rarity = "Epic",      Image = "rbxassetid://0", CanPurchase = true },
 
 
 	},
