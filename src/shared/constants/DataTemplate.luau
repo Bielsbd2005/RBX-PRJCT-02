@@ -342,13 +342,20 @@ local DEFAULT: PlayerProfile = {
 		Losses = 0,
 		MatchesPlayed = 0,
 		TimePlayedSeconds = 0,
-		-- 150 desde el 2026-09-04 (antes 500) = el peldaño más barato del catálogo
-		-- (ItemsConfig: Groza, UZI, Face8, Hat1 y Wrap_White a 150, nivel 0). El
-		-- jugador nuevo elige UNA cosa en el minuto 0 —aprende la tienda con una
-		-- decisión real— y la segunda ya se la gana jugando (~155 Cash por
-		-- partida). Con 500 se compraban las ocho Common antes de la primera
-		-- partida. Si baja el peldaño más barato, bajar esto con él.
-		Cash = 150,
+		-- 80 desde el 2026-09-11 (100 unas horas antes, 150 desde el 2026-09-04,
+		-- 500 antes). A propósito NO llega al peldaño más barato del catálogo:
+		-- Wrap_White (Arctic) a 100 y nivel 0, y detrás la Groza a 150 (UZI,
+		-- Face8 y Hat10 a 300 desde el 2026-09-12).
+		-- Con 100 el Arctic se compraba antes del primer disparo, sin esfuerzo
+		-- detrás, y un regalo en el minuto 0 enseña que la moneda se regala. Con
+		-- 80 el Arctic queda a 2 kills y la Groza a 7, y una partida (~210 Cash
+		-- de combate a 90 kills/h) deja al jugador en ~290: "primera partida,
+		-- primera arma", ganada.
+		-- No se toca el Arctic en su lugar: a 125 no se distingue del Blue (150,
+		-- un 20 %, bajo el umbral de Weber) y con nivel 1 la escalera lo devuelve
+		-- a 0, porque su peldaño más barato no pide nivel. Mantener esto POR
+		-- DEBAJO del peldaño más barato y a menos de una partida de él.
+		Cash = 80,
 		TotalCashEarned = 0,
 		TotalCashPurchased = 0,
 		-- Arranca a 0: los Gems son premium, no se regalan de salida.
@@ -367,10 +374,13 @@ local DEFAULT: PlayerProfile = {
 					Default = true,
 				},
 			},
+			-- Sólo el wrap Default. Hasta el 2026-09-11 la secundaria traía también
+			-- Wrap_Red (Crimson Flow, Epic, 1.500 Cash en la tienda): un resto de
+			-- pruebas que regalaba un Epic en el minuto 0. Reconcile rellena claves
+			-- pero no las borra, así que los perfiles ya creados lo conservan.
 			Special = {
 				Default = {
 					Default = true,
-					Wrap_Red = true,
 				},
 			},
 		},
@@ -444,7 +454,6 @@ local DEFAULT: PlayerProfile = {
 		Progress = {
 			Eliminations = 0,
 			WinMatches = 0,
-			PlayMatches = 0,
 			Headshots = 0,
 			KillStreak = 0,
 			Assists = 0,

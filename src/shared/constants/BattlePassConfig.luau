@@ -96,17 +96,20 @@ BattlePassConfig.RewardIcons = {
 
 --[[
 	Curva de XP por tier. Tunear XP_BASE / XP_STEP mueve la curva entera.
-	CALIBRACIÓN (2026-09-01): con 64 tiers, base 100 y step 10 la season suma
-	26.560 XP ≈ 1.060 kills ≈ ~17h a ritmo medio (~63 kills/h) — unas 2h/semana
-	en una season de 8: el jugador constante la termina con margen y el
-	hardcore no la agota en la semana 1 (con step 5 eran 10,5h y sobraban 6
-	semanas sin objetivo). Tier 1 = 100 XP (4 kills, gancho inmediato); tier 64
-	= 730 (~3 partidas). La forma casi plana es deliberada: un pase vende
-	progreso constante, sin muro final. El XP del pase solo viene de kills
-	(XPRates) y respeta MatchXPCap (ver ServerBootstrap).
+	El XP del pase SOLO viene de kills (XPRates.PerKill = 25; headshots y
+	asistencias no cuentan, a diferencia del nivel de cuenta) y respeta
+	MatchXPCap (ver ServerBootstrap). Las horas del pase se calculan SIEMPRE
+	como XP total / (kills/h × 25), nunca con el XP/h del nivel.
+	CALIBRACIÓN (2026-09-12, economía 2.0): con 64 tiers, base 280 y step 24 la
+	season suma 66.304 XP ≈ 2.650 kills ≈ 29,5 h a 90 kills/h (jugador de
+	GameConfig; 2.250 XP de pase por hora). A 1,3 h/día se termina el día 23 de
+	los 60 de la season; a 0,5 h/día, el día 59. Tier 1 = 280 XP (~11 kills);
+	tier 64 = 1.792 (~1 h). Se eligió 280/24 frente a 300/25 (31 h) para que
+	el casual llegue. Anterior (2026-09-01): 100/10 = 26.560 XP ≈ 11,8 h a 90
+	kills/h, calibrado con 63 kills/h que el juego real no da.
 ]]
-local XP_BASE = 100
-local XP_STEP = 10
+local XP_BASE = 280
+local XP_STEP = 24
 local function xpForLevel(level: number): number
 	return XP_BASE + (level - 1) * XP_STEP
 end
@@ -149,9 +152,15 @@ local TIER_COUNT = 64
 --     tier 1 como gancho inmediato y el wrap RPG Blue en el 21 — y un cierre
 --     legendario en el 63) para que jugar sin pagar siga sintiéndose premiado.
 --   · Track PASS: todas las demás exclusivas de S1 (Wrap_Pink, Gravity, Cone,
---     el outfit Ducky y la Crown como cierre del tier 64) e ítems de tienda
---     como atajo. Los outfits de tienda (Gems) NO van en el pase: regalarlos
---     canibalizaría su venta — el único outfit del pase es su exclusiva.
+--     el outfit Ducky y la Crown como cierre del tier 64). Los outfits de
+--     tienda (Gems) NO van en el pase: regalarlos canibalizaría su venta — el
+--     único outfit del pase es su exclusiva.
+--   · REGLA (2026-09-12): NADA de lo que regala el pase se vende en la tienda.
+--     Los 14 ítems que estaban en los dos sitios (Hat1/4/5/7/12/13/14,
+--     Face2/4/6/7/10/11, Explosion) son ahora exclusivos (isBPExclusive) y la
+--     tienda los sustituye por ítems nuevos en los mismos peldaños (reservados
+--     en ItemsConfig hasta que exista el arte). Un tier nunca vale cero y el
+--     reembolso de BattlePassService queda como red de seguridad sin casos.
 --   · GEMS — balanceados para VENDER PACKS, no para regalarlos. El pase cuesta
 --     500 Gems (PremiumGemPrice) y la season devuelve 250 en total: 200 en el
 --     track PASS (rebate del 40%: quien compró el pase termina con la mitad
@@ -162,35 +171,30 @@ local TIER_COUNT = 64
 --   · Outfits: solo Gems (tienda: Tourist 100, Inmate 1.000, Jungle 2.500) o
 --     pase (Ducky, PASS 42). Ningún outfit se vende por Cash. Tourist a 100 =
 --     pack mínimo: las 50 Gems free dejan al F2P a medio pack de comprarlo.
---   · UN solo wrap global por season, y es el flagship: Gold en el 54 ("oro en
---     TODO el arsenal"). Un global se concede a las 11 armas y la tienda vende
---     el mismo wrap por arma, así que vale 11 compras: con Neon, Red y Gold
---     globales el track PASS valía ×129 su precio (323k Cash-eq por 500 Gems,
---     auditoría 2026-09-04) y dejaba muertos los wraps de la tienda para quien
---     compra el pase. Neon (26) y Red (36) pasan a por-arma. Orden: un
---     weaponWrap cuyo global cae en un tier ANTERIOR es un premio vacío, así
---     que per-weapon primero (Gold 2/30 → global 54).
---   · Atajos de tienda: 15 de los 22 ítems de tienda del pase llegan DESPUÉS
---     de la hora a la que la tienda ya los vendía (Face6: tienda 8 h, pase
---     16 h). Se mantienen donde están —repartidos por página para que cada
---     tramo tenga un objetivo— porque BattlePassService devuelve el precio de
---     tienda al jugador que YA lo tenía: el tier nunca vale cero y comprar
---     pronto no es un castigo. Quien espera y quien compra acaban igual.
+--   · UN solo wrap global por season, y es el flagship: Prism en el 54 (en
+--     TODO el arsenal). Los siete wraps del pase (Ember 2, Tide 9, Magma 14,
+--     Volt 26, Frost 30, Shadow 36 y Prism 54) son exclusivos de S1 y sólo
+--     datos (color): la tienda vende otros. Antes el pase daba Gold, Coral, Red
+--     y Neon por arma y Gold global, que la tienda también vendía; con la regla
+--     de arriba eso ya no puede pasar. Orden: per-weapon primero, global al
+--     final.
+--   · El calendario de ítems (qué tier lleva ítem) NO cambia: sigue repartido
+--     por página para que cada tramo tenga un objetivo.
 --   · Los wraps Mastery_* NO van en el pase: son recompensas de desafío de
 --     kills (KillChallenge) y meterlos aquí las haría redundantes.
 local REWARD_OVERRIDES: { [number]: Reward } = {
 	-- Página 1 (1-8): gancho inmediato en ambos tracks.
 	[1]  = item("Faces", "Face5"),                        -- FREE · cara exclusiva S1
-	[2]  = weaponWrap("Wrap_Gold", "Main", "Default"),    -- PASS · oro en el arma inicial
+	[2]  = weaponWrap("Wrap_S1_Ember", "Main", "Default"), -- PASS · exclusivo S1 en el arma inicial
 	[5]  = item("Hats", "Hat1"),                          -- FREE · Bunny
 	[6]  = globalWrap("Wrap_Pink"),                       -- PASS · wrap global exclusivo
 
 	-- Página 2 (9-16).
-	[9]  = weaponWrap("Wrap_Coral", "Special", "UZI"),    -- FREE
+	[9]  = weaponWrap("Wrap_S1_Tide", "Special", "UZI"),  -- FREE · exclusivo S1
 	[10] = item("KillEffects", "Gravity"),                -- PASS · kill effect exclusivo
 	[11] = gems(25),                                      -- FREE · muestra de Gems al F2P
 	[13] = item("Faces", "Face2"),                        -- FREE
-	[14] = weaponWrap("Wrap_Red", "Main", "Tommy"),       -- PASS · wrap animado (per-weapon)
+	[14] = weaponWrap("Wrap_S1_Magma", "Main", "Tommy"),  -- PASS · exclusivo S1 (per-weapon)
 	[16] = gems(50),                                      -- PASS
 
 	-- Página 3 (17-24).
@@ -200,16 +204,16 @@ local REWARD_OVERRIDES: { [number]: Reward } = {
 	[24] = item("Hats", "Hat12"),                         -- PASS · Sombrero
 
 	-- Página 4 (25-32).
-	[26] = weaponWrap("Wrap_Neon", "Main", "AK"),      -- PASS · Neon en el AK (por arma)
+	[26] = weaponWrap("Wrap_S1_Volt", "Main", "AK"),      -- PASS · exclusivo S1 en el AK (por arma)
 	[29] = item("Faces", "Face10"),                       -- FREE
-	[30] = weaponWrap("Wrap_Gold", "Main", "Sniper"),     -- PASS
+	[30] = weaponWrap("Wrap_S1_Frost", "Main", "Sniper"), -- PASS · exclusivo S1
 	[32] = gems(50),                                      -- PASS
 
 	-- Página 5 (33-40).
 	[33] = item("Hats", "Hat13"),                         -- FREE · Shark
 	[34] = item("Hats", "Hat5"),                          -- PASS · Alaska
 	[35] = gems(25),                                      -- FREE · segunda muestra
-	[36] = weaponWrap("Wrap_Red", "Special", "Laser"), -- PASS · Crimson en el Laser (por arma)
+	[36] = weaponWrap("Wrap_S1_Shadow", "Special", "Laser"), -- PASS · exclusivo S1 en el Laser (por arma)
 	[37] = item("Faces", "Face11"),                       -- FREE
 
 	-- Página 6 (41-48).
@@ -221,27 +225,18 @@ local REWARD_OVERRIDES: { [number]: Reward } = {
 	-- Página 7 (49-56).
 	[49] = item("KillEffects", "Explosion"),              -- FREE · gancho fuerte tardío
 	[52] = item("Hats", "Hat7"),                          -- PASS · IceCream
-	[54] = globalWrap("Wrap_Gold"),                       -- PASS · oro en TODO el arsenal
+	[54] = globalWrap("Wrap_S1_Prism"),                   -- PASS · exclusivo S1 en TODO el arsenal (flagship)
 
 	--[[
 		Página 8 (57-64): cierre de season.
 
-		Face7 y los Gems del 62 están INTERCAMBIADOS respecto al reparto
-		original, y no es cosmético: Face7 (Kitty) también se vende en la
-		tienda, por 20.000 Cash y nivel 55, que a los ritmos de diseño son
-		~16,7 h de juego. En el tier 58 el pase lo entregaba a las ~14,2 h, así
-		que le quitaba a la tienda un sink de 20.000 Cash y adelantaba el ítem
-		2,5 h (un 15 % del camino). En el 62 llega a las ~15,9 h: sigue siendo
-		una ventaja de quien paga el pase —que es lo que se compra— pero de
-		0,8 h en vez de 2,5, y la tienda conserva el sink para casi todos.
-
-		Se mueve en lugar de sacarlo porque sacarlo dejaría el track premium
-		sin una de sus tres piezas grandes y exigiría una exclusiva nueva con
-		arte propio. Los dos tiers son PASS, así que el intercambio no cambia
-		qué recibe el track gratuito.
-
-		El 63 (Face6, FREE) y el 64 (Crown, la exclusiva de S1) no se tocan:
-		son el cierre de cada track.
+		Face7 (Kitty) va en el 62 y los 50 Gems en el 58 (intercambiados el
+		2026-09-05 cuando Face7 aún se vendía en la tienda y el pase la
+		adelantaba 2,5 h). Desde el 2026-09-12 Face7 es exclusiva del pase (la
+		tienda vende otra cara Legendary en su peldaño de 65.000), así que el
+		orden ya no es un cálculo de atajo: es la pieza grande del track premium
+		antes de la Crown del 64. Los dos tiers son PASS. El 63 (Face6, FREE) y
+		el 64 (Crown, exclusiva de S1) no se tocan.
 	]]
 	[58] = gems(50),                                      -- PASS
 	[62] = item("Faces", "Face7"),                        -- PASS · Kitty (legendaria)
@@ -256,22 +251,19 @@ local function isPremiumLevel(level: number): boolean
 end
 
 --[[
-	Cash filler de los tiers sin override. PRESUPUESTO AUDITADO (2026-09-01),
-	con 30 tiers de filler (18 FREE + 12 PASS) esta fórmula reparte:
-	  FREE 4.100 + PASS 2.450 = 6.550 Cash por season ≈ media Legendary
-	  (10.000-20.000 desde el recalibrado del 2026-09-04).
+	Cash filler de los tiers sin override. PRESUPUESTO (2026-09-12, economía
+	2.0), con 30 tiers de filler (18 FREE + 12 PASS) esta fórmula reparte:
+	  FREE 9.100 + PASS 5.500 = 14.600 Cash por season ≈ un Epic (10.000-25.000).
 	Referencias contra las que se calibró — revisar si cambia cualquiera:
-	  · Jugar hasta el final de season (~660 kills, ~10h) da ~12k de Cash
-	    (kills+headshots+assists ~120/partida, fin de partida ~35 desde el
-	    2026-09-04, dailies 65/día). El BP debe ser suplemento (~1/3), nunca el
-	    ingreso principal.
-	  · El pack IAP grande vende 15.000 Cash por 799 R$: el track FREE jamás
-	    puede acercarse a esa cifra o nadie compra packs.
-	La fórmula anterior (100+25·(l-1), heredada de la tabla de pruebas) regalaba
-	28.250 — más que el pack grande y que todo el cash jugado: rompía ambas.
+	  · Jugar hasta el final de season (~2.650 kills, ~29,5 h a 2.000 Cash/h con
+	    diarias) da ~59.000 Cash. El BP añade un +25 %: suplemento, nunca el
+	    ingreso principal (antes: 6.550 sobre 11,8 h = +42 %).
+	  · El pack IAP grande vende 24.000 Cash por 799 R$: el track FREE (9.100)
+	    se queda por debajo de la mitad o nadie compra packs.
+	Anterior (2026-09-01): 50+5·(l-1) = 6.550, calibrado a 1.300 Cash/h.
 ]]
 local function defaultCashFor(level: number): number
-	return 50 + (level - 1) * 5
+	return 150 + (level - 1) * 10
 end
 
 local function buildTiers(): { Tier }
@@ -291,9 +283,13 @@ BattlePassConfig.Seasons = {
 	{
 		Id = "S1",
 		Name = "Season 1",
-		-- Cierre de S1: ~8 semanas desde el lanzamiento previsto (sep 2026).
-		-- Ajustar al fijar la fecha real de release.
-		EndsAt = os.time({ year = 2026, month = 11, day = 1, hour = 0, min = 0, sec = 0 }),
+		-- S1 se reinicia en el lanzamiento (2026-10-01) con reset de perfiles y
+		-- dura 60 días. Los 60 no salen del "estándar" de shooters (que es para
+		-- pases de 60-100 h) sino de capacidad: una persona, arte pendiente de
+		-- 14 ítems de tienda y la S2 necesita contenido propio. Si el casual
+		-- (0,5 h/día) debe terminar, el tramo sin pase es siempre ~62 % de la
+		-- season, se ponga la curva que se ponga. S2 arranca el 2026-12-01.
+		EndsAt = os.time({ year = 2026, month = 12, day = 1, hour = 0, min = 0, sec = 0 }),
 		-- 500 = justo por debajo del pack de 600 Gems (199 R$): el pack "natural"
 		-- del pase es el de 199 R$ (precio de entrada que convierte más que los
 		-- 399 R$ del flujo Robux antiguo) y deja 100 Gems de resto — resto que,

@@ -120,11 +120,11 @@ export type Catalog<T> = {
 -- ────────────────────────────────────────────────────────────
 
 local CASH_PACKS = {
-	{ ButtonName = "Cash1", ProductId = 3567132597, RobuxPrice = 49, CashAmount = 500 },
-	{ ButtonName = "Cash2", ProductId = 3567132599, RobuxPrice = 99, CashAmount = 1250 },
-	{ ButtonName = "Cash3", ProductId = 3567132598, RobuxPrice = 199, CashAmount = 3000 },
-	{ ButtonName = "Cash4", ProductId = 3567132596, RobuxPrice = 399, CashAmount = 7000 },
-	{ ButtonName = "Cash5", ProductId = 3567132595, RobuxPrice = 799, CashAmount = 15000 },
+	{ ButtonName = "Cash1", ProductId = 3567132597, RobuxPrice = 49, CashAmount = 800 },
+	{ ButtonName = "Cash2", ProductId = 3567132599, RobuxPrice = 99, CashAmount = 2000 },
+	{ ButtonName = "Cash3", ProductId = 3567132598, RobuxPrice = 199, CashAmount = 5000 },
+	{ ButtonName = "Cash4", ProductId = 3567132596, RobuxPrice = 399, CashAmount = 11000 },
+	{ ButtonName = "Cash5", ProductId = 3567132595, RobuxPrice = 799, CashAmount = 24000 },
 }
 
 -- Moneda premium. ProductId = 0 → pendientes de crear en el panel de Roblox.

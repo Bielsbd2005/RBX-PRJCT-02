@@ -70,15 +70,25 @@ ResultsRewards.CashIcon = "rbxassetid://113694528712529"
 -- Recalibrado el 2026-09-04. Con 50/100/25/75 el fin de partida pagaba ~130
 -- Cash/partida ≈ 980 Cash/h a ritmo de diseño (7,5 partidas/h): MÁS que todo
 -- el combate (~900/h con Kill 10/HS 5/Assist 5), y ningún cálculo de precios
--- lo contaba. Ahora ~35/partida ≈ 260/h → ~1.200 Cash/h en total, que es la
--- tasa con la que está calibrado ItemsConfig. Son un remate visible, no la
--- fuente principal: el jugador tiene que sentir que lo que paga es jugar bien.
--- El VIP baja a 25 por la misma razón: +100/partida eran +750 Cash/h
--- permanentes (un 40% de ingreso extra) por un gamepass de 100 R$.
+-- lo contaba. Bajó a ~35/partida ≈ 260/h → ~1.200 Cash/h en total. Son un
+-- remate visible, no la fuente principal: el jugador tiene que sentir que lo
+-- que paga es jugar bien. El VIP baja a 25 por la misma razón: +100/partida
+-- eran +750 Cash/h permanentes (un 40% de ingreso extra) por un gamepass de
+-- 100 R$.
+--
+-- Match (10, siempre) y Defeat (10, al perder) se QUITAN el 2026-09-11. Eran
+-- los dos números más pequeños de la pantalla de resultados y los que todo el
+-- mundo recibía: pagar por aparecer le dice al jugador que la moneda se
+-- regala, y un 10 al lado del kill de 10 lo convierte en "una unidad". Ese
+-- Cash (~110/h) pasa a Headshot y Assist en ActionRewards, que ahora valen 10
+-- en vez de 5: el fin de partida sólo paga por ganar o por ser el mejor.
+-- Total ~1.690 Cash/h jugando, ~2.000 con las diarias (2026-09-12; ver
+-- docs/la-economia-de-las-40-horas.md en Telemetry). Quien
+-- pierde sin MVP no ve ninguna línea de Cash aquí: la ganó en vivo, kill a
+-- kill. Para reponer una línea basta con añadir la entry (el server ignora
+-- Cash = 0, pero el cliente la pintaría).
 ResultsRewards.CashRewards = {
-	{ Id = "Match", Title = "MATCH", Condition = "Always", Cash = 10 },
 	{ Id = "Victory", Title = "VICTORY", Condition = "Victory", Cash = 30 },
-	{ Id = "Defeat", Title = "DEFEAT", Condition = "Defeat", Cash = 10 },
 	{ Id = "MVP", Title = "MVP", Condition = "MVP", Cash = 20 },
 	{ Id = "VIP", Title = "VIP PASS", Condition = "Always", Cash = 25, RequiresVIP = true },
 } :: { CashRewardDef }
