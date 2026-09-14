@@ -1,16 +1,22 @@
 --!strict
 --[[
 	BattlePassConfig.luau
-	Fuente única de verdad para temporadas, tiers y recompensas del Battle Pass.
+	API de temporadas, tiers y recompensas del Battle Pass.
+
+	Los DATOS viven en `BattlePassSeasons.luau` (generado por el dashboard de
+	Telemetry, vista Temporadas): puntero `ActiveSeasonId`, `Products` (skips,
+	globales) y la lista `Seasons` con curva, filler y `Rewards` por tier. Este
+	módulo sólo construye los tiers a partir de esos datos y resuelve el puntero.
 
 	Modelo (v2): cada nivel tiene UNA sola recompensa y es de tipo FREE o PASS.
 	  • FREE  → cualquiera puede reclamarla.
-	  • PASS  → requiere PremiumOwned (compra del pase Premium con Robux).
+	  • PASS  → requiere PremiumOwned (compra del pase Premium con Gems).
 
 	Diseño escalable:
-	  • Añadir una nueva season = append a `Seasons`. Los perfiles existentes
-	    se resetean automáticamente cuando `GetActiveSeason().Id` ya no coincide
-	    con el `SeasonId` almacenado.
+	  • Añadir una season = añadirla a `BattlePassSeasons.Seasons` (borrador);
+	    activarla = mover `ActiveSeasonId`. Los perfiles existentes se resetean
+	    automáticamente cuando `GetActiveSeason().Id` ya no coincide con el
+	    `SeasonId` almacenado (BattlePassService._ensureSeason).
 	  • Las recompensas se leen LIVE del config en cada claim (no se snapshotean
 	    en el perfil).
 	  • Los tiers son contiguos (Level == índice).
@@ -20,10 +26,14 @@
 	  • Reward.Kind = "Gems" → usar Amount (number). Moneda premium: junto con
 	    los packs de Robux es la ÚNICA forma de conseguir Gems.
 	  • Reward.Kind = "Item" → usar Category + ItemId (deben existir en ItemsConfig).
-	  • El premium y el skip se COMPRAN CON GEMS (PremiumGemPrice/SkipGemPrice;
-	    BattlePassService cobra de Stats.Gems, sin developer product). Los campos
-	    *ProductId/*RobuxPrice son el flujo Robux directo LEGACY, dormido con
-	    ProductId = 0.
+	  • El premium se COMPRA CON GEMS (PremiumGemPrice; BattlePassService cobra
+	    de Stats.Gems, sin developer product). PremiumProductId/PremiumRobuxPrice
+	    son el flujo Robux directo LEGACY, dormido con ProductId = 0.
+	  • Los skips de nivel se COMPRAN CON ROBUX: dos developer products, +1 nivel
+	    (SkipProductId) y +5 niveles (Skip5ProductId), GLOBALES a todas las
+	    seasons (`Products`). El cliente lanza el prompt y
+	    BattlePassService:ProcessReceipt concede. ProductId = 0 = sin crear en
+	    el panel de Roblox: el botón queda inactivo y el receipt no matchea.
 ]]
 
 -- ────────────────────────────────────────────────────────────
@@ -57,20 +67,32 @@ export type Tier = {
 export type Season = {
 	Id: string,
 	Name: string,
-	EndsAt: number,             -- os.time() deadline (fuente del timer)
-	-- Compra con GEMS (flujo vigente): BattlePassService descuenta de Stats.Gems
+	-- Sellos del dashboard (ISO 8601, opcionales). Con PublishedAt = publicada
+	-- alguna vez; con EndedAt = pasada. Sin PublishedAt = borrador. Sólo
+	-- informativos en el juego: la activa es la del puntero.
+	PublishedAt: string?,
+	EndedAt: string?,
+	EndsAt: number,             -- Unix timestamp del fin de season (fuente del timer del HUD). 0 = sin contador.
+	-- Premium con GEMS (flujo vigente): BattlePassService descuenta de Stats.Gems
 	-- en un BatchUpdate atómico, sin developer product ni receipt. 0 = no
 	-- comprable (el handler responde Unavailable y la UI no puede completar).
 	PremiumGemPrice: number,    -- Precio del premium en Gems.
-	SkipGemPrice: number,       -- Precio del "Skip Tier" (+1 nivel) en Gems.
-	-- LEGACY Robux directo: dormido con ProductId = 0 (ResolveReceipt no matchea
-	-- y el dispatcher de receipts lo ignora). Se conserva por si una promo
-	-- futura vuelve a vender el pase como developer product.
+	-- Premium LEGACY Robux directo: dormido con ProductId = 0 (ResolveReceipt no
+	-- matchea y el dispatcher de receipts lo ignora). Se conserva por si una
+	-- promo futura vuelve a vender el pase como developer product.
 	PremiumProductId: number,   -- Roblox developer product. 0 = desactivado.
 	PremiumRobuxPrice: number,  -- Precio en Robux del flujo legacy (analytics).
-	SkipProductId: number,      -- Developer product "Skip Tier". 0 = desactivado.
-	SkipRobuxPrice: number,     -- Precio en Robux del flujo legacy (analytics).
 	Tiers: { Tier },            -- contiguos, Level == índice
+}
+
+-- Skips de nivel con ROBUX (developer products), globales a todas las seasons.
+-- RobuxPrice tiene que ser el mismo que el del panel de Roblox: se pinta en el
+-- botón y va a analytics.
+export type Products = {
+	SkipProductId: number,      -- Developer product "+1 nivel". 0 = sin crear.
+	SkipRobuxPrice: number,
+	Skip5ProductId: number,     -- Developer product "+5 niveles". 0 = sin crear.
+	Skip5RobuxPrice: number,
 }
 
 -- ────────────────────────────────────────────────────────────
@@ -78,6 +100,7 @@ export type Season = {
 -- ────────────────────────────────────────────────────────────
 
 local ActionRewards = require(script.Parent:WaitForChild("ActionRewards"))
+local BattlePassSeasons = require(script.Parent:WaitForChild("BattlePassSeasons")) :: any
 
 local BattlePassConfig = {}
 
@@ -95,225 +118,191 @@ BattlePassConfig.RewardIcons = {
 }
 
 --[[
-	Curva de XP por tier. Tunear XP_BASE / XP_STEP mueve la curva entera.
-	El XP del pase SOLO viene de kills (XPRates.PerKill = 25; headshots y
-	asistencias no cuentan, a diferencia del nivel de cuenta) y respeta
-	MatchXPCap (ver ServerBootstrap). Las horas del pase se calculan SIEMPRE
-	como XP total / (kills/h × 25), nunca con el XP/h del nivel.
-	CALIBRACIÓN (2026-09-12, economía 2.0): con 64 tiers, base 280 y step 24 la
-	season suma 66.304 XP ≈ 2.650 kills ≈ 29,5 h a 90 kills/h (jugador de
-	GameConfig; 2.250 XP de pase por hora). A 1,3 h/día se termina el día 23 de
-	los 60 de la season; a 0,5 h/día, el día 59. Tier 1 = 280 XP (~11 kills);
-	tier 64 = 1.792 (~1 h). Se eligió 280/24 frente a 300/25 (31 h) para que
-	el casual llegue. Anterior (2026-09-01): 100/10 = 26.560 XP ≈ 11,8 h a 90
-	kills/h, calibrado con 63 kills/h que el juego real no da.
+	Diseño de la economía del pase: ver `docs/temporadas-y-assets.md` del
+	dashboard de Telemetry (formato del fichero, estados de temporada, reglas
+	del selector de recompensas y validaciones). Resumen:
+	  · Curva de XP por tier: XpBase + (nivel - 1) · XpStep; el XP del pase SOLO
+	    viene de kills (XPRates.PerKill), nunca del XP de nivel de cuenta.
+	  · Filler de los tiers sin reward: Cash = CashBase + (nivel - 1) · CashStep.
+	  · PremiumRule decide qué niveles son PASS ("even" = pares, "odd" = impares).
+	  · NADA de lo que regala el pase se vende en la tienda, y un ítem de una
+	    temporada pasada no vuelve a otro pase (lo valida el dashboard).
+	  · Aquí sólo se avisa por reward Item cuyo ítem no exista en ItemsConfig.
 ]]
-local XP_BASE = 280
-local XP_STEP = 24
-local function xpForLevel(level: number): number
-	return XP_BASE + (level - 1) * XP_STEP
+
+-- ── Builder ──────────────────────────────────────────────────
+
+local function _toNumber(value: any, fallback: number): number
+	return if type(value) == "number" then value else fallback
 end
 
-local function cash(amount: number): Reward
-	return { Kind = "Cash", Amount = amount }
+local function _toString(value: any, fallback: string): string
+	return if type(value) == "string" then value else fallback
 end
 
-local function gems(amount: number): Reward
-	return { Kind = "Gems", Amount = amount }
+local function _optionalString(value: any): string?
+	return if type(value) == "string" and value ~= "" then value else nil
 end
 
-local function item(category: string, itemId: string): Reward
-	return { Kind = "Item", Category = category, ItemId = itemId }
+-- ISO 8601 → Unix timestamp, una sola vez al construir. Ausente o inválido → 0
+-- (el HUD oculta el contador). El aviso sale una vez por season.
+local function _parseEndsAt(seasonId: string, value: any): number
+	if value == nil then
+		return 0
+	end
+	if type(value) == "string" and value ~= "" then
+		local ok, parsed = pcall(DateTime.fromIsoDate, value)
+		if ok and parsed then
+			return (parsed :: DateTime).UnixTimestamp
+		end
+	end
+	warn(("[BattlePassConfig] EndsAt inválido en la season %s (%s): sin contador"):format(seasonId, tostring(value)))
+	return 0
 end
 
-local function globalWrap(itemId: string): Reward
-	return { Kind = "Item", Category = "WeaponWraps", ItemId = itemId, Global = true }
+local function _isPremiumLevel(rule: string, level: number): boolean
+	if rule == "odd" then
+		return level % 2 == 1
+	elseif rule == "all" then
+		return true
+	elseif rule == "none" then
+		return false
+	end
+	return level % 2 == 0 -- "even" (por defecto)
 end
 
-local function weaponWrap(itemId: string, weaponCategory: string, weaponId: string): Reward
-	return {
-		Kind = "Item",
-		Category = "WeaponWraps",
-		ItemId = itemId,
-		WeaponCategory = weaponCategory,
-		WeaponId = weaponId,
+local function _copyReward(raw: any): Reward
+	local reward: Reward = {
+		Kind = raw.Kind,
+		Amount = if type(raw.Amount) == "number" then raw.Amount else nil,
+		Category = _optionalString(raw.Category),
+		ItemId = _optionalString(raw.ItemId),
+		Icon = _optionalString(raw.Icon),
+		Label = _optionalString(raw.Label),
+		Global = if raw.Global == true then true else nil,
+		WeaponCategory = _optionalString(raw.WeaponCategory),
+		WeaponId = _optionalString(raw.WeaponId),
 	}
+	return reward
 end
 
--- 64 niveles → 8 páginas de 8 slots. Editable: ajusta TIER_COUNT, los overrides
--- de recompensa y la regla de qué niveles son PASS.
-local TIER_COUNT = 64
-
--- Recompensa por nivel: por defecto Cash escalado; overrides puntuales para items/wraps.
---
--- ECONOMÍA DE LANZAMIENTO (S1). Reglas de diseño de la tabla:
---   · Impares = FREE, pares = PASS (ver `isPremiumLevel`).
---   · Track FREE: un ítem visible por página (con dos exclusivas — Face5 en el
---     tier 1 como gancho inmediato y el wrap RPG Blue en el 21 — y un cierre
---     legendario en el 63) para que jugar sin pagar siga sintiéndose premiado.
---   · Track PASS: todas las demás exclusivas de S1 (Wrap_Pink, Gravity, Cone,
---     el outfit Ducky y la Crown como cierre del tier 64). Los outfits de
---     tienda (Gems) NO van en el pase: regalarlos canibalizaría su venta — el
---     único outfit del pase es su exclusiva.
---   · REGLA (2026-09-12): NADA de lo que regala el pase se vende en la tienda.
---     Los 14 ítems que estaban en los dos sitios (Hat1/4/5/7/12/13/14,
---     Face2/4/6/7/10/11, Explosion) son ahora exclusivos (isBPExclusive) y la
---     tienda los sustituye por ítems nuevos en los mismos peldaños (reservados
---     en ItemsConfig hasta que exista el arte). Un tier nunca vale cero y el
---     reembolso de BattlePassService queda como red de seguridad sin casos.
---   · GEMS — balanceados para VENDER PACKS, no para regalarlos. El pase cuesta
---     500 Gems (PremiumGemPrice) y la season devuelve 250 en total: 200 en el
---     track PASS (rebate del 40%: quien compró el pase termina con la mitad
---     del siguiente y necesita un pack para renovar) + 50 en el track FREE
---     (25+25: la "muestra" que enseña la moneda al F2P y le deja a un pack de
---     un outfit). NUNCA subir el total del PASS a ≥500: el pase se volvería
---     autosostenible y mataría la venta de packs para siempre.
---   · Outfits: solo Gems (tienda: Tourist 100, Inmate 1.000, Jungle 2.500) o
---     pase (Ducky, PASS 42). Ningún outfit se vende por Cash. Tourist a 100 =
---     pack mínimo: las 50 Gems free dejan al F2P a medio pack de comprarlo.
---   · UN solo wrap global por season, y es el flagship: Prism en el 54 (en
---     TODO el arsenal). Los siete wraps del pase (Ember 2, Tide 9, Magma 14,
---     Volt 26, Frost 30, Shadow 36 y Prism 54) son exclusivos de S1 y sólo
---     datos (color): la tienda vende otros. Antes el pase daba Gold, Coral, Red
---     y Neon por arma y Gold global, que la tienda también vendía; con la regla
---     de arriba eso ya no puede pasar. Orden: per-weapon primero, global al
---     final.
---   · El calendario de ítems (qué tier lleva ítem) NO cambia: sigue repartido
---     por página para que cada tramo tenga un objetivo.
---   · Los wraps Mastery_* NO van en el pase: son recompensas de desafío de
---     kills (KillChallenge) y meterlos aquí las haría redundantes.
-local REWARD_OVERRIDES: { [number]: Reward } = {
-	-- Página 1 (1-8): gancho inmediato en ambos tracks.
-	[1]  = item("Faces", "Face5"),                        -- FREE · cara exclusiva S1
-	[2]  = weaponWrap("Wrap_S1_Ember", "Main", "Default"), -- PASS · exclusivo S1 en el arma inicial
-	[5]  = item("Hats", "Hat1"),                          -- FREE · Bunny
-	[6]  = globalWrap("Wrap_Pink"),                       -- PASS · wrap global exclusivo
-
-	-- Página 2 (9-16).
-	[9]  = weaponWrap("Wrap_S1_Tide", "Special", "UZI"),  -- FREE · exclusivo S1
-	[10] = item("KillEffects", "Gravity"),                -- PASS · kill effect exclusivo
-	[11] = gems(25),                                      -- FREE · muestra de Gems al F2P
-	[13] = item("Faces", "Face2"),                        -- FREE
-	[14] = weaponWrap("Wrap_S1_Magma", "Main", "Tommy"),  -- PASS · exclusivo S1 (per-weapon)
-	[16] = gems(50),                                      -- PASS
-
-	-- Página 3 (17-24).
-	[17] = item("Hats", "Hat4"),                          -- FREE · Squid
-	[18] = item("Hats", "Hat2"),                          -- PASS · Cone, exclusivo
-	[21] = weaponWrap("Wrap_RPG_Blue", "Special", "RPG"), -- FREE · exclusiva free track
-	[24] = item("Hats", "Hat12"),                         -- PASS · Sombrero
-
-	-- Página 4 (25-32).
-	[26] = weaponWrap("Wrap_S1_Volt", "Main", "AK"),      -- PASS · exclusivo S1 en el AK (por arma)
-	[29] = item("Faces", "Face10"),                       -- FREE
-	[30] = weaponWrap("Wrap_S1_Frost", "Main", "Sniper"), -- PASS · exclusivo S1
-	[32] = gems(50),                                      -- PASS
-
-	-- Página 5 (33-40).
-	[33] = item("Hats", "Hat13"),                         -- FREE · Shark
-	[34] = item("Hats", "Hat5"),                          -- PASS · Alaska
-	[35] = gems(25),                                      -- FREE · segunda muestra
-	[36] = weaponWrap("Wrap_S1_Shadow", "Special", "Laser"), -- PASS · exclusivo S1 en el Laser (por arma)
-	[37] = item("Faces", "Face11"),                       -- FREE
-
-	-- Página 6 (41-48).
-	[42] = item("Outfits", "Ducky"),                      -- PASS · outfit del pase (premium)
-	[43] = item("Hats", "Hat14"),                         -- FREE · Unicorn
-	[46] = item("Faces", "Face4"),                        -- PASS
-	[48] = gems(50),                                      -- PASS
-
-	-- Página 7 (49-56).
-	[49] = item("KillEffects", "Explosion"),              -- FREE · gancho fuerte tardío
-	[52] = item("Hats", "Hat7"),                          -- PASS · IceCream
-	[54] = globalWrap("Wrap_S1_Prism"),                   -- PASS · exclusivo S1 en TODO el arsenal (flagship)
-
-	--[[
-		Página 8 (57-64): cierre de season.
-
-		Face7 (Kitty) va en el 62 y los 50 Gems en el 58 (intercambiados el
-		2026-09-05 cuando Face7 aún se vendía en la tienda y el pase la
-		adelantaba 2,5 h). Desde el 2026-09-12 Face7 es exclusiva del pase (la
-		tienda vende otra cara Legendary en su peldaño de 65.000), así que el
-		orden ya no es un cálculo de atajo: es la pieza grande del track premium
-		antes de la Crown del 64. Los dos tiers son PASS. El 63 (Face6, FREE) y
-		el 64 (Crown, exclusiva de S1) no se tocan.
-	]]
-	[58] = gems(50),                                      -- PASS
-	[62] = item("Faces", "Face7"),                        -- PASS · Kitty (legendaria)
-	[63] = item("Faces", "Face6"),                        -- FREE · cierre del track free
-	[64] = item("Hats", "Hat3"),                          -- PASS · Crown, LA exclusiva de S1
-}
-
--- Niveles PASS (requieren Premium). Regla por defecto: los pares son PASS, los
--- impares FREE. Editar a gusto del diseño.
-local function isPremiumLevel(level: number): boolean
-	return level % 2 == 0
+local function _warnMissingItems(seasonId: string, rewards: { [number]: any })
+	local ItemsConfig = require(script.Parent:WaitForChild("ItemsConfig")) :: any
+	for level, raw in rewards do
+		if type(raw) == "table" and raw.Kind == "Item" then
+			local catalog = if type(raw.Category) == "string" then ItemsConfig[raw.Category] else nil
+			local def = if type(catalog) == "table" and type(raw.ItemId) == "string" then catalog[raw.ItemId] else nil
+			if type(def) ~= "table" then
+				warn(("[BattlePassConfig] %s tier %s: el ítem %s.%s no existe en ItemsConfig"):format(
+					seasonId,
+					tostring(level),
+					tostring(raw.Category),
+					tostring(raw.ItemId)
+				))
+			end
+		end
+	end
 end
 
---[[
-	Cash filler de los tiers sin override. PRESUPUESTO (2026-09-12, economía
-	2.0), con 30 tiers de filler (18 FREE + 12 PASS) esta fórmula reparte:
-	  FREE 9.100 + PASS 5.500 = 14.600 Cash por season ≈ un Epic (10.000-25.000).
-	Referencias contra las que se calibró — revisar si cambia cualquiera:
-	  · Jugar hasta el final de season (~2.650 kills, ~29,5 h a 2.000 Cash/h con
-	    diarias) da ~59.000 Cash. El BP añade un +25 %: suplemento, nunca el
-	    ingreso principal (antes: 6.550 sobre 11,8 h = +42 %).
-	  · El pack IAP grande vende 24.000 Cash por 799 R$: el track FREE (9.100)
-	    se queda por debajo de la mitad o nadie compra packs.
-	Anterior (2026-09-01): 50+5·(l-1) = 6.550, calibrado a 1.300 Cash/h.
-]]
-local function defaultCashFor(level: number): number
-	return 150 + (level - 1) * 10
-end
+local function buildTiers(seasonData: any): { Tier }
+	local seasonId = _toString(seasonData.Id, "?")
+	local tierCount = math.max(0, math.floor(_toNumber(seasonData.TierCount, 0)))
+	local xpBase = _toNumber(seasonData.XpBase, 0)
+	local xpStep = _toNumber(seasonData.XpStep, 0)
+	local cashBase = _toNumber(seasonData.CashBase, 0)
+	local cashStep = _toNumber(seasonData.CashStep, 0)
+	local premiumRule = _toString(seasonData.PremiumRule, "even")
+	if premiumRule ~= "even" and premiumRule ~= "odd" and premiumRule ~= "all" and premiumRule ~= "none" then
+		warn(("[BattlePassConfig] PremiumRule desconocida en la season %s (%s): se usa \"even\""):format(seasonId, premiumRule))
+		premiumRule = "even"
+	end
+	local rewards: { [number]: any } = if type(seasonData.Rewards) == "table" then seasonData.Rewards else {}
+	_warnMissingItems(seasonId, rewards)
 
-local function buildTiers(): { Tier }
 	local tiers: { Tier } = {}
-	for level = 1, TIER_COUNT do
+	for level = 1, tierCount do
+		local raw = rewards[level]
+		local reward: Reward = if type(raw) == "table"
+			then _copyReward(raw)
+			else { Kind = "Cash", Amount = cashBase + (level - 1) * cashStep }
 		tiers[level] = {
 			Level = level,
-			XPRequired = xpForLevel(level),
-			Reward = REWARD_OVERRIDES[level] or cash(defaultCashFor(level)),
-			Premium = isPremiumLevel(level),
+			XPRequired = xpBase + (level - 1) * xpStep,
+			Reward = reward,
+			Premium = _isPremiumLevel(premiumRule, level),
 		}
 	end
 	return tiers
 end
 
-BattlePassConfig.Seasons = {
-	{
-		Id = "S1",
-		Name = "Season 1",
-		-- S1 se reinicia en el lanzamiento (2026-10-01) con reset de perfiles y
-		-- dura 60 días. Los 60 no salen del "estándar" de shooters (que es para
-		-- pases de 60-100 h) sino de capacidad: una persona, arte pendiente de
-		-- 14 ítems de tienda y la S2 necesita contenido propio. Si el casual
-		-- (0,5 h/día) debe terminar, el tramo sin pase es siempre ~62 % de la
-		-- season, se ponga la curva que se ponga. S2 arranca el 2026-12-01.
-		EndsAt = os.time({ year = 2026, month = 12, day = 1, hour = 0, min = 0, sec = 0 }),
-		-- 500 = justo por debajo del pack de 600 Gems (199 R$): el pack "natural"
-		-- del pase es el de 199 R$ (precio de entrada que convierte más que los
-		-- 399 R$ del flujo Robux antiguo) y deja 100 Gems de resto — resto que,
-		-- sumado al rebate de 200 del propio pase, acerca al siguiente sink sin
-		-- llegar nunca (ver REWARD_OVERRIDES: el pase jamás se autofinancia).
-		PremiumGemPrice = 500,
-		-- 100 = exactamente el pack mínimo (49 R$): cada skip es una compra
-		-- impulsiva de un pack pequeño para quien va justo de Gems.
-		SkipGemPrice = 100,
-		-- Flujo Robux directo LEGACY, desactivado (el pase se compra con Gems).
-		PremiumProductId = 0,
-		PremiumRobuxPrice = 0,
-		SkipProductId = 0,
-		SkipRobuxPrice = 0,
-		Tiers = buildTiers(),
-	},
-} :: { Season }
+local function buildSeason(seasonData: any): Season
+	local id = _toString(seasonData.Id, "?")
+	return {
+		Id = id,
+		Name = _toString(seasonData.Name, id),
+		PublishedAt = _optionalString(seasonData.PublishedAt),
+		EndedAt = _optionalString(seasonData.EndedAt),
+		EndsAt = _parseEndsAt(id, seasonData.EndsAt),
+		PremiumGemPrice = _toNumber(seasonData.PremiumGemPrice, 0),
+		PremiumProductId = _toNumber(seasonData.PremiumProductId, 0),
+		PremiumRobuxPrice = _toNumber(seasonData.PremiumRobuxPrice, 0),
+		Tiers = buildTiers(seasonData),
+	}
+end
+
+local rawProducts: any = if type(BattlePassSeasons.Products) == "table" then BattlePassSeasons.Products else {}
+BattlePassConfig.Products = {
+	SkipProductId = _toNumber(rawProducts.SkipProductId, 0),
+	SkipRobuxPrice = _toNumber(rawProducts.SkipRobuxPrice, 0),
+	Skip5ProductId = _toNumber(rawProducts.Skip5ProductId, 0),
+	Skip5RobuxPrice = _toNumber(rawProducts.Skip5RobuxPrice, 0),
+} :: Products
+
+local seasons: { Season } = {}
+if type(BattlePassSeasons.Seasons) == "table" then
+	for _, seasonData in ipairs(BattlePassSeasons.Seasons) do
+		if type(seasonData) == "table" then
+			table.insert(seasons, buildSeason(seasonData))
+		end
+	end
+end
+if #seasons == 0 then
+	warn("[BattlePassConfig] BattlePassSeasons no define ninguna season")
+end
+BattlePassConfig.Seasons = seasons
+
+local _seasonById: { [string]: Season } = {}
+for _, season in seasons do
+	if _seasonById[season.Id] then
+		warn(("[BattlePassConfig] Id de season repetido: %s"):format(season.Id))
+	end
+	_seasonById[season.Id] = season
+end
+
+BattlePassConfig.ActiveSeasonId = _toString(BattlePassSeasons.ActiveSeasonId, "")
 
 -- ────────────────────────────────────────────────────────────
 -- API PÚBLICA
 -- ────────────────────────────────────────────────────────────
 
--- v1: la season activa es siempre la primera.
+function BattlePassConfig.GetSeasonById(id: string): Season?
+	return _seasonById[id]
+end
+
+-- La season activa es la del puntero `ActiveSeasonId`. Si no resuelve, se
+-- avisa una vez por servidor/cliente y se cae a la primera de la lista.
+local _warnedActive = false
 function BattlePassConfig.GetActiveSeason(): Season
+	local active = _seasonById[BattlePassConfig.ActiveSeasonId]
+	if active then
+		return active
+	end
+	if not _warnedActive then
+		_warnedActive = true
+		warn(("[BattlePassConfig] ActiveSeasonId \"%s\" no existe en BattlePassSeasons: se usa la primera season"):format(
+			BattlePassConfig.ActiveSeasonId
+		))
+	end
 	return BattlePassConfig.Seasons[1]
 end
 
@@ -328,8 +317,10 @@ function BattlePassConfig.GetMaxTier(season: Season): number
 	return #season.Tiers
 end
 
--- Set de ítems EXCLUSIVOS del BP: aparecen como reward en alguna season/tier y
--- además no se pueden conseguir de otra forma. Construido lazy y cacheado.
+-- Set de ítems EXCLUSIVOS del BP: aparecen como reward en alguna season/tier
+-- (activa, borrador o pasada: lo asignado a un borrador deja de venderse en
+-- cuanto se publica y las exclusivas de temporadas pasadas siguen invendibles)
+-- y además no se pueden conseguir de otra forma. Construido lazy y cacheado.
 --
 -- Estar en el pase NO basta para ser exclusivo: un ítem comprable en la tienda
 -- (CanPurchase = true) o un wrap de desafío de kills (KillChallenge) que también
@@ -370,19 +361,45 @@ function BattlePassConfig.IsBPExclusive(category: string, itemId: string): boole
 	return cat ~= nil and cat[itemId] == true
 end
 
--- Resuelve un productId a su (Season, kind). kind ∈ "Premium" | "Skip".
--- Devuelve (nil, nil) si el producto no pertenece a ningún BattlePass.
-export type ReceiptKind = "Premium" | "Skip"
+-- Skips de nivel vendidos con Robux: "Skip" = +1 nivel, "Skip5" = +5 niveles.
+export type SkipKind = "Skip" | "Skip5"
+
+-- Devuelve (productId, robuxPrice, niveles que concede) de un skip. Los skips
+-- son globales (`Products`); `season` se conserva en la firma por
+-- compatibilidad con los llamadores y no se usa.
+function BattlePassConfig.GetSkipOffer(_season: Season, kind: SkipKind): (number, number, number)
+	local products = BattlePassConfig.Products
+	if kind == "Skip5" then
+		return products.Skip5ProductId, products.Skip5RobuxPrice, 5
+	end
+	return products.SkipProductId, products.SkipRobuxPrice, 1
+end
+
+-- Resuelve un productId a su (Season, kind). kind ∈ "Premium" | "Skip" | "Skip5".
+-- Los skips resuelven SIEMPRE a la season activa (son globales); el premium
+-- por Robux se busca primero en la activa y después en el resto (un receipt
+-- reentregado tras cambiar de season sigue concediendo sobre la activa: ver
+-- BattlePassService:ProcessReceipt). Devuelve (nil, nil) si el producto no
+-- pertenece a ningún BattlePass.
+export type ReceiptKind = "Premium" | SkipKind
 function BattlePassConfig.ResolveReceipt(productId: number): (Season?, ReceiptKind?)
 	if productId == 0 then
 		return nil, nil
 	end
+	local products = BattlePassConfig.Products
+	if products.SkipProductId == productId then
+		return BattlePassConfig.GetActiveSeason(), "Skip"
+	end
+	if products.Skip5ProductId == productId then
+		return BattlePassConfig.GetActiveSeason(), "Skip5"
+	end
+	local active = BattlePassConfig.GetActiveSeason()
+	if active and active.PremiumProductId == productId then
+		return active, "Premium"
+	end
 	for _, season in BattlePassConfig.Seasons do
 		if season.PremiumProductId == productId then
 			return season, "Premium"
-		end
-		if season.SkipProductId == productId then
-			return season, "Skip"
 		end
 	end
 	return nil, nil

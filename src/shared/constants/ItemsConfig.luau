@@ -127,6 +127,8 @@ Special = {
 			BaseColor = Color3.fromRGB(255, 105, 180),
 			isAnimated = false,
 			StudsPerTile = 3,
+			Season = "S1",
+			SeasonTier = 6,
 		},
 		Wrap_RPG_Blue = {
 			Name = "RPG Blue",
@@ -138,6 +140,8 @@ Special = {
 			BaseColor = Color3.fromRGB(30, 120, 255),
 			isAnimated = false,
 			StudsPerTile = 3,
+			Season = "S1",
+			SeasonTier = 21,
 		},
 		-- ── Wraps del pase S1 (2026-09-12) ──
 		-- Regla: nada que regale el pase se vende en la tienda. Antes el pase
@@ -156,6 +160,8 @@ Special = {
 			BaseColor = Color3.fromRGB(230, 90, 40),
 			isAnimated = false,
 			StudsPerTile = 3,
+			Season = "S1",
+			SeasonTier = 2,
 		},
 		Wrap_S1_Tide = {
 			Name = "Tide",
@@ -167,6 +173,8 @@ Special = {
 			BaseColor = Color3.fromRGB(40, 160, 200),
 			isAnimated = false,
 			StudsPerTile = 3,
+			Season = "S1",
+			SeasonTier = 9,
 		},
 		Wrap_S1_Magma = {
 			Name = "Magma",
@@ -178,6 +186,8 @@ Special = {
 			BaseColor = Color3.fromRGB(200, 50, 30),
 			isAnimated = false,
 			StudsPerTile = 3,
+			Season = "S1",
+			SeasonTier = 14,
 		},
 		Wrap_S1_Volt = {
 			Name = "Volt",
@@ -190,6 +200,8 @@ Special = {
 			Material = Enum.Material.Neon,
 			isAnimated = false,
 			StudsPerTile = 3,
+			Season = "S1",
+			SeasonTier = 26,
 		},
 		Wrap_S1_Frost = {
 			Name = "Frost",
@@ -201,6 +213,8 @@ Special = {
 			BaseColor = Color3.fromRGB(180, 230, 255),
 			isAnimated = false,
 			StudsPerTile = 3,
+			Season = "S1",
+			SeasonTier = 30,
 		},
 		Wrap_S1_Shadow = {
 			Name = "Shadow",
@@ -212,6 +226,8 @@ Special = {
 			BaseColor = Color3.fromRGB(40, 40, 50),
 			isAnimated = false,
 			StudsPerTile = 3,
+			Season = "S1",
+			SeasonTier = 36,
 		},
 		Wrap_S1_Prism = {
 			Name = "Prism",
@@ -224,6 +240,8 @@ Special = {
 			Material = Enum.Material.Neon,
 			isAnimated = false,
 			StudsPerTile = 3,
+			Season = "S1",
+			SeasonTier = 54,
 		},
 		-- ── Escalera Cash: colores planos → animada → material especial ──
 		-- Banda PROPIA, ≈⅓ de la del ítem de su rareza (desde el 2026-09-04). Un
@@ -359,13 +377,13 @@ Special = {
 		-- Los cuatro comparten Image de momento (icono genérico de la categoría):
 		-- subir iconos propios por efecto cuando haya arte.
 		Default   = { Name = "Default Kill",   Price = 0,   LevelRequired = 1, Rarity = "Common", Image = "rbxassetid://130437553674754", CanPurchase = false },
-		Gravity   = { Name = "Gravity Kill",   Price = 0, LevelRequired = 0, Rarity = "Rare",   Image = "rbxassetid://130437553674754", CanPurchase = false, isBPExclusive = true },
-		Explosion = { Name = "Explosion Kill", Price = 0, LevelRequired = 0, Rarity = "Epic",   Image = "rbxassetid://130437553674754", CanPurchase = false, isBPExclusive = true },
+		Gravity   = { Name = "Gravity Kill",   Price = 0, LevelRequired = 0, Rarity = "Rare",   Image = "rbxassetid://130437553674754", CanPurchase = false, isBPExclusive = true, Season = "S1", SeasonTier = 10 },
+		Explosion = { Name = "Explosion Kill", Price = 0, LevelRequired = 0, Rarity = "Epic",   Image = "rbxassetid://130437553674754", CanPurchase = false, isBPExclusive = true, Season = "S1", SeasonTier = 49 },
 		Tornado   = { Name = "Tornado Kill",   Price = 20000, LevelRequired = 46, Rarity = "Epic",   Image = "rbxassetid://130437553674754", CanPurchase = true },
 		-- PROVISIONAL (2026-09-12): entrada real con nombre e Image de relleno; sustituir por el
 		-- ítem definitivo (mismo precio y nivel). Sin módulo en KillEffectsRegistry cae al Default.
 		-- PRIORIDAD sobre caras y sombreros: sin él la categoría queda vacía por debajo de las 10 h.
-		KE_A = { Name = "New Kill", Price = 5000, LevelRequired = 0, Rarity = "Rare", Image = "rbxassetid://0", CanPurchase = true },
+		KE_A = { Name = "New Kill", Price = 5000, LevelRequired = 0, Rarity = "Rare", Image = "rbxassetid://0", CanPurchase = true, Effect = { ImpulseXZ = 40, ImpulseY = 30, Spin = 8, Jitter = 10, Flash = true, FlashRadius = 6 } },
 	},
 
 	Faces = {
@@ -377,17 +395,17 @@ Special = {
 		-- la cara base del head. No comprable, precio 0.
 		Default = { Name = "Default",        Price = 0,  LevelRequired = 0, Rarity = "Common", Image = "rbxasset://textures/face.png", CanPurchase = false },
 		Face1   = { Name = "Classic Smile",  Price = 400,  LevelRequired = 4, Rarity = "Common",   Image = "rbxassetid://79175047578893",  CanPurchase = true },
-		Face2   = { Name = "Nervous",        Price = 0,  LevelRequired = 0, Rarity = "Uncommon",   Image = "rbxassetid://18571318923",    CanPurchase = false, isBPExclusive = true },
+		Face2   = { Name = "Nervous",        Price = 0,  LevelRequired = 0, Rarity = "Uncommon",   Image = "rbxassetid://18571318923",    CanPurchase = false, isBPExclusive = true, Season = "S1", SeasonTier = 13 },
 		Face3   = { Name = "Pout",           Price = 1250,  LevelRequired = 9, Rarity = "Uncommon",   Image = "rbxassetid://97580829209799", CanPurchase = true },
-		Face4   = { Name = "Kawaii",         Price = 0,  LevelRequired = 0, Rarity = "Epic",   Image = "rbxassetid://94789972115859", CanPurchase = false, isBPExclusive = true },
+		Face4   = { Name = "Kawaii",         Price = 0,  LevelRequired = 0, Rarity = "Epic",   Image = "rbxassetid://94789972115859", CanPurchase = false, isBPExclusive = true, Season = "S1", SeasonTier = 46 },
 		-- Exclusiva del Battle Pass (tier 1 FREE de S1).
-		Face5   = { Name = "Nerd",           Price = 0,  LevelRequired = 0, Rarity = "Rare",   Image = "rbxassetid://17285554126",    CanPurchase = false, isBPExclusive = true },
-		Face6   = { Name = "Deadpan",        Price = 0,  LevelRequired = 0, Rarity = "Legendary",   Image = "rbxassetid://70391209868621", CanPurchase = false, isBPExclusive = true },
-		Face7   = { Name = "Kitty",          Price = 0,  LevelRequired = 0, Rarity = "Legendary",   Image = "rbxassetid://18626918162",    CanPurchase = false, isBPExclusive = true },
+		Face5   = { Name = "Nerd",           Price = 0,  LevelRequired = 0, Rarity = "Rare",   Image = "rbxassetid://17285554126",    CanPurchase = false, isBPExclusive = true, Season = "S1", SeasonTier = 1 },
+		Face6   = { Name = "Deadpan",        Price = 0,  LevelRequired = 0, Rarity = "Legendary",   Image = "rbxassetid://70391209868621", CanPurchase = false, isBPExclusive = true, Season = "S1", SeasonTier = 63 },
+		Face7   = { Name = "Kitty",          Price = 0,  LevelRequired = 0, Rarity = "Legendary",   Image = "rbxassetid://18626918162",    CanPurchase = false, isBPExclusive = true, Season = "S1", SeasonTier = 62 },
 		Face8   = { Name = "Goofy",          Price = 300,  LevelRequired = 0, Rarity = "Common", Image = "rbxassetid://17373537487",    CanPurchase = true },
 		Face9   = { Name = "Chill",          Price = 4000,  LevelRequired = 19, Rarity = "Rare",   Image = "rbxassetid://118980363558612", CanPurchase = true },
-		Face10  = { Name = "Side Eye",       Price = 0, LevelRequired = 0, Rarity = "Uncommon",   Image = "rbxassetid://18870092964",    CanPurchase = false, isBPExclusive = true },
-		Face11  = { Name = "Angry",          Price = 0, LevelRequired = 0, Rarity = "Rare",   Image = "rbxassetid://101878427779141", CanPurchase = false, isBPExclusive = true },
+		Face10  = { Name = "Side Eye",       Price = 0, LevelRequired = 0, Rarity = "Uncommon",   Image = "rbxassetid://18870092964",    CanPurchase = false, isBPExclusive = true, Season = "S1", SeasonTier = 29 },
+		Face11  = { Name = "Angry",          Price = 0, LevelRequired = 0, Rarity = "Rare",   Image = "rbxassetid://101878427779141", CanPurchase = false, isBPExclusive = true, Season = "S1", SeasonTier = 37 },
 		Face12  = { Name = "Menace",         Price = 12500, LevelRequired = 36, Rarity = "Epic",   Image = "rbxassetid://112166980943980", CanPurchase = true },
 		-- PROVISIONALES (2026-09-12): entradas reales con nombre e Image de relleno; sustituir por
 		-- el ítem definitivo (mismo precio y nivel). Con Image 0 la cara se aplica en blanco.
@@ -401,22 +419,22 @@ Special = {
 	},
 
 	Hats = {
-		Hat1 = { Name = "Bunny",          Price = 0,  LevelRequired = 0,  Rarity = "Common",    Image = "rbxassetid://117004939623250", CanPurchase = false, isBPExclusive = true },
-		Hat2 = { Name = "Cone",      Price = 0, LevelRequired = 10, Rarity = "Rare",      Image = "rbxassetid://138341632720877", CanPurchase = false, isBPExclusive = true },
-		Hat3 = { Name = "Crown",        Price = 0, LevelRequired = 20, Rarity = "Legendary", Image = "rbxassetid://119183410438332", CanPurchase = false, isBPExclusive = true },
-		Hat4 = { Name = "Squid",        Price = 0, LevelRequired = 0, Rarity = "Rare", Image = "rbxassetid://74317816532636", CanPurchase = false, isBPExclusive = true },
-		Hat5 = { Name = "Alaska",        Price = 0, LevelRequired = 0, Rarity = "Epic", Image = "rbxassetid://83643028468192", CanPurchase = false, isBPExclusive = true },
+		Hat1 = { Name = "Bunny",          Price = 0,  LevelRequired = 0,  Rarity = "Common",    Image = "rbxassetid://117004939623250", CanPurchase = false, isBPExclusive = true, Season = "S1", SeasonTier = 5 },
+		Hat2 = { Name = "Cone",      Price = 0, LevelRequired = 10, Rarity = "Rare",      Image = "rbxassetid://138341632720877", CanPurchase = false, isBPExclusive = true, Season = "S1", SeasonTier = 18 },
+		Hat3 = { Name = "Crown",        Price = 0, LevelRequired = 20, Rarity = "Legendary", Image = "rbxassetid://119183410438332", CanPurchase = false, isBPExclusive = true, Season = "S1", SeasonTier = 64 },
+		Hat4 = { Name = "Squid",        Price = 0, LevelRequired = 0, Rarity = "Rare", Image = "rbxassetid://74317816532636", CanPurchase = false, isBPExclusive = true, Season = "S1", SeasonTier = 17 },
+		Hat5 = { Name = "Alaska",        Price = 0, LevelRequired = 0, Rarity = "Epic", Image = "rbxassetid://83643028468192", CanPurchase = false, isBPExclusive = true, Season = "S1", SeasonTier = 34 },
 		Hat6 = { Name = "Drink",        Price = 20000, LevelRequired = 46, Rarity = "Epic", Image = "rbxassetid://130927276777389", CanPurchase = true },
-		Hat7 = { Name = "IceCream",        Price = 0, LevelRequired = 0, Rarity = "Epic", Image = "rbxassetid://89103967355981", CanPurchase = false, isBPExclusive = true },
+		Hat7 = { Name = "IceCream",        Price = 0, LevelRequired = 0, Rarity = "Epic", Image = "rbxassetid://89103967355981", CanPurchase = false, isBPExclusive = true, Season = "S1", SeasonTier = 52 },
 		-- OJO: Image comparte assetId con Hat7 (IceCream) — subir el thumbnail
 		-- real del Spartan antes del launch o sale con imagen de helado.
 		Hat8 = { Name = "Spartan",        Price = 40000, LevelRequired = 67, Rarity = "Legendary", Image = "rbxassetid://89103967355981", CanPurchase = true },
 		Hat9 = { Name = "RaceHelmet",        Price = 80000, LevelRequired = 96, Rarity = "Legendary", Image = "rbxassetid://84090421736652", CanPurchase = true },
 		Hat10 = { Name = "Pan",        Price = 300, LevelRequired = 0, Rarity = "Common", Image = "rbxassetid://97418970357486", CanPurchase = true },
 		Hat11 = { Name = "Football",        Price = 500, LevelRequired = 5, Rarity = "Common", Image = "rbxassetid://86457108228550", CanPurchase = true },
-		Hat12 = { Name = "Sombrero",        Price = 0, LevelRequired = 0, Rarity = "Uncommon", Image = "rbxassetid://79179819137524", CanPurchase = false, isBPExclusive = true },
-		Hat13 = { Name = "Shark",        Price = 0, LevelRequired = 0, Rarity = "Uncommon", Image = "rbxassetid://72319063957484", CanPurchase = false, isBPExclusive = true },
-		Hat14 = { Name = "Unicorn",        Price = 0, LevelRequired = 0, Rarity = "Rare", Image = "rbxassetid://112312308063894", CanPurchase = false, isBPExclusive = true },
+		Hat12 = { Name = "Sombrero",        Price = 0, LevelRequired = 0, Rarity = "Uncommon", Image = "rbxassetid://79179819137524", CanPurchase = false, isBPExclusive = true, Season = "S1", SeasonTier = 24 },
+		Hat13 = { Name = "Shark",        Price = 0, LevelRequired = 0, Rarity = "Uncommon", Image = "rbxassetid://72319063957484", CanPurchase = false, isBPExclusive = true, Season = "S1", SeasonTier = 33 },
+		Hat14 = { Name = "Unicorn",        Price = 0, LevelRequired = 0, Rarity = "Rare", Image = "rbxassetid://112312308063894", CanPurchase = false, isBPExclusive = true, Season = "S1", SeasonTier = 43 },
 		-- PROVISIONALES (2026-09-12): entradas reales con nombre e Image de relleno; sustituir por
 		-- el ítem definitivo (mismo precio y nivel). Sin Accessory en Shared (findHatTemplate) el
 		-- sombrero se equipa en datos pero no se dibuja.
@@ -439,7 +457,7 @@ Special = {
 		-- premium del juego: el sink principal que empuja la compra de packs.
 		Default = { Name = "Default Outfit", Price = 0,    LevelRequired = 1,  Rarity = "Common",   Image = "rbxassetid://107928751959121", CanPurchase = false },
 		-- Exclusiva del pase S1 (track PASS, tier 42).
-		Ducky   = { Name = "Ducky",          Price = 0, LevelRequired = 0, Rarity = "Uncommon",     Image = "rbxassetid://137997678899031", CanPurchase = false, isBPExclusive = true },
+		Ducky   = { Name = "Ducky",          Price = 0, LevelRequired = 0, Rarity = "Uncommon",     Image = "rbxassetid://137997678899031", CanPurchase = false, isBPExclusive = true, Season = "S1", SeasonTier = 42 },
 		-- Tienda (Gems). Los precios están calibrados contra los packs de gemas
 		-- de StoreProducts (100 / 250 / 600 / 1400 / 3000) para que cada uno
 		-- caiga dentro de un pack y no obligue a comprar dos. Tourist a 100 es

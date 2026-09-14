@@ -20,6 +20,10 @@ export type LockerCatalogItem = {
 	Image: string,
 	CanPurchase: boolean,
 	isBPExclusive: boolean,
+	-- Temporada del pase que lo regaló (proyección `Season` de ItemsConfig, la
+	-- escribe el dashboard). Sin ella el ítem viene de la tienda y no lleva badge.
+	Season: string?,
+	SeasonName: string?,
 	TextureID: string?,
 	BaseColor: Color3?,
 	Material: Enum.Material?,
@@ -32,18 +36,12 @@ export type LockerCatalogItem = {
 	KillProgress: number?,
 }
 
-type CatalogCacheEntry = {
-	version: number,
-	items: { LockerCatalogItem },
-}
-
 export type LockerCatalog = {
 	_itemsConfig: any,
 	_itemsConfigByNav: { [LockerCategoryKey]: { [string]: string } },
 	_defaultThumbnail: string,
 	_templateCache: { [string]: { LockerCatalogItem } },
-	_sortedCache: { [string]: CatalogCacheEntry },
-	_inventoryVersion: number,
+	_sortedCache: { [string]: { LockerCatalogItem } },
 	_getRarityRank: (string) -> number,
 	_isItemOwned: (LockerCatalogItem) -> boolean,
 	_getTemplateItems: (self: LockerCatalog, categoryKey: LockerCategoryKey, navKey: string) -> { LockerCatalogItem },
@@ -61,25 +59,8 @@ local function makeCatalogCacheKey(categoryKey: LockerCategoryKey, navKey: strin
 end
 
 local function normalizeImageId(imageValue: any, fallback: string): string
-	if type(imageValue) == "string" then
-		if imageValue == "" then
-			return fallback
-		end
-
-		if string.find(imageValue, "rbxassetid://", 1, true) == 1 then
-			return imageValue
-		end
-
-		local numericFromString = tonumber(imageValue)
-		if numericFromString then
-			return "rbxassetid://" .. tostring(math.floor(numericFromString))
-		end
-
+	if type(imageValue) == "string" and imageValue ~= "" then
 		return imageValue
-	end
-
-	if type(imageValue) == "number" then
-		return "rbxassetid://" .. tostring(math.floor(imageValue))
 	end
 
 	return fallback
@@ -98,7 +79,6 @@ function LockerCatalog.new(
 	self._defaultThumbnail = defaultThumbnail
 	self._templateCache = {}
 	self._sortedCache = {}
-	self._inventoryVersion = 0
 	self._getRarityRank = getRarityRank
 	self._isItemOwned = isItemOwned
 	return self
@@ -134,8 +114,16 @@ function LockerCatalog:_getTemplateItems(categoryKey: LockerCategoryKey, navKey:
 				if kills and kills > 0 then
 					killGoalValue = math.floor(kills)
 				end
-			elseif tonumber(definition.KillGoal) and (tonumber(definition.KillGoal) :: number) > 0 then
-				killGoalValue = math.floor(tonumber(definition.KillGoal) :: number)
+			end
+
+			-- Badge de temporada: el Name de la season si resuelve, el Id crudo si no.
+			local seasonId: string? = if type(definition.Season) == "string" and definition.Season ~= ""
+				then definition.Season
+				else nil
+			local seasonName: string? = nil
+			if seasonId then
+				local seasonDef = BattlePassConfig.GetSeasonById(seasonId)
+				seasonName = if seasonDef then seasonDef.Name else seasonId
 			end
 
 			table.insert(catalogItems, {
@@ -153,6 +141,8 @@ function LockerCatalog:_getTemplateItems(categoryKey: LockerCategoryKey, navKey:
 				-- reward en cualquier season del BattlePass (single source of truth).
 				isBPExclusive = definition.isBPExclusive == true
 					or BattlePassConfig.IsBPExclusive(tostring(sourceCategory), tostring(itemId)),
+				Season = seasonId,
+				SeasonName = seasonName,
 				TextureID = if type(definition.TextureID) == "string" then definition.TextureID else nil,
 				BaseColor = if typeof(definition.BaseColor) == "Color3" then definition.BaseColor else nil,
 				Material = if typeof(definition.Material) == "EnumItem" and definition.Material.EnumType == Enum.Material then definition.Material else nil,
@@ -168,15 +158,14 @@ function LockerCatalog:_getTemplateItems(categoryKey: LockerCategoryKey, navKey:
 end
 
 function LockerCatalog:InvalidateSorted(): ()
-	self._inventoryVersion += 1
 	table.clear(self._sortedCache)
 end
 
 function LockerCatalog:GetItems(categoryKey: LockerCategoryKey, navKey: string): { LockerCatalogItem }
 	local cacheKey = makeCatalogCacheKey(categoryKey, navKey)
-	local cachedEntry = self._sortedCache[cacheKey]
-	if cachedEntry and cachedEntry.version == self._inventoryVersion then
-		return cachedEntry.items
+	local cachedItems = self._sortedCache[cacheKey]
+	if cachedItems then
+		return cachedItems
 	end
 
 	local templateItems = self:_getTemplateItems(categoryKey, navKey)
@@ -211,10 +200,7 @@ function LockerCatalog:GetItems(categoryKey: LockerCategoryKey, navKey: string):
 		return a.Name < b.Name
 	end)
 
-	self._sortedCache[cacheKey] = {
-		version = self._inventoryVersion,
-		items = catalogItems,
-	}
+	self._sortedCache[cacheKey] = catalogItems
 
 	return catalogItems
 end

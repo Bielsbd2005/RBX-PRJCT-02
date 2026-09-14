@@ -15,6 +15,7 @@ local WeaponCategoryMod = require(game:GetService("ReplicatedStorage"):WaitForCh
 local ItemDefaults = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("ItemDefaults"))
 local LockerCategory = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("LockerCategory"))
 local AssetIds = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("AssetIds"))
+local Currency = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("Currency"))
 
 export type LockerCatalogItem = {
 	qualifiedId: string,
@@ -27,6 +28,9 @@ export type LockerCatalogItem = {
 	Rarity: string,
 	Image: string,
 	CanPurchase: boolean,
+	-- Temporada del pase que lo regaló (badge en la tarjeta). Nil = sin badge.
+	Season: string?,
+	SeasonName: string?,
 	TextureID: string?,
 	BaseColor: Color3?,
 	Material: Enum.Material?,
@@ -64,6 +68,8 @@ type ItemGridCardRefs = {
 	glowNode: GuiObject?,
 	rarityGradientNode: UIGradient?,
 	appliedRarity: string?,
+	-- Badge de temporada (TextLabel creado por código, esquina superior de la card).
+	seasonBadgeNode: TextLabel?,
 }
 
 type LockerGridCallbacks = {
@@ -133,9 +139,9 @@ local WRAP_LOCKED_PLACEHOLDER_IMAGE = AssetIds.Images.WrapLockedPlaceholder
 -- Footer.Status.Icon (antes "Locked"): candado si el item está bloqueado, y si no
 -- la moneda con la que se compra. Oculto cuando ya es del jugador.
 local STATUS_ICON_LOCKED = AssetIds.Images.LockerLocked
+local SEASON_BADGE_NAME = "SeasonBadge"
 local STATUS_ICON_CASH = AssetIds.Images.LockerStatusCash
 local STATUS_ICON_GEMS = AssetIds.Images.LockerStatusGems
-local CURRENCY_GEMS = "Gems"
 -- Glow + gradiente de la card por rareza. Rarezas sin entrada (legacy
 -- Uncommon/Rare aún no re-tieradas) caen al visual de Common.
 local RARITY_GLOW = UITheme.LockerRarityGlow
@@ -191,7 +197,7 @@ end
 function LockerGrid:_buildGridCardRefs(card: GuiObject, templateKey: TemplateKey): ItemGridCardRefs
 	-- Plantilla única ItemTemplate (la vista de wraps la reutiliza): el card ES el
 	-- GuiButton y contiene ViewportFrame (preview 3D), Item (imagen) y
-	-- Status { Value, Icon, Bar { Fill } }.
+	-- Status { Value, Icon }.
 	local button: GuiButton? = if card:IsA("GuiButton") then card :: GuiButton else nil
 	if not button then
 		local buttonNode = card:FindFirstChild("Button")
@@ -218,9 +224,44 @@ function LockerGrid:_buildGridCardRefs(card: GuiObject, templateKey: TemplateKey
 	local glowNode = if button then button:FindFirstChild("Glow") else nil
 	local rarityGradient = if button then button:FindFirstChildOfClass("UIGradient") else nil
 
+	-- Badge de temporada: no existe en el template, se crea una vez por card y
+	-- copia la fuente/color del label de estado para no desentonar.
+	local seasonBadge: TextLabel? = nil
+	if button then
+		local existing = button:FindFirstChild(SEASON_BADGE_NAME)
+		if existing and existing:IsA("TextLabel") then
+			seasonBadge = existing
+		else
+			local badge = Instance.new("TextLabel")
+			badge.Name = SEASON_BADGE_NAME
+			badge.AnchorPoint = Vector2.new(1, 0)
+			badge.Position = UDim2.new(1, -4, 0, 4)
+			badge.Size = UDim2.new(0.45, 0, 0.12, 0)
+			badge.BackgroundColor3 = Color3.new(0, 0, 0)
+			badge.BackgroundTransparency = 0.35
+			badge.BorderSizePixel = 0
+			badge.TextScaled = true
+			badge.TextXAlignment = Enum.TextXAlignment.Center
+			badge.ZIndex = button.ZIndex + 2
+			badge.Visible = false
+			if statusValueNode and statusValueNode:IsA("TextLabel") then
+				badge.FontFace = statusValueNode.FontFace
+				badge.TextColor3 = statusValueNode.TextColor3
+			else
+				badge.TextColor3 = Color3.new(1, 1, 1)
+			end
+			local corner = Instance.new("UICorner")
+			corner.CornerRadius = UDim.new(0, 4)
+			corner.Parent = badge
+			badge.Parent = button
+			seasonBadge = badge
+		end
+	end
+
 	local refs: ItemGridCardRefs = {
 		templateKey = templateKey,
 		button = button,
+		seasonBadgeNode = seasonBadge,
 		itemNode = resolvedItemNode,
 		itemNodeDefaultSize = if resolvedItemNode then resolvedItemNode.Size else nil,
 		nameNode = resolvedNameNode,
@@ -236,13 +277,7 @@ function LockerGrid:_buildGridCardRefs(card: GuiObject, templateKey: TemplateKey
 end
 
 function LockerGrid:_getGridCardRefs(card: GuiObject): ItemGridCardRefs
-	local cached = self._cachedGridCardRefs[card]
-	if cached then
-		return cached
-	end
-
-	-- Fallback: legacy default template (should not normally hit since cards are built on acquire).
-	return self:_buildGridCardRefs(card, "default")
+	return self._cachedGridCardRefs[card]
 end
 
 function LockerGrid:_clearCardViewportPreview(card: GuiObject)
@@ -313,8 +348,7 @@ local function isKillChallengeItem(item: LockerCatalogItem): boolean
 end
 
 function LockerGrid:_acquireGridCard(templateKey: TemplateKey): GuiObject
-	local pool = self._gridCardPools[templateKey]
-	local pooledCard = if pool then table.remove(pool) else nil
+	local pooledCard = table.remove(self._gridCardPools[templateKey])
 	if pooledCard then
 		return pooledCard
 	end
@@ -327,20 +361,16 @@ end
 
 function LockerGrid:_returnCardToPool(card: GuiObject)
 	local refs = self._cachedGridCardRefs[card]
-	local templateKey: TemplateKey = if refs then refs.templateKey else "default"
 
 	self:_clearCardViewportPreview(card)
 	card.Visible = false
 
-	if refs and refs.button then
+	if refs.button then
 		self._gridButtonItems[refs.button] = nil
 		self._gridCardByButton[refs.button] = nil
 	end
 
-	local pool = self._gridCardPools[templateKey]
-	if pool then
-		table.insert(pool, card)
-	end
+	table.insert(self._gridCardPools[refs.templateKey], card)
 end
 
 -- Imagen que toca a Footer.Status.Icon, o nil para ocultarlo.
@@ -351,7 +381,7 @@ local function resolveStatusIcon(item: LockerCatalogItem, isLocked: boolean, isO
 	if isOwned then
 		return nil
 	end
-	return if item.Currency == CURRENCY_GEMS then STATUS_ICON_GEMS else STATUS_ICON_CASH
+	return if item.Currency == Currency.GEMS then STATUS_ICON_GEMS else STATUS_ICON_CASH
 end
 
 local function applyStatusIcon(node: GuiObject?, image: string?)
@@ -411,7 +441,7 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 				refs.statusValueNode.Text = "OWNED"
 			else
 				-- Wrap no poseído comprable con cash → precio.
-				if item.CanPurchase and item.Price > 0 then
+				if isWrapPurchasable then
 					refs.statusValueNode.Text = UIUtils.formatCashAmount(item.Price)
 				else
 					refs.statusValueNode.Text = ""
@@ -558,7 +588,6 @@ function LockerGrid:_syncWrapPreviewVisibility(card: GuiObject, item: LockerCata
 	local usesViewportPreview = false
 
 	if needsViewport then
-		self:_clearCardViewportPreview(card)
 		usesViewportPreview = self:_applyWeaponWrapViewportPreview(card, item)
 	elseif self._cardPreviewJanitors[card] then
 		self:_clearCardViewportPreview(card)
@@ -572,7 +601,7 @@ function LockerGrid:_syncWrapPreviewVisibility(card: GuiObject, item: LockerCata
 		end
 	end
 
-	if refs.itemNode and (refs.itemNode:IsA("ImageLabel") or refs.itemNode:IsA("ImageButton")) then
+	if refs.itemNode then
 		refs.itemNode.Visible = not usesViewportPreview
 		refs.itemNode.Image = if isLockedWrap then WRAP_LOCKED_PLACEHOLDER_IMAGE else item.Image
 		-- El ImageColor3 (oscurecido si locked) lo fija _updateGridCardVisual justo después.
@@ -592,6 +621,12 @@ function LockerGrid:_applyCatalogItemToCard(card: GuiObject, item: LockerCatalog
 	local refs = self:_getGridCardRefs(card)
 	self:_applyRarityVisuals(card, item.Rarity)
 	self:_syncWrapPreviewVisibility(card, item, self._callbacks.isItemOwned(item))
+
+	if refs.seasonBadgeNode then
+		local badgeText = item.SeasonName or item.Season
+		refs.seasonBadgeNode.Visible = badgeText ~= nil
+		refs.seasonBadgeNode.Text = badgeText or ""
+	end
 
 	if refs.nameNode then
 		-- Faces y Hats no muestran el nombre en la card.
@@ -719,15 +754,13 @@ end
 function LockerGrid:Populate(items: { LockerCatalogItem }, selectedQualifiedId: string?, templateKey: TemplateKey?)
 	local resolvedTemplateKey: TemplateKey = templateKey or "default"
 
+	self:_resetTransientState(false)
 	if self._currentTemplateKey ~= nil and self._currentTemplateKey ~= resolvedTemplateKey then
-		self:_resetTransientState(false)
 		for index = #self._activeGridCards, 1, -1 do
 			local card = self._activeGridCards[index]
 			self:_returnCardToPool(card)
 			self._activeGridCards[index] = nil
 		end
-	else
-		self:_resetTransientState(false)
 	end
 
 	self._currentTemplateKey = resolvedTemplateKey

@@ -14,7 +14,8 @@
 	la raíz del panel, así que da igual de cuál de los dos cuelgue):
 	  CloseBtn (root)                 -- fallback opcional: Header.CloseBtn
 	  Nav.Back (.Indicator) / Nav.Next (.Indicator) / Nav.Info  ("1/8")
-	  SkipLevelBtn                     (compra con Gems: +1 nivel)
+	  SkipLevel                        (compra con Robux: +1 nivel; .Price opcional)
+	  SkipLevel5                       (compra con Robux: +5 niveles; .Price opcional)
 	  PurchaseBtn                      (compra con Gems: premium / PASS)
 	  PathContainer."1".."8" (cada item, GuiButton; nombre antiguo `Path`, y se
 	  acepta también que envuelva un `Path` con los slots dentro):
@@ -55,12 +56,13 @@
 
 	Además, la recompensa seleccionada se enseña en el decorado de la escena
 	(ScenePreview), cada clase en su peana de Workspace.BattlePass: hats y faces en
-	HeadSpawn, wraps en WrapSpawn, bodies y kill effects en DummySpawn, y lo que no
-	tiene modelo 3D (cash, gems) en la carta de CardSpawn. Solo se ve la peana de lo
-	seleccionado, y el relevo entre ellas va animado.
+	HeadSpawn, wraps en WrapSpawn, bodies y kill effects en DummySpawn, y cash y
+	gems como un montón de monedas o de gemas en PileSpawn. Solo se ve la peana de
+	lo seleccionado, y el relevo entre ellas va animado.
 ]]
 
 local Players = game:GetService("Players")
+local MarketplaceService = game:GetService("MarketplaceService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
@@ -116,6 +118,10 @@ local TYPE_CLAIMED_TEXT = Color3.fromRGB(255, 255, 255)
 local GLOW_CLAIMED_COLOR = Color3.fromRGB(34, 34, 34)
 local RARITY_GLOW = UITheme.LockerRarityGlow
 local RARITY_FALLBACK = "Common"
+
+-- Precio en Robux del label .Price de los botones de skip. El espacio inicial
+-- es la separación con el icono de Robux, igual que en la tienda.
+local SKIP_PRICE_FORMAT = " %d"
 
 -- Nivel del slot en Container.Level (y en CurrentLevel.Level para el actual).
 local STATUS_LEVEL_FORMAT = "Lvl. %d"
@@ -254,10 +260,10 @@ type SlotRefs = {
 	-- otro (wrap → viewport 3D, resto → imagen) y el que no se usa se oculta.
 	image: ImageLabel?,
 	viewport: ViewportFrame?,
-	-- LevelReward.Value: cantidad de una recompensa de moneda.
+	-- LevelReward.Value: tipo de recompensa ("Cash", "Gems", "Hat"…).
 	value: TextLabel?,
 	rewardGradient: UIGradient?,
-	-- LevelReward.Glow: resplandor teñido por rareza (verde si está reclamado).
+	-- LevelReward.Glow: resplandor teñido por rareza (oscuro si está reclamado).
 	glow: GuiObject?,
 	-- Container.Level: nivel del slot ("Lvl. 5"). Se oculta en el slot del nivel
 	-- actual: ahí lo pinta el clon de CurrentLevel, que trae su propio label.
@@ -397,11 +403,10 @@ function BattlePassFeature.start(menuController: any): any
 		then btnInstance
 		else (btnInstance and btnInstance:FindFirstChildWhichIsA("GuiButton"))
 
-	local navTarget = btnInstance or menuBtn
-	local navIconValueNode = navTarget and navTarget:FindFirstChild("Icon")
+	local navIconValueNode = btnInstance and btnInstance:FindFirstChild("Icon")
 	local navValueNode = navIconValueNode and navIconValueNode:FindFirstChild("Value")
 	local navIconValue: TextLabel? = if navValueNode and navValueNode:IsA("TextLabel") then navValueNode else nil
-	local navIndicatorNode = navTarget and navTarget:FindFirstChild("Indicator")
+	local navIndicatorNode = btnInstance and btnInstance:FindFirstChild("Indicator")
 	local navIndicator: GuiObject? = if navIndicatorNode and navIndicatorNode:IsA("GuiObject") then navIndicatorNode else nil
 
 	-- Header. CloseBtn cuelga hoy directo de BattlePass (root), no de Header;
@@ -419,8 +424,9 @@ function BattlePassFeature.start(menuController: any): any
 	local backIndicator = if backBtn then backBtn:FindFirstChild("Indicator") else nil
 	local nextIndicator = if nextBtn then nextBtn:FindFirstChild("Indicator") else nil
 
-	-- Skip + Purchase (Premium) opcional.
-	local skipBtn = findPanelChild("SkipLevelBtn")
+	-- Skips con Robux (+1 / +5) y Purchase (Premium) opcional.
+	local skipBtn = findPanelChild("SkipLevel")
+	local skip5Btn = findPanelChild("SkipLevel5")
 	local purchaseBtn = findPanelChild("PurchaseBtn")
 
 	-- Slots 1..8, bajo PathContainer (nombre antiguo: Path). Si el nodo que
@@ -588,7 +594,7 @@ function BattlePassFeature.start(menuController: any): any
 	-- ── Wrap previews por slot ───────────────────────────────
 	-- previewKey = wrap + arma sobre la que se pinta: si cambia cualquiera de los
 	-- dos hay que rehacer el viewport.
-	type WrapEntry = { previewKey: string, janitor: any, viewport: ViewportFrame }
+	type WrapEntry = { previewKey: string, janitor: any }
 	local wrapBySlot: { [GuiObject]: WrapEntry } = {}
 	local function clearWrap(slotFrame: GuiObject)
 		local entry = wrapBySlot[slotFrame]
@@ -655,6 +661,19 @@ function BattlePassFeature.start(menuController: any): any
 		selectedFrame = nil
 	end
 
+	-- Relee la season activa y reinicia la navegación. El puntero
+	-- `ActiveSeasonId` sólo cambia entre publicaciones del place, pero el perfil
+	-- puede llegar con el SeasonId de la anterior hasta que el servidor lo
+	-- resetee: se llama al abrir el panel y desde el observer de BattlePass
+	-- cuando `state.SeasonId` no coincide con la season capturada.
+	local function refreshSeason()
+		season = BattlePassConfig.GetActiveSeason()
+		maxTier = BattlePassConfig.GetMaxTier(season)
+		pageCount = math.max(1, math.ceil(maxTier / SLOTS_PER_PAGE))
+		currentPage = 0
+		resetSelection()
+	end
+
 	-- Aparición escalonada: cada Container entra deslizándose desde abajo.
 	local function playPageStagger()
 		local order = 0
@@ -681,16 +700,7 @@ function BattlePassFeature.start(menuController: any): any
 		end
 	end
 
-	janitor:Add(function()
-		for slotFrame, tween in selectMoveTween do
-			tween:Cancel()
-			local rest = slotRestPos[slotFrame]
-			if rest and slotFrame.Parent then
-				slotFrame.Position = rest
-			end
-		end
-		table.clear(selectMoveTween)
-	end, true)
+	janitor:Add(resetSelection, true)
 
 	-- ── Preview del item seleccionado ────────────────────────
 	-- Entra deslizándose desde abajo. Una recompensa sin imagen (p. ej. un wrap
@@ -705,7 +715,7 @@ function BattlePassFeature.start(menuController: any): any
 
 	-- Decorado de la escena: qué peana sale con cada clase de recompensa lo decide
 	-- ScenePreview. Aquí solo se le pasa lo que él no puede deducir — el arma sobre
-	-- la que va un wrap (sale del loadout) y la imagen del premio para la carta.
+	-- la que va un wrap, que sale del loadout del jugador.
 	local function pushScenePreview(reward: BattlePassConfig.Reward)
 		lastSceneReward = reward
 		local weaponCategory, weaponId, weaponName = _wrapPreviewWeapon(reward)
@@ -714,7 +724,6 @@ function BattlePassFeature.start(menuController: any): any
 			weaponId = weaponId,
 			weaponName = weaponName,
 			wrapId = if _isWrapReward(reward) then reward.ItemId else nil,
-			image = _rewardImage(reward),
 		})
 	end
 
@@ -787,7 +796,7 @@ function BattlePassFeature.start(menuController: any): any
 		return false
 	end
 
-	-- Estado del botón Menu.Nav.BattlePass. Independiente de `render` (que solo pinta
+	-- Estado del botón Menu.Container.FamePass. Independiente de `render` (que solo pinta
 	-- con el panel abierto): esto debe reflejar nivel + indicador aunque esté cerrado.
 	local function updateNavButton()
 		if not (navIconValue or navIndicator) then
@@ -846,7 +855,7 @@ function BattlePassFeature.start(menuController: any): any
 			local weaponCategory, weaponId, weaponName = _wrapPreviewWeapon(reward)
 			local previewKey = `{wrapId}|{weaponCategory}|{weaponId or ""}`
 			local existing = wrapBySlot[refs.frame]
-			if not existing or existing.previewKey ~= previewKey or existing.viewport ~= refs.viewport then
+			if not existing or existing.previewKey ~= previewKey then
 				clearWrap(refs.frame)
 				local wrapsCatalog = ItemsConfig.WeaponWraps
 				local wrapDef = if type(wrapsCatalog) == "table" then wrapsCatalog[wrapId] else nil
@@ -869,7 +878,7 @@ function BattlePassFeature.start(menuController: any): any
 						if not usedWeapon then
 							WeaponWrapPreviewer.reframeCentered(refs.viewport)
 						end
-						wrapBySlot[refs.frame] = { previewKey = previewKey, janitor = previewJanitor, viewport = refs.viewport }
+						wrapBySlot[refs.frame] = { previewKey = previewKey, janitor = previewJanitor }
 					else
 						previewJanitor:Destroy()
 					end
@@ -1066,6 +1075,7 @@ function BattlePassFeature.start(menuController: any): any
 			isOpen = true
 
 			local function presentPanel()
+				refreshSeason()
 				currentPage = pageForCurrentTier()
 				resetSelection()
 				render()
@@ -1163,11 +1173,48 @@ function BattlePassFeature.start(menuController: any): any
 			end
 		end), "Disconnect")
 	end
-	if skipBtn and skipBtn:IsA("GuiButton") then
-		janitor:Add((skipBtn :: GuiButton).MouseButton1Click:Connect(function()
-			Network.BattlePass.BuySkip.Send({})
+	-- Skip con Robux: el prompt sale del cliente (como los packs de la tienda) y
+	-- el servidor concede en ProcessReceipt. Antes de cobrar se comprueba aquí
+	-- que queden niveles suficientes: pagar 5 y recibir menos sería una estafa.
+	-- Con ProductId = 0 (producto sin crear) el botón queda inactivo.
+	local function bindSkipButton(buttonNode: Instance?, buttonName: string, kind: BattlePassConfig.SkipKind)
+		if not (buttonNode and buttonNode:IsA("GuiButton")) then
+			warn(("[BattlePassFeature] BattlePass.%s no existe"):format(buttonName))
+			return
+		end
+		local button = buttonNode :: GuiButton
+		local productId, robuxPrice, tierCount = BattlePassConfig.GetSkipOffer(season, kind)
+
+		local priceNode = button:FindFirstChild("Price")
+		if priceNode and priceNode:IsA("TextLabel") and robuxPrice > 0 then
+			priceNode.Text = SKIP_PRICE_FORMAT:format(robuxPrice)
+		end
+		button.Active = productId > 0
+		button.Selectable = productId > 0
+
+		janitor:Add(button.MouseButton1Click:Connect(function()
+			if productId <= 0 then
+				warn("[BattlePassFeature] ProductId no configurado para", buttonName)
+				return
+			end
+			local state = Fusion.peek(DataController.BattlePass)
+			if type(state) == "table" then
+				local currentTier = math.max(1, math.floor(state.CurrentTier or 1))
+				local remaining = maxTier - currentTier + 1
+				if remaining <= 0 then
+					Notify.warning("You already completed the season.")
+					return
+				end
+				if remaining < tierCount then
+					Notify.warning(("Only %d levels left in the season."):format(remaining))
+					return
+				end
+			end
+			MarketplaceService:PromptProductPurchase(player, productId)
 		end), "Disconnect")
 	end
+	bindSkipButton(skipBtn, "SkipLevel", "Skip")
+	bindSkipButton(skip5Btn, "SkipLevel5", "Skip5")
 	if purchaseBtn and purchaseBtn:IsA("GuiButton") then
 		janitor:Add((purchaseBtn :: GuiButton).MouseButton1Click:Connect(function()
 			Network.BattlePass.BuyPremium.Send({})
@@ -1183,13 +1230,15 @@ function BattlePassFeature.start(menuController: any): any
 			elseif data.message == "PremiumGranted" then
 				Notify.success("Premium unlocked!")
 			elseif data.message == "SkipGranted" then
-				Notify.success("Tier skipped!")
+				Notify.success("Level skipped!")
+			elseif data.message == "Skip5Granted" then
+				Notify.success("5 levels skipped!")
 			end
 		else
 			-- Fallos accionables por el jugador → notificación; el resto, log.
 			-- "GemsInsufficient" es el momento clave del embudo: el jugador quiso
-			-- comprar (premium o skip) y le faltan Gems — el copy apunta a la
-			-- tienda, donde viven los packs.
+			-- comprar el premium y le faltan Gems — el copy apunta a la tienda,
+			-- donde viven los packs.
 			if data.message == "GemsInsufficient" then
 				Notify.warning("Not enough Gems. Get more in the store.")
 			elseif data.message == "AlreadyOwned" then
@@ -1214,6 +1263,10 @@ function BattlePassFeature.start(menuController: any): any
 		-- El panel solo se repinta abierto (render), pero el botón del menú debe
 		-- reflejar nivel/indicador en cada cambio de estado aunque esté cerrado.
 		janitor:Add(obs:onBind(function()
+			local state = Fusion.peek(DataController.BattlePass)
+			if type(state) == "table" and type(state.SeasonId) == "string" and state.SeasonId ~= season.Id then
+				refreshSeason()
+			end
 			render()
 			updateNavButton()
 		end), true)

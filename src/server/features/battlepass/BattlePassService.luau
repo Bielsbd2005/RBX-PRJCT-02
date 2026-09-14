@@ -17,12 +17,12 @@
 	  • AddXP(player, amount): cascading tier-up con cap.
 	  • Hook OnKill(player) llamado desde WeaponsSystem (inyectado).
 	  • ClaimTier(player, tier): valida y otorga la recompensa única del tier.
-	  • PromptPremium(player) / PromptSkip(player): compra del Premium y del
-	    Skip con GEMS — chequeo de saldo + cobro y grant en un único BatchUpdate
-	    atómico sobre Stats.Gems (mismo patrón que ShopService). Sin receipt.
-	  • ProcessReceipt(receiptInfo): flujo LEGACY de developer products Robux,
-	    dormido mientras los ProductId de la season sean 0 (ver
-	    BattlePassConfig.Season). Idempotente vía DataService:IsReceiptProcessed.
+	  • PromptPremium(player): compra del Premium con GEMS — chequeo de saldo +
+	    cobro y grant en un único BatchUpdate atómico sobre Stats.Gems (mismo
+	    patrón que ShopService). Sin receipt.
+	  • ProcessReceipt(receiptInfo): developer products Robux. Skips de +1 y +5
+	    niveles (el cliente lanza el prompt) y el Premium LEGACY, dormido con
+	    PremiumProductId = 0. Idempotente vía DataService:IsReceiptProcessed.
 ]]
 
 local Players = game:GetService("Players")
@@ -518,7 +518,9 @@ function BattlePassService:ClaimTier(player: Player, tierLevel: number): ()
 		))
 	end
 
-	local tierSku = "Tier" .. tostring(tierLevel)
+	-- "<SeasonId>::TierN": el ingest lo parte por season; sin el prefijo dos
+	-- temporadas serían indistinguibles en economy_flow.
+	local tierSku = season.Id .. "::Tier" .. tostring(tierLevel)
 	if reward.Kind == "Cash" then
 		local cashAmount = math.max(0, math.floor(reward.Amount or 0))
 		if cashAmount > 0 then
@@ -635,90 +637,17 @@ function BattlePassService:PromptPremium(player: Player): ()
 end
 
 -- ────────────────────────────────────────────────────────────
--- SKIP TIER (compra con Gems)
+-- SKIP DE NIVELES (developer products Robux)
 -- ────────────────────────────────────────────────────────────
 
-function BattlePassService:PromptSkip(player: Player): ()
-	local season = BattlePassConfig.GetActiveSeason()
-	local price = season.SkipGemPrice
-	if type(price) ~= "number" or price <= 0 then
-		warn("[BattlePassService] SkipGemPrice no configurado para season", season.Id)
-		_respond(player, false, "SkipUnavailable", 0)
-		return
-	end
-	if not _ensureSeason(player) then
-		_respond(player, false, "ProfileUnavailable", 0)
-		return
-	end
-
-	local profile = _dataService:GetProfile(player)
-	if not profile or not profile.Data or not profile.Data.BattlePass then
-		_respond(player, false, "ProfileUnavailable", 0)
-		return
-	end
-
-	local state = profile.Data.BattlePass
-
-	-- Si ya completó la season, no tiene sentido cobrar por un skip.
-	local maxTier = BattlePassConfig.GetMaxTier(season)
-	local currentTier = math.max(1, math.floor(state.CurrentTier or 1))
-	if currentTier > maxTier then
-		_respond(player, false, "SeasonCompleted", currentTier)
-		return
-	end
-
-	local stats = profile.Data.Stats
-	local balance: number = if stats and type(stats.Gems) == "number" then stats.Gems else 0
-	if balance < price then
-		_respond(player, false, "GemsInsufficient", 0)
-		return
-	end
-
-	-- Mismo tier-up que el _grantSkip del flujo de receipts (ajusta TotalXPEarned
-	-- para que _deriveTierFromTotalXP no cape la elegibilidad del claim), con el
-	-- cobro de Gems dentro del MISMO BatchUpdate atómico. Sin GrantedSkips: aquí
-	-- no hay receipt que idempotentizar — cada request cobrada ES una compra
-	-- (el ACTION_COOLDOWN del listener absorbe el doble-click accidental).
-	local currentXP = math.max(0, math.floor(state.XP or 0))
-	local totalXP = math.max(0, math.floor(state.TotalXPEarned or 0))
-	local tierDef = BattlePassConfig.GetTier(season, currentTier)
-	if not tierDef then
-		_respond(player, false, "InternalError", 0)
-		return
-	end
-	local xpToFill = math.max(0, tierDef.XPRequired - currentXP)
-
-	local ok = _dataService:BatchUpdate(player, {
-		{ path = Currency.balancePath(Currency.GEMS), delta = -price },
-		{ path = { "BattlePass", "CurrentTier" },   value = currentTier + 1 },
-		{ path = { "BattlePass", "XP" },            value = 0 },
-		{ path = { "BattlePass", "TotalXPEarned" }, value = totalXP + xpToFill },
-	})
-	if not ok then
-		_respond(player, false, "InternalError", 0)
-		return
-	end
-
-	--[[
-		Guardado durable antes de registrar: `BatchUpdate` sólo toca el perfil
-		en memoria y el autosave puede tardar hasta 30 s. Un crash en esa
-		ventana dejaba el evento emitido y la transacción inexistente (los Gems
-		volvían al saldo del jugador y el sink seguía contado en el dashboard).
-		Se registra igual si el Save falla —el jugador ya tiene el cambio en
-		memoria— pero con aviso.
-	]]
-	if not _dataService:ForceSave(player) then
-		warn(("[BattlePassService] skip de %s registrado sin guardado confirmado"):format(player.Name))
-	end
-
-	TelemetryService.RecordFlow(player, "sink", "BattlePassSkip", price, season.Id, Currency.GEMS)
-	_respond(player, true, "SkipGranted", currentTier + 1)
-end
-
--- Aplica un skip de 1 tier. Idempotente per-receipt vía GrantedSkips[purchaseId].
--- Ajusta TotalXPEarned para que _deriveTierFromTotalXP devuelva el nuevo
--- CurrentTier (sin ese ajuste, ClaimTier capparía la elegibilidad).
-local function _grantSkip(player: Player, purchaseId: string): boolean
+-- Aplica un skip de `tierCount` niveles. Idempotente per-receipt vía
+-- GrantedSkips[purchaseId]. Rellena el XP que falta del nivel actual y el
+-- completo de los siguientes, y lo suma a TotalXPEarned para que
+-- _deriveTierFromTotalXP devuelva el nuevo CurrentTier (sin ese ajuste,
+-- ClaimTier capparía la elegibilidad). Nunca pasa de MaxTier+1 (completada):
+-- si quedan menos niveles que los comprados, concede los que queden (el
+-- cliente ya bloquea el prompt en ese caso; esto solo cubre la carrera).
+local function _grantSkip(player: Player, purchaseId: string, tierCount: number, robuxPrice: number): boolean
 	if not _dataService then return false end
 
 	local profile = _dataService:GetProfile(player)
@@ -733,41 +662,37 @@ local function _grantSkip(player: Player, purchaseId: string): boolean
 	local season = BattlePassConfig.GetActiveSeason()
 	local maxTier = BattlePassConfig.GetMaxTier(season)
 	local currentTier = math.max(1, math.floor(state.CurrentTier or 1))
+	local tiersToGrant = math.clamp(tierCount, 0, math.max(0, maxTier - currentTier + 1))
 
 	-- Contabilizar el gasto en el MISMO BatchUpdate atómico que GrantedSkips, no
 	-- en un Increment separado posterior. Si el Increment fallaba tras persistir
 	-- ProcessedReceipts, la reentrega devolvía PurchaseGranted sin reejecutarlo y
 	-- el gasto se subcontaba para siempre. El path no-op (ya concedido arriba) no
 	-- pasa por aquí, así que no hay doble conteo.
-	local skipRobux = (season.SkipRobuxPrice and season.SkipRobuxPrice > 0) and season.SkipRobuxPrice or 0
-
-	if currentTier > maxTier then
-		-- Season ya completada: marcamos el receipt para no quedar en loop.
-		local updates: { any } = {
-			{ path = { "BattlePass", "GrantedSkips", purchaseId }, value = true },
-		}
-		if skipRobux > 0 then
-			table.insert(updates, { path = { "Stats", "TotalRobuxSpent" }, delta = skipRobux })
-		end
-		return _dataService:BatchUpdate(player, updates)
-	end
-
-	local currentXP = math.max(0, math.floor(state.XP or 0))
-	local totalXP = math.max(0, math.floor(state.TotalXPEarned or 0))
-	local tierDef = BattlePassConfig.GetTier(season, currentTier)
-	if not tierDef then return false end
-
-	local xpToFill = math.max(0, tierDef.XPRequired - currentXP)
-
 	local updates: { any } = {
-		{ path = { "BattlePass", "CurrentTier" },              value = currentTier + 1 },
-		{ path = { "BattlePass", "XP" },                       value = 0 },
-		{ path = { "BattlePass", "TotalXPEarned" },            value = totalXP + xpToFill },
 		{ path = { "BattlePass", "GrantedSkips", purchaseId }, value = true },
 	}
-	if skipRobux > 0 then
-		table.insert(updates, { path = { "Stats", "TotalRobuxSpent" }, delta = skipRobux })
+	if robuxPrice > 0 then
+		table.insert(updates, { path = { "Stats", "TotalRobuxSpent" }, delta = robuxPrice })
 	end
+
+	if tiersToGrant > 0 then
+		local currentXP = math.max(0, math.floor(state.XP or 0))
+		local totalXP = math.max(0, math.floor(state.TotalXPEarned or 0))
+		local xpToFill = 0
+		for offset = 0, tiersToGrant - 1 do
+			local tierDef = BattlePassConfig.GetTier(season, currentTier + offset)
+			if not tierDef then return false end
+			local alreadyEarned = if offset == 0 then currentXP else 0
+			xpToFill += math.max(0, tierDef.XPRequired - alreadyEarned)
+		end
+		table.insert(updates, { path = { "BattlePass", "CurrentTier" }, value = currentTier + tiersToGrant })
+		table.insert(updates, { path = { "BattlePass", "XP" }, value = 0 })
+		table.insert(updates, { path = { "BattlePass", "TotalXPEarned" }, value = totalXP + xpToFill })
+	end
+	-- Season ya completada (tiersToGrant = 0): solo se marca el receipt para no
+	-- quedar en bucle de reentregas.
+
 	return _dataService:BatchUpdate(player, updates)
 end
 
@@ -853,8 +778,11 @@ function BattlePassService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchas
 		return Enum.ProductPurchaseDecision.PurchaseGranted
 	end
 
-	-- Skip: grant idempotente vía GrantedSkips[purchaseId].
-	local granted = _grantSkip(player, purchaseId)
+	-- Skip (+1 o +5): grant idempotente vía GrantedSkips[purchaseId].
+	local skipKind = kind :: BattlePassConfig.SkipKind
+	local _, skipRobux, tierCount = BattlePassConfig.GetSkipOffer(season, skipKind)
+	skipRobux = math.max(0, skipRobux)
+	local granted = _grantSkip(player, purchaseId, tierCount, skipRobux)
 	if not granted then
 		return Enum.ProductPurchaseDecision.NotProcessedYet
 	end
@@ -880,13 +808,16 @@ function BattlePassService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchas
 		userId = player.UserId,
 		purchaseId = purchaseId,
 		productId = receiptInfo.ProductId,
-		sku = "SkipTier::" .. season.Id,
-		robuxPrice = (season.SkipRobuxPrice and season.SkipRobuxPrice > 0) and season.SkipRobuxPrice or 0,
+		-- Mismo kind para los dos skips; el sku los separa ("SkipTier" / "SkipTier5").
+		-- Los skips son globales: el sku lleva el Id de la season ACTIVA, que es
+		-- sobre la que se concedió.
+		sku = (if skipKind == "Skip5" then "SkipTier5::" else "SkipTier::") .. BattlePassConfig.GetActiveSeason().Id,
+		robuxPrice = skipRobux,
 		cashGranted = 0,
 		kind = "SkipTier",
 	})
 
-	_respond(player, true, "SkipGranted", newTier)
+	_respond(player, true, if skipKind == "Skip5" then "Skip5Granted" else "SkipGranted", newTier)
 	return Enum.ProductPurchaseDecision.PurchaseGranted
 end
 
@@ -935,11 +866,6 @@ function BattlePassService:Start(dataService: DataService): ()
 	Network.BattlePass.BuyPremium.Listen(function(_data: any, player: Player)
 		if not _checkActionCooldown(player, "premium") then return end
 		BattlePassService:PromptPremium(player)
-	end)
-
-	Network.BattlePass.BuySkip.Listen(function(_data: any, player: Player)
-		if not _checkActionCooldown(player, "skip") then return end
-		BattlePassService:PromptSkip(player)
 	end)
 end
 

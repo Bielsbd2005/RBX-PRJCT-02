@@ -37,6 +37,9 @@
 
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local ServerStorage = game:GetService("ServerStorage")
 
 -- TelemetryConfig vive en server/core (NO en shared/constants): nada del
 -- cliente lo necesita, y así el nombre del secreto (SecretKey, no su valor)
@@ -264,6 +267,9 @@ local IRREPLACEABLE_EVENTS: { [string]: boolean } = {
 	ITEM_PURCHASE = true,
 	LEVEL_UP = true,
 	MATCH_END = true,
+	-- Uno por servidor: si se pierde, el dashboard no sabe qué modelos hay en
+	-- el place hasta el siguiente arranque.
+	ASSET_MANIFEST = true,
 }
 
 --[[
@@ -486,6 +492,10 @@ local function _buildSessionEnd(player: Player): any?
 		sessionSeconds = sessionSeconds,
 		economy = economy,
 		combat = _drainCombatAccumulator(userId),
+		-- Sesión de un play-test de Studio o de un servidor publicado. Es lo
+		-- que permite al dashboard saber qué temporada corre en producción
+		-- (`placeVersion` en Studio suele ser 0).
+		isStudio = RunService:IsStudio(),
 	}
 
 	local profile = _dataService and _dataService:GetProfile(player)
@@ -1043,6 +1053,87 @@ local function _recordNewPlayerGrant(player: Player)
 	end
 end
 
+-- ────────────────────────────────────────────────────────────
+-- MANIFIESTO DE ASSETS
+-- ────────────────────────────────────────────────────────────
+
+local MANIFEST_MAX_NAMES = 500
+
+-- Nombres de los hijos de una carpeta (tal cual están en el DataModel), o lista
+-- vacía si la carpeta no existe. Tope de MANIFEST_MAX_NAMES por lista.
+local function _childNames(root: Instance?, ...: string): { string }
+	local node: Instance? = root
+	for _, childName in { ... } do
+		if not node then
+			break
+		end
+		node = node:FindFirstChild(childName)
+	end
+	local names: { string } = {}
+	if not node then
+		return names
+	end
+	for _, child in node:GetChildren() do
+		if #names >= MANIFEST_MAX_NAMES then
+			break
+		end
+		table.insert(names, child.Name)
+	end
+	table.sort(names)
+	return names
+end
+
+local function _killEffectIds(): { string }
+	local ok, ids = pcall(function()
+		local shared = ReplicatedStorage:FindFirstChild("Shared")
+		local locker = if shared then shared:FindFirstChild("Locker") else nil
+		local killEffects = if locker then locker:FindFirstChild("killEffects") else nil
+		local registryModule = if killEffects then killEffects:FindFirstChild("KillEffectsRegistry") else nil
+		if not registryModule then
+			return {}
+		end
+		local registry = require(registryModule) :: any
+		return if type(registry.ids) == "function" then registry.ids() else {}
+	end)
+	if not ok or type(ids) ~= "table" then
+		return {}
+	end
+	local out: { string } = {}
+	for _, id in ids do
+		if #out >= MANIFEST_MAX_NAMES then
+			break
+		end
+		table.insert(out, tostring(id))
+	end
+	return out
+end
+
+--[[
+	Qué modelos hay en ESTE place. Hats, outfits, tools y modelos de display
+	viven sólo en el place (Rojo no los sincroniza), así que el repo no puede
+	saber si el arte de un ítem existe: lo cuenta el servidor al arrancar y el
+	dashboard cruza los nombres con ItemsConfig. `placeVersion` en Studio suele
+	ser 0: por eso viaja `isStudio` y el ingest guarda el último recibido.
+]]
+local function _buildAssetManifest(): any
+	local shared = ReplicatedStorage:FindFirstChild("Shared")
+	return {
+		placeVersion = game.PlaceVersion,
+		isStudio = RunService:IsStudio(),
+		hats = _childNames(shared, "Locker", "Hats"),
+		bodies = _childNames(shared, "Bodies"),
+		weaponDisplays = {
+			Main = _childNames(shared, "Locker", "weapons", "Main"),
+			Special = _childNames(shared, "Locker", "weapons", "Special"),
+		},
+		weaponTools = {
+			Main = _childNames(ServerStorage, "WeaponTools", "Main"),
+			Special = _childNames(ServerStorage, "WeaponTools", "Special"),
+		},
+		killEffects = _killEffectIds(),
+	}
+end
+
 --[[
 	Start: arranca loops y suscripciones.
 
@@ -1060,6 +1151,20 @@ function TelemetryService.Start(dataService: DataService, botCountProvider: (() 
 	_botCountProvider = botCountProvider
 
 	_resolveAuthHeader()
+
+	-- Manifiesto de assets, una vez por servidor. Con retraso para que el
+	-- place haya terminado de cargar las carpetas de modelos.
+	task.delay(5, function()
+		if not _started then
+			return
+		end
+		local ok, payload = pcall(_buildAssetManifest)
+		if ok and payload then
+			_enqueue("ASSET_MANIFEST", payload)
+		else
+			warn("[Telemetry] ASSET_MANIFEST no construido: " .. tostring(payload))
+		end
+	end)
 
 	-- El acumulador nace en ProfileLoaded para que `startedAt` mida la sesión
 	-- real y no el momento de la primera transacción.
