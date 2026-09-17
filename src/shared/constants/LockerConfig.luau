@@ -59,11 +59,10 @@ local CATEGORY_TO_LOADOUT_SLOT = table.freeze({
 
 local RARITY_RANK = table.freeze({
 	Common = 1,
-	Uncommon = 2,
-	Rare = 3,
-	Epic = 4,
-	Legendary = 5,
-	Mythic = 6,
+	Rare = 2,
+	Epic = 3,
+	Legendary = 4,
+	Mythic = 5,
 })
 
 local function makeQualifiedId(category: string, id: string): string
