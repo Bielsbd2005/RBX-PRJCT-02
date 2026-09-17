@@ -1,13 +1,16 @@
 --!strict
--- HealthBillboardController: clona el template HealthBillboard de RS sobre cada
--- jugador/bot en partida y muestra solo barra de vida (solo enemigos).
+-- Clona ReplicatedStorage.Templates.HealthBillboard sobre cada jugador/bot en partida
+-- (menos el local): barra de vida con gradiente de aliado/enemigo y nombre en
+-- Container.Name (DisplayName del jugador o atributo "DisplayName" del bot).
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Templates = ReplicatedStorage:WaitForChild("Templates")
 local TeamUtils = require(Shared.utils.TeamUtils)
+local CollisionGroups = require(Shared.CollisionGroups)
 
 local localPlayer = Players.LocalPlayer
 
@@ -21,58 +24,38 @@ local ENEMY_GRADIENT = ColorSequence.new({
 	ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 95, 95)),
 })
 
--- ── Animación de daño (chips blancos + indicador) ───────────────
--- El trozo de vida perdido se cubre con frames blancos contiguos que se elevan
--- y desvanecen de derecha a izquierda formando una escalera. Nº de segmentos
--- proporcional al daño (1 por cada CHIP_HEALTH_PER_SEGMENT de vida perdida).
+-- Daño: chips blancos contiguos cubren la vida perdida y se elevan/desvanecen de
+-- derecha a izquierda formando una escalera.
 local CHIP_HEALTH_PER_SEGMENT = 0.12 -- ~12% de vida por segmento → pocos y grandes
-local CHIP_MAX_SEGMENTS = 3 -- tope de segmentos (2-3 escalones)
+local CHIP_MAX_SEGMENTS = 3 -- tope de segmentos
 local CHIP_MIN_DAMAGE = 0.01 -- ignorar bajadas < 1% (ruido / MaxHealth changes)
 local CHIP_HEIGHT = 1.6 -- alto del chip relativo a la barra (sobresale arriba/abajo)
-local CHIP_RISE = 1.6 -- sube 1.6× la altura de la barra (en scale)
+local CHIP_RISE = 1.6 -- subida en alturas de barra (scale)
 local CHIP_STEP_DELAY = 0.08 -- delay entre escalones (derecha→izquierda)
 local CHIP_TWEEN = TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local CHIP_COLOR = Color3.new(1, 1, 1)
--- Gate móvil: no animar daño de billboards más lejos que esto (≈ MaxDistance del
--- BillboardGui). MaxDistance solo culla el render; sin este gate, los frames y
--- tweens se crearían igual para enemigos lejanos/fuera de cámara que el jugador
--- no ve — desperdicio en peleas con muchos bots.
+-- No animar daño más allá de esto (≈ MaxDistance del BillboardGui): MaxDistance solo
+-- culla el render, y los frames/tweens se crearían igual para enemigos que no se ven.
 local CHIP_MAX_DISTANCE = 200
 local CHIP_MAX_DISTANCE_SQ = CHIP_MAX_DISTANCE * CHIP_MAX_DISTANCE
 
--- ── Template (cacheado una sola vez) ────────────────────────────
 local healthBillboardTemplate: BillboardGui? = nil
 
 local function getTemplate(): BillboardGui?
 	if healthBillboardTemplate then
 		return healthBillboardTemplate
 	end
-	-- Buscar solo hijos directos de RS para no capturar clones en workspace
-	local found = ReplicatedStorage:FindFirstChild("HealthBillboard")
-	if not found then
-		-- Buscar dentro de carpetas comunes
-		for _, child in ReplicatedStorage:GetChildren() do
-			if child:IsA("Folder") or child:IsA("Configuration") then
-				local inner = child:FindFirstChild("HealthBillboard")
-				if inner and inner:IsA("BillboardGui") then
-					found = inner
-					break
-				end
-			end
-		end
-	end
+	local found = Templates:FindFirstChild("HealthBillboard")
 	if found and found:IsA("BillboardGui") then
 		healthBillboardTemplate = found :: BillboardGui
 		return healthBillboardTemplate
 	end
-	warn("[HealthBillboardController] HealthBillboard no encontrado en ReplicatedStorage")
+	warn("[HealthBillboardController] HealthBillboard no encontrado en ReplicatedStorage.Templates")
 	return nil
 end
 
--- ── Tracked state ───────────────────────────────────────────────
 type TrackState = {
 	billboard: BillboardGui,
-	container: Instance?,
 	fill: GuiObject?,
 	healthBG: GuiObject?,
 	humanoid: Humanoid,
@@ -83,11 +66,11 @@ type TrackState = {
 	damage: ImageLabel?,
 	lastRatio: number?,
 	damageToken: number,
+	nameLabel: TextLabel?,
 }
 
 local tracked: { [Model]: TrackState } = {}
 
--- ── Ocultar nombre por defecto de Roblox ────────────────────────
 local function hideDefaultName(humanoid: Humanoid)
 	humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
 end
@@ -109,6 +92,44 @@ local function removeExistingHealthBillboards(model: Model)
 	end
 end
 
+-- Jugador real: DisplayName (con fallback a Name). Bot: el nombre ficticio que
+-- AIService estampa en el atributo "DisplayName" del modelo (y en
+-- Humanoid.DisplayName). Nunca se muestra el Name interno del bot ("Bot_N").
+local function resolveDisplayName(model: Model, humanoid: Humanoid): string
+	local owner = Players:GetPlayerFromCharacter(model)
+	if owner then
+		return if owner.DisplayName ~= "" then owner.DisplayName else owner.Name
+	end
+	local attr = model:GetAttribute("DisplayName")
+	if type(attr) == "string" and attr ~= "" then
+		return attr
+	end
+	return humanoid.DisplayName
+end
+
+-- Container.Name puede ser el TextLabel en sí o un frame que lo contenga.
+local function findNameLabel(container: Instance): TextLabel?
+	local node = container:FindFirstChild("Name")
+	if not node then
+		return nil
+	end
+	if node:IsA("TextLabel") then
+		return node
+	end
+	return node:FindFirstChildWhichIsA("TextLabel", true)
+end
+
+local function updateName(state: TrackState)
+	local label = state.nameLabel
+	if not label then
+		return
+	end
+	local name = resolveDisplayName(state.model, state.humanoid)
+	if label.Text ~= name then
+		label.Text = name
+	end
+end
+
 local function ensureFillGradient(fill: GuiObject): UIGradient
 	local grad = fill:FindFirstChildOfClass("UIGradient")
 	if not grad then
@@ -119,11 +140,25 @@ local function ensureFillGradient(fill: GuiObject): UIGradient
 	return grad
 end
 
--- Indicador "Damage": aparece INSTANTÁNEO (sin tween) en el borde del Fill (es
--- hijo suyo, así que sigue el punto de vida actual) y NO se oculta hasta que los
--- chips blancos han terminado de desaparecer (holdTime = duración de la escalera).
--- El token invalida el ocultado programado por golpes anteriores cuando llega uno
--- nuevo (mantiene el Damage visible mientras quede cualquier chip animándose).
+-- Pinta el nombre con el mismo degradado que el Fill. UIGradient multiplica sobre
+-- TextColor3, así que el texto base va en blanco para que el color sea idéntico
+-- al de la barra.
+local function applyNameColor(state: TrackState, color: ColorSequence)
+	local label = state.nameLabel
+	if not label then
+		return
+	end
+	label.TextColor3 = Color3.new(1, 1, 1)
+	local grad = ensureFillGradient(label)
+	grad.Color = color
+	local fillGrad = state.fill and state.fill:FindFirstChildOfClass("UIGradient")
+	if fillGrad then
+		grad.Rotation = fillGrad.Rotation
+	end
+end
+
+-- Indicador "Damage" (hijo del Fill, sigue el punto de vida): aparece instantáneo y
+-- no se oculta hasta que acaban los chips. El token invalida ocultados de golpes anteriores.
 local function showDamageIndicator(state: TrackState, holdTime: number)
 	local dmg = state.damage
 	if not dmg then
@@ -140,12 +175,9 @@ local function showDamageIndicator(state: TrackState, holdTime: number)
 	end)
 end
 
--- Cubre el trozo perdido [newRatio, oldRatio] con N frames blancos contiguos
--- (N proporcional al daño) y los hace desaparecer de derecha a izquierda: cada
--- uno se eleva (CHIP_RISE) y se desvanece (BackgroundTransparency→1), con un
--- delay escalonado entre ellos → escalera. Cada chip se autodestruye al acabar.
--- Devuelve la duración total de la escalera (último chip en terminar), para que
--- el indicador "Damage" sepa cuándo ocultarse.
+-- Cubre el trozo perdido [newRatio, oldRatio] con N chips (N proporcional al daño) que
+-- desaparecen escalonados de derecha a izquierda y se autodestruyen. Devuelve la
+-- duración total, para que el indicador "Damage" sepa cuándo ocultarse.
 local function spawnDamageChips(state: TrackState, newRatio: number, oldRatio: number): number
 	local healthBG = state.healthBG
 	local fill = state.fill
@@ -194,11 +226,9 @@ local function spawnDamageChips(state: TrackState, newRatio: number, oldRatio: n
 		end)
 	end
 
-	-- El último en terminar es el de la izquierda (i=0): mayor stagger + el tween.
 	return (n - 1) * CHIP_STEP_DELAY + CHIP_TWEEN.Time
 end
 
--- Distancia cámara→enemigo (al cuadrado, sin sqrt) para el gate móvil del efecto.
 local function isWithinAnimDistance(state: TrackState): boolean
 	local cam = workspace.CurrentCamera
 	if not cam then
@@ -216,53 +246,39 @@ local function isWithinAnimDistance(state: TrackState): boolean
 	return delta:Dot(delta) <= CHIP_MAX_DISTANCE_SQ
 end
 
--- ── Actualizar un billboard ─────────────────────────────────────
+-- Un muerto no lleva barra. Se mira la vida Y el atributo de ragdoll de los kill effects
+-- en vez de fiarlo a `Died`: los reintentos de `scheduleTrack` pueden alcanzar a un
+-- cuerpo que murió antes de montar el tracking, y el evento ya habría pasado.
+local function isCorpse(model: Model, humanoid: Humanoid): boolean
+	return humanoid.Health <= 0 or model:GetAttribute(CollisionGroups.RAGDOLL_ATTRIBUTE) == true
+end
+
+local untrackModel: (model: Model) -> ()
+
 local function updateState(state: TrackState)
 	local model = state.model
 	local humanoid = state.humanoid
 
-	-- Vida
-	if not state.fill and state.healthBG then
-		local f = state.healthBG:FindFirstChild("Fill")
-		if f and f:IsA("GuiObject") then
-			state.fill = f
-			state.baseFillSize = f.Size
-		end
+	if isCorpse(model, humanoid) then
+		untrackModel(model)
+		return
 	end
 
-	if not state.healthBG and state.container then
-		local template = getTemplate()
-		if template then
-			local templateContainer = template:FindFirstChild("Container")
-			if templateContainer then
-				local templateHealthBG = templateContainer:FindFirstChild("HealthBG")
-				if templateHealthBG and templateHealthBG:IsA("GuiObject") then
-					local newHealthBG = templateHealthBG:Clone()
-					newHealthBG.Parent = state.container
-					state.healthBG = newHealthBG
-
-					local newFill = newHealthBG:FindFirstChild("Fill")
-					if newFill and newFill:IsA("GuiObject") then
-						state.fill = newFill
-						state.baseFillSize = newFill.Size
-					end
-				end
-			end
+	-- Color de equipo: barra y nombre comparten degradado.
+	local localChar = localPlayer.Character
+	local isAlly = localChar ~= nil and TeamUtils.isSameTeam(localChar, model)
+	if state.lastIsAlly ~= isAlly then
+		state.lastIsAlly = isAlly
+		local color = if isAlly then ALLY_GRADIENT else ENEMY_GRADIENT
+		if state.fill then
+			ensureFillGradient(state.fill).Color = color
 		end
+		applyNameColor(state, color)
 	end
 
 	if state.fill then
-		local localChar = localPlayer.Character
-		local isAlly = localChar ~= nil and TeamUtils.isSameTeam(localChar, model)
 
-		if state.lastIsAlly ~= isAlly then
-			state.lastIsAlly = isAlly
-			local gradient = ensureFillGradient(state.fill)
-			gradient.Color = if isAlly then ALLY_GRADIENT else ENEMY_GRADIENT
-		end
-
-		-- Resolver el indicador "Damage" (hijo del Fill) una vez; oculto hasta el
-		-- primer golpe.
+		-- Indicador "Damage" (hijo del Fill): se resuelve una vez, oculto hasta el primer golpe.
 		if not state.damage then
 			local d = state.fill:FindFirstChild("Damage")
 			if d and d:IsA("ImageLabel") then
@@ -275,12 +291,8 @@ local function updateState(state: TrackState)
 		local maxHp = math.max(1, humanoid.MaxHealth)
 		local ratio = math.clamp(humanoid.Health / maxHp, 0, 1)
 
-		-- Daño: la vida bajó respecto al último valor mostrado → escalera de chips
-		-- blancos sobre el trozo perdido + flash del indicador. El Fill baja
-		-- instantáneo (abajo), sin tween.
+		-- Daño: chips sobre el trozo perdido + indicador. El Fill baja instantáneo, sin tween.
 		local last = state.lastRatio
-		-- Solo animar daño si el billboard está dentro de la distancia de render:
-		-- evita crear frames/tweens para enemigos que el jugador no ve.
 		if last ~= nil and ratio < last - CHIP_MIN_DAMAGE and isWithinAnimDistance(state) then
 			local chipsDuration = spawnDamageChips(state, ratio, last)
 			showDamageIndicator(state, chipsDuration)
@@ -288,7 +300,6 @@ local function updateState(state: TrackState)
 		state.lastRatio = ratio
 
 		local base = state.baseFillSize
-		-- Escalar eje X (horizontal) con el ratio de vida
 		state.fill.Size = UDim2.new(
 			base.X.Scale * ratio,
 			math.floor(base.X.Offset * ratio + 0.5),
@@ -298,8 +309,7 @@ local function updateState(state: TrackState)
 	end
 end
 
--- ── Untrack ─────────────────────────────────────────────────────
-local function untrackModel(model: Model)
+function untrackModel(model: Model)
 	local state = tracked[model]
 	if not state then return end
 	for _, conn in state.conns do
@@ -311,7 +321,6 @@ local function untrackModel(model: Model)
 	tracked[model] = nil
 end
 
--- ── Track ───────────────────────────────────────────────────────
 local function trackModel(model: Model)
 	if tracked[model] then
 		updateState(tracked[model])
@@ -323,10 +332,14 @@ local function trackModel(model: Model)
 	if not head or not head:IsA("BasePart") then return end
 	local humanoid = model:FindFirstChildOfClass("Humanoid")
 	if not humanoid then return end
+	if isCorpse(model, humanoid) then
+		-- Cuerpo ya muerto: ni se monta el billboard ni se deja el que hubiera.
+		removeExistingHealthBillboards(model)
+		return
+	end
 
 	hideDefaultName(humanoid)
 
-	-- Limpiar billboard previo (si lo hubiera)
 	removeExistingHealthBillboards(model)
 
 	local template = getTemplate()
@@ -338,10 +351,8 @@ local function trackModel(model: Model)
 	-- Parentear al Head (BasePart) para que Roblox lo renderice correctamente
 	billboard.Parent = head :: BasePart
 
-	-- Resolver nodos cacheados una sola vez
 	local container = billboard:FindFirstChild("Container")
 	if not container then
-		-- Intentar buscar un frame/folder hijo que haga de container
 		for _, child in billboard:GetChildren() do
 			if child:IsA("GuiObject") then
 				container = child
@@ -352,10 +363,12 @@ local function trackModel(model: Model)
 
 	local fill: GuiObject? = nil
 	local healthBG: GuiObject? = nil
+	local nameLabel: TextLabel? = nil
 	local baseFillSize = UDim2.new(1, 0, 1, 0)
 
 	if container then
-		-- HealthBG y Fill
+		nameLabel = findNameLabel(container)
+
 		local bg = container:FindFirstChild("HealthBG")
 		if bg and bg:IsA("GuiObject") then
 			healthBG = bg
@@ -371,7 +384,6 @@ local function trackModel(model: Model)
 
 	local state: TrackState = {
 		billboard = billboard,
-		container = container,
 		fill = fill,
 		healthBG = healthBG,
 		humanoid = humanoid,
@@ -379,13 +391,12 @@ local function trackModel(model: Model)
 		conns = conns,
 		baseFillSize = baseFillSize,
 		damageToken = 0,
+		nameLabel = nameLabel,
 	}
 	tracked[model] = state
 
-	-- Conectar eventos. `HealthChanged` y el property signal de Health disparan
-	-- ambos en el mismo frame en el cambio de vida — antes ejecutábamos
-	-- updateState 2× por daño × N enemigos. Mantenemos solo el property signal
-	-- (cubre Health) + MaxHealth (no expuesto por HealthChanged).
+	-- Solo el property signal de Health (HealthChanged dispara en el mismo frame y
+	-- duplicaría updateState) + MaxHealth.
 	table.insert(conns, humanoid:GetPropertyChangedSignal("Health"):Connect(function()
 		updateState(state)
 	end))
@@ -396,10 +407,22 @@ local function trackModel(model: Model)
 		untrackModel(model)
 	end))
 	table.insert(conns, model.AttributeChanged:Connect(function(attr)
-		if attr == "Team" or attr == "TeamSide" or attr == "BotTeam" or attr == "Side"
+		if attr == CollisionGroups.RAGDOLL_ATTRIBUTE then
+			-- El kill effect acaba de ragdollear el cuerpo.
+			if model:GetAttribute(attr) == true then
+				untrackModel(model)
+			end
+		elseif attr == "Team" or attr == "TeamSide" or attr == "BotTeam" or attr == "Side"
 			or attr == "TeamAffinity" then
 			updateState(state)
+		elseif attr == "DisplayName" then
+			-- El atributo puede llegar tras el modelo, y AIService lo reescribe si
+			-- la identidad del bot choca con la de un jugador que acaba de entrar.
+			updateName(state)
 		end
+	end))
+	table.insert(conns, humanoid:GetPropertyChangedSignal("DisplayName"):Connect(function()
+		updateName(state)
 	end))
 	table.insert(conns, model.AncestryChanged:Connect(function(_, parent)
 		if parent == nil then
@@ -407,11 +430,10 @@ local function trackModel(model: Model)
 		end
 	end))
 
-	-- Primer update inmediato
+	updateName(state)
 	updateState(state)
 end
 
--- ── Deteccion de modelos elegibles ──────────────────────────────
 local function isBot(model: Model): boolean
 	return string.find(model.Name, "^Bot_") ~= nil or TeamUtils.getSide(model) ~= nil
 end
@@ -420,7 +442,6 @@ local function tryTrack(model: Model)
 	local owner = Players:GetPlayerFromCharacter(model)
 	if owner then
 		if owner == localPlayer then
-			-- Nunca mostrar billboard del propio jugador local.
 			removeExistingHealthBillboards(model)
 			untrackModel(model)
 			return
@@ -433,7 +454,6 @@ local function tryTrack(model: Model)
 	end
 end
 
--- ── Scheduler robusto de tracking ───────────────────────────────
 -- Reintentos por modelo mientras su Humanoid/Head aún no ha replicado.
 local _trackRetryConns: { [Model]: { RBXScriptConnection } } = {}
 local _trackRetryThreads: { [Model]: { thread } } = {}
@@ -470,18 +490,11 @@ local function isTrackCandidate(model: Model): boolean
 	return isBot(model)
 end
 
--- Programa el tracking de un modelo cuyo Humanoid/Head puede no haber replicado
--- todavía. `tryTrack` es idempotente (guard `tracked[model]`); si aún no se pudo
--- trackear y el modelo ES candidato (player char o bot), instala reintentos:
--- ChildAdded + reintentos temporizados a 0.1/0.5/2s.
---
--- Los timers son la clave del fix del bug "a veces no se muestra": ChildAdded a
--- veces NO dispara para los hijos (Head/Humanoid) que llegan en el paquete de
--- replicación INICIAL del Model (mismo gotcha documentado en
--- CharacterHighlightController). El watcher anterior solo tenía ChildAdded + un
--- timeout de 5s que se rendía (cleanup) sin reintentar, así que al perderse ese
--- evento el billboard no aparecía nunca. Los reintentos temporizados cubren ese
--- caso sin polling continuo (son no-ops en cuanto se logra el track).
+-- Programa el tracking de un modelo cuyo Humanoid/Head puede no haber replicado.
+-- `tryTrack` es idempotente; si aún no se pudo y el modelo es candidato, instala
+-- ChildAdded + reintentos temporizados a 0.1/0.5/2s. Los timers son necesarios:
+-- ChildAdded a veces NO dispara para hijos que llegan en la replicación INICIAL del
+-- Model (mismo gotcha que CharacterHighlightController).
 --
 -- `assumeCandidate` lo fuerzan los callers que ya saben que es player/bot (en
 -- mid-replicación el owner puede no resolver aún).
@@ -525,20 +538,15 @@ local function scheduleTrack(model: Model, assumeCandidate: boolean?)
 	}
 end
 
--- ── Modulo publico ──────────────────────────────────────────────
 local HealthBillboardController = {}
 
--- Conexiones a nivel de módulo (PlayerAdded, DescendantAdded, etc.). Sin tracking
--- explícito, los listeners se duplicaban en cada Start() (re-entrar al menú de
--- match) y nunca se limpiaban en Stop().
+-- Conexiones de módulo: se limpian en Stop() para que Start() pueda repetirse sin duplicarlas.
 local _moduleConns: { RBXScriptConnection } = {}
 local _started = false
 
 local function _wireCharacterAddedFor(player: Player)
 	table.insert(_moduleConns, player.CharacterAdded:Connect(function(character)
-		-- Player conocido → candidato seguro. scheduleTrack reintenta hasta que
-		-- Head y Humanoid replican (antes: un solo WaitForChild(...,5) + tryTrack
-		-- que se rendía al timeout, dejando al jugador sin billboard).
+		-- Player conocido → candidato seguro.
 		scheduleTrack(character, true)
 	end))
 end
@@ -552,7 +560,6 @@ function HealthBillboardController:Start(prescannedModels: { Model }?)
 	end
 	_started = true
 
-	-- Jugadores existentes
 	for _, player in Players:GetPlayers() do
 		if player.Character then
 			scheduleTrack(player.Character, true)
@@ -560,7 +567,6 @@ function HealthBillboardController:Start(prescannedModels: { Model }?)
 		_wireCharacterAddedFor(player)
 	end
 
-	-- Nuevos jugadores
 	table.insert(_moduleConns, Players.PlayerAdded:Connect(function(player)
 		_wireCharacterAddedFor(player)
 		if player.Character then
@@ -576,11 +582,8 @@ function HealthBillboardController:Start(prescannedModels: { Model }?)
 		-- Heurística rápida: si el padre es un Model, NO es un character.
 		if instance.Parent and instance.Parent:IsA("Model") then return end
 
-		-- Audit mobile: filter heurística adicional para mapas grandes con
-		-- props decorativos. Solo procedemos si es bot (parent.Name == "Bots")
-		-- o ya parece char (tiene Humanoid o es player char). Sin esto el
-		-- listener + task.delay se enganchaba a cualquier Model decorativo
-		-- entrando al workspace.
+		-- Filtro para mapas con muchos props decorativos: solo bots (padre "Bots"),
+		-- modelos con Humanoid o characters de jugador.
 		local parent = instance.Parent
 		local isBotChild = parent ~= nil and parent.Name == "Bots"
 		local hasHumanoid = instance:FindFirstChildOfClass("Humanoid") ~= nil
@@ -589,25 +592,17 @@ function HealthBillboardController:Start(prescannedModels: { Model }?)
 			return
 		end
 
-		-- Trackea ya si está listo; si Head/Humanoid aún no replicaron, instala
-		-- reintentos (ChildAdded + timers 0.1/0.5/2s) para no perder el billboard
-		-- cuando ChildAdded no dispara en la replicación inicial del Model.
 		scheduleTrack(instance :: Model)
 	end))
 
-	-- Cuando cambia el equipo local, refrescar todos
 	table.insert(_moduleConns, localPlayer:GetPropertyChangedSignal("Team"):Connect(function()
 		for _, state in tracked do
 			updateState(state)
 		end
 	end))
 
-	-- Scan inicial: una sola pasada al arrancar. Si el caller pasa
-	-- `prescannedModels` (init.luau hace un solo scan compartido con CharacterHighlight),
-	-- lo reusamos en vez de re-escanear workspace.
-	-- scheduleTrack self-filtra: para props decorativos es un tryTrack directo (sin
-	-- reintentos); para players/bots aún replicando instala reintentos, cubriendo el
-	-- join mid-partida donde el combatiente ya existe pero su Head/Humanoid llega tarde.
+	-- Scan inicial; `prescannedModels` evita re-escanear (init.luau comparte un scan
+	-- con CharacterHighlight). Cubre el join mid-partida con combatientes aún replicando.
 	if prescannedModels then
 		for _, model in prescannedModels do
 			scheduleTrack(model)
@@ -621,9 +616,8 @@ function HealthBillboardController:Start(prescannedModels: { Model }?)
 	end
 end
 
--- Limpia listeners de módulo, watchers pendientes y todos los billboards
--- activos. Permite que MatchFeature vuelva a hacer Start() después sin que
--- los listeners se dupliquen (D1 — connection leak por reload del feature).
+-- Limpia listeners de módulo, watchers pendientes y billboards activos, para que
+-- MatchFeature pueda volver a hacer Start() sin duplicar listeners.
 function HealthBillboardController:Stop()
 	if not _started then
 		return
@@ -635,25 +629,12 @@ function HealthBillboardController:Stop()
 	end
 	table.clear(_moduleConns)
 
-	-- Watchers de reintento pendientes (conns + threads temporizados).
+	-- Watchers de reintento pendientes (conns + threads temporizados). Los dos
+	-- mapas comparten claves: scheduleTrack los rellena a la vez y
+	-- _cleanupTrackRetry los vacía a la vez.
 	for model in _trackRetryConns do
-		local conns = _trackRetryConns[model]
-		if conns then
-			for _, c in conns do
-				c:Disconnect()
-			end
-		end
+		_cleanupTrackRetry(model)
 	end
-	table.clear(_trackRetryConns)
-	for model in _trackRetryThreads do
-		local threads = _trackRetryThreads[model]
-		if threads then
-			for _, t in threads do
-				pcall(task.cancel, t)
-			end
-		end
-	end
-	table.clear(_trackRetryThreads)
 
 	for model, _ in tracked do
 		untrackModel(model)
