@@ -1,7 +1,5 @@
 --!strict
--- Hotbar.luau (Client/Server Library)
 -- Gestiona la interfaz del hotbar (PC y Touchscreen) del sistema de armas.
---
 -- Estructura esperada por slot (Item1 / Item2), ambos idénticos:
 --   Item.Image                    -> imagen del arma
 --   Item.Footer.Value             -> munición "actual/cargador" en RichText
@@ -38,7 +36,6 @@ local HOTBAR_STROKE_TWEEN_INFO = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum
 local HOTBAR_ALIGNMENT_PC = Enum.HorizontalAlignment.Right
 local HOTBAR_ALIGNMENT_TOUCH = Enum.HorizontalAlignment.Center
 
--- Texto de munición: color por munición baja y "..." animado al recargar.
 local AMMO_LOW_RATIO = 0.45 -- naranja por debajo de este % del cargador
 local AMMO_CRITICAL_RATIO = 0.2 -- rojo por debajo de este %
 local AMMO_COLOR_NORMAL = Color3.fromRGB(255, 255, 255)
@@ -71,18 +68,23 @@ local function toHexColor(color: Color3): string
 	)
 end
 
-local function getCategoryByToolName(toolName)
-	if ItemsConfig.Main[toolName] ~= nil then
+-- Categoría de un Tool: primero la identidad estampada por LoadoutService
+-- (atributo WeaponCategory), que desambigua ids repetidos en los dos catálogos
+-- ("Default"); si no la lleva, por nombre.
+local function getToolCategory(tool: Tool): string?
+	local category = WeaponsConfig.ResolveToolIdentity(tool)
+	if category then
+		return category
+	end
+	if ItemsConfig.Main[tool.Name] ~= nil then
 		return "Main"
 	end
-	if ItemsConfig.Special[toolName] ~= nil then
+	if ItemsConfig.Special[tool.Name] ~= nil then
 		return "Special"
 	end
 	return nil
 end
 
--- Capacidad del cargador de un Tool: AmmoCapacity de su definición en
--- WeaponsConfig (o el default del esquema).
 local function getToolAmmoCapacity(tool: Instance?): number
 	if not tool then
 		return 0
@@ -205,7 +207,7 @@ function Hotbar:_findMainSpecialTools()
 		if not container then continue end
 		for _, child in ipairs(container:GetChildren()) do
 			if child:IsA("Tool") then
-				local category = getCategoryByToolName(child.Name)
+				local category = getToolCategory(child)
 				if category == "Main" then
 					if not mainTool or (character and child:IsDescendantOf(character)) then
 						mainTool = child
@@ -242,7 +244,6 @@ function Hotbar:_applySelectedVisual(selectedSlot)
 	end
 end
 
--- ¿El Tool de este slot es el arma que se está recargando ahora mismo?
 function Hotbar:_isToolReloading(tool): boolean
 	if not tool then
 		return false
@@ -254,9 +255,6 @@ function Hotbar:_isToolReloading(tool): boolean
 	return currentWeapon ~= nil and currentWeapon.instance == tool
 end
 
--- Pinta la munición de un slot: "..." blanco animado si su arma se recarga; si
--- no, "actual/cargador" con el número actual coloreado por munición baja
--- (blanco → naranja → rojo).
 function Hotbar:_renderSlotAmmo(slotNode, tool)
 	if not slotNode then return end
 	local ammoValueLabel = slotNode.ammoValueLabel
@@ -283,7 +281,6 @@ function Hotbar:_renderSlotAmmo(slotNode, tool)
 			return
 		end
 		local capacity = math.max(0, math.floor(getToolAmmoCapacity(tool)))
-		-- Color por munición baja (% del cargador): naranja, luego rojo.
 		local color = AMMO_COLOR_NORMAL
 		if capacity > 0 then
 			local ratio = roundedAmmo / capacity
@@ -460,9 +457,8 @@ function Hotbar:equipSlot(slot)
 	local currentWeapon = self.weaponsGui.weaponsSystem.currentWeapon
 	local currentTool = if currentWeapon then currentWeapon.instance else nil
 
-	-- Si ya estamos en ese slot (su arma ya está equipada), no hacemos nada:
-	-- no re-equipamos (evita el toggle/desequipado de Roblox) y solo
-	-- garantizamos el resaltado correcto.
+	-- Ya equipada: no re-equipar (evita el toggle/desequipado de Roblox), solo
+	-- garantizar el resaltado.
 	if currentTool == tool then
 		self:_applySelectedVisual(slot)
 		return

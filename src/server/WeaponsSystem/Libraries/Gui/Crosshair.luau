@@ -1,6 +1,4 @@
 --!strict
--- Crosshair.luau (Client/Server Library)
--- Gestiona la retícula de apuntado (estándar y escopeta) y la advertencia de fuera de rango.
 
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
@@ -8,6 +6,13 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local TeamUtils = require(Shared:WaitForChild("utils"):WaitForChild("TeamUtils"))
+local DebugFlags = require(Shared:WaitForChild("utils"):WaitForChild("DebugFlags"))
+
+-- Debug (solo Studio): mismo filtro de táctil que el autoshoot de BaseWeapon.
+local forceMobileInput = DebugFlags.bind(ReplicatedStorage, "ForceMobileInput")
+-- Diagnóstico del aviso de fuera de rango de la escopeta: BoolValue
+-- ReplicatedStorage.Debug.DebugCrosshair = true (fuera de Studio siempre false).
+local debugCrosshair = DebugFlags.bind(ReplicatedStorage, "DebugCrosshair")
 
 local WeaponsSystemFolder = script.Parent.Parent.Parent
 local Libraries = WeaponsSystemFolder:WaitForChild("Libraries")
@@ -16,6 +21,21 @@ local AutoAimSystem = require(Libraries:WaitForChild("AutoAimSystem"))
 
 local CENTER_ANCHOR_V2 = Vector2.new(0.5, 0.5)
 local SHOTGUN_RANGE_TICK_INTERVAL = 0.1
+-- Alto de viewport al que los valores de spread (px) se ven tal cual.
+local SPREAD_REFERENCE_VIEWPORT_HEIGHT = 1080
+
+-- No vale el primer Model ancestro: el arma empuñada (Tool > WeaponModel) es un
+-- Model propio sin Humanoid.
+local function findCharacterWithHumanoid(instance: Instance): Model?
+	local model = instance:FindFirstAncestorOfClass("Model")
+	while model do
+		if model:FindFirstChildOfClass("Humanoid") then
+			return model
+		end
+		model = model:FindFirstAncestorOfClass("Model")
+	end
+	return nil
+end
 
 local Crosshair = {}
 Crosshair.__index = Crosshair
@@ -38,6 +58,9 @@ function Crosshair.new(weaponsGui: any)
 	self.spreadBase = 30
 	self.spreadAim = 20
 	self.spreadFireKick = 3
+	-- spreadBase/spreadAim/spreadFireKick son píxeles a 1080 de alto; resize()
+	-- los adapta a la pantalla con este factor (ver SPREAD_REFERENCE_VIEWPORT_HEIGHT).
+	self.spreadScreenFactor = 1
 	self.shotgunDefaultOptimalRange = 30
 
 	self._kickCooldownEnd = 0
@@ -121,6 +144,17 @@ function Crosshair:setScale(scale: number)
 end
 
 function Crosshair:setVariant(isShotgun: boolean)
+	if debugCrosshair() then
+		local weapon = self.weaponsGui.weaponsSystem.currentWeapon
+		local tool = weapon and weapon.instance
+		warn(string.format(
+			"[Crosshair/OutOfRange] arma=%s atributo Shotgun=%s -> escopeta=%s",
+			tool and tool.Name or "nil",
+			tostring(tool and tool:GetAttribute("Shotgun")),
+			tostring(isShotgun)
+		))
+		self._dbgLastRangeKey = nil
+	end
 	self.isShotgun = isShotgun
 	self.isOutOfRange = false
 	self:refreshVisibility()
@@ -136,7 +170,7 @@ end
 function Crosshair:layoutShotgunCorners()
 	if not (self.shotgunFrame and self.isShotgun) then return end
 	local compScale = self.scale * self.weaponScale
-	local s = self.spread * compScale
+	local s = self.spread * compScale * self.spreadScreenFactor
 	local size = math.floor(self.normalSize.Y * 0.45 * compScale)
 	if not self._shotgunAnchorsSet then
 		self.shotgunTopLeft.AnchorPoint = CENTER_ANCHOR_V2
@@ -167,10 +201,26 @@ function Crosshair:kickShotgunSpread()
 	end)
 end
 
-function Crosshair:updateShotgunRangeState()
-	if not self.isShotgun or not self.outOfRangeFrame then return end
+-- Solo escribe cuando cambia el motivo, para no llenar la consola a 10 Hz.
+function Crosshair:_debugRange(key: string, detail: string)
+	if not debugCrosshair() or key == self._dbgLastRangeKey then return end
+	self._dbgLastRangeKey = key
+	warn("[Crosshair/OutOfRange] " .. detail)
+end
 
-	if not (UserInputService.TouchEnabled and not UserInputService.MouseEnabled) then
+function Crosshair:updateShotgunRangeState()
+	if not self.isShotgun then return end
+	if not self.outOfRangeFrame then
+		self:_debugRange("sin-frame", "la GUI no tiene ScalingElements.OutOfRange: el aviso no puede mostrarse")
+		return
+	end
+
+	if not (forceMobileInput() or (UserInputService.TouchEnabled and not UserInputService.MouseEnabled)) then
+		self:_debugRange("no-tactil", string.format(
+			"desactivado, no es táctil puro (TouchEnabled=%s MouseEnabled=%s)",
+			tostring(UserInputService.TouchEnabled),
+			tostring(UserInputService.MouseEnabled)
+		))
 		if self.isOutOfRange then
 			self.isOutOfRange = false
 			self:refreshVisibility()
@@ -230,23 +280,48 @@ function Crosshair:updateShotgunRangeState()
 	rayParams.FilterDescendantsInstances = filter
 
 	local maxRay = AutoAimSystem.MAX_DISTANCE or 300
+	local localChar = localPlayer and localPlayer.Character
 	local result = workspace:Raycast(cameraOrigin, cameraDir * maxRay, rayParams)
-	if result and result.Instance then
-		local hitChar = result.Instance:FindFirstAncestorOfClass("Model")
-		local hum = hitChar and hitChar:FindFirstChildOfClass("Humanoid")
-		if hum then
-			local localChar = localPlayer and localPlayer.Character
-			local sameTeam = localChar and TeamUtils.isSameTeam(localChar, hitChar) or false
-			if hum and hum.Health > 0 and not sameTeam and hitChar ~= localChar then
-				distance = (result.Position - cameraOrigin).Magnitude
-				outOfRange = distance > optimalRange
-			end
+	local hitChar = result and findCharacterWithHumanoid(result.Instance)
+	local hitHum = hitChar and hitChar:FindFirstChildOfClass("Humanoid")
+	if result and hitChar and hitHum and hitHum.Health > 0 and hitChar ~= localChar
+		and not (localChar and TeamUtils.isSameTeam(localChar, hitChar))
+	then
+		distance = (result.Position - cameraOrigin).Magnitude
+	else
+		-- El rayo es de un píxel y a distancia pasa entre brazos y piernas. El
+		-- autoshoot fija objetivo por radio en pantalla y no dispara fuera de
+		-- OptimalRange (BaseWeapon:onStepped): sin este fallback no dispararía
+		-- ni saldría el aviso.
+		local targetPart, targetPos = AutoAimSystem.findBestTarget(self.weaponsGui.weaponsSystem)
+		if targetPart and targetPos and AutoAimSystem.isTargetVisible(cameraOrigin, targetPart) then
+			distance = (targetPos - cameraOrigin).Magnitude
 		end
+	end
+	if distance then
+		outOfRange = distance > optimalRange
 	end
 
 	if outOfRange ~= self.isOutOfRange then
 		self.isOutOfRange = outOfRange
 		self:refreshVisibility()
+	end
+
+	if debugCrosshair() then
+		if not distance then
+			self:_debugRange("sin-enemigo", "sin enemigo detectado (ni el rayo ni el autoaim)")
+		else
+			self:_debugRange(if outOfRange then "fuera" else "dentro", string.format(
+				"%s: distancia=%.1f OptimalRange=%s (atributo del Tool=%s) | frame.Visible=%s enabled=%s recargando=%s",
+				if outOfRange then "FUERA de rango" else "dentro de rango",
+				distance,
+				tostring(optimalRange),
+				tostring(tool and tool:GetAttribute("OptimalRange")),
+				tostring(self.outOfRangeFrame.Visible),
+				tostring(self.enabled),
+				tostring(self.weaponsGui._isReloadProgressAnimating)
+			))
+		end
 	end
 
 	if outOfRange and distance and self.outOfRangeDistanceLabel then
@@ -261,6 +336,17 @@ end
 
 function Crosshair:resize(viewportSize: Vector2)
 	if not self.frame then return end
+
+	-- Las esquinas escalan con normalSize (WeaponsGui:updateScale); el spread en
+	-- píxeles fijos no, y en móvil quedaría el doble de abierto. Mismo peso que
+	-- updateScale, normalizado a factor 1 en 1080 de alto.
+	local gui = self.weaponsGui
+	local refHeight = gui.referenceViewportSize.Y
+	if viewportSize.Y > 0 then
+		self.spreadScreenFactor =
+			gui:getWeightedScaleAmount(1, viewportSize.Y, refHeight) * viewportSize.Y
+			/ (gui:getWeightedScaleAmount(1, SPREAD_REFERENCE_VIEWPORT_HEIGHT, refHeight) * SPREAD_REFERENCE_VIEWPORT_HEIGHT)
+	end
 
 	local crosshairAbsoluteSize = self.frame.AbsoluteSize
 	if crosshairAbsoluteSize.X <= 0 or crosshairAbsoluteSize.Y <= 0 then
@@ -299,11 +385,14 @@ function Crosshair:update(dt: number)
 		self:updateShotgunRangeState()
 	else
 		if self.frame and self.enabled then
-			local cs = self.scale * self.weaponScale
-			if cs ~= self._lastCrosshairComputedScale then
-				self._lastCrosshairComputedScale = cs
-				local crosshairSize = self.normalSize * cs
-				self.frame.Size = UDim2.new(0, crosshairSize.X, 0, crosshairSize.Y)
+			-- Comparar contra frame.Size, no contra una caché: WeaponsGui:updateScale
+			-- devuelve el frame a su tamaño base por su cuenta y la caché no lo
+			-- detectaría. Redondeado porque Offset es entero.
+			local crosshairSize = self.normalSize * (self.scale * self.weaponScale)
+			local targetSize = UDim2.fromOffset(math.round(crosshairSize.X), math.round(crosshairSize.Y))
+			local currentSize = self.frame.Size
+			if currentSize ~= targetSize then
+				self.frame.Size = targetSize
 			end
 		end
 	end

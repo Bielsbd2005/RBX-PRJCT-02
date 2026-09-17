@@ -12,21 +12,21 @@ local WeaponsNetwork = require(script.Parent:WaitForChild("WeaponsNetwork"))
 local PewEffect = require(script.Parent:WaitForChild("PewEffect"))
 local SharedConstants = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants")
 local WeaponsConfig = require(SharedConstants:WaitForChild("WeaponsConfig"))
+local DebugFlags = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("utils"):WaitForChild("DebugFlags"))
+local Haptics = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("utils"):WaitForChild("Haptics"))
 
--- DEBUG: forzar comportamiento de autoshoot de movil tambien en PC.
--- Poner en false para volver al gating normal por plataforma.
-local DEBUG_FORCE_AUTOSHOOT_ON_PC = false
+-- Debug (solo Studio): ReplicatedStorage.Debug.ForceMobileInput = true hace que
+-- el PC pase el filtro de táctil (autoshoot con ratón). Crosshair usa la misma opción.
+local forceMobileInput = DebugFlags.bind(ReplicatedStorage, "ForceMobileInput")
 
 local function _isTouchPrimaryInput(): boolean
-	if DEBUG_FORCE_AUTOSHOOT_ON_PC then return true end
+	if forceMobileInput() then return true end
 	return UserInputService.TouchEnabled and not UserInputService.MouseEnabled
 end
 
 local localRandom = Random.new()
 
--- W3: throttle del path mobile-only de autoshoot. Antes corría a 60Hz:
--- workspace barrer + 2 raycasts + RaycastParams.new() por frame. 20Hz (50ms)
--- es imperceptible para detectar enemigo bajo el crosshair.
+-- Throttle de la detección de target del autoshoot (findBestTarget + raycasts).
 local AUTO_AIM_TICK_INTERVAL = 0.05
 
 local BaseWeapon = {}
@@ -84,7 +84,6 @@ function BaseWeapon:doInitialSetup()
 	-- Config de combate desde WeaponsConfig (Shared), antes del barrido de hijos.
 	self:loadConfigFromDefinition()
 
-	-- Set up child added
 	self.connections.childAdded = self.instance.ChildAdded:Connect(function(child)
 		self:onChildAdded(child)
 	end)
@@ -92,11 +91,8 @@ function BaseWeapon:doInitialSetup()
 		self:onChildAdded(child)
 	end
 
-	-- Cargador lleno al entrar en juego. Lo escribe el SERVIDOR desde la
-	-- definición y replica al cliente, que lo pinta en el hotbar. Así el Tool de
-	-- Studio no necesita traer CurrentAmmo autorado: antes ese número era una
-	-- copia a mano del AmmoCapacity que se desincronizaba al duplicar Tools (una
-	-- recortada de 2 cartuchos arrancaba con 5).
+	-- Cargador lleno al entrar en juego: lo escribe el SERVIDOR desde la definición
+	-- y replica. El Tool de Studio no debe traer CurrentAmmo autorado.
 	if selfClass.CanBeReloaded and IsServer then
 		self.instance:SetAttribute("CurrentAmmo", self:getConfigValue("AmmoCapacity"))
 	end
@@ -104,19 +100,17 @@ function BaseWeapon:doInitialSetup()
 	self.connections.ancestryChanged = self.instance.AncestryChanged:Connect(function() self:onAncestryChanged() end)
 	self:onAncestryChanged()
 
-	-- Set up equipped/unequipped and activated/deactivated
 	if self.instanceIsTool then
 		self.connections.equipped = self.instance.Equipped:Connect(function()
 			if IsServer or (Players.LocalPlayer and (self.instance:IsDescendantOf(Players.LocalPlayer.Backpack) or self.instance:IsDescendantOf(Players.LocalPlayer.Character))) then
-				-- Generación invalida delays/defers obsoletos cuando user cambia
-				-- de arma rápido — sin esto, auto-reload encolaba barras fantasma.
+				-- La generación invalida delays obsoletos al cambiar de arma rápido
+				-- (si no, el auto-reload encola barras fantasma).
 				self._equipGeneration = (self._equipGeneration or 0) + 1
 				local gen = self._equipGeneration
 
 				self:setEquipped(true)
 				if self:getAmmoInWeapon() <= 0 then
-					-- 200ms: requiere que user "se quede" en el arma antes de
-					-- auto-recargar. Switches rápidos no triggean auto-reload.
+						-- Solo auto-recarga si el jugador se queda en el arma.
 					task.delay(0.2, function()
 						if gen ~= self._equipGeneration then return end
 						if not self.equipped then return end
@@ -138,15 +132,10 @@ function BaseWeapon:doInitialSetup()
 				self:setEquipped(false)
 			end
 		end)
-		-- Auto-equip de un arma que ya está en el workspace cuando se crea este
-		-- BaseWeapon (caso típico: un cliente entra a la partida y barre los Tools
-		-- ya etiquetados via CollectionService:GetTagged en WeaponsSystem.setup).
-		-- En el CLIENTE solo debe auto-equiparse el arma del LocalPlayer: equipar
-		-- la de OTRO jugador dispara setWeaponEquipped → enciende la ShoulderCamera
-		-- (tercera persona) y la GUI de arma del jugador local aunque esté desarmado
-		-- en el lobby (bug: al conectarte con alguien jugando aparecías bugueado).
-		-- Coherente con los handlers Equipped/Unequipped de arriba, ya filtrados al
-		-- LocalPlayer en cliente.
+		-- Auto-equip de un arma que ya está en workspace al crear el BaseWeapon (un
+		-- cliente que entra barre los Tools etiquetados). En CLIENTE solo la del
+		-- LocalPlayer: equipar la de otro enciende la ShoulderCamera y la GUI de arma
+		-- del jugador local aunque esté desarmado en el lobby.
 		if self.instance:IsDescendantOf(workspace) and self.player then
 			if IsServer or self.player == Players.LocalPlayer then
 				self:setEquipped(true)
@@ -160,7 +149,6 @@ function BaseWeapon:doInitialSetup()
 			self:setActivated(false)
 		end)
 
-		-- Weld handle to weapon primary part
 		if IsServer then
 			self.handle = self.instance:FindFirstChild("Handle")
 
@@ -168,7 +156,13 @@ function BaseWeapon:doInitialSetup()
 			if model then
 				local handleAttachment = model:FindFirstChild("HandleAttachment", true)
 
-				if self.handle and handleAttachment then
+				if self.handle and handleAttachment and not model.PrimaryPart then
+					warn(string.format(
+						"[BaseWeapon] %s: el Model '%s' no tiene PrimaryPart; no se crea HandleWeld.",
+						self.instance:GetFullName(),
+						model.Name
+					))
+				elseif self.handle and handleAttachment then
 					local handleOffset = model.PrimaryPart.CFrame:toObjectSpace(handleAttachment.WorldCFrame)
 
 					local weld = Instance.new("Weld")
@@ -339,8 +333,7 @@ function BaseWeapon:setActivated(activated, fromNetwork)
 		return
 	end
 
-	-- Server-side debounce: descarta cambios de estado más rápidos que ACTIVATE_DEBOUNCE
-	-- (protege contra spam por exploit del RemoteEvent).
+	-- Debounce server-side contra spam por exploit del RemoteEvent.
 	if IsServer and fromNetwork then
 		local now = os.clock()
 		local last = self._lastActivatedAt or 0
@@ -382,10 +375,8 @@ function BaseWeapon:fire(origin, dir, charge)
 		return
 	end
 
-	-- Cadencia real: BulletWeapon.onFired actualiza nextFireTime con ShotCooldown
-	-- (y BurstShotCooldown). Antes esto usaba FireRate, una clave que no existe
-	-- en las armas, por lo que el AutoShoot quedaba clavado al fallback de 0.15s
-	-- e ignoraba la cadencia configurada por arma.
+	-- Cadencia: BulletWeapon.onFired actualiza nextFireTime con ShotCooldown
+	-- (y BurstShotCooldown).
 	if os.clock() < (self.nextFireTime or 0) then
 		return
 	end
@@ -418,10 +409,7 @@ function BaseWeapon:onFired(firingPlayer, fireInfo, fromNetwork)
 		end
 
 		self:simulateFire(firingPlayer, fireInfo)
-		-- Solo el LocalPlayer ve su propio PewEffect — para otros jugadores
-		-- y NPCs no se reproduce. (firingPlayer==LocalPlayer + fromNetwork
-		-- ya retornó arriba, así que aquí esa combinación es: tu disparo
-		-- local fresh.)
+		-- Solo el LocalPlayer ve su propio PewEffect.
 		if firingPlayer == Players.LocalPlayer then
 			PewEffect.play(self.instance)
 		end
@@ -435,16 +423,10 @@ function BaseWeapon:onFired(firingPlayer, fireInfo, fromNetwork)
 end
 
 --[[
-	Valor de una clave de config para esta arma, por orden de precedencia:
-	  1. lo que declara su definición (Definitions/<Category>/<Id>.luau),
-	  2. el default del esquema para su WeaponType (WeaponsConfig/Schema.luau),
-	  3. `defaultValue`, sólo como último recurso: claves fuera del esquema, o un
-	     Tool sin definición (self.definition == nil).
-
-	Los call-sites NO deben repetir el default del esquema. Antes lo hacían: eran
-	~70 literales copiados a mano que Schema.luau ya declara, y ya habían
-	divergido en MaxDistance (el chequeo anti-cheat asumía 1500 y la simulación
-	2000, así que rechazaba disparos legítimos a esa distancia).
+	Precedencia: 1) la definición (Definitions/<Category>/<Id>.luau), 2) el default
+	del esquema para su WeaponType (WeaponsConfig/Schema.luau), 3) `defaultValue`,
+	solo para claves fuera del esquema o un Tool sin definición.
+	Los call-sites NO deben repetir el default del esquema: las copias divergen.
 ]]
 function BaseWeapon:getConfigValue(valueName, defaultValue)
 	local value = self.configValues[valueName]
@@ -462,18 +444,9 @@ function BaseWeapon:getConfigValue(valueName, defaultValue)
 	return defaultValue
 end
 
---[[
-	Sprint 3: pool de Sound clones por weapon × soundName (round-robin de 5).
-
-	Antes cada disparo hacía Sound:Clone() + coroutine wait(TimeLength) +
-	Destroy. Para una arma automática (ShotCooldown 0.05-0.1s) eso era 10-20
-	clones/seg/jugador, todos con el mismo overhead de Instance.new + GC.
-
-	Patrón idéntico al de DamageBillboardHandler.luau:177-196 — round-robin
-	pre-clonado de 5 items. Si firerate × duración > 5 overlaps, el sound más
-	viejo se reinicia (ya inaudible). Las clones viven en el mismo parent
-	que el template y se destruyen junto con el Tool al unequip.
-]]
+-- Pool round-robin de clones de Sound por soundName: un arma automática haría
+-- decenas de Clone/Destroy por segundo. Con más overlaps que el pool, el sonido
+-- más viejo se reinicia (ya inaudible). Los clones viven bajo el Parent del template.
 
 local POOL_PER_SOUND = 5
 
@@ -537,22 +510,15 @@ function BaseWeapon:getSound(soundName)
 end
 
 function BaseWeapon:onDestroyed()
-	-- Desvincular el render loop por-frame. Se bindea con BindToRenderStep en
-	-- onEquippedChanged y se guarda en self.activeRenderStepName (NO en
-	-- self.connections), así que el loop de disconnect de abajo no lo toca.
-	-- Si el Tool se destruye estando equipado (p.ej. RagdollCleanup borra el
-	-- cadáver tras morir, sin que dispare Unequipped), el render seguiría
-	-- corriendo para siempre spammeando "No animation controller"/"no aimTrack"
-	-- cada frame porque self.instance.Parent ya es nil. Limpiar equipped
-	-- garantiza además que los guards `if not self.equipped then return end`
-	-- cortan cualquier callback en vuelo.
+	-- El render loop se bindea con BindToRenderStep (no está en self.connections).
+	-- Si el Tool se destruye equipado sin disparar Unequipped (p.ej. RagdollCleanup
+	-- borra el cadáver), seguiría corriendo cada frame para siempre.
 	if self.activeRenderStepName then
 		RunService:UnbindFromRenderStep(self.activeRenderStepName)
 		self.activeRenderStepName = nil
 	end
 	self.equipped = false
 
-	-- Disconnect all RBXScriptConnections
 	if self.connections then
 		for name, conn in self.connections do
 			if typeof(conn) == "RBXScriptConnection" then
@@ -562,7 +528,6 @@ function BaseWeapon:onDestroyed()
 		end
 	end
 
-	-- Stop and detach any cached animation tracks
 	if self.animTracks then
 		for name, track in self.animTracks do
 			if typeof(track) == "Instance" then
@@ -574,14 +539,13 @@ function BaseWeapon:onDestroyed()
 		end
 	end
 
-	-- Clear sound template cache (don't destroy — they live in the instance tree)
+	-- No destruir las plantillas: viven en el árbol del instance.
 	if self.sounds then
 		table.clear(self.sounds)
 	end
 
-	-- Sprint 3: destroy pooled sound clones. Si el Tool aún existe (unequip
-	-- sin destruir), el pool sigue vivo bajo el Parent del template — sin
-	-- limpieza acumularían N×POOL_PER_SOUND clones por re-equip.
+	-- Si el Tool sigue vivo (unequip sin destruir), sin esto se acumularían clones
+	-- en cada re-equip.
 	if self.soundPools then
 		for _, pool in self.soundPools do
 			for _, sound in pool.items do
@@ -593,11 +557,9 @@ function BaseWeapon:onDestroyed()
 end
 
 --[[
-	Carga la config del arma desde WeaponsConfig (Shared/constants/WeaponsConfig),
-	resolviendo el arma por el nombre del Tool y su atributo de categoría (ver
-	WeaponsConfig.ResolveToolIdentity).
-	WeaponsSystem.createWeaponForInstance ya garantiza que hay definición; si
-	aun así faltara, el arma queda con los defaults de cada getConfigValue.
+	Resuelve el arma por el nombre del Tool y su atributo de categoría (ver
+	WeaponsConfig.ResolveToolIdentity). WeaponsSystem.createWeaponForInstance ya
+	garantiza que hay definición; si faltara, quedan los defaults del esquema.
 ]]
 function BaseWeapon:loadConfigFromDefinition()
 	local definition = WeaponsConfig.GetForTool(self.instance)
@@ -615,8 +577,8 @@ function BaseWeapon:loadConfigFromDefinition()
 end
 
 function BaseWeapon:onChildAdded(child)
-	-- La config ya no vive en el Tool. Una Configuration aquí es un resto de
-	-- la migración: se ignora, y en Studio se avisa para que se borre.
+	-- La config vive en WeaponsConfig: una Configuration en el Tool es un resto
+	-- obsoleto que se ignora.
 	if child:IsA("Configuration") and RunService:IsStudio() then
 		warn(string.format(
 			"[BaseWeapon] %s tiene una Configuration obsoleta que se ignora (la config vive en WeaponsConfig). Bórrala con tools/weapons/StudioMigration.luau.",
@@ -643,10 +605,8 @@ function BaseWeapon:onRenderStepped(dt)
 		isSprinting = self.weaponsSystem.camera.isSprinting
 	end
 
-	-- Check if we fired recently
 	local firedRecently = (os.clock() - self.lastFireTime) < 0.5
 
-	-- Prioritize reload: Do not play run animation if reloading
 	if self.reloading then
 		isSprinting = false
 	end
@@ -680,8 +640,6 @@ function BaseWeapon:onStepped(dt)
 	local selfClass = getmetatable(self)
 	if not selfClass.CanBeFired then return end
 
-	-- Autoshoot es exclusivo de móvil. En PC nos saltamos los raycasts de
-	-- target-finding por completo.
 	if not _isTouchPrimaryInput() then return end
 
 	if Players.LocalPlayer:GetAttribute("AutoShoot") == false then return end
@@ -689,15 +647,13 @@ function BaseWeapon:onStepped(dt)
 	-- Rocket launcher: nunca autoshoot (riesgo de splash al teammate / al jugador).
 	if self:getConfigValue("ExplodeOnImpact") then return end
 
-	-- Sniper: solo autoshoot cuando el jugador esta apuntando (ADS).
 	if self:getConfigValue("HasScope") then
 		local cam = self.weaponsSystem and self.weaponsSystem.camera
 		if not (cam and cam.isZoomed and cam:isZoomed()) then return end
 	end
 
-	-- Detección de target throttled a 20Hz (caro: findBestTarget + 2 raycasts).
-	-- El camera pull NO está throttled — corre cada frame con el target cacheado
-	-- para evitar el efecto a trompicones al moverse en pasos discretos de 50ms.
+	-- La detección de target va throttled (cara); el camera pull no, para no ir a
+	-- trompicones en pasos discretos.
 	local now = os.clock()
 	local lastTickAt = self._autoAimLastTickAt or 0
 	local shouldRefreshTarget = (now - lastTickAt) >= AUTO_AIM_TICK_INTERVAL
@@ -711,9 +667,6 @@ function BaseWeapon:onStepped(dt)
 		if targetPart and targetPos and camera and AutoAimSystem.isTargetVisible(camera.CFrame.Position, targetPart) then
 			local cameraRay = camera:ViewportPointToRay(camera.ViewportSize.X * 0.5, camera.ViewportSize.Y * 0.5)
 
-			-- W3: RaycastParams + filter cacheados en self. Antes new() + table
-			-- literal por frame → GC churn constante. Solo mutamos filter[1] que
-			-- cambia con el character (respawn).
 			local raycastParams = self._autoAimRaycastParams
 			if not raycastParams then
 				raycastParams = RaycastParams.new()
@@ -752,14 +705,8 @@ function BaseWeapon:onStepped(dt)
 	if not camera then return end
 	local cameraOrigin = camera.CFrame.Position
 
-	-- Tracking continuo cada frame (no throttled). Usa `dt` real del Heartbeat
-	-- para que el desplazamiento por segundo sea independiente del framerate.
-	-- IMPORTANTE: no aplicamos el pull mientras el jugador arrastra la cámara
-	-- activamente (touchObj activo). Antes el pull sobreescribía yaw/pitch cada
-	-- frame aunque el jugador estuviera moviendo el dedo → la cámara se sentía
-	-- magnetizada/bloqueada al enemigo durante el autoshoot y no se podía apuntar
-	-- a otro lado. El auto-fire (más abajo) sigue funcionando; solo se cede el
-	-- control de encuadre al jugador mientras arrastra.
+	-- No se aplica el pull mientras el jugador arrastra la cámara (touchObj): la
+	-- cámara se sentiría magnetizada al enemigo y no podría apuntar a otro lado.
 	local playerIsDraggingCamera = self.weaponsSystem
 		and self.weaponsSystem.camera
 		and self.weaponsSystem.camera.touchObj ~= nil
@@ -777,9 +724,6 @@ function BaseWeapon:onStepped(dt)
 
 		local deltaPitch = desiredPitch - currentPitch
 
-		-- Interpolación `delta * (strength * dt)` por frame: asintótica (nunca snap),
-		-- y al correr a cada frame en vez de cada 50ms el movimiento se siente
-		-- continuo en lugar de a trompicones.
 		local pullStrength = if self._autoAimIsAimingAtEnemy then (4.5 * dt) else (7.0 * dt)
 
 		self.weaponsSystem.camera.yaw = currentYaw + deltaYaw * pullStrength
@@ -790,14 +734,10 @@ function BaseWeapon:onStepped(dt)
 		)
 	end
 
-	-- Path de auto-fire: corre cada frame (no gated por el refresh de target) para
-	-- igualar la cadencia del disparo manual, que también chequea nextFireTime
-	-- cada frame en BulletWeapon:onStepped. Si lo gateamos a 20Hz, hasta 50ms de
-	-- latencia se suman cuando nextFireTime cae entre ticks → autoshoot percibido
-	-- como más lento. nextFireTime ya bloquea el spam de cadencia.
+	-- El auto-fire corre cada frame, no al ritmo del refresh de target: si no,
+	-- sumaría latencia frente al disparo manual cuando nextFireTime cae entre ticks.
 	if not self._autoAimIsAimingAtEnemy then return end
 
-	-- Shotgun: no auto-disparar si el target esta fuera del rango optimo.
 	if self.instance and self.instance:GetAttribute("Shotgun") == true then
 		local optimalRange = self.instance:GetAttribute("OptimalRange")
 		if type(optimalRange) ~= "number" or optimalRange <= 0 then
@@ -806,15 +746,10 @@ function BaseWeapon:onStepped(dt)
 		if (targetPos - cameraOrigin).Magnitude > optimalRange then return end
 	end
 
-	-- Auto-fire respeta la cadencia real del arma. BulletWeapon.onFired actualiza
-	-- nextFireTime con ShotCooldown / BurstShotCooldown tras cada disparo, igual
-	-- que el flujo manual de fuego (ver BulletWeapon.onActivatedChanged).
 	if os.clock() < (self.nextFireTime or 0) then return end
 
-	-- Determine weapon muzzle origin matching BulletWeapon's self.tipAttach precisely.
-	-- El lookup se cachea: el subárbol del Tool no cambia en runtime, y los
-	-- FindFirstChild recursivos (true) son caros — esto se ejecutaba en cada
-	-- disparo del auto-aim.
+	-- Mismo origen que el self.tipAttach de BulletWeapon. Lookup cacheado: el
+	-- FindFirstChild recursivo es caro y esto corre en cada disparo.
 	local weaponOrigin = cameraOrigin
 	if self.tipAttach then
 		weaponOrigin = self.tipAttach.WorldPosition
@@ -832,7 +767,6 @@ function BaseWeapon:onStepped(dt)
 				weaponOrigin = muzzlePart.Position
 			end
 		else
-			-- Fallback if no muzzle object is found
 			local weaponModel = self.instance:FindFirstChildOfClass("Model")
 			if weaponModel and weaponModel.PrimaryPart then
 				weaponOrigin = weaponModel.PrimaryPart.Position
@@ -848,9 +782,8 @@ function BaseWeapon:onStepped(dt)
 	local direction = (resultPos - weaponOrigin).Unit
 	local charge = self.charge or 0
 
-	-- Hitscan: marcar para que simulateProjectile resuelva el impacto
-	-- instantáneamente en vez de simular un proyectil con viaje. Así el
-	-- auto-fire no falla contra enemigos en movimiento.
+	-- Hitscan: simulateProjectile resuelve el impacto al instante para que el
+	-- auto-fire no falle contra enemigos en movimiento.
 	self._hitscanMode = true
 	self:fire(weaponOrigin, direction, charge)
 	self._hitscanMode = nil
@@ -875,7 +808,6 @@ function BaseWeapon:getAnimationController()
 		if IsServer then
 			humanoid = owner:FindFirstChildOfClass("Humanoid")
 		else
-			-- Client: wait for humanoid with reasonable timeout
 			humanoid = owner:FindFirstChildOfClass("Humanoid")
 			if not humanoid and owner.Parent then
 				humanoid = owner:WaitForChild("Humanoid", 5)
@@ -939,7 +871,6 @@ function BaseWeapon:reload(player, fromNetwork)
 		return false
 	end
 
-	-- Solo la weapon actualmente equipada puede iniciar reload en cliente.
 	if not IsServer then
 		local cw = self.weaponsSystem and self.weaponsSystem.currentWeapon
 		if cw ~= self then
@@ -969,7 +900,6 @@ function BaseWeapon:onReloaded(player, fromNetwork)
 
 	self.canReload = false
 
-	-- Play reload animation and sound
 	if not IsServer then
 		local reloadTrackKey = self:getConfigValue("ReloadAnimation")
 		if reloadTrackKey then
@@ -981,8 +911,8 @@ function BaseWeapon:onReloaded(player, fromNetwork)
 
 		self.curReloadSound = self:tryPlaySound("Reload", nil)
 		if self.curReloadSound then
-			-- :Once — con :Connect cada recarga acumulaba una conexión viva sobre
-			-- los clones del soundPool, que persisten toda la vida del arma.
+				-- :Once: los clones del soundPool viven toda la vida del arma y
+				-- :Connect acumularía una conexión por recarga.
 			self.curReloadSound.Ended:Once(function()
 				self.curReloadSound = nil
 			end)
@@ -992,17 +922,24 @@ function BaseWeapon:onReloaded(player, fromNetwork)
 	local reloadTime = self:getConfigValue("ReloadTime")
 	local startTime = os.clock()
 
-	-- GUI solo si esta weapon es la currentWeapon del LocalPlayer.
 	if not IsServer and self.weaponsSystem.gui
 		and self.player == Players.LocalPlayer
 		and self.weaponsSystem.currentWeapon == self then
 		self.weaponsSystem.gui:playReloadProgressAnimation(reloadTime)
 	end
 
-	-- Token-based: en vez de un Heartbeat ejecutándose 60 veces/seg verificando
-	-- si pasó el tiempo, agendamos el cierre de la recarga con task.delay y
-	-- usamos un token incremental para invalidar callbacks superpuestos
-	-- (cancelReload o un nuevo reload mientras este aún no terminó).
+	-- Háptica solo de la recarga propia: onReloaded también corre en cliente para
+	-- las recargas replicadas de otros. `self.player == nil` cuenta como propia,
+	-- igual que en reload(): el dueño puede no estar resuelto aún por onAncestryChanged.
+	local isLocalReload = not IsServer
+		and (self.player == nil or self.player == Players.LocalPlayer)
+		and self.weaponsSystem.currentWeapon == self
+
+	if isLocalReload then
+		Haptics.play("ReloadStart")
+	end
+
+	-- El token invalida callbacks superpuestos (cancelReload o un reload nuevo).
 	self._reloadToken = (self._reloadToken or 0) + 1
 	local token = self._reloadToken
 
@@ -1013,10 +950,14 @@ function BaseWeapon:onReloaded(player, fromNetwork)
 		self.instance:SetAttribute("CurrentAmmo", self:getConfigValue("AmmoCapacity"))
 		self.reloading = false
 		self.instance:SetAttribute("IsReloading", false)
-		-- L9: restaurar canReload tras una recarga completada normalmente. Antes
-		-- quedaba en false y solo useAmmo/cancelReload lo reponían, dejando una
-		-- weapon a tope (que nunca disparó) incapaz de volver a recargar.
+		-- Reponer canReload: si no, un arma a tope que nunca disparó no podría
+		-- volver a recargar.
 		self.canReload = true
+
+		-- El pulso de cierre: es el que se lee como "cargador dentro".
+		if isLocalReload then
+			Haptics.play("ReloadEnd")
+		end
 	end)
 end
 
@@ -1046,10 +987,8 @@ function BaseWeapon:cancelReload(player, fromNetwork)
 	end
 
 	if self.curReloadSound then
-		-- Stop SIN Destroy: el sonido viene del soundPool round-robin (5 clones
-		-- que viven toda la vida del arma). Destruirlo dejaba un clon muerto en
-		-- pool.items — tras 5 reloads cancelados el arma se quedaba sin sonido
-		-- de recarga para siempre.
+			-- Stop SIN Destroy: el sonido es un clon del soundPool, que vive toda la
+			-- vida del arma; destruirlo dejaría el pool sin sonido de recarga.
 		self.curReloadSound:Stop()
 		self.curReloadSound = nil
 	end

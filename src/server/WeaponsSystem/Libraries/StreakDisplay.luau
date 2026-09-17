@@ -1,13 +1,11 @@
--- StreakDisplay.luau
--- HUD de racha de bajas SIN MORIR (cliente). Cuenta las eliminaciones
--- consecutivas del jugador local y las muestra en WeaponsSystemGui.Streak:
+-- HUD de racha de bajas SIN MORIR (cliente) en WeaponSystemInsets.Streak (con
+-- fallback a WeaponsSystemGui.Streak):
 --   • Streak.Value (texto): DOUBLE, TRIPLE, QUAD!, QUINTUPLE!!, "<N> KILLSTREAK!"
 --   • Streak.Image (ImageLabel): spritesheet animado en bucle mientras es visible.
 --
 -- La racha la dirige el cliente: cada PlayerEliminated dirigido al killer local
--- incrementa el contador (ver NetworkingCallbacks.PlayerEliminated); morir lo
--- resetea (Humanoid.Died / respawn). Es un popup puramente local — no toca el
--- packet PlayerStreakState del marcador (server-authoritative, otro concepto).
+-- incrementa el contador (NetworkingCallbacks.PlayerEliminated); morir la resetea.
+-- Es independiente del packet PlayerStreakState del marcador (server-authoritative).
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -16,7 +14,7 @@ local LocalPlayer = Players.LocalPlayer
 
 local AssetIds = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("AssetIds"))
 
--- ── Spritesheet (parámetros del asset) ────────────────────────────────────────
+-- Parámetros del spritesheet: deben coincidir con el asset.
 local SHEET_IMAGE = AssetIds.Images.StreakSheet
 local FPS = 12
 local COLUMNS = 4
@@ -25,26 +23,21 @@ local FRAME_HEIGHT = 128
 local TOTAL_FRAMES = 12
 local FRAME_TIME = 1 / FPS
 
--- La racha empieza a mostrarse en la 2ª baja (DOUBLE). 1 baja no es racha.
 local MIN_STREAK = 2
 
--- Punch elástico de escala en cada nueva baja (juice, en línea con el killfeed).
 local TI_PUNCH = TweenInfo.new(0.45, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out)
 local PUNCH_SCALE = 1.35
 
--- Fade de entrada (al abrir la racha) y de salida (al morir): el HUD no aparece
--- ni desaparece de golpe.
 local TI_FADE_IN = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local TI_FADE_OUT = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 
 local StreakDisplay = {}
 
 local _count = 0
-local _shown = false -- ¿el HUD está actualmente visible (post fade-in)?
+local _shown = false
 
--- Token monotónico que identifica el bucle de animación activo. Resetear/ocultar
--- lo incrementa, y el bucle en curso sale en su siguiente iteración (su token
--- deja de coincidir). Garantiza que nunca corra más de un bucle a la vez.
+-- Token del bucle de animación activo: resetear/ocultar lo incrementa y el bucle
+-- en curso sale en su siguiente iteración. Nunca corre más de un bucle.
 local _animToken = 0
 local _animating = false
 
@@ -52,19 +45,23 @@ local _animating = false
 -- desvanece, el "ocultar al terminar" diferido se invalida.
 local _fadeToken = 0
 
--- ── Resolución de la GUI ──────────────────────────────────────────────────────
--- Se re-resuelve en cada uso (como PersonalKillFeed): la WeaponsSystemGui se
--- clona/parchea de forma asíncrona y puede no existir todavía al requerir.
+-- Se re-resuelve en cada uso (como PersonalKillFeed): la GUI se clona de forma
+-- asíncrona y puede no existir al requerir. WeaponsSystemGui es el fallback del
+-- asset antiguo.
+local HUD_GUI_NAMES = { "WeaponSystemInsets", "WeaponsSystemGui" }
+
 local function getStreakFrame(): GuiObject?
 	local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
 	if not playerGui then return nil end
-	local gui = playerGui:FindFirstChild("WeaponsSystemGui")
-	if not gui then return nil end
-	-- Primero hijo directo (estructura esperada: WeaponsSystemGui.Streak); si no,
-	-- búsqueda recursiva por si vive anidado bajo ScalingElements u otro contenedor.
-	local streak = gui:FindFirstChild("Streak") or gui:FindFirstChild("Streak", true)
-	if streak and streak:IsA("GuiObject") then
-		return streak
+	for _, guiName in HUD_GUI_NAMES do
+		local gui = playerGui:FindFirstChild(guiName)
+		if gui then
+			-- Hijo directo o anidado (p. ej. bajo ScalingElements).
+			local streak = gui:FindFirstChild("Streak") or gui:FindFirstChild("Streak", true)
+			if streak and streak:IsA("GuiObject") then
+				return streak
+			end
+		end
 	end
 	return nil
 end
@@ -74,12 +71,10 @@ local function getImageLabel(streak: GuiObject): ImageLabel?
 	if img and img:IsA("ImageLabel") then
 		return img
 	end
-	-- Fallback: cualquier ImageLabel descendiente.
 	local found = streak:FindFirstChildWhichIsA("ImageLabel", true)
 	return found
 end
 
--- Texto de la racha según el número de bajas consecutivas.
 local function labelForStreak(n: number): string
 	if n == 2 then
 		return "DOUBLE"
@@ -93,7 +88,6 @@ local function labelForStreak(n: number): string
 	return tostring(n) .. " KILLSTREAK!"
 end
 
--- Escribe el texto en Streak.Value, sea TextLabel/TextButton/TextBox o un *Value.
 local function setStreakText(streak: GuiObject, text: string)
 	local valueObj = streak:FindFirstChild("Value")
 	if not valueObj then return end
@@ -102,7 +96,6 @@ local function setStreakText(streak: GuiObject, text: string)
 	elseif valueObj:IsA("StringValue") then
 		valueObj.Value = text
 	else
-		-- Value es un contenedor: busca un nodo de texto dentro.
 		local textNode = valueObj:FindFirstChildWhichIsA("TextLabel", true)
 			or valueObj:FindFirstChildWhichIsA("TextButton", true)
 		if textNode then
@@ -111,9 +104,8 @@ local function setStreakText(streak: GuiObject, text: string)
 	end
 end
 
--- ── Animación del spritesheet ─────────────────────────────────────────────────
 local function startAnimation(imageLabel: ImageLabel)
-	if _animating then return end -- ya hay un bucle vivo; no reiniciar (evita salto a frame 0)
+	if _animating then return end -- no reiniciar: evitaría el salto a frame 0
 	_animating = true
 	_animToken += 1
 	local myToken = _animToken
@@ -125,7 +117,6 @@ local function startAnimation(imageLabel: ImageLabel)
 	task.spawn(function()
 		local index = 0
 		while _animToken == myToken do
-			-- Si el label desaparece (GUI re-clonada), abandona el bucle.
 			if not imageLabel.Parent then
 				if _animToken == myToken then
 					_animating = false
@@ -142,7 +133,7 @@ local function startAnimation(imageLabel: ImageLabel)
 end
 
 local function stopAnimation()
-	_animToken += 1 -- invalida el bucle en curso
+	_animToken += 1
 	_animating = false
 end
 
@@ -158,9 +149,6 @@ local function punch(streak: GuiObject)
 	TweenService:Create(uiScale, TI_PUNCH, { Scale = 1 }):Play()
 end
 
--- ── Fade in/out de transparencia ──────────────────────────────────────────────
--- Aplica/anima la transparencia según el tipo de elemento (mismo criterio que
--- PersonalKillFeed): texto, imagen, stroke o fondo de frame.
 local function setObjTransparency(obj: Instance, t: number)
 	if obj:IsA("TextLabel") or obj:IsA("TextButton") then
 		obj.TextTransparency = t
@@ -185,7 +173,6 @@ local function tweenObjTransparency(obj: Instance, info: TweenInfo, t: number)
 	end
 end
 
--- Estado opaco inicial + tween a 0 (visible). El frame entra desde transparente.
 local function fadeIn(streak: GuiObject)
 	setObjTransparency(streak, 1)
 	for _, obj in streak:GetDescendants() do
@@ -205,13 +192,10 @@ local function fadeOut(streak: GuiObject)
 	end
 end
 
--- ── API pública ───────────────────────────────────────────────────────────────
-
--- Una eliminación del jugador local. Incrementa la racha y refresca el HUD.
 function StreakDisplay.onKill()
 	_count += 1
 	if _count < MIN_STREAK then
-		return -- 1 baja todavía no es racha visible
+		return
 	end
 
 	local streak = getStreakFrame()
@@ -225,7 +209,6 @@ function StreakDisplay.onKill()
 	end
 
 	if not _shown then
-		-- Primera baja de la racha → fade-in (cancela cualquier fade-out pendiente).
 		_shown = true
 		_fadeToken += 1
 		fadeIn(streak)
@@ -236,7 +219,6 @@ function StreakDisplay.onKill()
 	punch(streak)
 end
 
--- Morir / respawnear: corta la racha y oculta el HUD (con fade-out si estaba visible).
 function StreakDisplay.reset()
 	_count = 0
 
@@ -248,7 +230,6 @@ function StreakDisplay.reset()
 	end
 
 	if not _shown then
-		-- No estaba visible: oculta directo, sin fade.
 		streak.Visible = false
 		stopAnimation()
 		return
@@ -259,8 +240,6 @@ function StreakDisplay.reset()
 	local myToken = _fadeToken
 	fadeOut(streak)
 
-	-- Oculta y detiene el spritesheet al terminar el fade — salvo que una nueva
-	-- racha lo haya retomado entretanto (token cambiado).
 	task.delay(TI_FADE_OUT.Time, function()
 		if myToken ~= _fadeToken then
 			return
@@ -270,17 +249,20 @@ function StreakDisplay.reset()
 	end)
 end
 
--- Estado actual (por si algún otro sistema lo quiere consultar).
 function StreakDisplay.getStreak(): number
 	return _count
 end
 
--- Al cargar: oculta el HUD en cuanto la GUI exista, por si la plantilla viene
--- Visible=true desde Studio. Espera una sola vez (no es un bucle de polling).
+-- Oculta el HUD en cuanto la GUI exista, por si la plantilla viene Visible=true
+-- desde Studio.
 task.spawn(function()
 	local playerGui = LocalPlayer:WaitForChild("PlayerGui", 30)
-	local gui = playerGui and playerGui:WaitForChild("WeaponsSystemGui", 30)
-	local streak = gui and gui:WaitForChild("Streak", 30)
+	-- WeaponsGui parenta WeaponSystemInsets antes que WeaponsSystemGui, así que
+	-- cuando existe la principal ya se puede resolver la de insets sin esperar.
+	local mainGui = playerGui and playerGui:WaitForChild("WeaponsSystemGui", 30)
+	if not mainGui then return end
+	local host = playerGui:FindFirstChild("WeaponSystemInsets") or mainGui
+	local streak = host:WaitForChild("Streak", 30)
 	if streak and streak:IsA("GuiObject") then
 		streak.Visible = false
 	end

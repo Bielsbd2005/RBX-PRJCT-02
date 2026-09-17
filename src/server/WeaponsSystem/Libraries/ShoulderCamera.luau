@@ -35,7 +35,6 @@ local CONTROLLABLE_HUMANOID_STATES = {
 	[Enum.HumanoidStateType.Landed] = true
 }
 
--- Gamepad thumbstick utilities
 local k = 0.5
 local lowerK = 0.9
 local function SCurveTransform(t)
@@ -79,14 +78,9 @@ local function gamepadLinearToCurve(thumbstickPosition)
 		math.clamp(math.sign(thumbstickPosition.Y) * fromSCurveSpace(SCurveTransform(toSCurveSpace(math.abs(thumbstickPosition.Y)))), -1, 1))
 end
 
-
--- Remove back accessories since they frequently block the camera
--- Audit mobile: check síncrono. Antes WaitForChild("Handle",5) +
--- WaitForChild("BodyBackAttachment",5) + WaitForChild("WaistBackAttachment",5)
--- por cada descendant del character (~150 al respawn → ~150 coroutines
--- pendientes con yields hasta 5s en mobile spawn). Los Accessory de Roblox
--- llegan con su Handle ya parented cuando se añaden al character; un check
--- síncrono cubre el caso normal sin yields.
+-- Quita accesorios de espalda (tapan la cámara). Check síncrono sin WaitForChild: los
+-- Accessory llegan al character con su Handle ya parented, y esperar por cada descendant
+-- al respawn dejaba cientos de coroutines en yield.
 local function isBackAccessory(instance)
 	if instance and instance:IsA("Accessory") then
 		local handle = instance:FindFirstChild("Handle")
@@ -135,7 +129,6 @@ local function onCharacterRemoving(character)
 	end
 end
 
--- Set up the Local Player
 if RunService:IsClient() then
 	if LocalPlayer.Character then
 		onCharacterAdded(LocalPlayer.Character)
@@ -143,7 +136,6 @@ if RunService:IsClient() then
 	LocalPlayer.CharacterAdded:Connect(onCharacterAdded)
 	LocalPlayer.CharacterRemoving:Connect(onCharacterRemoving)
 end
-
 
 local ShoulderCamera = {}
 ShoulderCamera.__index = ShoulderCamera
@@ -153,14 +145,11 @@ function ShoulderCamera.new(weaponsSystem)
 	local self = setmetatable({}, ShoulderCamera)
 	self.weaponsSystem = weaponsSystem
 
-	-- Configuration parameters (constants)
 	self.fieldOfView = 70
 	self.minPitch = math.rad(-75) -- min degrees camera can angle down
 	self.maxPitch = math.rad(75) -- max degrees camera can cangle up
-	-- Offset cámara→jugador (X lateral, Y altura, Z distancia). Hombro más marcado
-	-- (estilo TPS moderno): más offset lateral y un pelín más cerca, dejando el
-	-- centro/mira más despejado. El zoom (ADS) tira por el LookVector sin tocar el
-	-- lateral, así que el hombro se mantiene al apuntar.
+	-- Offset cámara→jugador (X lateral, Y altura, Z distancia). El zoom (ADS) tira por el
+	-- LookVector sin tocar el lateral, así que el hombro se mantiene al apuntar.
 	self.normalOffset = Vector3.new(3.0, 2.25, 9.5)
 	self.zoomedOffsetDistance = 6 -- number of studs to zoom in from default offset when zooming
 	self.normalCrosshairScale = 1
@@ -173,17 +162,19 @@ function ShoulderCamera.new(weaponsSystem)
 	self.zoomedMouseRadsPerPixel = Vector2.new(1 / 1200, 1 / 1200)
 	self.touchSensitivity = Vector2.new(1 / 100, 1 / 100)
 	self.zoomedTouchSensitivity = Vector2.new(1 / 200, 1 / 200)
+	-- Zona muerta (px) del dedo que dispara antes de que empiece a girar la
+	-- cámara. Un dedo de cámara puro no la tiene; ver claimTouchForLook.
+	self.fireTouchLookDeadZonePx = 8
 	self.touchDelayTime = 0.25 -- max time for a touch to count as a tap (to shoot the weapon instead of control camera),
 	-- also the amount of time players have to start a second touch after releasing the first time to trigger automatic fire
 	self.recoilDecay = 2 -- higher number means faster recoil decay rate
 	self.rotateCharacterWithCamera = true
 	self.gamepadSensitivityModifier = Vector2.new(0.85, 0.65)
-	-- Walk speeds
 	self.zoomWalkSpeed = 10
 	self.normalWalkSpeed = 22
 	self.sprintingWalkSpeed = 32
-	self.sprintFOV = 82 -- Field of view when sprinting
-	self.sprintCrosshairScale = 1.5 -- Crosshair scale when sprinting
+	self.sprintFOV = 82
+	self.sprintCrosshairScale = 1.5
 	self.killFOVKick = 11
 	self.headshotFOVKick = 14
 	self.fovKickDecay = 6
@@ -198,7 +189,6 @@ function ShoulderCamera.new(weaponsSystem)
 	self.maxShakeYaw = math.rad(0.8)
 	self.maxShakeRoll = math.rad(1.6)
 
-	-- Current state
 	self.enabled = false
 	self.yaw = 0
 	self.pitch = 0
@@ -216,7 +206,6 @@ function ShoulderCamera.new(weaponsSystem)
 	self.sprintEnabled = false -- true means player will move faster while doing sprint inputs
 	self.slowZoomWalkEnabled = false -- true means player will move slower while doing zoom inputs
 	self.desiredFieldOfView = self.fieldOfView
-	-- Zoom variables
 	self.zoomedFromInput = false -- true if player has performed input to zoom
 	self.forcedZoomed = false -- ignores zoomedFromInput and canZoom
 	self.zoomState = false -- true if player is currently zoomed in
@@ -225,7 +214,6 @@ function ShoulderCamera.new(weaponsSystem)
 	self.hideToolWhileZoomed = false
 	self.currentZoomFactor = self.defaultZoomFactor
 	self.zoomedFOV = self.fieldOfView
-	-- Gamepad variables
 	self.gamepadPan = Vector2.new(0, 0) -- essentially the amount the gamepad has moved from resting position
 	self.movementPan = Vector2.new(0, 0) -- this is for movement (gamepadPan is for camera)
 	self.lastThumbstickPos = Vector2.new(0, 0)
@@ -233,7 +221,6 @@ function ShoulderCamera.new(weaponsSystem)
 	self.currentGamepadSpeed = 0
 	self.lastGamepadVelocity = Vector2.new(0, 0)
 
-	-- Occlusion
 	self.lastOcclusionDistance = 0
 	self.lastOcclusionReachedTime = 0 -- marks the last time camera was at the true occlusion distance
 	self.defaultTimeUntilZoomOut = 0
@@ -253,7 +240,6 @@ function ShoulderCamera.new(weaponsSystem)
 	self.timeUntilRevertSideCorrection = self.defaultTimeUntilRevertSideCorrection -- time after lastSideCorrectionReachedTime that camera will revert the correction
 	self.isRevertingSideCorrection = false
 
-	-- Datamodel references
 	self.eventConnections = {}
 	self.raycastIgnoreList = {}
 	self.currentCamera = nil
@@ -261,18 +247,12 @@ function ShoulderCamera.new(weaponsSystem)
 	self.currentHumanoid = nil
 	self.currentRootPart = nil
 
-	-- Transparencias del personaje: dirty flag — handlePartTransparencies se
-	-- llama en cada renderstep, pero el resultado solo cambia con zoom,
-	-- hasScope, hideToolWhileZoomed, character, o cuando el character gana/pierde
-	-- hijos (Tool/Accoutrement). Saltamos el O(N·M) cuando no hay nada que hacer.
+	-- Dirty flag: handlePartTransparencies corre cada renderstep pero el resultado solo
+	-- cambia con zoom, hasScope, hideToolWhileZoomed, character o hijos del character.
 	self._transparencyDirty = true
 	self._transparencyChildConns = {} :: { RBXScriptConnection }
-	-- Audit mobile: cache de arrays { BasePart } por Accoutrement/Tool. Antes
-	-- handlePartTransparencies iteraba GetDescendants() de cada Accoutrement/
-	-- Tool en CADA dirty-cycle (zoom toggle, hasScope, child added). Con 6
-	-- hats + Tool en mobile con tap-aim, eso son 7 GetDescendants() por tap.
-	-- El cache se invalida vía DescendantAdded/Removed por instancia, y se
-	-- libera cuando el char cambia (junto con _transparencyChildConns).
+	-- Cache de { BasePart } por Accoutrement/Tool para no llamar GetDescendants() en cada
+	-- dirty-cycle; se invalida con DescendantAdded/Removing y se libera al cambiar de char.
 	self._partsCacheByInstance = {} :: { [Instance]: { BasePart } }
 	self._partsCacheConns = {} :: { [Instance]: { RBXScriptConnection } }
 	self.controlModule = nil -- used to get player's touch input for moving character
@@ -280,7 +260,6 @@ function ShoulderCamera.new(weaponsSystem)
 	self.shakeSeed = self.random:NextInteger(1, 10000)
 	self.isSprinting = false
 
-	-- Sway
 	self.currentSway = CFrame.new()
 	self.lastCameraCFrame = CFrame.new()
 
@@ -308,9 +287,8 @@ function ShoulderCamera.new(weaponsSystem)
 	return self
 end
 
--- L8: setup dependiente de la cámara, extraído de setEnabled para poder
--- ejecutarlo también desde onCurrentCameraChanged cuando la cámara aparece
--- tarde. Idempotente (guard _cameraStateReady) para no duplicar el occlusion
+-- Setup dependiente de la cámara; también lo llama onCurrentCameraChanged cuando la
+-- cámara aparece tarde. Idempotente (_cameraStateReady) para no duplicar el occlusion
 -- object ni reaplicar el yaw/pitch inicial en cada cambio de cámara.
 function ShoulderCamera:_setupCameraState()
 	if not self.enabled then
@@ -385,14 +363,11 @@ function ShoulderCamera:setEnabled(enabled)
 		self:onCurrentCharacterChanged(LocalPlayer.Character)
 		self:onCurrentCameraChanged(workspace.CurrentCamera)
 
-		-- L8: el setup dependiente de la cámara (CameraType, aimRayCallback,
-		-- occlusion object) se hace en _setupCameraState. Si la cámara aún es nil
-		-- aquí, onCurrentCameraChanged lo completará cuando aparezca, en vez de
-		-- quedar a medias (antes el early-return dejaba aimRayCallback sin setear
-		-- y las balas usaban el ray del arma toda la sesión).
+		-- Si la cámara aún es nil, onCurrentCameraChanged completa el setup al aparecer (sin
+		-- él aimRayCallback quedaría sin setear y las balas usarían el ray del arma).
 		self:_setupCameraState()
 	else
-		-- L8: permitir que un futuro setEnabled(true) re-ejecute el setup de cámara.
+		-- Permite que un futuro setEnabled(true) re-ejecute el setup de cámara.
 		self._cameraStateReady = false
 
 		RunService:UnbindFromRenderStep(CAMERA_RENDERSTEP_NAME)
@@ -404,6 +379,12 @@ function ShoulderCamera:setEnabled(enabled)
 		end
 
 		if self.currentCamera then
+			-- El spring del FOV vive en el loop GLOBAL de SpringService, no en este render step:
+			-- despierto (fovKick, sprint, zoom) seguiría arrastrando el FOV del lobby hacia el de
+			-- gameplay. Pararlo aquí; onRenderStep lo retargetea al reactivarse.
+			if ShoulderCamera.SpringService then
+				ShoulderCamera.SpringService:Stop(self.currentCamera, "FieldOfView")
+			end
 			self.currentCamera.CameraType = Enum.CameraType.Custom
 			if self.currentHumanoid then
 				self.currentCamera.CameraSubject = self.currentHumanoid
@@ -420,7 +401,6 @@ function ShoulderCamera:setEnabled(enabled)
 			self.occlusionTweenObject:Destroy()
 			self.occlusionTweenObject = nil
 		end
-
 
 		self:updateZoomState()
 
@@ -544,7 +524,6 @@ function ShoulderCamera:onRenderStep(dt)
 		return
 	end
 
-	-- Hide mouse and lock to center if applicable
 	if self.mouseLocked and not GuiService:GetEmotesMenuOpen() then
 		UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
 		UserInputService.MouseIconEnabled = false
@@ -553,15 +532,10 @@ function ShoulderCamera:onRenderStep(dt)
 		UserInputService.MouseIconEnabled = true
 	end
 
-	-- Handle gamepad input
 	self:processGamepadInput(dt)
 
-	-- Smoothly zoom to desired values
-	-- Target solo cuando el valor no está ya asentado en el goal: antes corría
-	-- incondicional a 60Hz, alocando tabla goal + LinearValue (+ spring nuevo,
-	-- porque el spring dormido se recreaba) por frame y por propiedad incluso
-	-- con la cámara en reposo. Epsilon en vez de igualdad exacta porque los
-	-- springs duermen a <1e-4 del goal sin snap final.
+	-- Target solo si el valor no está asentado: Target aloca (goal + LinearValue, y un
+	-- spring nuevo si dormía). Epsilon porque los springs duermen a <1e-4 del goal sin snap.
 	local zoomGoal = self.zoomState and 1 or 0
 	local springDamping, springFrequency = 0.9, 5
 	if self.hasScope then
@@ -574,7 +548,6 @@ function ShoulderCamera:onRenderStep(dt)
 		ShoulderCamera.SpringService:Target(self.currentCamera, springDamping, springFrequency, { FieldOfView = self.desiredFieldOfView })
 	end
 
-	-- Handle walk speed changes
 	if self.sprintEnabled or self.slowZoomWalkEnabled then
 		self.desiredWalkSpeed = self.normalWalkSpeed
 		if self.sprintEnabled and (self.sprintingInputActivated or self:sprintFromTouchInput() or self:sprintFromGamepadInput()) and not self.zoomState then
@@ -588,9 +561,8 @@ function ShoulderCamera:onRenderStep(dt)
 			self.isSprinting = false
 		end
 
-		-- Mismo gating por epsilon que los springs de zoom/FOV. Si algo externo
-		-- toca WalkSpeed, la diferencia re-dispara el Target (mismo re-assert
-		-- que antes), pero en reposo no se aloca nada.
+		-- Mismo gating por epsilon; si algo externo toca WalkSpeed, la diferencia re-dispara
+		-- el Target.
 		if math.abs(self.currentHumanoid.WalkSpeed - self.desiredWalkSpeed) > 1e-3 then
 			ShoulderCamera.SpringService:Target(self.currentHumanoid, 0.95, 4, { WalkSpeed = self.desiredWalkSpeed })
 		end
@@ -603,7 +575,6 @@ function ShoulderCamera:onRenderStep(dt)
 	local shakeCFrame, fovKick = self:updateCameraShake(dt)
 	self.currentOffset = dynamicOffset
 
-	-- Update desiredFieldOfView based on sprinting
 	if self.isSprinting then
 		self.desiredFieldOfView = self.sprintFOV + fovKick
 	elseif self.zoomState then
@@ -612,7 +583,6 @@ function ShoulderCamera:onRenderStep(dt)
 		self.desiredFieldOfView = self.fieldOfView + fovKick
 	end
 
-	-- Update crosshair scale based on sprinting
 	if self.weaponsSystem and self.weaponsSystem.gui then
 		local targetScale = self.normalCrosshairScale
 		if self.zoomState then
@@ -623,7 +593,6 @@ function ShoulderCamera:onRenderStep(dt)
 		self.weaponsSystem.gui:setCrosshairScaleTarget(targetScale)
 	end
 
-	-- Initialize variables used for side correction, occlusion, and calculating camera focus/rotation
 	local rootPartPos = self.currentRootPart.CFrame.Position
 	local rootPartUnrotatedCFrame = CFrame.new(rootPartPos)
 	local yawRotation = CFrame.Angles(0, self.yaw, 0)
@@ -676,12 +645,10 @@ function ShoulderCamera:onRenderStep(dt)
 		end
 	end
 
-	-- Update cameraFocus to reflect side correction
 	cameraYawRotationAndXOffset = cameraYawRotationAndXOffset + (-vecToFocus.Unit * self.lastSideCorrectionMagnitude)
 	cameraFocus = rootPartUnrotatedCFrame * cameraYawRotationAndXOffset
 	self.currentCamera.Focus = cameraFocus
 
-	-- Calculate and apply CFrame for camera
 	local cameraCFrameInSubjectSpace =
 		cameraYawRotationAndXOffset *
 		pitchRotation * 	-- rotate around the X axis (look up/down)
@@ -689,7 +656,6 @@ function ShoulderCamera:onRenderStep(dt)
 		zOffset				-- move camera back
 	self.currentCFrame = rootPartUnrotatedCFrame * cameraCFrameInSubjectSpace
 
-	-- Move camera forward if zoomed in
 	if self.zoomAlpha > 0 then
 		local trueZoomedOffset = math.max(self.zoomedOffsetDistance - self.lastOcclusionDistance, 0) -- don't zoom too far in if already occluded
 		self.currentCFrame = self.currentCFrame:lerp(self.currentCFrame + trueZoomedOffset * self.currentCFrame.LookVector.Unit, self.zoomAlpha)
@@ -698,13 +664,8 @@ function ShoulderCamera:onRenderStep(dt)
 
 	self.currentCamera.CFrame = self.currentCFrame
 
-	-- Handle occlusion
-	-- W10: GetLargestCutoffDistance es caro (raycast contra ignore list). Cuando
-	-- yaw, pitch y rootPartPos no cambian frame-a-frame (jugador idle, mirando
-	-- fijo) reusamos el último resultado. Cualquier movimiento de cámara o
-	-- personaje fuerza recompute, así que rotar/andar mantiene la respuesta
-	-- completa. Geometría dinámica con jugador inmóvil tiene 1-frame de delay
-	-- hasta el primer micro-movimiento — aceptable visualmente.
+	-- GetLargestCutoffDistance es caro: si yaw, pitch y rootPartPos no cambian se reusa el
+	-- último resultado. Con jugador inmóvil, la geometría dinámica tiene 1 frame de retraso.
 	local occlusionDistance
 	local lastYaw = self._occlusionLastYaw
 	local lastPitch = self._occlusionLastPitch
@@ -762,7 +723,6 @@ function ShoulderCamera:onRenderStep(dt)
 		end
 	end
 
-	-- Update occlusion amount if timeout time has passed
 	if currentTime >= self.lastOcclusionReachedTime + self.timeUntilZoomOut and not self.zoomState then
 		if self.curOcclusionTween == nil then
 			self.occlusionTweenObject.Value = self.lastOcclusionDistance
@@ -774,18 +734,15 @@ function ShoulderCamera:onRenderStep(dt)
 		end
 	end
 
-	-- Apply occlusion to camera CFrame
 	local currentOffsetDir = self.currentCFrame.LookVector.Unit
 	self.currentCFrame = self.currentCFrame + (currentOffsetDir * self.lastOcclusionDistance)
 	self.aimCFrame = self.currentCFrame
 	self.currentCamera.CFrame = self.currentCFrame
 
-	-- Apply recoil decay
 	self.currentRecoil = self.currentRecoil - (self.currentRecoil * self.recoilDecay * dt)
 
 	self.lastCameraCFrame = self.currentCamera.CFrame
 
-	-- Update camera CFrame with new effects
 	self.currentCamera.CFrame = self.currentCFrame * dynamicRotation * lookLagCFrame * shakeCFrame
 	if self:isHumanoidControllable() and self.rotateCharacterWithCamera then
 		self.currentHumanoid.AutoRotate = false
@@ -859,15 +816,12 @@ end
 
 function ShoulderCamera:onCurrentCharacterChanged(character)
 	self.currentCharacter = character
-	-- Resetear listeners de transparencia para el character nuevo
 	for _, conn in self._transparencyChildConns do
 		conn:Disconnect()
 	end
 	table.clear(self._transparencyChildConns)
-	-- Vaciar cache de parts por instancia (Accoutrements/Tools del char
-	-- anterior). Las conns por-instancia se desconectan vía AncestryChanged
-	-- al destruirse el char, pero invalidamos defensivamente. Snapshot de
-	-- keys primero para no mutar la tabla durante la iteración.
+	-- Vaciar cache de parts del char anterior (sus conns ya caen por AncestryChanged, pero se
+	-- invalida defensivamente). Snapshot de keys para no mutar la tabla al iterar.
 	local toInvalidate: { Instance } = {}
 	for instance in self._partsCacheByInstance do
 		table.insert(toInvalidate, instance)
@@ -876,10 +830,8 @@ function ShoulderCamera:onCurrentCharacterChanged(character)
 		self:_invalidatePartsCache(instance)
 	end
 	self._transparencyDirty = true
-	-- Audit mobile: cleanup defensivo SIEMPRE de listeners ligados al char
-	-- anterior. En respawn rápido CharacterAdded del nuevo puede llegar
-	-- antes que CharacterRemoving del anterior, dejando humanoidDied y los
-	-- ChildAdded/Removed apuntando a un Humanoid/char destruido.
+	-- Cleanup defensivo SIEMPRE: en respawn rápido CharacterAdded del nuevo puede llegar
+	-- antes que CharacterRemoving del anterior, dejando listeners sobre un char destruido.
 	if self.eventConnections.humanoidDied then
 		self.eventConnections.humanoidDied:Disconnect()
 		self.eventConnections.humanoidDied = nil
@@ -920,9 +872,8 @@ function ShoulderCamera:onCurrentCharacterChanged(character)
 		self.lastVerticalVelocity = 0
 		self.wasGrounded = true
 		self.landingAlpha = 0
-		-- Orientar la cámara hacia la dirección del spawn al (re)aparecer: rotar la
-		-- part de spawn en el mapa controla hacia dónde mira el jugador, igual que
-		-- los bots. Antes se heredaba el yaw de la vida anterior (ignoraba el spawn).
+		-- Orientar la cámara hacia el spawn al (re)aparecer: rotar la part de spawn en el mapa
+		-- controla hacia dónde mira el jugador, igual que los bots.
 		local spawnYaw = self:_yawFromSpawn(character)
 		if spawnYaw then
 			self.yaw = spawnYaw
@@ -971,8 +922,6 @@ function ShoulderCamera:onCurrentCharacterChanged(character)
 			end
 		end
 	else
-		-- humanoidDied/characterChildAdded/characterChildRemoved ya se
-		-- desconectaron en el cleanup defensivo al inicio de esta función.
 		self.currentTool = nil
 		self.currentHumanoid = nil
 		self.currentRootPart = nil
@@ -1016,8 +965,7 @@ function ShoulderCamera:onCurrentCameraChanged(camera)
 			end
 		end)
 
-		-- L8: si setEnabled(true) corrió con la cámara aún nil, completar aquí el
-		-- setup dependiente de la cámara (CameraType/aimRayCallback/occlusion).
+		-- Si setEnabled(true) corrió con la cámara aún nil, completar aquí el setup.
 		self:_setupCameraState()
 	end
 end
@@ -1046,16 +994,13 @@ end
 
 local PENETRATE_MAX_TRIES = 8
 
--- RaycastParams cacheado a nivel módulo. Antes FindPartOnRayWithIgnoreList
--- (deprecated) por frame del RenderStep para occlusion del shoulder cam;
--- workspace:Raycast es la ruta optimizada. Mutamos FilterDescendantsInstances
--- in-place (reasignación obligatoria por Roblox; mutar la tabla no se propaga).
+-- RaycastParams cacheado a nivel módulo (corre por frame). FilterDescendantsInstances
+-- hay que reasignarlo: mutar la tabla no se propaga.
 local _shoulderCastParams: RaycastParams? = nil
 
 function ShoulderCamera:penetrateCast(ray, ignoreList)
-	-- W7: mutar ignoreList in-place y restaurar al final. Antes table.clone()
-	-- por frame en RenderStep alocaba un array completo + GC churn. No hay
-	-- reentrancia (penetrateCast no yield) → mutación temporal es segura.
+	-- ignoreList se muta in-place y se restaura al final para no clonarlo por frame; seguro
+	-- porque penetrateCast no yielda.
 	local params = _shoulderCastParams
 	if not params then
 		params = RaycastParams.new()
@@ -1136,8 +1081,7 @@ function ShoulderCamera:_getCachedBaseParts(instance: Instance): { BasePart }
 	end
 	self._partsCacheByInstance[instance] = parts
 
-	-- Invalidate on DescendantAdded/Removed: si llegan/salen parts del
-	-- accoutrement/tool, recomputar en el próximo dirty cycle.
+	-- Invalidar si entran/salen parts: se recomputa en el próximo dirty cycle.
 	local conns = {} :: { RBXScriptConnection }
 	local function invalidate()
 		self._partsCacheByInstance[instance] = nil
@@ -1169,11 +1113,8 @@ function ShoulderCamera:handlePartTransparencies()
 			child.LocalTransparencyModifier = hidden and 1 or 0
 		elseif child:IsA("Accoutrement") then
 			local isMatchLoadoutHat = child:GetAttribute(MATCH_LOADOUT_HAT_ATTRIBUTE) == true
-			-- Detección de hidden vía attachments: el dict accoutrementsLookup
-			-- está vacío en la práctica pero conservamos la rama para no
-			-- cambiar comportamiento si algún flujo futuro lo poblara. El
-			-- check de Attachment es O(descendants) — para hacerlo cheap,
-			-- itera solo cuando el dict tiene alguna entrada.
+			-- accoutrementsLookup está vacío en la práctica: el check O(descendants) de
+			-- attachments solo corre si algún flujo lo puebla.
 			if next(accoutrementsLookup) then
 				for _, desc in child:GetDescendants() do
 					if desc:IsA("Attachment") and accoutrementsLookup[desc.Name] then
@@ -1231,9 +1172,6 @@ end
 function ShoulderCamera:onSprintAction(actionName, inputState, inputObj)
 	self.sprintingInputActivated = inputState == Enum.UserInputState.Begin
 end
-
-
--- Zoom related functions
 
 function ShoulderCamera:isZoomed()
 	return self.zoomState
@@ -1325,9 +1263,6 @@ function ShoulderCamera:onZoomAction(actionName, inputState, inputObj)
 	return Enum.ContextActionResult.Sink
 end
 
-
--- Recoil related functions
-
 function ShoulderCamera:setCurrentRecoilIntensity(x, y)
 	self.currentRecoil = Vector2.new(x, y)
 end
@@ -1349,9 +1284,6 @@ function ShoulderCamera:playKillCameraShake(wasHeadshot)
 		self.fovKick = math.max(self.fovKick, self.killFOVKick)
 	end
 end
-
-
--- Input related functions
 
 function ShoulderCamera:applyInput(yaw, pitch)
 	local yInvertValue = UserGameSettings:GetCameraYInvertValue()
@@ -1432,46 +1364,92 @@ function ShoulderCamera:onInputBegan(inputObj, wasProcessed)
 		self.movementPan = Vector2.new(inputObj.Position.X, inputObj.Position.Y)
 	elseif inputObj.UserInputType == Enum.UserInputType.Touch then
 		local touchStartPos = Vector2.new(inputObj.Position.X, inputObj.Position.Y)
-		-- Solo reclamamos un touch para la cámara si NO fue consumido por la GUI
-		-- (los botones Fire/Aim/Reload/Jump llegan con wasProcessed=true) y no cae
-		-- sobre el thumbstick de movimiento. Antes el guard de abajo forzaba
-		-- wasProcessed=false en CUALQUIER InputBegan nuevo, así que tocar el botón
-		-- de disparo secuestraba el touchObj de la cámara (o dejaba el dedo de
-		-- arrastre desconectado) → la cámara se bloqueaba al disparar en táctil.
+		-- Solo se reclama el touch para la cámara si la GUI NO lo consumió (Fire/Aim/Reload/Jump
+		-- llegan con wasProcessed=true) y no cae sobre el thumbstick: si no, tocar un botón
+		-- secuestraría el dedo de cámara. Excepción: MobileControls cede el dedo del botón de
+		-- disparo vía claimTouchForLook, para apuntar y disparar con un solo pulgar.
 		if not wasProcessed and self:isTouchPositionForCamera(touchStartPos) then
-			-- Si ya había un dedo controlando la cámara (un segundo dedo de cámara
-			-- legítimo), soltamos el anterior y dejamos que este lo reemplace. Sin
-			-- esto se filtraban dos listeners aplicando input a la vez (cámara
-			-- errática con dos dedos) y la conexión vieja quedaba colgada. Clave:
-			-- esto solo ocurre para un touch de cámara real — un toque en un botón
-			-- ya no mata el dedo de cámara activo.
-			if self.touchObj and self.eventConnections.touchChanged then
-				self.eventConnections.touchChanged:Disconnect()
-				self.eventConnections.touchChanged = nil
-			end
-			self.touchObj = inputObj
-			self.touchStartTime = os.clock()
-			self.eventConnections.touchChanged = inputObj.Changed:Connect(function(prop)
-				if prop == "Position" then
-					local touchTime = os.clock() - self.touchStartTime
-
-					local newTouchPos = Vector2.new(inputObj.Position.X, inputObj.Position.Y)
-					local delta = (newTouchPos - touchStartPos) * self.currentTouchSensitivity
-					local yawInput = -delta.X
-					local pitchInput = -delta.Y
-					if self.touchPanAccumulator.Magnitude > 0.01 and touchTime > self.touchDelayTime then
-						if not self.applyingTouchPan then
-							self.applyingTouchPan = true
-							self.touchPanAccumulator = Vector2.new(0, 0)
-						end
-					end
-					self:applyInput(yawInput, pitchInput)
-					self.touchPanAccumulator = self.touchPanAccumulator + Vector2.new(yawInput, pitchInput)
-					touchStartPos = newTouchPos
-				end
-			end)
+			self:_beginTouchLook(inputObj, 0)
 		end
 	end
+end
+
+--[[
+	_beginTouchLook(inputObj, deadZonePx)
+	Engancha un dedo como control de cámara hasta que se levanta (onInputEnded limpia
+	por `self.touchObj == inputObj`).
+
+	deadZonePx: radio (px) a recorrer antes de girar. 0 para un dedo de cámara puro; el
+	del botón de disparo lleva uno pequeño para que el temblor de mantener pulsado no
+	haga bailar la mira.
+]]
+function ShoulderCamera:_beginTouchLook(inputObj, deadZonePx: number)
+	-- Un segundo dedo de cámara legítimo reemplaza al anterior: sin soltarlo, dos listeners
+	-- aplicarían input a la vez. Un toque en un botón no llega aquí.
+	if self.touchObj and self.eventConnections.touchChanged then
+		self.eventConnections.touchChanged:Disconnect()
+		self.eventConnections.touchChanged = nil
+	end
+
+	local touchStartPos = Vector2.new(inputObj.Position.X, inputObj.Position.Y)
+	local pastDeadZone = deadZonePx <= 0
+
+	self.touchObj = inputObj
+	self.touchStartTime = os.clock()
+	self.eventConnections.touchChanged = inputObj.Changed:Connect(function(prop)
+		if prop ~= "Position" then
+			return
+		end
+
+		local newTouchPos = Vector2.new(inputObj.Position.X, inputObj.Position.Y)
+
+		-- Dentro de la zona muerta no giramos ni movemos el origen: así el
+		-- primer giro real parte del punto donde el dedo cruzó el radio, sin
+		-- salto acumulado.
+		if not pastDeadZone then
+			if (newTouchPos - touchStartPos).Magnitude < deadZonePx then
+				return
+			end
+			pastDeadZone = true
+			touchStartPos = newTouchPos
+			return
+		end
+
+		local touchTime = os.clock() - self.touchStartTime
+		local delta = (newTouchPos - touchStartPos) * self.currentTouchSensitivity
+		local yawInput = -delta.X
+		local pitchInput = -delta.Y
+		if self.touchPanAccumulator.Magnitude > 0.01 and touchTime > self.touchDelayTime then
+			if not self.applyingTouchPan then
+				self.applyingTouchPan = true
+				self.touchPanAccumulator = Vector2.new(0, 0)
+			end
+		end
+		self:applyInput(yawInput, pitchInput)
+		self.touchPanAccumulator = self.touchPanAccumulator + Vector2.new(yawInput, pitchInput)
+		touchStartPos = newTouchPos
+	end)
+end
+
+--[[
+	claimTouchForLook(inputObj) → boolean
+	Para MobileControls: el dedo que pulsa el botón de disparo también gira la cámara
+	mientras siga apoyado. Devuelve false si no lo reclamó; no roba el control si otro
+	dedo ya lleva la cámara.
+]]
+function ShoulderCamera:claimTouchForLook(inputObj): boolean
+	if not self.enabled then
+		return false
+	end
+	if inputObj.UserInputType ~= Enum.UserInputType.Touch then
+		return false
+	end
+	if self.touchObj then
+		return false
+	end
+
+	self:_beginTouchLook(inputObj, self.fireTouchLookDeadZonePx)
+	return true
 end
 
 function ShoulderCamera:onInputChanged(inputObj, wasProcessed)

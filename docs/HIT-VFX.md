@@ -5,8 +5,8 @@ solapan:
 
 | Efecto | Dueño | Disparado desde |
 | --- | --- | --- |
-| **Partículas** (Body / Headshot) | carpeta `ReplicatedStorage.HitVFX` (Studio) | `HitVFX.play` en `BulletWeapon` |
-| **Sonido** hit/headshot | `SoundService.Audio.Gameplay.HitSound`/`Headshot` | `DamageBillboardHandler` (2D, pitch progresivo) |
+| **Partículas** (Body / Headshot) | carpeta `ReplicatedStorage.Templates.HitVFX` (Studio) | `HitVFX.play` en `BulletWeapon` |
+| **Sonido** hit/headshot | `SoundService.Audio.Gameplay.Hit`/`Headshot` | `DamageBillboardHandler` (2D, pitch progresivo) |
 | **Números** de daño | `DamageBillboardHandler` | — |
 
 Sólo **dos categorías de partícula**: `Body` y `Headshot`. Los impactos contra el
@@ -16,9 +16,10 @@ mundo (suelo, metal, ...) no producen partículas.
 
 ```
 ReplicatedStorage/
-  HitVFX/                 (Folder)
-    Body                  (Attachment o Part)  ← sólo ParticleEmitters
-    Headshot              (Attachment o Part)  ← sólo ParticleEmitters
+  Templates/              (Folder)
+    HitVFX/               (Folder)
+      Body                (Attachment o Part)  ← sólo ParticleEmitters
+      Headshot            (Attachment o Part)  ← sólo ParticleEmitters
 ```
 
 - La carpeta y los hijos se llaman EXACTO `HitVFX` / `Body` / `Headshot`
@@ -45,9 +46,10 @@ en pool por categoría → cero `Instance.new` en régimen.
 ## Sonido — vive en SoundService
 
 El sonido de hit/headshot **no** se toca en HitVFX. Está en
-`SoundService.Audio.Gameplay.HitSound` / `Headshot` y lo reproduce
+`SoundService.Audio.Gameplay.Hit` / `Headshot` y lo reproduce
 `DamageBillboardHandler` (pooled ×5, con **pitch progresivo de combo** y
-distance-aware). Para cambiarlo: sustituye esos dos `Sound` en Studio.
+distance-aware). Para cambiarlo: sustituye esos dos `Sound` en Studio. La
+estructura completa de audio está en [AUDIO.md](AUDIO.md).
 
 ## Archivos
 

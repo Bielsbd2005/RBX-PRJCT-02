@@ -1,6 +1,4 @@
 --!strict
--- MobileControls.luau (Client/Server Library)
--- Gestiona los controles táctiles para dispositivos móviles (Aim, Fire, Reload, Jump).
 
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
@@ -47,10 +45,22 @@ function MobileControls.new(weaponsGui: any)
 	return self
 end
 
-function MobileControls:setup(gui: ScreenGui)
+-- `insetsGui` es la ScreenGui WeaponSystemInsets (safe-area). Si existe, los
+-- frames táctiles se buscan ahí primero; si no, en `gui`.
+function MobileControls:setup(gui: ScreenGui, insetsGui: ScreenGui?)
 	self.gui = gui
-	self.smallTouchscreen = gui:WaitForChild("SmallTouchscreen") :: GuiObject
-	self.largeTouchscreen = gui:WaitForChild("LargeTouchscreen") :: GuiObject
+	self.insetsGui = insetsGui
+
+	local function findTouchFrame(name: string): GuiObject
+		local fromInsets = insetsGui and insetsGui:FindFirstChild(name)
+		if fromInsets and fromInsets:IsA("GuiObject") then
+			return fromInsets
+		end
+		return gui:WaitForChild(name) :: GuiObject
+	end
+
+	self.smallTouchscreen = findTouchFrame("SmallTouchscreen")
+	self.largeTouchscreen = findTouchFrame("LargeTouchscreen")
 
 	self.smallAimButton = self.smallTouchscreen:WaitForChild("AimButton") :: GuiButton
 	self.smallAimButton:SetAttribute("NoClickSound", true)
@@ -176,6 +186,13 @@ function MobileControls:onTouchFireButton(_button: GuiButton?, inputObj: InputOb
 			end
 		end)
 		self:setFireButtonsPressed(true)
+
+		-- El mismo pulgar que dispara gira la cámara. El GuiButton consume el toque
+		-- (wasProcessed=true), así que la cámara no lo vería: se lo cedemos.
+		local camera = self.weaponsGui.weaponsSystem and self.weaponsGui.weaponsSystem.camera
+		if camera and camera.claimTouchForLook then
+			camera:claimTouchForLook(inputObj)
+		end
 	elseif inputState == Enum.UserInputState.End then
 		if inputObj ~= self._activeFireInput then return end
 		self:stopTouchFire()
@@ -244,7 +261,6 @@ function MobileControls:setReloadButtonsPressed(isPressed: boolean)
 	self:_setButtonVisual(self.largeReloadButton, isPressed)
 end
 
--- Fix selene parameter name to match the implementation
 function MobileControls:setJumpButtonsPressed(isPressed: boolean)
 	self._isJumpPressed = isPressed
 	self:_setButtonVisual(self.smallJumpButton, isPressed)

@@ -1,7 +1,4 @@
 --!strict
--- WeaponsGui.luau
--- Compositor principal del sistema de interfaces de armas (cliente).
--- Coordina retícula, barra de accesos rápidos, controles táctiles y viñetas de retroalimentación.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -17,9 +14,13 @@ local ItemsConfig = require(Shared.constants.ItemsConfig)
 local WeaponsSystemFolder = script.Parent.Parent
 local WeaponData = WeaponsSystemFolder:WaitForChild("WeaponData")
 local Libraries = WeaponsSystemFolder:WaitForChild("Libraries")
-local WeaponsSystemGuiTemplate = WeaponsSystemFolder:WaitForChild("Assets"):WaitForChild("WeaponsSystemGui")
+local AssetsFolder = WeaponsSystemFolder:WaitForChild("Assets")
+local WeaponsSystemGuiTemplate = AssetsFolder:WaitForChild("WeaponsSystemGui")
+-- ScreenGui opcional con ScreenInsets = DeviceSafeInsets para lo que debe respetar
+-- el notch (HealthBar, Streak, Small/LargeTouchscreen). Si no existe, esos nodos
+-- se buscan en WeaponsSystemGui.
+local WeaponSystemInsetsTemplate = AssetsFolder:FindFirstChild("WeaponSystemInsets")
 
--- Módulos del sub-sistema GUI
 local GuiFolder = Libraries:WaitForChild("Gui")
 local Crosshair = require(GuiFolder:WaitForChild("Crosshair"))
 local Hotbar = require(GuiFolder:WaitForChild("Hotbar"))
@@ -40,7 +41,6 @@ local RELOAD_PROGRESS_STYLE = {
 	TransOfMissingPart = 0.25,
 }
 
--- Caché pre-construido para las secuencias de reload
 local _reloadSeqCache: {
 	colorSeq: ColorSequence?,
 	transSeq: NumberSequence?,
@@ -96,11 +96,9 @@ function WeaponsGui.new(weaponsSystem: any)
 	self.weaponsSystem = weaponsSystem
 	self.libraries = Libraries
 	self.connections = {}
-	-- L7: las conexiones de "ciclo de vida" (AbsoluteSize / CurrentCamera /
-	-- GuiEnabled) se crean una sola vez en el constructor. Mantenerlas en una
-	-- tabla aparte para que setEnabled(false) NO las desconecte — si vivieran en
-	-- self.connections, un ciclo disable→enable las perdería y la GUI dejaría de
-	-- reescalarse ante cambios de resolución/cámara.
+	-- Conexiones de ciclo de vida (AbsoluteSize / CurrentCamera / GuiEnabled)
+	-- aparte de self.connections: setEnabled(false) las desconectaría y la GUI
+	-- dejaría de reescalarse.
 	self.lifetimeConnections = {}
 	self.enabled = false
 	self.isZoomed = false
@@ -112,37 +110,39 @@ function WeaponsGui.new(weaponsSystem: any)
 	self.scaleWeight = 0.75
 	self.originalScaleAmounts = {}
 
-	-- Estados internos
 	self._lastWeaponInstance = nil
 	self._toolConns = {}
 	self._hotbarDirty = true
 
-	-- Inicializar interfaz clonando el template
 	self.gui = WeaponsSystemGuiTemplate:Clone()
 	self.gui.Enabled = false
 
-	-- Submódulos desacoplados
+	-- Su Enabled va siempre espejado con self.gui (_setGuisEnabled y el watcher
+	-- guiEnabled): el resto del sistema trata a WeaponsSystemGui como "la" GUI.
+	self.insetsGui = if WeaponSystemInsetsTemplate then WeaponSystemInsetsTemplate:Clone() else nil
+	if self.insetsGui then
+		self.insetsGui.Enabled = false
+	end
+
 	self.crosshair = Crosshair.new(self)
 	self.hotbar = Hotbar.new(self)
 	self.mobileControls = MobileControls.new(self)
 	self.hitFeedback = HitFeedback.new(self)
-	self.scope = Scope.new(self)
+	self.scope = Scope.new()
 	self.directionalIndicators = DirectionalIndicators.new(self)
 
 	coroutine.wrap(function()
 		self.scalingElementsFolder = self.gui:WaitForChild("ScalingElements")
 
-		-- Configurar submódulos
 		self.crosshair:setup(self.scalingElementsFolder)
-		-- `Hotbar` es el layout único actual; los `_PC`/`_TouchScreen` son los dos
-		-- layouts por dispositivo del asset anterior. setupLayout ignora los que no
-		-- existan, así que registrar los tres vale para cualquiera de los dos assets.
+		-- Hotbar_PC/_TouchScreen son del asset antiguo; setupLayout ignora los que
+		-- no existan.
 		self.hotbar:setupLayout(self.gui:FindFirstChild("Hotbar"))
 		self.hotbar:setupLayout(self.gui:FindFirstChild("Hotbar_PC"))
 		self.hotbar:setupLayout(self.gui:FindFirstChild("Hotbar_TouchScreen"))
 		self.hotbar:setupEvents()
 
-		self.mobileControls:setup(self.gui)
+		self.mobileControls:setup(self.gui, self.insetsGui)
 		self.hitFeedback:setup(self.scalingElementsFolder)
 		self.scope:setup(self.gui)
 		self.directionalIndicators:setup(self.gui)
@@ -151,18 +151,26 @@ function WeaponsGui.new(weaponsSystem: any)
 		local ammoFrame = self.scalingElementsFolder:FindFirstChild("Ammo")
 		self.ammoDisplayLabel = if ammoFrame then ammoFrame:FindFirstChild("Value") else nil
 
-		self.gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+		-- Insets ANTES que la principal: StreakDisplay y HealthBarController asumen
+		-- que si WeaponsSystemGui existe, WeaponSystemInsets ya está en PlayerGui.
+		local playerGui = LocalPlayer:WaitForChild("PlayerGui")
+		if self.insetsGui then
+			self.insetsGui.Parent = playerGui
+		end
+		self.gui.Parent = playerGui
 
-		-- Limpiar listeners antiguos de forma segura
 		if self.lifetimeConnections.absoluteSize then self.lifetimeConnections.absoluteSize:Disconnect() end
 		if self.lifetimeConnections.currentCamera then self.lifetimeConnections.currentCamera:Disconnect() end
 		if self.lifetimeConnections.guiEnabled then self.lifetimeConnections.guiEnabled:Disconnect() end
 
-		-- L7: estos watchers viven en lifetimeConnections (no en connections) para
-		-- sobrevivir a los ciclos disable→enable.
 		self.lifetimeConnections.absoluteSize = self.gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function() self:onScreenSizeChanged() end)
 		self.lifetimeConnections.currentCamera = workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function() self:onScreenSizeChanged() end)
 		self.lifetimeConnections.guiEnabled = self.gui:GetPropertyChangedSignal("Enabled"):Connect(function()
+			-- Quien apague/encienda WeaponsSystemGui desde fuera (MatchWeapons.clearGui)
+			-- arrastra también a la GUI de insets.
+			if self.insetsGui then
+				self.insetsGui.Enabled = self.gui.Enabled
+			end
 			if self.gui.Enabled then
 				self:onScreenSizeChanged()
 			end
@@ -170,13 +178,11 @@ function WeaponsGui.new(weaponsSystem: any)
 
 		self:onScreenSizeChanged()
 
-		-- Precargar assets
 		local preloadTargets = {
 			self.crosshair.bottom,
 			self.crosshair.left,
 			self.crosshair.right,
 			self.crosshair.top,
-			self.scope.scopeFrame,
 			self.mobileControls.smallAimButton,
 			self.mobileControls.largeAimButton,
 			self.mobileControls.smallFireButton,
@@ -184,6 +190,9 @@ function WeaponsGui.new(weaponsSystem: any)
 			self.mobileControls.smallReloadButton,
 			self.mobileControls.largeReloadButton,
 		}
+		if self.scope.scopeFrame then
+			table.insert(preloadTargets, self.scope.scopeFrame)
+		end
 		if self.scope.vignette then
 			table.insert(preloadTargets, self.scope.vignette)
 		end
@@ -223,9 +232,8 @@ function WeaponsGui:onScreenSizeChanged()
 		self.mobileControls.largeTouchscreen.Visible = UserInputService.TouchEnabled and not isSmallScreen
 	end
 
-	-- Hotbar único: se recoloca por dispositivo (derecha en PC, centrado en
-	-- táctil). Los Hotbar_PC/_TouchScreen son del asset anterior, que resolvía lo
-	-- mismo con dos layouts y visibilidad cruzada.
+	-- Hotbar único recolocado por dispositivo; Hotbar_PC/_TouchScreen son del
+	-- asset antiguo con dos layouts.
 	self.hotbar:applyDeviceAlignment()
 	local hotbarPC = self.gui:FindFirstChild("Hotbar_PC")
 	if hotbarPC then
@@ -270,14 +278,21 @@ function WeaponsGui:updateScale(guiObject: Instance, viewportSize: Vector2)
 	end
 end
 
+function WeaponsGui:_setGuisEnabled(enabled: boolean)
+	if self.insetsGui then
+		self.insetsGui.Enabled = enabled
+	end
+	if self.gui then
+		self.gui.Enabled = enabled
+	end
+end
+
 function WeaponsGui:setEnabled(enabled: boolean)
 	if self.enabled == enabled then return end
 	self.enabled = enabled
 
 	if self.enabled then
-		if self.gui then
-			self.gui.Enabled = true
-		end
+		self:_setGuisEnabled(true)
 		task.defer(function()
 			self:onScreenSizeChanged()
 		end)
@@ -376,7 +391,6 @@ function WeaponsGui:onRenderStepped(dt: number)
 	end
 	if not self.enabled or not self.gui then return end
 
-	-- Comprobar cambio de arma
 	local w = self.weaponsSystem.currentWeapon
 	local tool = w and w.instance
 	if tool ~= self._lastWeaponInstance then
@@ -390,7 +404,6 @@ function WeaponsGui:onRenderStepped(dt: number)
 	if self._hotbarDirty then
 		self.hotbar:refresh()
 	end
-	-- Anima por frame los "..." de recarga en el slot del arma actual del hotbar.
 	self.hotbar:tickReloadDots()
 
 	self.crosshair:update(dt)
@@ -626,7 +639,6 @@ function WeaponsGui:_updateReloadProgressBar(progressPercent: number)
 		or 180 - math.clamp(percentNumber, 180, 360)
 end
 
--- Funciones puente delegadas para mantener compatibilidad
 function WeaponsGui:setCrosshairEnabled(crosshairEnabled: boolean)
 	self.crosshair:setEnabled(crosshairEnabled)
 end

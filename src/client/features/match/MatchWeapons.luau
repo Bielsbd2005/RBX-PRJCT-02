@@ -1,8 +1,4 @@
 --!strict
---[[
-	MatchWeapons.luau
-	Limpieza centralizada de armas, herramientas y UI del WeaponsSystem.
-]]
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -47,32 +43,9 @@ local function _deactivateRuntime()
 		return
 	end
 
-	if weaponsSystem.resetClientRuntimeState then
-		weaponsSystem.resetClientRuntimeState()
-		return
-	end
-
-	weaponsSystem.currentWeapon = nil
-
-	if weaponsSystem.gui and weaponsSystem.gui.setEnabled then
-		weaponsSystem.gui:setEnabled(false)
-	end
-
-	if weaponsSystem.camera then
-		if weaponsSystem.camera.setEnabled then
-			weaponsSystem.camera:setEnabled(false)
-		end
-		weaponsSystem.camera.rotateCharacterWithCamera = false
-		if weaponsSystem.camera.resetZoomFactor then
-			weaponsSystem.camera:resetZoomFactor()
-		end
-		if weaponsSystem.camera.setHasScope then
-			weaponsSystem.camera:setHasScope(false)
-		end
-	end
+	weaponsSystem.resetClientRuntimeState()
 end
 
---- Desactiva ScreenGuis del WeaponsSystem (crosshair, etc.).
 function MatchWeapons.clearGui(playerGui: PlayerGui)
 	for _, node in playerGui:GetChildren() do
 		if not node:IsA("ScreenGui") then
@@ -80,6 +53,7 @@ function MatchWeapons.clearGui(playerGui: PlayerGui)
 		end
 
 		local isWeaponsGui = node.Name == "WeaponsSystemGui"
+			or node.Name == "WeaponSystemInsets"
 			or node.Name == "WeaponGUI"
 			or node.Name == "WeaponGui"
 
@@ -95,7 +69,6 @@ function MatchWeapons.clearGui(playerGui: PlayerGui)
 	end
 end
 
---- Limpieza completa: desequipar tools, parar animaciones, destruir armas, ocultar GUI.
 function MatchWeapons.cleanAll(playerGui: PlayerGui)
 	local localPlayer = Players.LocalPlayer
 	local character = localPlayer.Character

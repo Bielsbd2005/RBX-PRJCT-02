@@ -1,22 +1,12 @@
 --!strict
 --[[
-	HitVFX/init.luau — VFX de impacto de balas (sólo Body / Headshot).
+	VFX de impacto de balas (solo Body / Headshot). Plantillas en Studio:
+	ReplicatedStorage.Templates.HitVFX con "Body" y "Headshot"; contrato en Config.luau.
 
-	Los efectos viven SIEMPRE en una carpeta de Studio (ReplicatedStorage.HitVFX),
-	con una plantilla "Body" y otra "Headshot". Ver Config.luau para el contrato.
+	Solo partículas: el sonido de hit lo dispara DamageBillboardHandler desde
+	SoundService.Audio.Gameplay, así que cualquier Sound en las plantillas se ignora.
 
-	SÓLO PARTÍCULAS. El sonido de hit/headshot NO se gestiona aquí — vive en
-	SoundService.Audio.Gameplay.HitSound/Headshot y lo dispara DamageBillboardHandler
-	(2D, pitch progresivo de combo). Mantener el sonido en un único sitio evita el
-	doble audio; por eso el motor ignora cualquier Sound dentro de las plantillas.
-
-	Eficiencia: pool por categoría (clones reusados, cero Instance.new en régimen),
-	escalado de partículas en móvil y, por defecto, sólo se renderizan los impactos
-	del jugador local (Config.LocalPlayerOnly).
-
-	API:
-	  HitVFX.play(hitInfo, isLocalShot)   -- hitInfo = { p, n, h, wasHeadshot }
-	  HitVFX.preload()                    -- opcional, precarga assets en bootstrap
+	hitInfo = { p, n, h, wasHeadshot }
 ]]
 
 local RunService = game:GetService("RunService")
@@ -63,7 +53,6 @@ local function getContainer(): Folder?
 	return folder
 end
 
--- Punto invisible y anclado que aloja los emitters + sonidos de un impacto.
 local function makeHost(): Part
 	local part = Instance.new("Part")
 	part.Name = "Impact"
@@ -79,14 +68,18 @@ local function makeHost(): Part
 	return part
 end
 
--- Prototipo de una categoría = host con la plantilla de la carpeta clonada
--- dentro. Se construye una vez (al primer impacto de esa categoría con la
--- carpeta ya replicada) y se cachea.
+-- Sin WaitForChild: se consulta en cada uso hasta que haya replicado.
+local function getFolder(): Instance?
+	local templates = ReplicatedStorage:FindFirstChild("Templates")
+	return templates and templates:FindFirstChild(Config.FolderName)
+end
+
+-- Se cachea al primer impacto de la categoría con la carpeta ya replicada.
 local function getPrototype(name: string): Part?
 	if prototypes[name] then
 		return prototypes[name]
 	end
-	local folder = ReplicatedStorage:FindFirstChild(Config.FolderName)
+	local folder = getFolder()
 	local template = folder and folder:FindFirstChild(name)
 	if not template then
 		return nil
@@ -108,8 +101,7 @@ local function getPrototype(name: string): Part?
 	return host
 end
 
--- Indexa los emitters (con su EmitCount) de una clone recién creada. Los Sound
--- de la plantilla se ignoran a propósito (el audio vive en SoundService).
+-- EmitCount: atributo opcional del ParticleEmitter en la plantilla.
 local function indexUnit(part: Part): Unit
 	local emitters = {}
 	for _, d in part:GetDescendants() do
@@ -181,7 +173,6 @@ local function classify(hitInfo: any): string?
 	return nil
 end
 
--- Reproduce el VFX de impacto. No-op en el servidor o si no es impacto a jugador.
 function HitVFX.play(hitInfo: any, isLocalShot: boolean?)
 	if IS_SERVER or not Config.Enabled or not hitInfo then
 		return
@@ -217,13 +208,13 @@ function HitVFX.play(hitInfo: any, isLocalShot: boolean?)
 	task.delay(hold + 0.15, release, unit)
 end
 
--- Opcional: precarga las texturas de la carpeta para evitar el primer hitch.
+-- Opcional: evita el hitch del primer impacto.
 function HitVFX.preload()
 	if IS_SERVER then
 		return
 	end
 	task.spawn(function()
-		local folder = ReplicatedStorage:FindFirstChild(Config.FolderName)
+		local folder = getFolder()
 		if not folder then
 			return
 		end

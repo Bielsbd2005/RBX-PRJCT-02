@@ -1,6 +1,7 @@
 --!strict
--- Scope.luau (Client/Server Library)
--- Gestiona la mira de francotirador (Scope) y los efectos de viñeta (Vignette) de daño y curación.
+-- Mira de francotirador (Scope) y viñetas de daño/curación/baja. Ambos son hijos de
+-- WeaponsSystemGui, que ignora los insets: cubren la pantalla y la mira queda en el
+-- centro real del viewport.
 
 local VIGNETTE_DAMAGE_COLOR = Color3.fromRGB(255, 0, 0) -- rojo, vida baja
 local VIGNETTE_HEAL_COLOR = Color3.fromRGB(0, 255, 128) -- verde, curación
@@ -64,15 +65,28 @@ local function applyVignetteColor(nodes: { VignetteNode }, color: Color3)
 	end
 end
 
+-- Hijo directo primero; si no, búsqueda recursiva por si el nodo vive dentro de
+-- algún contenedor de la GUI.
+local function findNode(gui: Instance, name: string): Instance?
+	return gui:FindFirstChild(name) or gui:FindFirstChild(name, true)
+end
+
+local function setShown(instance: Instance, shown: boolean)
+	if instance:IsA("GuiObject") then
+		instance.Visible = shown
+	end
+end
+
 local Scope = {}
 Scope.__index = Scope
 
-function Scope.new(weaponsGui: any)
+function Scope.new()
 	local self = setmetatable({}, Scope)
-	self.weaponsGui = weaponsGui
 
 	self.scopeEnabled = false
+	self.scopeFrame = nil -- WeaponsSystemGui.Scope
 
+	self.vignette = nil -- WeaponsSystemGui.Vignette
 	self._vignetteNodes = nil
 	self.vignetteHealthAlphaDriver = nil -- rojo, vida baja (peligro continuo)
 	self.vignetteHealAlphaDriver = nil -- verde, curación
@@ -87,15 +101,19 @@ function Scope.new(weaponsGui: any)
 end
 
 function Scope:setup(gui: ScreenGui)
-	self.scopeFrame = gui:WaitForChild("Scope") :: GuiObject
-	self.vignette = gui:FindFirstChild("Vignette") :: GuiObject?
+	self.scopeFrame = findNode(gui, "Scope")
+	self.vignette = findNode(gui, "Vignette")
+	if not self.scopeFrame then
+		warn("[Scope] WeaponsSystemGui no tiene Scope; la mira no se mostrará")
+	end
 	if not self.vignette then
-		self.vignette = gui:FindFirstChild("KillContainer") :: GuiObject?
+		warn("[Scope] WeaponsSystemGui no tiene Vignette; el vignette no se mostrará")
 	end
 
-	if self.vignette and self.vignette:IsA("GuiObject") then
-		self.vignette.Visible = false
+	-- setScopeEnabled pudo llegar antes de que terminara el setup.
+	self:_applyScopeVisibility()
 
+	if self.vignette then
 		self.vignetteHealthAlphaDriver = self.vignette:FindFirstChild("HealthAlphaDriver") :: NumberValue?
 		if not self.vignetteHealthAlphaDriver then
 			local val = Instance.new("NumberValue")
@@ -138,11 +156,8 @@ function Scope:setup(gui: ScreenGui)
 
 		self._vignetteNodes = buildVignetteNodeList(self.vignette)
 
-		-- Combina los efectos: gana el de mayor alpha y su color tiñe el vignette.
-		-- Prioridad en empate: daño (rojo) > heal (verde) > baja (amarillo). El amarillo es
-		-- el de menor prioridad — el flash de baja solo se dispara cuando no hay
-		-- daño ni curación en pantalla (gateado en HealthBarController), pero si uno
-		-- de esos aparece mientras el amarillo está en flight, el rojo/verde manda.
+		-- Gana el efecto de mayor alpha y su color tiñe el vignette. Empate: daño (rojo) >
+		-- heal (verde) > baja (amarillo); el flash de baja ya se gatea en HealthBarController.
 		local function refreshVignette()
 			if not self.vignette or not self._vignetteNodes then
 				return
@@ -156,7 +171,7 @@ function Scope:setup(gui: ScreenGui)
 			local visibleAlpha = math.max(redAlpha, healAlpha, killAlpha)
 			if visibleAlpha <= 0 then
 				applyVignetteAlpha(self._vignetteNodes, 1)
-				self.vignette.Visible = false
+				setShown(self.vignette, false)
 				return
 			end
 
@@ -170,7 +185,7 @@ function Scope:setup(gui: ScreenGui)
 			end
 			applyVignetteColor(self._vignetteNodes, color)
 			applyVignetteAlpha(self._vignetteNodes, 1 - math.clamp(visibleAlpha, 0, 1))
-			self.vignette.Visible = true
+			setShown(self.vignette, true)
 		end
 
 		self.vignetteHealthConn = self.vignetteHealthAlphaDriver.Changed:Connect(refreshVignette)
@@ -181,14 +196,23 @@ function Scope:setup(gui: ScreenGui)
 	end
 end
 
-function Scope:setScopeEnabled(scopeEnabled: boolean)
-	self.scopeEnabled = scopeEnabled
+function Scope:_applyScopeVisibility()
 	if self.scopeFrame then
-		self.scopeFrame.Visible = scopeEnabled
+		setShown(self.scopeFrame, self.scopeEnabled)
 	end
 end
 
+function Scope:setScopeEnabled(scopeEnabled: boolean)
+	if self.scopeEnabled == scopeEnabled then
+		return
+	end
+	self.scopeEnabled = scopeEnabled
+	self:_applyScopeVisibility()
+end
+
 function Scope:Destroy()
+	self.scopeFrame = nil
+	self.vignette = nil
 	if self.vignetteHealthConn then
 		self.vignetteHealthConn:Disconnect()
 		self.vignetteHealthConn = nil
