@@ -1,18 +1,14 @@
 --!strict
 --[[
-	VotingService.luau
-	Flujo completo de votación de mapas: estado del voto activo, cooldowns,
-	timer y resolución del ganador.
+	Votación de mapas: estado del voto activo, cooldowns, timer y resolución del ganador.
 
 	El estado visible (opciones, votos por opción, ganador) se publica en el
-	snapshot replicado (Shared/MatchSnapshot) — no hay paquetes de voto S→C ni
-	resyncs; los clientes leen los attributes. El único paquete es CastVote
-	(C→S).
+	snapshot replicado (Shared/MatchSnapshot); los clientes leen los attributes.
+	El único paquete es CastVote (C→S).
 
-	El CUÁNDO votar lo decide la máquina de fases de MatchService — StartVote
-	solo se llama desde la transición Idle → Voting. Al cerrar la votación se
-	invoca `onVoteFinished(winnerMapName)` (inyectado via Start), con el que
-	MatchService transiciona a Loading.
+	El CUÁNDO lo decide la máquina de fases de MatchService: StartVote solo se llama
+	desde Idle → Voting, y al cerrar se invoca `onVoteFinished(winnerMapName)`
+	(inyectado vía Start), con el que MatchService transiciona a Loading.
 ]]
 
 local HttpService = game:GetService("HttpService")
@@ -35,26 +31,15 @@ type ActiveVoteState = {
 
 type Deps = {
 	onVoteFinished: (winnerMapName: string) -> (),
-	--[[
-		Id de la partida que esta votación está decidiendo. Lo acuña
-		MatchService al abrir la votación, así que el MAP_VOTE y el MATCH_END
-		de la ronda resultante comparten clave: sin ella no se puede responder
-		si el mapa más votado es también el que más recompensa, ni si un mapa
-		concreto acorta las partidas.
-
-		Opcional: un despliegue que no lo cablee sigue emitiendo la votación
-		igual, sólo que sin poder unirla a su partida.
-	]]
+	-- Id de la partida que decide esta votación (lo acuña MatchService), para unir
+	-- MAP_VOTE con el MATCH_END de la ronda. Opcional: sin él se emite sin matchId.
 	currentMatchId: (() -> string)?,
 }
 
 local VotingService = {}
 VotingService.__index = VotingService
 
--- ── Constantes ───────────────────────────────────────────────
-
--- Cooldown entre cambios de voto del mismo jugador. 0.3s permite ~3 cambios/seg
--- — suficiente para UX responsive sin permitir spam que sature la replicación.
+-- ~3 cambios/s: UX responsive sin spam que sature la replicación.
 local VOTE_CHANGE_COOLDOWN = 0.3
 local DEFAULT_PLACEHOLDER_IMAGE = "rbxasset://textures/ui/GuiImagePlaceholder.png"
 
@@ -62,15 +47,11 @@ local DEFAULT_PLACEHOLDER_IMAGE = "rbxasset://textures/ui/GuiImagePlaceholder.pn
 -- (o gana el desempate), se resuelve a un mapa aleatorio entre las 3 opciones.
 local RANDOM_KEY = GameConfig.RandomVoteKey
 
--- ── Estado ───────────────────────────────────────────────────
-
 local _deps: Deps = nil :: any
 local _started = false
 local _activeVote: ActiveVoteState? = nil
 local _voteCooldownsByUserId: { [number]: number } = {}
 local _castVoteConn: any = nil
-
--- ── Helpers privados ─────────────────────────────────────────
 
 local function _pickRandomMapOptions(pool: { MapDefinition }, count: number): { MapDefinition }
 	local shuffled = table.clone(pool)
@@ -117,7 +98,6 @@ local function _isVoteChangeAllowed(player: Player): boolean
 	return true
 end
 
--- La opción Random es válida además de los 3 mapas concretos.
 local function _isValidOption(vote: ActiveVoteState, mapName: string): boolean
 	if mapName == RANDOM_KEY then
 		return true
@@ -130,8 +110,7 @@ local function _isValidOption(vote: ActiveVoteState, mapName: string): boolean
 	return false
 end
 
--- Devuelve siempre un mapa concreto. Candidatos = 3 mapas + Random; si gana
--- Random (o el desempate lo elige), se resuelve a un mapa aleatorio entre los 3.
+-- Devuelve siempre un mapa concreto: si gana Random, se resuelve entre los 3.
 local function _resolveWinner(vote: ActiveVoteState): string
 	local connectedByUserId = {} :: { [number]: true }
 	for _, player in Players:GetPlayers() do
@@ -176,8 +155,7 @@ local function _resolveWinner(vote: ActiveVoteState): string
 end
 
 local function _onCastVote(data: { mapName: string }, player: Player)
-	-- Cap longitud antes de cualquier processing — protege contra payloads
-	-- arbitrariamente grandes que harían trabajo en _isValidOption / format.
+	-- Cap de longitud antes de cualquier procesado.
 	if not NetGuards.validate(data, { mapName = NetGuards.MAX.MapName }) then
 		return
 	end
@@ -217,13 +195,8 @@ local function _finishVote(vote: ActiveVoteState)
 	for _ in vote.votesByUserId do
 		totalVoters += 1
 	end
-	--[[
-		Se envía el reparto COMPLETO, no sólo el ganador. Con el ganador solo
-		no se puede decidir nada: un mapa que gana siempre podría estar
-		ganando porque nunca se enfrenta a rivales fuertes. Hacen falta las
-		tres cosas — opciones ofrecidas (exposición), votos por opción
-		(preferencia) y abstención (indiferencia).
-	]]
+	-- Se envía el reparto COMPLETO (opciones ofrecidas, votos por opción y abstención):
+	-- con el ganador solo no se distingue un mapa querido de uno sin rivales fuertes.
 	local votesByMap: { [string]: number } = {}
 	local randomVotes = 0
 	for _, mapName in vote.votesByUserId do
@@ -234,9 +207,7 @@ local function _finishVote(vote: ActiveVoteState)
 		end
 	end
 
-	-- Las opciones con CERO votos se envían igual: son el denominador de
-	-- exposición. Sin ellas no se distingue un mapa querido de uno que
-	-- simplemente sale mucho.
+	-- Las opciones con CERO votos se envían igual: son el denominador de exposición.
 	local options = {}
 	for _, mapName in vote.optionNames do
 		table.insert(options, { mapName = mapName, votes = votesByMap[mapName] or 0 })
@@ -254,8 +225,7 @@ local function _finishVote(vote: ActiveVoteState)
 		voteId = HttpService:GenerateGUID(false),
 		matchId = matchId,
 		winnerMap = winner,
-		-- Elegibles frente a emitidos: con VoteDuration = 15s, no votar es una
-		-- señal real de indiferencia hacia los mapas ofrecidos.
+			-- Elegibles frente a emitidos: no votar es señal de indiferencia.
 		eligibleVoters = #Players:GetPlayers(),
 		castVotes = totalVoters,
 		randomVotes = randomVotes,
@@ -275,8 +245,6 @@ local function _finishVote(vote: ActiveVoteState)
 		_deps.onVoteFinished(winner)
 	end)
 end
-
--- ── API pública ──────────────────────────────────────────────
 
 function VotingService:Start(deps: Deps)
 	if _started then
@@ -320,8 +288,7 @@ function VotingService:StartVote(): boolean
 	}
 
 	_activeVote = vote
-	-- Limpiar cooldowns viejos del voto anterior para que el primer voto del
-	-- nuevo ciclo no quede bloqueado.
+	-- Limpiar cooldowns para que el primer voto del nuevo ciclo no quede bloqueado.
 	table.clear(_voteCooldownsByUserId)
 
 	local function imageOf(definition: MapDefinition): string

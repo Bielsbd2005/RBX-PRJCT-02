@@ -8,7 +8,6 @@ local weaponsSystemInitialized = false
 
 local function initializeWeaponsSystemAssets()
 	if not weaponsSystemInitialized then
-		-- Enable/make visible all necessary assets
 		local effectsFolder = weaponsSystemFolder.Assets.Effects
 		local partNonZeroTransparencyValues = {
 			["BulletHole"] = 1, ["Explosion"] = 1, ["Pellet"] = 1, ["Scorch"] = 1,

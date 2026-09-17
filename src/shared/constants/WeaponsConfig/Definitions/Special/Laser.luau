@@ -1,7 +1,5 @@
 --!strict
--- Special/Laser (Epic). Arma de energía: proyectil muy rápido sin gravedad,
--- sin dispersión, trazador Plasma y marca Scorch. Stats de partida escritos a
--- mano; este fichero ES la fuente de verdad. Claves y defaults: Schema.luau.
+-- Special/Laser. Este fichero es la fuente de verdad de sus stats; claves y defaults: Schema.luau.
 local Types = require(script.Parent.Parent.Parent.Types)
 
 return {

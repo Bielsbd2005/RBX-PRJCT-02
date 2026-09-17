@@ -1,6 +1,5 @@
 --!strict
 --[[
-	SettingsService.luau (Server)
 	Listener tipado para mutaciones de Settings desde el cliente.
 
 	Whitelist por handler:
@@ -35,9 +34,8 @@ SettingsService.__index = SettingsService
 
 local _dataService: DataService = nil :: any
 local _started = false
--- Cooldown global por player (no por-key) para evitar spam por rotación de keys.
--- Un usuario que mueva un slider Y cambie un toggle dentro de 100ms verá el
--- segundo action descartado — UX impact despreciable, anti-spam asegurado.
+-- Cooldown global por player (no por clave) para que rotar claves no sirva de spam;
+-- dos cambios distintos dentro de RATE_LIMIT_SECONDS descartan el segundo.
 local _cooldowns: { [number]: number } = {}
 
 local RATE_LIMIT_SECONDS = 0.1
@@ -59,8 +57,6 @@ local BOOLEAN_SETTINGS = {
 	GiftsEnabled = true,
 }
 
--- Enums: clave → set de valores válidos. Defensa contra clientes que envían
--- strings arbitrarias.
 local CHOICE_SETTINGS: { [string]: { [string]: boolean } } = {
 	ColorblindMode = {
 		None = true,
@@ -74,7 +70,6 @@ local CHOICE_SETTINGS: { [string]: { [string]: boolean } } = {
 	},
 }
 
--- Colores: clave → true (presencia indica que el setting acepta RGB).
 local COLOR_SETTINGS = {
 	CrosshairColor = true,
 }

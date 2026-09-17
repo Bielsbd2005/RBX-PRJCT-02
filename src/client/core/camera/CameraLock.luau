@@ -1,10 +1,6 @@
 --!strict
---[[
-	CameraLock.luau
-	Mecanismo simple para que una feature reclame control exclusivo
-	de la cámara. Mientras haya un lock activo, otros sistemas
-	deben abstenerse de modificar la cámara.
-]]
+-- Control exclusivo de la cámara: mientras haya un lock activo, los demás
+-- sistemas deben abstenerse de modificarla (no se impone, es por convención).
 
 local CameraLock = {}
 

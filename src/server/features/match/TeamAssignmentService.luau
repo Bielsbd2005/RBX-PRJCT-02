@@ -1,17 +1,6 @@
 --!strict
 --[[
-	TeamAssignmentService.luau
-	Lógica de asignación de equipos balanceados. Lee el estado de los jugadores
-	de la tabla de sesiones de MatchService (team/inMenu/pendingSpawn) y escribe
-	`team` al asignar — es el único dueño de la asignación de equipo.
-
-	API:
-		TeamAssignmentService:Start({ sessions, getRoundScoreA, getRoundScoreB, teamSizeTarget })
-		TeamAssignmentService:CountActiveRealAssignments() -> (number, number)
-		TeamAssignmentService:PickBalancedTeam(userId) -> ("A" | "B")?
-
-	`PickBalancedTeam` debe permanecer **yield-free** — es la sección crítica
-	del debounce de `_onRequestJoinMatch`; un yield permitiría doble-spawn.
+	Lee la tabla de sesiones de MatchService y es el único que escribe `session.team`.
 ]]
 
 local Players = game:GetService("Players")
@@ -28,7 +17,7 @@ type SessionView = {
 type Deps = {
 	-- Tabla de sesiones compartida con MatchService, keyed por userId.
 	sessions: { [number]: SessionView },
-	-- Score actual del round para tie-break determinístico.
+	-- Para el tie-break por marcador.
 	getRoundScoreA: () -> number,
 	getRoundScoreB: () -> number,
 	-- Cap por equipo (de GameConfig.TeamSizeTarget).
@@ -83,7 +72,8 @@ local function _pickTeamByScoreTieBreak(): TeamSide
 	return if _tieBreakToA then "A" else "B"
 end
 
--- INVARIANT: yield-free.
+-- INVARIANTE: yield-free. Es la sección crítica del debounce de MatchService._onRequestJoinMatch;
+-- un yield permitiría doble-spawn.
 function TeamAssignmentService:PickBalancedTeam(userId: number): TeamSide?
 	local session = _deps.sessions[userId]
 	if not session then

@@ -1,7 +1,6 @@
 --!strict
--- Special/UZI. Migrado desde la Configuration del Tool
--- ServerStorage.WeaponTools.Special.UZI, que ya no la lleva: este fichero ES
--- la fuente de verdad. Claves y defaults: WeaponsConfig/Schema.luau.
+-- Special/UZI. Este fichero es la fuente de verdad de sus stats (el Tool no lleva
+-- Configuration); claves y defaults: WeaponsConfig/Schema.luau.
 local Types = require(script.Parent.Parent.Parent.Types)
 
 return {

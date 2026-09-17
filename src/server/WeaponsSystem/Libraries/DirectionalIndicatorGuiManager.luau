@@ -4,11 +4,8 @@ local TweenService = game:GetService("TweenService")
 local DirectionalIndicatorGuiManager = {}
 DirectionalIndicatorGuiManager.__index = DirectionalIndicatorGuiManager
 
--- W11: bucle único compartido para actualizar la rotación de todos los DIs
--- activos. Antes cada activación creaba su propio coroutine con
--- RenderStepped:Wait() (4 atacantes simultáneos = 4 loops paralelos en mobile).
--- Ahora un sólo RenderStepped:Connect itera _activeDIs y los retira cuando
--- la imagen alcanza ImageTransparency=1.
+-- Un único RenderStepped compartido actualiza la rotación de todos los DIs
+-- activos y los retira cuando llegan a ImageTransparency=1.
 type ActiveDI = {
 	manager: any,
 	diInfo: any,
@@ -95,7 +92,6 @@ function DirectionalIndicatorGuiManager:GetDIInfoFromFrame(frame)
 end
 
 function DirectionalIndicatorGuiManager:ActivateDirectionalIndicator(DIName, otherPosition)
-	-- Use original DI, or make a copy if it's already active
 	local diInfo = self.DIInfo[DIName]
 	if not diInfo then
 		warn("Warning: invalid name given to ActivateDirectionalIndicator")
@@ -110,20 +106,15 @@ function DirectionalIndicatorGuiManager:ActivateDirectionalIndicator(DIName, oth
 	end
 	diInfo.active = true
 
-	-- Update distance from center
 	local distanceLevel = GetConfigValue(diInfo.config, "DistanceLevelFromCenter", 6)
 	local widthLevel = GetConfigValue(diInfo.config, "WidthLevel", distanceLevel)
 	local levelMultiplier = 0.03
 	self.weaponsGui.originalScaleAmounts[diInfo.frame] = Vector2.new(widthLevel * levelMultiplier, distanceLevel * levelMultiplier * 2)
 	self.weaponsGui:updateScale(diInfo.frame, workspace.CurrentCamera.ViewportSize)
 
-	-- Set initial indicator rotation and transparency
 	diInfo.frame.Rotation = self:CalculateDIRotation(otherPosition)
 	diInfo.image.ImageTransparency = GetConfigValue(diInfo.config, "TransparencyBeforeFade", 0)
 
-	-- W11: push al bucle único. La rotación se actualiza junto con todos los
-	-- otros DIs activos en un solo RenderStepped global; cleanup ocurre cuando
-	-- ImageTransparency llega a 1.
 	_ensureDILoop()
 	table.insert(_activeDIs, {
 		manager = self,
@@ -131,18 +122,14 @@ function DirectionalIndicatorGuiManager:ActivateDirectionalIndicator(DIName, oth
 		otherPosition = otherPosition,
 	})
 
-	-- Show indicator for a bit, then fade out
 	coroutine.wrap(function()
-		-- P8: task.wait en lugar del legacy wait() (era el único w() restante del repo).
 		task.wait(GetConfigValue(diInfo.config, "TimeBeforeFade", 1))
 		local tweenInfo = TweenInfo.new(GetConfigValue(diInfo.config, "FadeTime", 1))
 		local goal = {}
 		goal.ImageTransparency = 1
 		local tween = TweenService:Create(diInfo.image, tweenInfo, goal)
-		-- P8: destruir el clon en Tween.Completed en vez de depender solo del poll
-		-- de transparencia. Si el frame se ocultara antes de que el loop lo viera
-		-- (o el loop dejara de correr), el clon quedaría huérfano. dieOnFade marca
-		-- los clones; los DIs originales se mantienen y solo se ocultan.
+		-- Destruir el clon también en Completed, no solo en el poll del loop: si
+		-- el frame se oculta antes o el loop deja de correr, quedaría huérfano.
 		tween.Completed:Once(function()
 			diInfo.active = false
 			if diInfo.dieOnFade and diInfo.frame and diInfo.frame.Parent then

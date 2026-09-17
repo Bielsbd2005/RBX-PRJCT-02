@@ -1,8 +1,6 @@
 --!strict
--- Special/Short (Uncommon). Escopeta recortada: seis perdigones, dos cartuchos,
--- letal a bocajarro y nula a media distancia (falloff corto). Stats de partida
--- escritos a mano; este fichero ES la fuente de verdad. Claves y defaults:
--- Schema.luau.
+-- Escopeta recortada: letal a bocajarro, nula a media distancia. Fuente de verdad de
+-- los stats. Claves y defaults: WeaponsConfig/Schema.luau.
 local Types = require(script.Parent.Parent.Parent.Types)
 
 return {

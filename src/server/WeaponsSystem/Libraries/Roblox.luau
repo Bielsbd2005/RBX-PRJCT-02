@@ -39,10 +39,6 @@ function Roblox.waitForDescendant(instance, descendantName, timeout)
 		return found
 	end
 
-	-- Audit mobile: si timeout expira, romper el bucle infinito. Antes el
-	-- coroutine de warn imprimía pero el while quedaba ESPERANDO forever
-	-- contra DescendantAdded, manteniendo el coroutine y el listener
-	-- implícito vivos indefinidamente para un name que nunca llega.
 	local deadline = if timeout < 1e6 and timeout > 0 then os.clock() + timeout else math.huge
 	local warned = false
 
@@ -335,8 +331,7 @@ local function findInstanceImpl(root, path, getChildFunc)
 			return nil
 		end
 
-		-- L10: en el último segmento (sin más separadores) ya consumimos el path
-		-- completo; retornar evita un bucle infinito en findFirstChild/waitForChild.
+		-- Sin este return el último segmento haría un bucle infinito.
 		if isLastSegment then
 			return currentInstance
 		end
@@ -358,12 +353,8 @@ function Roblox.waitForInstance(root, path)
 	return findInstanceImpl(root, path, waitForChildImpl)
 end
 
--- RaycastParams cacheado a nivel módulo. Antes la API legacy
--- FindPartOnRayWithIgnoreList (deprecated por Roblox) se llamaba por cada
--- bala × jugador × frame de vuelo. workspace:Raycast es la ruta optimizada
--- actual y se beneficia del JIT. Mutamos FilterDescendantsInstances in-place
--- cada call (Roblox requiere reasignación de la propiedad para tomar la
--- lista nueva, así que no podemos solo mutar la tabla por referencia).
+-- RaycastParams reutilizado. FilterDescendantsInstances se reasigna en cada llamada:
+-- Roblox copia la lista al asignar, mutar la tabla por referencia no tiene efecto.
 local _penetrateCastParams: RaycastParams? = nil
 
 function Roblox.penetrateCast(ray, ignoreList)

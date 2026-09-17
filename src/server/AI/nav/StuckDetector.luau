@@ -1,38 +1,9 @@
 --!strict
 --[[
-	StuckDetector — escalada de 4 niveles cuando un bot deja de progresar.
-
-	Tickeado por el bot cada loop iter en PATROL/CHASE. El detector consulta
-	`navigator:isMoving()` directamente — no se pasa flag externo. Si el
-	Navigator no está moviendo (Engage parado, Roam idle post-arrive), el
-	contador no acumula.
-
-	Mientras Navigator está moving, mide displacement contra la última
-	muestra. Si la velocidad neta es < StuckMoveEpsilon studs/seg, acumula
-	tiempo. Al cruzar cada threshold de BotConfig.Navigation.StuckThresholds
-	dispara la acción correspondiente:
-
-	  1.0s lateral  → MoveTo offset ±4 studs (XZ). Tag stuck_lateral.
-	  2.0s repath   → navigator:recomputeLast(). Tag stuck_repath.
-	  4.0s jump     → Humanoid.Jump = true + offset ±8 studs. Tag stuck_jump
-	                  (print inmediato).
-	  8.0s teleport → rootPart.CFrame = roamGraph:nearestPoint + Y3.
-	                  Tag stuck_teleport (print inmediato).
-
-	El roamGraph es opcional en commit 2 (no existe todavía); cuando es nil
-	el nivel 4 hace log de stuck_teleport_unavailable y no teleporta. Commit
-	3 introduce RoamGraph y nivel 4 queda funcional.
-
-	Cuando el bot vuelve a moverse (speed >= epsilon) los contadores y
-	triggers se resetean automáticamente.
-
-	Los primeros BotConfig.Navigation.StuckSpawnGrace segundos de vida del
-	detector no acumulan: recién spawneado el bot cae sobre el pad, espera
-	path en la cola y se empuja con los otros bots del mismo spawn.
-
-	Debug de mapa: si el BoolValue ServerStorage.ShowStuckMarkers está en true,
-	cada escalada de nivel >= 2 deja una esfera neon rosa en el punto del
-	atasco (ver debug/StuckViz).
+	Escalada de 4 niveles (umbrales en BotConfig.Navigation.StuckThresholds)
+	cuando el bot no progresa mientras navigator:isMoving(); con el Navigator
+	idle no acumula. Debug: BoolValue ServerStorage.ShowStuckMarkers = true deja
+	una esfera en cada atasco de nivel >= VIZ_MIN_LEVEL (ver debug/StuckViz).
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -104,42 +75,28 @@ function StuckDetector:reset()
 	self._lastTickT = os.clock()
 end
 
--- Las acciones de cada nivel NO emiten `humanoid:MoveTo` directos: hacerlo
--- cancela el MoveTo del walk loop del Navigator y dispara MoveToFinished
--- espuriamente, lo que hace que el walk loop avance a waypoints que el
--- bot nunca alcanzó (síntoma visible: "pasos a tirones").
---
--- En cambio, cada nivel opera sobre el Navigator vía API limpia
--- (cancel/recomputeLast) y deja que el caller (PATROL/CHASE) decida el
--- siguiente movimiento.
+-- Los niveles NO llaman humanoid:MoveTo: cancelaría el MoveTo del walk loop del
+-- Navigator y dispararía MoveToFinished espurio (avanza a waypoints no
+-- alcanzados). Operan vía cancel/recomputeLast y el caller decide el movimiento.
 local function _applyLevel(self, level: number)
-	-- Antes de tocar nada: el marker debe quedar donde el bot ESTÁ atascado.
-	-- En nivel 4 el teleport mueve el rootPart, así que marcar aquí (y no al
-	-- final) es lo que hace que el punto señalado sea el problemático.
+	-- Marcar antes de actuar: el teleport de nivel 4 mueve el rootPart.
 	if level >= VIZ_MIN_LEVEL then
 		StuckViz.mark(self._rootPart.Position, level, self._botName)
 	end
 
 	if level == 1 then
-		-- 1s sin progreso: abandonar la navegación actual. cancel(true)
-		-- dispara onFailed deferred → PATROL polling sale del bucle y
-		-- elige otro destino. CHASE retrocede 0.3s (failure cooldown)
-		-- antes de reintentar. La mayoría de stucks transitorios
-		-- (bot bloqueado contra otro NPC) se resuelven aquí porque al
-		-- pedir otro destino el path va por otra ruta.
+		-- cancel(true) dispara onFailed deferred: PATROL elige otro destino y
+		-- CHASE reintenta tras su failure cooldown. Resuelve la mayoría de
+		-- bloqueos transitorios contra otros NPC.
 		self._navigator:cancel(true)
 	elseif level == 2 then
-		-- 2s: recompute al mismo destino. Si la ruta original tenía un
-		-- problema dinámico (otro bot bloqueando), una nueva ComputeAsync
-		-- puede encontrar otra forma.
+		-- Recompute al mismo destino por si el bloqueo era dinámico.
 		self._navigator:recomputeLast()
 	elseif level == 3 then
-		-- 4s: jump + abandonar + onFailed. El jump puede ayudar si el bot
-		-- está atascado contra un escalón pequeño que el pathfinder no vio.
+		-- El jump ayuda con escalones pequeños que el pathfinder no vio.
 		self._humanoid.Jump = true
 		self._navigator:cancel(true)
 	elseif level == 4 then
-		-- 8s: teleport al roam point navegable más cercano. Última opción.
 		local roamGraph = self._roamGraph
 		local nearest: Vector3? = nil
 		if roamGraph then
@@ -150,8 +107,6 @@ local function _applyLevel(self, level: number)
 			self._lastPos = self._rootPart.Position
 		end
 		self._navigator:cancel(true)
-		-- Reset post-teleport: el bot está en nuevo sitio, los contadores
-		-- empiezan de cero (igual que cualquier movimiento real).
 		self._stuckAccum = 0
 		table.clear(self._triggered)
 	end
@@ -161,11 +116,8 @@ function StuckDetector:tick(now: number)
 	local dt = now - self._lastTickT
 	self._lastTickT = now
 
-	-- Gracia de spawn: durante los primeros segundos el bot cae desde +4 studs
-	-- sobre el pad, espera su turno en la cola de pathfinding (saturada en
-	-- round-start) y se empuja con los otros bots del mismo spawn. Nada de eso
-	-- es un problema de geometría del mapa, pero el detector lo veía como
-	-- "moving sin progreso" y escalaba en cada spawn.
+	-- Gracia de spawn: el bot cae sobre el pad, espera la cola de pathfinding
+	-- (saturada en round-start) y se empuja con otros bots; no es geometría.
 	if now - self._spawnedAt < BotConfig.Navigation.StuckSpawnGrace then
 		self._lastPos = self._rootPart.Position
 		return
@@ -175,11 +127,9 @@ function StuckDetector:tick(now: number)
 	local moving = navigator:isMoving()
 
 	if not moving then
-		-- Navigator idle: el bot no debería estar moviéndose (entre paths,
-		-- en ATTACK, post-cancel esperando nuevo path...). No acumulamos
-		-- stuck pero TAMPOCO reseteamos — _stuckAccum se mantiene entre
-		-- ciclos cancel→walk para que la escalada pueda llegar a level 4
-		-- aunque el bot esté ciclando entre level 1 y nuevo walk.
+		-- No acumula pero TAMPOCO resetea: _stuckAccum sobrevive a los ciclos
+		-- cancel→walk para que la escalada llegue a nivel 4 aunque el bot
+		-- cicle entre nivel 1 y un nuevo walk.
 		self._lastPos = self._rootPart.Position
 		return
 	end
@@ -194,15 +144,11 @@ function StuckDetector:tick(now: number)
 	self._lastPos = pos
 
 	if speed >= BotConfig.Navigation.StuckMoveEpsilon then
-		-- Bot SE ESTÁ MOVIENDO. Esto es el único reset legítimo:
-		-- recompenza un walk exitoso o un escape lateral. Limpia
-		-- _stuckAccum y _triggered para que próximos stucks empiecen
-		-- desde cero.
+		-- Único reset legítimo de los contadores.
 		_resetCounters(self)
 		return
 	end
 
-	-- Navigator dice "moving" pero el bot no progresa. Acumular.
 	self._stuckAccum += dt
 	local stuckDur = self._stuckAccum
 	local thresholds = BotConfig.Navigation.StuckThresholds

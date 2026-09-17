@@ -1,16 +1,8 @@
 --!strict
 --[[
-	WeaponsConfig/Schema.luau
-	Esquema de claves de configuración POR TIPO DE ARMA.
-
-	Para cada clave: tipo de valor, default y descripción. Este default es EL
-	default: `BaseWeapon:getConfigValue(key)` cae aquí cuando la definición del
-	arma no declara la clave, así que cambiarlo aquí lo cambia en todo el
-	runtime. Los call-sites no repiten el literal (antes sí: ~70 copias a mano
-	que ya habían divergido en MaxDistance).
-
-	El esquema es además lo que valida el registro (WeaponsConfig/init) al
-	cargar cada definición.
+	El default de cada clave es EL default: BaseWeapon:getConfigValue(key) cae
+	aquí cuando el arma no declara la clave, y los call-sites no repiten el literal.
+	WeaponsConfig/init valida cada definición contra este esquema al cargarla.
 ]]
 
 export type ValueType = "number" | "integer" | "string" | "boolean"
@@ -29,7 +21,6 @@ local function key(valueType: ValueType, default: any, description: string): Key
 	return { type = valueType, default = default, description = description }
 end
 
--- ── BaseWeapon ───────────────────────────────────────────────
 -- Claves que entiende cualquier arma (las lee BaseWeapon / WeaponsSystem).
 Schema.Base = {
 	AmmoCapacity = key("integer", 30, "Balas por cargador."),
@@ -41,17 +32,13 @@ Schema.Base = {
 	CrosshairScale = key("number", 1, "Escala del crosshair."),
 } :: KeySchema
 
--- ── BulletWeapon ─────────────────────────────────────────────
--- Proyectiles: cadencia, balística, daño, recoil y VFX.
 Schema.Bullet = {
-	-- Cadencia / modo de disparo
 	FireMode = key("string", "Semiautomatic", "Automatic | Semiautomatic | Burst."),
 	ShotCooldown = key("number", 0.1, "Segundos entre disparos. 60/ShotCooldown = balas por minuto."),
 	BurstShotCooldown = key("number", nil, "Segundos entre balas de una ráfaga (sólo FireMode=Burst)."),
 	NumBurstShots = key("integer", 3, "Balas por ráfaga (sólo FireMode=Burst)."),
 	StartupTime = key("number", 0.2, "Retardo antes del primer disparo al mantener el gatillo."),
 
-	-- Proyectil
 	ShotEffect = key("string", "Bullet", "Template en Assets.Effects.Shots."),
 	NumProjectiles = key("integer", 1, "Proyectiles por disparo (escopetas > 1)."),
 	BulletSpeed = key("number", 1000, "Velocidad del proyectil (studs/s)."),
@@ -64,7 +51,6 @@ Schema.Bullet = {
 	BeamWidth0 = key("number", 1.5, "Ancho inicial del beam del trazador."),
 	BeamWidth1 = key("number", 1.8, "Ancho final del beam del trazador."),
 
-	-- Daño
 	HitDamage = key("number", 10, "Daño por impacto directo."),
 	FullDamageDistance = key("number", 1000, "Hasta esta distancia el daño es completo."),
 	ZeroDamageDistance = key("number", 10000, "A esta distancia el daño llega a cero (falloff lineal)."),
@@ -73,7 +59,7 @@ Schema.Bullet = {
 	BlastRadius = key("number", 8, "Radio de la explosión (studs)."),
 	BlastPressure = key("number", 10000, "Presión de la explosión (física)."),
 
-	-- Carga. Definir ChargeRate activa el modo carga aunque sea 0.
+	-- Definir ChargeRate activa el modo carga aunque sea 0.
 	ChargeRate = key("number", 0, "Carga por segundo mientras se mantiene el gatillo."),
 	ChargePassively = key("boolean", false, "Carga sola sin mantener el gatillo."),
 	DischargeRate = key("number", 0, "Descarga por segundo al soltar."),
@@ -82,7 +68,6 @@ Schema.Bullet = {
 	NumChargeCompleteParticles = key("integer", 25, "Partículas al completar la carga."),
 	NumDischargeCompleteParticles = key("integer", 25, "Partículas al completar la descarga."),
 
-	-- Recoil / feel
 	RecoilMin = key("number", 0.05, "Recoil mínimo por disparo."),
 	RecoilMax = key("number", 0.5, "Recoil máximo acumulado."),
 	RecoilDecay = key("number", 0.825, "Factor de decaimiento del recoil por frame."),
@@ -94,7 +79,6 @@ Schema.Bullet = {
 	ViewKickReturn = key("number", 13, "Velocidad de retorno del view-kick."),
 	FiredPlaybackSpeedRange = key("number", 0.1, "Variación aleatoria del pitch del sonido de disparo."),
 
-	-- VFX
 	MuzzleFlashTime = key("number", 0.03, "Duración del fogonazo."),
 	MuzzleFlashSize0 = key("number", 1, "Tamaño mínimo del fogonazo."),
 	MuzzleFlashSize1 = key("number", 1, "Tamaño máximo del fogonazo."),
@@ -108,7 +92,6 @@ Schema.Bullet = {
 	AlignHitMarkToNormal = key("boolean", true, "Orienta la marca de impacto a la normal de la superficie."),
 	ModularHitVFX = key("boolean", true, "Usa el sistema modular de HitVFX (ver docs/HIT-VFX.md)."),
 
-	-- Animaciones
 	AimTrack = key("string", "RifleAim", "Track de animación al apuntar."),
 	AimZoomTrack = key("string", "RifleAimDownSights", "Track de animación al apuntar con zoom."),
 } :: KeySchema
@@ -123,7 +106,6 @@ local function merge(...: KeySchema): KeySchema
 	return out
 end
 
---- Esquema completo por WeaponType. BowWeapon hereda de BulletWeapon sin claves propias.
 Schema.ByWeaponType = {
 	BulletWeapon = merge(Schema.Base, Schema.Bullet),
 	BowWeapon = merge(Schema.Base, Schema.Bullet),
@@ -138,7 +120,6 @@ function Schema.GetKeySpec(weaponType: string, keyName: string): KeySpec?
 	return if schema then schema[keyName] else nil
 end
 
---- Default documentado de una clave para ese tipo de arma (nil si no tiene).
 function Schema.GetDefault(weaponType: string, keyName: string): any
 	local spec = Schema.GetKeySpec(weaponType, keyName)
 	return if spec then spec.default else nil
@@ -153,12 +134,8 @@ local function matchesType(valueType: ValueType, value: any): boolean
 	return type(value) == valueType
 end
 
---[[
-	Valida una tabla de config contra el esquema de `weaponType`.
-	Devuelve la lista de problemas (vacía = OK). Claves desconocidas y tipos
-	incorrectos son errores: una clave mal escrita en una definición nunca
-	sería leída por el runtime y el arma jugaría silenciosamente con defaults.
-]]
+-- Claves desconocidas son error: una clave mal escrita nunca se leería y el
+-- arma jugaría silenciosamente con defaults.
 function Schema.Validate(weaponType: string, config: { [string]: any }): { string }
 	local problems: { string } = {}
 	local schema = Schema.ByWeaponType[weaponType]

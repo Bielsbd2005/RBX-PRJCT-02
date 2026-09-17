@@ -1,19 +1,10 @@
 --!strict
 --[[
-	GlobalKillFeed.luau
-	Manejador del feed de muertes global (jugadores y bots).
-	Usa la estructura "Template" pre-creada dentro de "GlobalKillFeedContainer".
+	Feed de muertes global (jugadores y bots). Studio: GlobalKillFeedContainer.Template
+	con hijos directos Killer (TextLabel), Weapon (ImageLabel) y Victim (TextLabel).
 
-	Estructura nueva del Template (hijos directos, ordenados por su propio
-	UIListLayout horizontal):
-		Template (Frame) [UICorner, UIListLayout, UIPadding, UIStroke]
-		├─ Killer  (TextLabel)
-		├─ Weapon  (ImageLabel)
-		└─ Victim  (TextLabel)
-
-	Como tanto el contenedor como el Template usan UIListLayout, no podemos
-	deslizar los items por Position (el layout controla la posición). La entrada
-	se anima expandiendo el alto + fade-in; la salida hace fade-out + colapso.
+	Contenedor y Template usan UIListLayout, así que no se puede animar Position:
+	la entrada expande el alto + fade-in y la salida hace fade-out + colapso.
 ]]
 
 local Players = game:GetService("Players")
@@ -46,7 +37,6 @@ local MAX_ITEMS = 5
 local DISPLAY_TIME = 6
 local SKULL_ICON = AssetIds.Images.Skull
 
--- Colores del HUD
 local TEAM_A_COLOR = Color3.fromRGB(0, 161, 251)
 local TEAM_B_COLOR = Color3.fromRGB(246, 82, 71)
 local NEUTRAL_COLOR = Color3.fromRGB(220, 220, 220)
@@ -66,14 +56,11 @@ function GlobalKillFeed.new(matchHudGui: ScreenGui, matchHudInstance: any): any
 	self._template = template
 	template.Visible = false
 
-	-- Alinear el feed a la derecha de la pantalla (los items salen por la derecha,
-	-- creciendo de derecha a izquierda).
 	local listLayout = container:FindFirstChildOfClass("UIListLayout")
 	if listLayout then
 		listLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
 	end
 
-	-- Escuchar el evento de KillFeed
 	local Network = require(Shared.networking.Network)
 	self._connection = Network.Combat.KillFeed.Listen(function(data)
 		self:pushKill(data.killerName, data.victimName, data.weaponId)
@@ -87,7 +74,6 @@ function GlobalKillFeed:_getParticipantTeamColor(name: string): Color3
 		return NEUTRAL_COLOR
 	end
 
-	-- 1. Buscar en jugadores reales conectados
 	local player = Players:FindFirstChild(name)
 	if player then
 		local side = if player.Character then TeamUtils.getSide(player.Character) else nil
@@ -102,7 +88,6 @@ function GlobalKillFeed:_getParticipantTeamColor(name: string): Color3
 		end
 	end
 
-	-- 2. Buscar en el roster de bots activo
 	if self._matchHudInstance and self._matchHudInstance._botRoster then
 		for _, bot in pairs(self._matchHudInstance._botRoster) do
 			if bot.displayName == name then
@@ -120,7 +105,7 @@ end
 
 function GlobalKillFeed:_getWeaponImage(weaponId: string): string
 	if not weaponId or weaponId == "" then
-		return SKULL_ICON -- Fallback calavera
+		return SKULL_ICON
 	end
 
 	local mainItem = ItemsConfig.Main[weaponId]
@@ -136,9 +121,7 @@ function GlobalKillFeed:_getWeaponImage(weaponId: string): string
 	return SKULL_ICON
 end
 
--- Recolecta las propiedades de transparencia (con su valor autorizado) de todos
--- los elementos visibles del item para animar fade-in/out sin asumir que el
--- diseñador dejó todo en 0.
+-- Guarda la transparencia original de cada elemento para no asumir que en Studio está todo en 0.
 function GlobalKillFeed:_collectFadeTargets(item: GuiObject): { FadeTarget }
 	local targets = {} :: { FadeTarget }
 
@@ -150,8 +133,7 @@ function GlobalKillFeed:_collectFadeTargets(item: GuiObject): { FadeTarget }
 		}
 	end
 
-	-- CanvasGroup: fade del grupo completo con una sola propiedad (más barato y
-	-- es justo para lo que el diseñador puso el CanvasGroup).
+	-- CanvasGroup: una sola propiedad para todo el grupo.
 	if item:IsA("CanvasGroup") then
 		add(item, "GroupTransparency")
 		return targets
@@ -174,14 +156,13 @@ function GlobalKillFeed:_collectFadeTargets(item: GuiObject): { FadeTarget }
 end
 
 function GlobalKillFeed:pushKill(killerName: string, victimName: string, weaponId: string)
-	if self._destroyed or not self._container or not self._template then
+	if self._destroyed then
 		return
 	end
 
 	local killerColor = self:_getParticipantTeamColor(killerName)
 	local victimColor = self:_getParticipantTeamColor(victimName)
 
-	-- Clonar la plantilla completa (Killer / Weapon / Victim son hijos directos)
 	local item = self._template:Clone()
 	item.Name = "KillItem"
 
@@ -198,27 +179,23 @@ function GlobalKillFeed:pushKill(killerName: string, victimName: string, weaponI
 		killerLabel.Visible = hasKiller
 	end
 
-	-- Arma: icono del arma usada, o calavera en autoeliminación
 	if weaponImage then
 		weaponImage.Image = if hasKiller then self:_getWeaponImage(weaponId) else SKULL_ICON
 		weaponImage.Visible = true
 	end
 
-	-- Víctima
 	if victimLabel then
 		victimLabel.Text = victimName
 		victimLabel.TextColor3 = victimColor
 		victimLabel.Visible = true
 	end
 
-	-- Capturar las transparencias autorizadas antes de iniciarlas en 1 (oculto)
 	local fadeTargets = self:_collectFadeTargets(item)
 	for _, target in ipairs(fadeTargets) do
 		(target.object :: any)[target.property] = 1
 	end
 
-	-- Si el Template se auto-dimensiona en alto no podemos animar Size.Y
-	-- manualmente (el AutomaticSize lo sobreescribe): caemos a fade puro.
+	-- Con AutomaticSize en Y el motor sobrescribe Size.Y: solo fade.
 	local animateHeight = item.AutomaticSize == Enum.AutomaticSize.None
 		or item.AutomaticSize == Enum.AutomaticSize.X
 	local targetHeight = item.Size.Y.Offset
@@ -245,7 +222,6 @@ function GlobalKillFeed:pushKill(killerName: string, victimName: string, weaponI
 
 	table.insert(self._activeItems, feedItem)
 
-	-- Animación de entrada: expandir alto (si aplica) + fade-in
 	if animateHeight then
 		TweenService:Create(item, ENTER_TWEEN, {
 			Size = UDim2.new(item.Size.X.Scale, item.Size.X.Offset, item.Size.Y.Scale, targetHeight),
@@ -255,7 +231,6 @@ function GlobalKillFeed:pushKill(killerName: string, victimName: string, weaponI
 		TweenService:Create(target.object, ENTER_TWEEN, { [target.property] = target.original }):Play()
 	end
 
-	-- Limitar cantidad
 	if #self._activeItems > MAX_ITEMS then
 		local oldest = table.remove(self._activeItems, 1)
 		if oldest then
@@ -263,7 +238,6 @@ function GlobalKillFeed:pushKill(killerName: string, victimName: string, weaponI
 		end
 	end
 
-	-- Tiempo de descarte
 	task.delay(DISPLAY_TIME, function()
 		if self._destroyed then
 			return
@@ -282,7 +256,6 @@ function GlobalKillFeed:_removeItem(item: GlobalKillFeedItem)
 	end
 	item.isDestroying = true
 
-	-- Animación de salida: fade-out de todos los elementos
 	local lastTween: Tween? = nil
 	for _, target in ipairs(item.fadeTargets) do
 		local tween = TweenService:Create(target.object, EXIT_TWEEN, { [target.property] = 1 })

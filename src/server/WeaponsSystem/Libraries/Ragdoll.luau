@@ -124,9 +124,7 @@ function Ragdoll:setupJoint(jointName, info)
 	end
 
 	if existingConstraint or RunService:IsClient() then
-		-- Timeout en WaitForChild: sin él, un constraint que nunca replica colgaba
-		-- toda la construcción del Ragdoll (bucle síncrono sobre 14 joints).
-		-- setJointRagdolled tolera constraint == nil.
+		-- Timeout: un constraint que nunca replica colgaría toda la construcción del Ragdoll.
 		existingConstraint = self.character:WaitForChild(constraintName, 5)
 		return {
 			constraint = existingConstraint,

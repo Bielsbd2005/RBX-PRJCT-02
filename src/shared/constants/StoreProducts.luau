@@ -4,49 +4,32 @@
 	Catálogo de todo lo que se compra con Robux: los developer products de la
 	tienda (packs de Cash y de Gems) y los gamepasses.
 
-	Los packs son dos monedas con exactamente la misma forma: packs de Cash y packs
-	de Gems. Cada una declara una lista de datos puros y `buildCatalog` deriva de
-	ahí los índices que consumen cliente y servidor, así que ambas monedas no
-	pueden divergir por copy-paste.
+	Cash y Gems declaran listas de datos puros y `buildCatalog` deriva los índices
+	que consumen cliente y servidor, para que no diverjan por copy-paste. El orden de
+	la lista es el orden en la UI; `PriceText` se deriva de `RobuxPrice`.
 
-	Para editar el catálogo solo se tocan las listas de packs de más abajo:
-	  · el orden de la lista es el orden de aparición en la UI;
-	  · `PriceText` NO se escribe a mano: se deriva de `RobuxPrice` para que no
-	    puedan quedar desincronizados.
+	Son catálogos separados porque cada uno se cablea sobre una fila distinta de la
+	GUI (Store…Content.CoinsRow / GemsRow; el mapeo vive en el cliente, store/init.luau).
 
-	Cash y Gems son catálogos separados (y no una sola lista con un campo de
-	moneda) porque cada uno se cablea sobre una fila distinta de la GUI: los packs
-	de Cash en Store…Content.CoinsRow y los de Gems en GemsRow (el mapeo fila↔
-	catálogo vive en el cliente, store/init.luau). Mezclarlos haría buscar los
-	packs de Gems en la fila del cash y no aparecerían.
-
-	`PageName` y `Row` son HERENCIA de la GUI anterior (páginas con filas Row1/
-	Row2…). Hoy no los usa nadie para localizar botones; se conservan porque
-	`Rows` sigue siendo el orden estable con el que recorrer el catálogo.
+	`PageName` y `Row` ya no se usan para localizar botones; `Rows` se conserva como
+	orden estable para recorrer el catálogo.
 
 	ProductId = 0 significa "sin configurar" (mismo convenio que
-	`BattlePassConfig.PremiumProductId`): el pack queda fuera de `ByProductId`,
-	así que ProcessReceipt lo ignora, y el binder desactiva el botón. Hay que
-	crear los developer products reales en el panel de Roblox y pegar aquí
-	los IDs.
+	`BattlePassConfig.PremiumProductId`): queda fuera de `ByProductId`, ProcessReceipt
+	lo ignora y el binder desactiva el botón.
 ]]
 
--- Fila usada por los packs que no declaran `Row`.
 local DEFAULT_ROW = "Row1"
 
 -- El espacio inicial es la separación con el icono de Robux que la GUI dibuja
 -- a la izquierda del label.
 local PRICE_TEXT_FORMAT = " %d"
 
--- ────────────────────────────────────────────────────────────
--- TIPOS
--- ────────────────────────────────────────────────────────────
-
 -- Campos comunes a todo pack, sea de la moneda que sea: es lo único que
 -- necesita el binder del cliente para localizar y cablear un botón.
 export type ProductBase = {
 	ButtonName: string,
-	-- Fila de la página donde vive el botón (Store.<PageName>.<Row>.<ButtonName>).
+	-- Sin uso: el cliente localiza las filas por nombre fijo (store/init.luau).
 	Row: string,
 	ProductId: number,
 	-- Precio ya formateado para el label (derivado de RobuxPrice).
@@ -57,29 +40,22 @@ export type ProductBase = {
 export type StoreProductDefinition = ProductBase & { CashAmount: number }
 export type GemProductDefinition = ProductBase & { GemAmount: number }
 
--- Fila lógica de una página: nombre del contenedor (Store.<PageName>.<RowName>)
--- y los productos que contiene, en orden de aparición.
+-- Agrupación por `Row`; sin consumidores (ver cabecera).
 export type ProductRow<T> = {
 	RowName: string,
 	Products: { T },
 }
 
 --[[
-	Gamepass de Roblox. Va aparte de los catálogos de packs a propósito: NO es un
-	developer product. No pasa por ProcessReceipt (no hay receipt ni PurchaseId
-	que idempotentizar), su posesión se consulta con `UserOwnsGamePassAsync` y es
-	permanente. Meterlo en un `Catalog` lo dejaría dentro de `ByProductId`, que es
-	justo el mapa con el que el dispatcher de receipts decide qué conceder: un id
-	de gamepass ahí concedería un pack de moneda por un receipt que nunca llega.
+	Gamepass: va aparte de los catálogos de packs a propósito. NO es un developer
+	product: no pasa por ProcessReceipt, su posesión se consulta con
+	`UserOwnsGamePassAsync` y es permanente. Dentro de `ByProductId` el dispatcher
+	de receipts concedería un pack de moneda por un receipt que nunca llega.
 
-	PassId = 0 significa "sin configurar" (mismo convenio que ProductId): nadie lo
-	posee, así que el beneficio se muestra bloqueado y no se concede.
+	PassId = 0 significa "sin configurar": nadie lo posee y el beneficio no se concede.
 
-	`RobuxPrice` es solo para pintar el label: el precio que se cobra es el del
-	panel de Roblox. Se declara aquí igual que en los packs para que la fila se
-	vea completa antes de que el pass exista (con PassId = 0 no hay
-	`GetProductInfo` que consultar); al crear el pass hay que pegar el id real y
-	dejar este número en el mismo precio que se puso en el panel.
+	`RobuxPrice` solo pinta el label (con PassId = 0 no hay `GetProductInfo`); el
+	precio que se cobra es el del panel de Roblox y deben coincidir.
 ]]
 export type GamePassDefinition = {
 	-- Nombre legible; se usa como sku en analíticas.
@@ -92,9 +68,8 @@ export type GamePassDefinition = {
 	PriceText: string,
 }
 
--- Los gamepasses no tienen filas ni páginas que derivar (van todos en la misma
--- fila de la tienda), pero sí necesitan un orden estable: `ByName` es un
--- diccionario y recorrerlo pintaría la fila en un orden distinto cada sesión.
+-- Orden estable explícito: `ByName` es un diccionario y recorrerlo pintaría la fila
+-- en un orden distinto cada sesión.
 export type GamePassCatalog = {
 	InOrder: { GamePassDefinition },
 	ByName: { [string]: GamePassDefinition },
@@ -109,15 +84,9 @@ export type Catalog<T> = {
 	-- Solo packs configurados (ProductId > 0), para que un receipt jamás pueda
 	-- resolverse a un pack a medio crear.
 	ByProductId: { [number]: T },
-	-- Filas en el orden de primera aparición de cada `Row` en `InOrder`. Así el
-	-- binder recorre filas en un orden estable y reordenar la lista de packs
-	-- reordena la UI sin tocar código.
+	-- Sin consumidores: el orden de la UI sale de `InOrder`.
 	Rows: { ProductRow<T> },
 }
-
--- ────────────────────────────────────────────────────────────
--- PACKS
--- ────────────────────────────────────────────────────────────
 
 local CASH_PACKS = {
 	{ ButtonName = "Cash1", ProductId = 3567132597, RobuxPrice = 49, CashAmount = 800 },
@@ -127,7 +96,7 @@ local CASH_PACKS = {
 	{ ButtonName = "Cash5", ProductId = 3567132595, RobuxPrice = 799, CashAmount = 24000 },
 }
 
--- Moneda premium. ProductId = 0 → pendientes de crear en el panel de Roblox.
+-- ProductId = 0 → pendientes de crear en el panel de Roblox.
 local GEM_PACKS = {
 	{ ButtonName = "Gems1", ProductId = 0, RobuxPrice = 49, GemAmount = 100 },
 	{ ButtonName = "Gems2", ProductId = 0, RobuxPrice = 99, GemAmount = 250 },
@@ -136,10 +105,8 @@ local GEM_PACKS = {
 	{ ButtonName = "Gems5", ProductId = 0, RobuxPrice = 799, GemAmount = 3000 },
 }
 
--- Gamepasses, en el orden en el que se pintan en la fila de la tienda.
--- `RobuxPrice` está puesto al precio real de cada pass en el panel de Roblox
--- (ver arriba: aquí sólo pinta el label, cobra el panel). Si se cambia el precio
--- allí hay que reflejarlo aquí o el botón mentirá.
+-- En el orden en que se pintan. `RobuxPrice` debe coincidir con el precio del panel
+-- de Roblox o el botón mentirá.
 local GAME_PASS_LIST = {
 	-- Bonus de cash de fin de partida: el bonus "VIP" de ResultsRewards.
 	{ Name = "VIP", ButtonName = "VIP", PassId = 1962133164, RobuxPrice = 100 },
@@ -147,19 +114,11 @@ local GAME_PASS_LIST = {
 	{ Name = "BackWeapon", ButtonName = "BackWeapon", PassId = 1964587184, RobuxPrice = 200 },
 }
 
--- ────────────────────────────────────────────────────────────
--- ÍNDICES DERIVADOS
--- ────────────────────────────────────────────────────────────
-
 --[[
-	Convierte una lista de packs en un catálogo listo para consumir: rellena los
-	campos derivados (Row por defecto, PriceText), congela cada producto y
-	construye los índices por botón, por productId y por fila.
-
-	Los errores son de configuración (dos packs con el mismo botón o el mismo
-	developer product), así que revientan al requerir el módulo: en Studio salta
-	en cuanto se edita la lista, mucho antes de que un receipt entregue el pack
-	equivocado.
+	Rellena los campos derivados (Row por defecto, PriceText), congela cada producto
+	y construye los índices. Los errores de configuración (botón o developer product
+	duplicado) revientan al requerir el módulo, antes de que un receipt entregue el
+	pack equivocado.
 ]]
 local function buildCatalog(pageName: string, packs: { any }): Catalog<any>
 	local inOrder = {} :: { any }
@@ -214,14 +173,8 @@ local function buildCatalog(pageName: string, packs: { any }): Catalog<any>
 end
 
 --[[
-	Misma idea que `buildCatalog` pero para los gamepasses: rellena `PriceText`,
-	congela cada pass y devuelve la lista en orden + el índice por nombre (el que
-	usan los consumidores del beneficio: `GamePasses.ByName.VIP`).
-
-	Los duplicados también revientan al requerir el módulo. El de `PassId` es el
-	que importa: dos passes con el mismo id darían por comprado un beneficio que
-	nadie pagó, y sólo se comprueba en los configurados porque PassId = 0 es
-	precisamente "todavía no tiene id".
+	Como `buildCatalog` para gamepasses. Un `PassId` duplicado daría por comprado un
+	beneficio que nadie pagó; solo se comprueba en los configurados (PassId > 0).
 ]]
 local function buildGamePasses(passes: { any }): GamePassCatalog
 	local inOrder = {} :: { GamePassDefinition }
@@ -252,10 +205,7 @@ local function buildGamePasses(passes: { any }): GamePassCatalog
 	return table.freeze({
 		InOrder = table.freeze(inOrder),
 		ByName = table.freeze(byName),
-		-- El índice ya se construía para detectar PassId repetidos y se tiraba.
-		-- Se expone porque `PromptGamePassPurchaseFinished` sólo entrega el
-		-- passId: sin este mapa, registrar la compra obligaba a recorrer la
-		-- lista entera en cada evento.
+		-- `PromptGamePassPurchaseFinished` solo entrega el passId.
 		ByPassId = table.freeze(byPassId),
 	})
 end

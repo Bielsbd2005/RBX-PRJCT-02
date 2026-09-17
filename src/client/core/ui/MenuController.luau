@@ -10,7 +10,6 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Janitor = require(Packages.janitor) :: any
 local Fusion = require(Packages.fusion) :: any
 
-local MenuAnimator = require(script.Parent.animators.MenuAnimator)
 local MenuHover = require(script.Parent.MenuHover)
 local InteractiveScaleTween = require(script.Parent.animators.InteractiveScaleTween)
 local UITheme = require(script.Parent.UITheme)
@@ -25,8 +24,7 @@ type StatsData = {
 	XP: number,
 	XPToNextLevel: number,
 	Cash: number,
-	-- Opcional: un perfil cargado antes del Reconcile de esta versión puede
-	-- no traer el campo todavía.
+	-- Opcional: un perfil aún sin Reconcile puede no traerlo.
 	Gems: number?,
 }
 
@@ -53,7 +51,6 @@ type HudRefs = {
 
 export type MenuController = {
 	_gui: ScreenGui,
-	_animator: any,
 	_hover: any,
 	_janitor: any,
 	_fusionScope: any,
@@ -61,7 +58,7 @@ export type MenuController = {
 	_lobbyStatsGui: ScreenGui?,
 	_statsHudOverride: boolean?,
 	_missionSlots: { MissionSlot },
-	_openPanels: { [Instance]: boolean },
+	_openPanels: { [Instance]: RBXScriptConnection },
 	getGui: (self: MenuController) -> ScreenGui,
 	setStatsHudOverride: (self: MenuController, visible: boolean?) -> (),
 	hide: (self: MenuController) -> (),
@@ -91,39 +88,25 @@ local function asFrame(inst: Instance?): Frame?
 	return if inst and inst:IsA("Frame") then inst else nil
 end
 
--- El HUD de monedas ya no vive en Menu ni en Locker: los dos comparten el
--- ScreenGui LobbyStats, cuyo nodo Stats se pasa aquí como `statsNode`.
---   <statsNode>.CoinsFrame.Value      → efectivo actual (coins/cash)
---   <statsNode>.GemsFrame.Value       → gems actuales (opcional)
--- El resto sigue bajo Menu.Container:
---   Container.TopFrame.Level.Current  → nivel actual
---   Container.TopFrame.Level.Next     → siguiente nivel
---   Container.TopFrame.Level.Bar.Fill → progreso de XP hacia el siguiente nivel
---   Container.FamePass.Season         → nombre de la season
---   Container.FamePass.Timer          → tiempo restante ("Ends in X, Y")
---   Container.FamePass.Level          → nivel en formato "Lv. X"
---   Container.FamePass.Bar.Fill       → progreso de tier del BattlePass
+-- `statsNode` es LobbyStats.Stats (HUD de monedas compartido por Menu y Locker);
+-- CoinsFrame muestra Cash. El resto cuelga de Menu.Container.
 local function resolveHudRefs(menuGui: ScreenGui, statsNode: Instance?): HudRefs
 	local container = menuGui:FindFirstChild("Container")
 	local topFrame = container and container:FindFirstChild("TopFrame")
 	local famePassNode = container and container:FindFirstChild("FamePass")
 
-	-- 1. Cash (el frame en el GUI se llama "CoinsFrame")
 	local cashFrame = statsNode and statsNode:FindFirstChild("CoinsFrame")
 	local cashValue = asTextLabel(cashFrame and cashFrame:FindFirstChild("Value"))
 
-	-- 1b. Gems (opcional: la GUI puede no tener todavía el GemsFrame).
 	local gemsFrame = statsNode and statsNode:FindFirstChild("GemsFrame")
 	local gemsValue = asTextLabel(gemsFrame and gemsFrame:FindFirstChild("Value"))
 
-	-- 2. Level
 	local levelNode = topFrame and topFrame:FindFirstChild("Level")
 	local levelCurrent = asTextLabel(levelNode and levelNode:FindFirstChild("Current"))
 	local levelNext = asTextLabel(levelNode and levelNode:FindFirstChild("Next"))
 	local barNode = levelNode and levelNode:FindFirstChild("Bar")
 	local barFill = asFrame(barNode and barNode:FindFirstChild("Fill"))
 
-	-- 3. FamePass
 	local famePassSeason = asTextLabel(famePassNode and famePassNode:FindFirstChild("Season"))
 	local famePassTimer = asTextLabel(famePassNode and famePassNode:FindFirstChild("Timer"))
 	local famePassLevel = asTextLabel(famePassNode and famePassNode:FindFirstChild("Level"))
@@ -144,14 +127,8 @@ local function resolveHudRefs(menuGui: ScreenGui, statsNode: Instance?): HudRefs
 end
 
 local function updateTopHud(hudRefs: HudRefs, stats: StatsData): ()
-	if hudRefs.cashValue then
-		setText(hudRefs.cashValue, UIUtils.formatCashAmount(stats.Cash))
-	end
-
-	if hudRefs.gemsValue then
-		-- `or 0` cubre el perfil que aún no pasó por Reconcile en esta sesión.
-		setText(hudRefs.gemsValue, UIUtils.formatCashAmount(stats.Gems or 0))
-	end
+	setText(hudRefs.cashValue, UIUtils.formatCashAmount(stats.Cash))
+	setText(hudRefs.gemsValue, UIUtils.formatCashAmount(stats.Gems or 0))
 
 	local currentXP = math.max(0, math.floor(stats.XP))
 	local xpToNext = math.max(0, math.floor(stats.XPToNextLevel))
@@ -165,17 +142,13 @@ local function updateTopHud(hudRefs: HudRefs, stats: StatsData): ()
 	setText(hudRefs.levelNext, tostring(stats.Level + 1))
 end
 
-local function updateFamePassHud(hudRefs: HudRefs, bpState: any): ()
-	local season = BattlePassConfig.GetActiveSeason()
-	local maxTier = BattlePassConfig.GetMaxTier(season)
-
-	setText(hudRefs.famePassSeason, season.Name)
-
+-- Oculto si la season no caduca (EndsAt <= 0) o ya no queda tiempo.
+local function updateFamePassTimer(hudRefs: HudRefs, endsAt: number): ()
 	if hudRefs.famePassTimer then
-		if season.EndsAt <= 0 then
+		if endsAt <= 0 then
 			hudRefs.famePassTimer.Visible = false
 		else
-			local remaining = season.EndsAt - os.time()
+			local remaining = endsAt - os.time()
 			local text = UIUtils.formatTimeLeft(remaining)
 			if text == "" then
 				hudRefs.famePassTimer.Visible = false
@@ -185,6 +158,15 @@ local function updateFamePassHud(hudRefs: HudRefs, bpState: any): ()
 			end
 		end
 	end
+end
+
+local function updateFamePassHud(hudRefs: HudRefs, bpState: any): ()
+	local season = BattlePassConfig.GetActiveSeason()
+	local maxTier = BattlePassConfig.GetMaxTier(season)
+
+	setText(hudRefs.famePassSeason, season.Name)
+
+	updateFamePassTimer(hudRefs, season.EndsAt)
 
 	local currentTier = if bpState and type(bpState.CurrentTier) == "number"
 		then math.floor(bpState.CurrentTier)
@@ -205,20 +187,14 @@ local function updateFamePassHud(hudRefs: HudRefs, bpState: any): ()
 	end
 end
 
--- Mapea el slot de DailyTasks ("Task1"/"Task2"/"Task3") al nombre del slot en
--- Menu.Container.Missions ("1"/"2"/"3"). Qué tarea cae en cada slot lo decide la
--- rotación del día (DailyTasks.GetForSlot); el cash es del slot, no de la tarea.
+-- Slot de DailyTasks → hijo de Menu.Container.Missions. La tarea de cada slot la
+-- decide la rotación del día (DailyTasks.GetForSlot).
 local MISSION_SLOT_NAMES: { [string]: string } = {
 	Task1 = "1",
 	Task2 = "2",
 	Task3 = "3",
 }
 
--- Estructura esperada por slot bajo Menu.Container.Missions:
---   Missions.<N>.Title      → nombre de la misión
---   Missions.<N>.Value      → progreso "p/o"
---   Missions.<N>.Bar.Fill   → Frame escalado X = progreso/objetivo
---   Missions.<N>.Reward     → TextLabel con el cash otorgado
 local function resolveMissionSlots(menuGui: ScreenGui): { MissionSlot }
 	local container = menuGui:FindFirstChild("Container")
 	local missionsNode = container and container:FindFirstChild("Missions")
@@ -282,14 +258,13 @@ local function updateMissionsHud(slots: { MissionSlot }, dailyTasksState: any): 
 	end
 end
 
--- Hover animations específicas por botón.
-local MENU_BUTTON_HOVER_BINDINGS: { { path: { string }, lift: number } } = {
-	{ path = { "Container", "TopFrame", "RightContainer", "Settings" }, lift = 0 },
-	{ path = { "Container", "TopFrame", "RightContainer", "Rewards" }, lift = 0 },
-	{ path = { "Container", "PlayBtn" }, lift = 0 },
-	{ path = { "Container", "Store" }, lift = 0 },
-	{ path = { "Container", "Locker" }, lift = 8 },
-	{ path = { "Container", "FamePass" }, lift = 0 },
+local MENU_BUTTON_HOVER_BINDINGS: { { path: { string } } } = {
+	{ path = { "Container", "TopFrame", "RightContainer", "Settings" } },
+	{ path = { "Container", "TopFrame", "RightContainer", "Rewards" } },
+	{ path = { "Container", "PlayBtn" } },
+	{ path = { "Container", "Store" } },
+	{ path = { "Container", "Locker" } },
+	{ path = { "Container", "FamePass" } },
 }
 
 local function resolveMenuButton(menuGui: ScreenGui, path: { string }): Instance?
@@ -302,15 +277,12 @@ local function resolveMenuButton(menuGui: ScreenGui, path: { string }): Instance
 end
 
 local function bindMenuButtonHovers(menuGui: ScreenGui, janitor: any): ()
-	local boundButtons: { [Instance]: boolean } = {}
 	for _, binding in MENU_BUTTON_HOVER_BINDINGS do
 		local node = resolveMenuButton(menuGui, binding.path)
-		if node and node:IsA("GuiButton") and not boundButtons[node] then
-			boundButtons[node] = true
+		if node and node:IsA("GuiButton") then
 			InteractiveScaleTween.bindButton(node, janitor, {
 				hoverScale = UITheme.ButtonHoverScale,
 				clickScale = UITheme.ButtonClickScale,
-				liftOffset = binding.lift,
 			})
 		end
 	end
@@ -327,9 +299,7 @@ function MenuController.new(): MenuController
 		starterMenu.ResetOnSpawn = false
 	end
 
-	-- HUD de monedas compartido por el Menu y el Locker (ninguno tiene ya su
-	-- propio Stats). Igual que el Menu, no debe resetearse al respawnear: si se
-	-- reclonara, las referencias de _hudRefs quedarían apuntando a nodos muertos.
+	-- ResetOnSpawn = false: si se reclonara, _hudRefs apuntaría a nodos muertos.
 	local lobbyStatsNode = playerGui:WaitForChild("LobbyStats", 10)
 	local lobbyStatsGui = if lobbyStatsNode and lobbyStatsNode:IsA("ScreenGui")
 		then lobbyStatsNode :: ScreenGui
@@ -352,7 +322,6 @@ function MenuController.new(): MenuController
 	self._statsHudOverride = nil
 	self._janitor = Janitor.new()
 	self._fusionScope = Fusion.scoped(Fusion)
-	self._animator = MenuAnimator.new(menuGui)
 	self._hover = MenuHover.new(menuGui)
 	self._hudRefs = resolveHudRefs(menuGui, lobbyStatsNodeStats)
 	self._missionSlots = resolveMissionSlots(menuGui)
@@ -361,14 +330,12 @@ function MenuController.new(): MenuController
 
 	bindMenuButtonHovers(menuGui, self._janitor)
 
-	-- El Menu se oculta también por fuera de :hide() (MatchMenu apaga el ScreenGui
-	-- durante la partida), así que seguimos su Enabled además del estado interno.
+	-- El Menu también se oculta por fuera de :hide() (MatchMenu apaga el ScreenGui).
 	self._janitor:Add(menuGui:GetPropertyChangedSignal("Enabled"):Connect(function()
 		self:_syncStatsHud()
 	end), "Disconnect")
 	self:_syncStatsHud()
 
-	self._janitor:Add(self._animator, "Destroy")
 	self._janitor:Add(self._hover, "Destroy")
 	self._janitor:Add(function()
 		Fusion.doCleanup(self._fusionScope)
@@ -402,28 +369,16 @@ function MenuController.new(): MenuController
 			updateMissionsFromState()
 		end
 
-		-- Actualización periódica del timer de temporada del FamePass (mismo esquema de UserInterface.BattlePass.Main.Timer)
 		if self._hudRefs.famePassTimer then
 			local timerRunning = true
 			task.spawn(function()
 				while timerRunning do
 					local season = BattlePassConfig.GetActiveSeason()
+					updateFamePassTimer(self._hudRefs, season.EndsAt)
 					if season.EndsAt <= 0 then
-						if self._hudRefs.famePassTimer then
-							self._hudRefs.famePassTimer.Visible = false
-						end
 						task.wait(3600)
 					else
 						local remaining = season.EndsAt - os.time()
-						local text = UIUtils.formatTimeLeft(remaining)
-						if self._hudRefs.famePassTimer then
-							if text == "" then
-								self._hudRefs.famePassTimer.Visible = false
-							else
-								self._hudRefs.famePassTimer.Visible = true
-								self._hudRefs.famePassTimer.Text = text
-							end
-						end
 						local pollInterval = if remaining > 3600 then 3600 else 60
 						task.wait(pollInterval)
 					end
@@ -442,11 +397,9 @@ function MenuController:getGui(): ScreenGui
 	return self._gui
 end
 
--- El HUD de monedas (LobbyStats) es un ScreenGui aparte, así que no se oculta
--- solo con el Menu. Por defecto sigue al Menu: como todo panel llama a :hide()
--- al abrirse, cualquier otra GUI (BattlePass, Gifting, …) y la partida lo dejan
--- oculto sin hacer nada. El Locker, que también quiere el HUD arriba con el Menu
--- escondido, se apropia de él con setStatsHudOverride.
+-- LobbyStats es un ScreenGui aparte: por defecto sigue al Menu (todo panel llama
+-- a :hide() al abrirse). El Locker lo quiere visible con el Menu oculto y usa
+-- setStatsHudOverride.
 function MenuController:_syncStatsHud(): ()
 	local gui = self._lobbyStatsGui
 	if not gui then
@@ -463,8 +416,7 @@ function MenuController:setStatsHudOverride(visible: boolean?): ()
 end
 
 function MenuController:_fireStateChanged(): ()
-	-- Snapshot defensivo: una callback puede unsubscribirse durante su propia
-	-- ejecución (mutaría la lista mientras iteramos).
+	-- Snapshot: una callback puede desuscribirse durante la iteración.
 	local snapshot = table.clone(self._stateChangeListeners)
 	for _, fn in snapshot do
 		local ok, err = pcall(fn)
@@ -492,20 +444,18 @@ end
 
 function MenuController:hide(): ()
 	self._isHidden = true
-	self._animator:hide()
+	self._gui.Enabled = false
 	self:_fireStateChanged()
 end
 
 function MenuController:show(): ()
 	self._isHidden = false
-	self._animator:show()
+	self._gui.Enabled = true
 	self:_fireStateChanged()
 end
 
 function MenuController:registerPanel(panel: Instance): ()
 	if self._openPanels[panel] then return end
-	-- Reaccionar también cuando el panel se abre/cierra (.Enabled/.Visible) para
-	-- notificar a los suscriptores de onStateChanged (p. ej. otros paneles).
 	local prop = if panel:IsA("ScreenGui") then "Enabled" else "Visible"
 	local conn = panel:GetPropertyChangedSignal(prop):Connect(function()
 		self:_fireStateChanged()
@@ -516,7 +466,7 @@ end
 
 function MenuController:unregisterPanel(panel: Instance): ()
 	local conn = self._openPanels[panel]
-	if typeof(conn) == "RBXScriptConnection" then
+	if conn then
 		conn:Disconnect()
 	end
 	self._openPanels[panel] = nil
@@ -536,9 +486,7 @@ end
 
 function MenuController:Destroy(): ()
 	for _, conn in self._openPanels do
-		if typeof(conn) == "RBXScriptConnection" then
-			conn:Disconnect()
-		end
+		conn:Disconnect()
 	end
 	table.clear(self._openPanels)
 	table.clear(self._stateChangeListeners)

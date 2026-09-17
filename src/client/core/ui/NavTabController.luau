@@ -1,14 +1,10 @@
 --!strict
--- NavTabController: gestión reutilizable de tabs/nav buttons con
--- tween de scale + ImageColor3 cancelable. Sustituye el patrón duplicado
--- en store, locker.
 
 local TweenService = game:GetService("TweenService")
 local UITheme = require(script.Parent.UITheme)
 
 export type NavTabController = {
 	_buttons: { [string]: GuiButton },
-	_activeKey: string?,
 	_scaleTweens: { [GuiButton]: Tween },
 	_colorTweens: { [GuiButton]: Tween },
 	setActive: (self: NavTabController, key: string?) -> (),
@@ -43,7 +39,6 @@ end
 function NavTabController.new(): NavTabController
 	local self = setmetatable({}, NavTabController) :: any
 	self._buttons = {}
-	self._activeKey = nil
 	self._scaleTweens = {}
 	self._colorTweens = {}
 	return self
@@ -54,8 +49,6 @@ function NavTabController:register(key: string, button: GuiButton)
 end
 
 function NavTabController:setActive(key: string?)
-	self._activeKey = key
-
 	for buttonKey, button in self._buttons do
 		local isSelected = (buttonKey == key)
 		local targetScale = if isSelected then UITheme.NavSelectedScale else UITheme.NavUnselectedScale
@@ -72,7 +65,7 @@ function NavTabController:setActive(key: string?)
 		end)
 		scaleTween:Play()
 
-		if button:IsA("ImageButton") or button:IsA("ImageLabel") then
+		if button:IsA("ImageButton") then
 			cancelTween(self._colorTweens, button)
 			local colorTween = TweenService:Create(button, UITheme.NavTweenInfo, { ImageColor3 = targetColor })
 			self._colorTweens[button] = colorTween
@@ -96,7 +89,6 @@ function NavTabController:clear()
 	table.clear(self._scaleTweens)
 	table.clear(self._colorTweens)
 	table.clear(self._buttons)
-	self._activeKey = nil
 end
 
 function NavTabController:Destroy()

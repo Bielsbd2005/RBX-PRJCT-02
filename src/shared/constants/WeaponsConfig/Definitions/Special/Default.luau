@@ -1,8 +1,6 @@
 --!strict
--- Special/Default (arma especial de inicio). Pistola semiautomática: fiable y
--- discreta, referencia inferior del resto de especiales. Stats de partida
--- escritos a mano; este fichero ES la fuente de verdad. Claves y defaults:
--- Schema.luau.
+-- Arma especial de inicio: pistola semiautomática, referencia inferior del resto de especiales.
+-- Este fichero es la fuente de verdad. Claves y defaults: Schema.luau.
 local Types = require(script.Parent.Parent.Parent.Types)
 
 return {

@@ -1,25 +1,10 @@
 --!strict
 --[[
-	TrainingDummyService — Área de testing con enemigos quietos para probar armas.
+	Dummies anclados para probar armas: clon de Shared.Bodies.<BODY>, sin equipo
+	(TeamUtils.isSameTeam solo bloquea entre equipos resueltos, así que todos le
+	dañan), respawnean y regeneran vida si dejan de recibir daño.
 
-	Cada dummy es un clon de un cuerpo (Shared.Bodies.<BODY>) que:
-	  · está ANCLADO (no se mueve, "quieto").
-	  · NO tiene equipo → cualquiera le hace daño (y los headshots aplican x2,
-	    igual que contra un jugador; ver WeaponsSystem._defaultDamageCallback +
-	    TeamUtils.isSameTeam, que sólo bloquea entre equipos resueltos).
-	  · RESPAWNEA unos segundos después de morir.
-	  · REGENERA vida si dejas de dispararle un rato (para probar DPS sin matarlo;
-	    si sigues disparando el daño gana a la regeneración y muere igual).
-
-	DÓNDE APARECEN — dos formas, combinables:
-	  1. PARTES CON TAG: pon partes en el mapa/lobby con el tag de CollectionService
-	     "TrainingDummy" (en Studio: Tags → TrainingDummy). Aparece un dummy sobre
-	     cada parte. Esto es tu "área de testing" persistente.
-	  2. COMANDO: escribe "/dummy" en el chat para spawnear uno enfrente de ti, y
-	     "/cleardummies" para quitar los del comando.
-
-	SEGURIDAD: por defecto sólo corre en Studio (ENABLED). Si montas un place de
-	testing dedicado y lo quieres publicado, pon ENABLED = true.
+	Aparecen sobre cada BasePart con el tag "TrainingDummy" y con "/dummy" en el chat.
 ]]
 
 local Players = game:GetService("Players")
@@ -30,26 +15,22 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local CollisionGroups = require(Shared:WaitForChild("CollisionGroups"))
 
--- ─────────────────────────────  AJUSTES  ──────────────────────────────────
-
--- Sólo en Studio por defecto. Cambia a `true` para un place de testing live.
+-- Por defecto solo en Studio: los comandos de chat no tienen control de permisos.
 local ENABLED = RunService:IsStudio()
 
-local SPAWN_TAG = "TrainingDummy" -- tag de CollectionService en las partes-marcador
+local SPAWN_TAG = "TrainingDummy"
 local SPAWN_COMMAND = "/dummy"
 local CLEAR_COMMAND = "/cleardummies"
 
-local BODY = "Default" -- cuerpo de Shared.Bodies a clonar
+local BODY = "Default"
 local MAX_HEALTH = 100
-local RESPAWN_DELAY = 3 -- s tras morir hasta reaparecer
-local SPAWN_DISTANCE = 8 -- studs por delante del jugador (comando /dummy)
+local RESPAWN_DELAY = 3 -- s
+local SPAWN_DISTANCE = 8 -- studs
 
 local REGEN_ENABLED = true
-local REGEN_DELAY = 3 -- s sin recibir daño antes de empezar a curar
-local REGEN_RATE = 25 -- vida/s de regeneración
-local REGEN_TICK = 0.2 -- cada cuánto corre el bucle de regen
-
--- ──────────────────────────────  ESTADO  ──────────────────────────────────
+local REGEN_DELAY = 3 -- s sin daño antes de curar
+local REGEN_RATE = 25 -- vida/s
+local REGEN_TICK = 0.2 -- s
 
 type Slot = {
 	cframe: CFrame,
@@ -65,8 +46,6 @@ local TrainingDummyService = {}
 local _started = false
 local _slots: { Slot } = {}
 local _container: Folder? = nil
-
--- ──────────────────────────────  HELPERS  ─────────────────────────────────
 
 local function _getContainer(): Folder
 	if _container and _container.Parent then
@@ -88,7 +67,6 @@ local function _bodyTemplate(): Model?
 	if template and template:IsA("Model") then
 		return template
 	end
-	-- Fallback: cualquier Model en Bodies.
 	for _, child in bodies:GetChildren() do
 		if child:IsA("Model") then
 			return child
@@ -97,7 +75,6 @@ local function _bodyTemplate(): Model?
 	return nil
 end
 
--- Construye un dummy anclado y sin equipo en `cframe`. Devuelve (model, humanoid).
 local function _spawnDummy(cframe: CFrame): (Model?, Humanoid?)
 	local template = _bodyTemplate()
 	if not template then
@@ -127,7 +104,6 @@ local function _spawnDummy(cframe: CFrame): (Model?, Humanoid?)
 	humanoid.WalkSpeed = 0
 	humanoid.JumpPower = 0
 
-	-- Desactivar estados que harían que se caiga/ragdollee (está anclado).
 	for _, state in {
 		Enum.HumanoidStateType.Climbing,
 		Enum.HumanoidStateType.Swimming,
@@ -144,8 +120,7 @@ local function _spawnDummy(cframe: CFrame): (Model?, Humanoid?)
 	dummy:SetAttribute("DisplayName", "Dummy")
 	dummy:SetAttribute("IsTrainingDummy", true)
 
-	-- Posicionar ANTES de parentar (evita un frame de física en el sitio del
-	-- template) y anclar el root para que quede totalmente quieto.
+	-- Posicionar antes de parentar: evita un frame de física en el sitio del template.
 	dummy:PivotTo(cframe)
 	root.Anchored = true
 	dummy.Parent = _getContainer()
@@ -156,7 +131,6 @@ local function _spawnDummy(cframe: CFrame): (Model?, Humanoid?)
 	return dummy, humanoid
 end
 
--- (Re)spawnea un dummy en un slot y engancha su muerte → respawn.
 local function _fillSlot(slot: Slot)
 	local dummy, humanoid = _spawnDummy(slot.cframe)
 	slot.dummy = dummy
@@ -167,7 +141,6 @@ local function _fillSlot(slot: Slot)
 	if humanoid then
 		humanoid.Died:Once(function()
 			task.delay(RESPAWN_DELAY, function()
-				-- Si el slot fue limpiado mientras tanto, no respawnear.
 				if not table.find(_slots, slot) then
 					if slot.dummy then
 						slot.dummy:Destroy()
@@ -197,8 +170,7 @@ local function _addSlot(cframe: CFrame, manual: boolean)
 	_fillSlot(slot)
 end
 
--- Bucle de regeneración: cura los dummies que llevan REGEN_DELAY sin recibir
--- daño. Throttle a REGEN_TICK para que sea barato.
+-- El daño se detecta comparando con prevHealth en cada tick.
 local function _startRegenLoop()
 	if not REGEN_ENABLED then
 		return
@@ -216,7 +188,7 @@ local function _startRegenLoop()
 			local humanoid = slot.humanoid
 			if humanoid and humanoid.Health > 0 then
 				if humanoid.Health < slot.prevHealth - 0.01 then
-					slot.lastDamageAt = now -- detectó daño
+					slot.lastDamageAt = now
 				end
 				if humanoid.Health < humanoid.MaxHealth and now - slot.lastDamageAt >= REGEN_DELAY then
 					humanoid.Health = math.min(humanoid.MaxHealth, humanoid.Health + REGEN_RATE * step)
@@ -227,15 +199,12 @@ local function _startRegenLoop()
 	end)
 end
 
--- ──────────────────────────────  COMANDOS  ────────────────────────────────
-
 local function _frontOfPlayer(player: Player): CFrame?
 	local character = player.Character
 	local root = character and character:FindFirstChild("HumanoidRootPart")
 	if not (root and root:IsA("BasePart")) then
 		return nil
 	end
-	-- SPAWN_DISTANCE studs por delante, mirando de vuelta hacia el jugador.
 	return root.CFrame * CFrame.new(0, 0, -SPAWN_DISTANCE) * CFrame.Angles(0, math.pi, 0)
 end
 
@@ -263,28 +232,23 @@ local function _onChatted(player: Player, message: string)
 	end
 end
 
--- ──────────────────────────────  START  ───────────────────────────────────
-
 function TrainingDummyService:Start()
 	if _started or not ENABLED then
 		return
 	end
 	_started = true
 
-	-- 1. Dummies de las partes con tag (el "área" persistente).
 	for _, marker in CollectionService:GetTagged(SPAWN_TAG) do
 		if marker:IsA("BasePart") then
 			_addSlot(marker.CFrame, false)
 		end
 	end
-	-- Partes con tag añadidas en runtime (p.ej. al cargar un mapa).
 	CollectionService:GetInstanceAddedSignal(SPAWN_TAG):Connect(function(marker)
 		if marker:IsA("BasePart") then
 			_addSlot(marker.CFrame, false)
 		end
 	end)
 
-	-- 2. Comandos de chat.
 	local function hook(player: Player)
 		player.Chatted:Connect(function(message)
 			_onChatted(player, message)
@@ -295,7 +259,6 @@ function TrainingDummyService:Start()
 	end
 	Players.PlayerAdded:Connect(hook)
 
-	-- 3. Regeneración.
 	_startRegenLoop()
 end
 

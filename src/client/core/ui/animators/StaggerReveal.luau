@@ -1,17 +1,8 @@
 --!strict
--- StaggerReveal: revela una lista ordenada de GuiObjects con un pop escalonado
--- (UIScale startScale → 1, con un delay incremental). Pensado para la entrada de
--- una página (p.ej. los packs de Store.CashPage al abrir el panel).
---
--- El retardo se cuenta por GRUPO, no por item: `setItems` mete cada item en su
--- propio grupo (cascada de uno en uno, el caso normal) y `setGroups` deja meter
--- varios en el mismo, que entran a la vez. Eso es lo que permite cascadear varias
--- filas en paralelo pasando columnas en vez de items.
---
--- Reutiliza el nodo "InteractiveScale" que crea InteractiveScaleTween para no
--- meter una segunda UIScale en conflicto (Roblox solo aplica una UIScale por
--- instancia). Si no existe ninguna, la crea con ese mismo nombre para que el
--- hover/click posterior comparta el nodo.
+-- Pop escalonado (UIScale startScale → 1) de una lista de GuiObjects. El retardo se
+-- cuenta por GRUPO: los items de un mismo grupo (setGroups) entran a la vez.
+-- Reutiliza la UIScale "InteractiveScale" de InteractiveScaleTween: Roblox solo aplica
+-- una UIScale por instancia.
 
 local TweenService = game:GetService("TweenService")
 
@@ -46,7 +37,6 @@ local function ensureScale(target: GuiObject): UIScale
 	if named and named:IsA("UIScale") then
 		return named
 	end
-	-- Cualquier UIScale existente sirve; compartimos para no duplicar.
 	local anyScale = target:FindFirstChildOfClass("UIScale")
 	if anyScale then
 		return anyScale
@@ -69,7 +59,6 @@ function StaggerReveal.new(options: RevealOptions?): StaggerReveal
 	return self
 end
 
--- Cascada de uno en uno: cada item es su propio grupo.
 function StaggerReveal:setItems(items: { GuiObject })
 	local groups = table.create(#items)
 	for i, item in items do
@@ -78,8 +67,6 @@ function StaggerReveal:setItems(items: { GuiObject })
 	self._groups = groups
 end
 
--- Cascada por grupos: los items de un mismo grupo entran a la vez, y el retardo
--- separa un grupo del siguiente.
 function StaggerReveal:setGroups(groups: { { GuiObject } })
 	self._groups = groups
 end
@@ -129,8 +116,8 @@ function StaggerReveal:Destroy()
 		tween:Cancel()
 	end
 	table.clear(self._tweens)
-	-- Restaurar scale = 1 por si nos destruyen mid-reveal; sin esto los items
-	-- quedarían invisibles para la próxima vida (hot reload).
+	-- Restaurar scale = 1 por si nos destruyen a mitad de reveal (hot reload): si no,
+	-- los items quedarían invisibles.
 	for _, scale in self._scales do
 		if scale.Parent ~= nil then
 			scale.Scale = 1

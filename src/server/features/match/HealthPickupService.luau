@@ -1,21 +1,4 @@
 --!strict
---[[
-	HealthPickupService.luau
-	Maneja Network.Match.RequestPickup → aplica regen de health al jugador
-	si está vivo, in-match y dentro de cooldown.
-
-	Extraído de MatchService como primer ejemplo del split sugerido por la
-	auditoría AAA (god module 2114 LOC). Patrón de extracción a seguir:
-	  • Estado interno propio (cooldowns, constantes).
-	  • Predicates inyectados (`isRoundActive`, `isPlayerInMenu`) en lugar
-	    de hard-acoplarse a state de MatchService — facilita testing y
-	    reduce import cycles.
-	  • Cleanup en PlayerRemoving propio.
-
-	Si en el futuro hay más kinds de pickup (Bullet, Armor, etc.), añadir
-	dispatcher por `data.kind` en _onRequestPickup; los handlers concretos
-	pueden seguir aquí o moverse a sub-modules según crezca el feature.
-]]
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -26,20 +9,15 @@ local NetGuards = require(Shared.networking.NetGuards)
 
 local HealthPickupService = {}
 
--- Tuneables del feature.
 local PICKUP_HEAL_AMOUNT = 30
 local PICKUP_REQUEST_COOLDOWN = 0.2
 
--- Predicates inyectados desde MatchService — ver Start().
--- Nil hasta Start() pero los call sites (handler de network) corren después.
+-- Inyectados desde MatchService en Start(); los handlers de red corren después.
 type Predicates = {
 	isRoundActive: () -> boolean,
 	isPlayerInMenu: (userId: number) -> boolean,
-	-- S2: consume un crédito de elegibilidad de pickup (una kill reciente no
-	-- reclamada). Devuelve true si había uno disponible dentro de la ventana.
-	-- Los health pickups son client-visuales (no hay entidad server-side que
-	-- validar), así que exigimos al menos una kill real reciente por heal —
-	-- esto recorta el exploit de "+30 HP cada 0.2s ilimitado" a "1 heal por kill".
+		-- Los pickups son solo visuales en cliente (sin entidad server-side que
+		-- validar): cada heal consume una kill reciente no reclamada.
 	consumePickupEligibility: (userId: number) -> boolean,
 }
 
@@ -58,8 +36,7 @@ local function _applyHealthPickup(character: Model): boolean
 end
 
 local function _onRequestPickup(data: { kind: string }, player: Player): ()
-	-- Whitelist estricta + cap longitud. Solo "Health" se dropea actualmente;
-	-- cualquier otro kind se ignora (no consume cooldown, no expone la API).
+	-- Solo "Health" existe; otros kinds se ignoran sin consumir cooldown.
 	if not NetGuards.validate(data, { kind = NetGuards.MAX.Kind }) or data.kind ~= "Health" then
 		return
 	end
@@ -79,12 +56,8 @@ local function _onRequestPickup(data: { kind: string }, player: Player): ()
 		return
 	end
 
-	-- S2: validación server-authoritative. No existe entidad de pickup en el
-	-- servidor (PickupDropEffect corre client-side), así que exigimos que el
-	-- jugador tenga una kill reciente NO reclamada antes de curar. Si no hay
-	-- crédito, ignoramos sin tocar el cooldown (no penalizamos requests
-	-- legítimos que llegan sin crédito por desync de timing). Sólo consumimos
-	-- el cooldown cuando de verdad vamos a intentar curar.
+	-- Sin crédito no se toca el cooldown: no penaliza requests legítimos que
+	-- llegan antes que el crédito por desync de timing.
 	if not _predicates.consumePickupEligibility(player.UserId) then
 		return
 	end
@@ -94,11 +67,6 @@ local function _onRequestPickup(data: { kind: string }, player: Player): ()
 	_applyHealthPickup(character)
 end
 
---- Inicia el servicio. Idempotente.
---- predicates.isRoundActive: devuelve true si hay una ronda activa (regen
----   solo aplica in-match — pickups en lobby se ignoran).
---- predicates.isPlayerInMenu: devuelve true si el jugador está en menu
----   (death screen, end results, etc.) — no debe poder regenerarse.
 function HealthPickupService:Start(predicates: Predicates): ()
 	if _started then
 		return

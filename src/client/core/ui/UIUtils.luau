@@ -13,8 +13,7 @@ function UIUtils.formatCashAmount(amount: number): string
 	return withSeparators
 end
 
--- Formato corto para contadores: a partir de mil usa sufijo "k" (1000 → "1k",
--- 1500 → "1.5k"). Por debajo de mil se muestra el número tal cual (999 → "999").
+-- 999 → "999", 1000 → "1k", 1500 → "1.5k".
 function UIUtils.formatCountShort(amount: number): string
 	local n = math.max(0, math.floor(amount))
 	if n < 1000 then
@@ -27,8 +26,7 @@ function UIUtils.formatCountShort(amount: number): string
 	return string.format("%.1fk", thousands)
 end
 
--- "actual/objetivo" para barras de progreso: el actual en blanco y el "/objetivo"
--- en gris y más pequeño. Requiere RichText activado en el TextLabel.
+-- El "/objetivo" va en gris y más pequeño. Requiere RichText en el TextLabel.
 function UIUtils.formatProgressValue(current: number, total: number): string
 	return string.format(
 		'<font color="#FFFFFF">%d</font><font color="#d6d6d6" size="10">/%d</font>',
@@ -37,8 +35,7 @@ function UIUtils.formatProgressValue(current: number, total: number): string
 	)
 end
 
--- Formatea segundos restantes como "Ends in 6 weeks, 2 days" (máx 2 unidades)
--- para temporizadores de temporadas / eventos (BattlePass, FamePass, etc.).
+-- "Ends in 6 weeks, 2 days" (máx. 2 unidades).
 function UIUtils.formatTimeLeft(seconds: number): string
 	if seconds <= 0 then return "" end
 

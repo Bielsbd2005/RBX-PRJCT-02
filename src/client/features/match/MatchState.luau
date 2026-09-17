@@ -1,7 +1,6 @@
 --!strict
 --[[
-	MatchState.luau
-	Máquina de estados centralizada para el flujo de partida del cliente.
+	Máquina de estados del flujo de partida del cliente.
 
 	Fases:
 	  Lobby            — En el menú, no en partida
@@ -46,12 +45,13 @@ function MatchState.shouldKeepMenuHidden(): boolean
 	return _phase ~= "Lobby"
 end
 
---- Permite hook opcional para logging/debug.
+--- Callback de cada cambio de fase (anterior, nueva). MatchFeature lo usa para
+--- alternar lighting, DoF, controles táctiles y el reset de personaje, y para
+--- capturar el podio de Resultados. nil lo quita.
 function MatchState.setOnPhaseChanged(callback: ((Phase, Phase) -> ())?)
 	_onPhaseChanged = callback
 end
 
---- Reset completo (para Destroy del feature).
 function MatchState.reset()
 	_phase = "Lobby"
 end

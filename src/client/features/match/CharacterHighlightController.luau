@@ -1,16 +1,6 @@
 --!strict
--- CharacterHighlightController: aplica un Highlight client-side a cada
--- character (player o bot), coloreado según relación con el LocalPlayer:
---   · aliado → verde (fill semi-transparente)
---   · enemigo → rojo  (fill semi-transparente)
---   · self    → outline negro, sin fill
---
--- Diseño:
--- - El Highlight se crea EN CLIENTE — no se replica al servidor ni a otros
---   clientes. Esto evita Z-fighting con cualquier Highlight baked-in en los
---   templates de body/NPC y centraliza la lógica visual en un solo lugar.
--- - Cubre tanto jugadores reales como bots con una única pasada de detección
---   sobre workspace.DescendantAdded + Players.PlayerAdded.
+-- Highlight local (no replicado) en cada character, player o bot, coloreado según
+-- su relación con el LocalPlayer.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -20,10 +10,8 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local TeamUtils = require(Shared.utils.TeamUtils)
 
 local HIGHLIGHT_NAME = "CharacterHighlight"
--- Atributo que el servidor pone en el cuerpo cuando arranca el fundido del kill
--- effect (ver RagdollCleanup.fadeAndDestroy), con la duración del fundido. Lo
--- escuchamos para desvanecer el highlight en sync con el cuerpo. Literal
--- compartido con el server; mantener ambos iguales.
+-- Debe coincidir con el literal del server (RagdollCleanup.fadeAndDestroy); valor =
+-- duración del fundido del cadáver.
 local FADE_OUT_ATTR = "KillEffectFadeOut"
 local COLOR_ALLY   = Color3.fromRGB(0, 210, 80)
 local COLOR_ENEMY  = Color3.fromRGB(220, 40, 40)
@@ -31,47 +19,32 @@ local COLOR_LOCAL  = Color3.fromRGB(0, 0, 0)
 local FILL_ALPHA   = 0.65
 local OUTLINE_ALPHA = 0.1
 
--- Flash verde sobre el highlight del jugador local al absorber un orbe de vida:
--- entra rápido a verde y vuelve suave al estado base (contorno negro, sin fill).
--- Umbral igual al de HealthBarController para no flashear con la regen de 1 HP/s.
---
--- El peso lo lleva el CONTORNO, no el relleno: el fill tiñe el cuerpo entero y
--- se comía al personaje en verde, y encima se solapa con la viñeta verde de
--- HealthBarController y los "+" de HealEffect. Queda en un tinte leve que se
--- nota sin tapar nada (recordatorio: son transparencias, más alto = menos
--- visible).
+-- Flash de heal del jugador local. Umbral igual al de HealthBarController, para
+-- ignorar la regen. El fill queda casi transparente a propósito: el peso lo lleva
+-- el contorno para no tapar la viñeta de HealthBarController ni HealEffect.
 local HEAL_FLASH_COLOR = Color3.fromRGB(60, 255, 120)
 local HEAL_FLASH_FILL_ALPHA = 0.82
 local HEAL_FLASH_OUTLINE_ALPHA = 0
 local HEAL_FLASH_THRESHOLD = 5
-local HEAL_FLASH_HOLD = 0.45 -- segundos que el verde se mantiene antes de desvanecerse
+local HEAL_FLASH_HOLD = 0.45 -- s
 local TI_HEAL_FLASH_IN  = TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local TI_HEAL_FLASH_OUT = TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
--- Atributos que indican team — mismos que TeamUtils.getSide consulta. Cuando
--- cualquiera de estos cambia (incluido el primer set vía replicación tardía
--- desde el server), re-evaluamos el color del highlight.
+-- Deben ser los mismos que consulta TeamUtils.getSide.
 local TEAM_ATTRS_TO_WATCH = { "Team", "TeamSide", "BotTeam", "Side", "TeamAffinity" }
 
 local localPlayer = Players.LocalPlayer
 
 local CharacterHighlightController = {}
 
--- D2: tracking explícito de listeners. Sin esto, cada Start() (e.g. hot
--- reload de MatchFeature) duplicaba conexiones DescendantAdded y Team.
 local _moduleConns: { RBXScriptConnection } = {}
 local _trackedHighlights: { [Model]: Highlight } = {}
 local _trackedConns: { [Model]: { RBXScriptConnection } } = {}
 local _started = false
 
--- Flash de heal del jugador local
 local _healFlashToken = 0
 local _healFlashTweens: { Tween } = {}
 local _localLastHealth: number? = nil
-
--- ────────────────────────────────────────────────────────────────
--- Helpers
--- ────────────────────────────────────────────────────────────────
 
 local function _hasAnyTeamAttribute(model: Model): boolean
 	for _, attrName in TEAM_ATTRS_TO_WATCH do
@@ -87,14 +60,10 @@ local function _shouldTrack(model: Model): boolean
 		return false
 	end
 	local owner = Players:GetPlayerFromCharacter(model)
-	-- Players reales (incluido localPlayer): trackear siempre.
 	if owner then
 		return true
 	end
-	-- NPCs/bots: requerir algún atributo de team. Esto distingue chars de
-	-- gameplay (siempre llevan team) de dummies de UI (locker preview, kill
-	-- effect dummy, menu) que tienen Humanoid pero no team. Si el atributo aún
-	-- no replicó, _onDescendantAdded reintenta vía GetAttributeChangedSignal.
+	-- Sin team = dummy de UI (preview del locker, menú), no se trackea.
 	return _hasAnyTeamAttribute(model)
 end
 
@@ -103,7 +72,6 @@ local function _refreshColor(model: Model)
 	if not highlight then
 		return
 	end
-	-- LocalPlayer's own char: outline negro, sin fill.
 	if model == localPlayer.Character then
 		highlight.FillColor = COLOR_LOCAL
 		highlight.OutlineColor = COLOR_LOCAL
@@ -120,9 +88,7 @@ local function _refreshColor(model: Model)
 	highlight.OutlineTransparency = OUTLINE_ALPHA
 end
 
--- Pulso verde breve sobre el highlight del jugador local (orbe de vida): contorno
--- verde marcado + un tinte muy leve en el cuerpo, y vuelta al estado base. El
--- token invalida un flash previo si llega otro heal antes de terminar.
+-- El token invalida un flash previo si llega otro heal antes de terminar.
 local function _flashLocalHeal()
 	local char = localPlayer.Character
 	if not char then
@@ -151,13 +117,10 @@ local function _flashLocalHeal()
 		if state ~= Enum.PlaybackState.Completed or _healFlashToken ~= token then
 			return
 		end
-		-- Mantener el verde un instante (HEAL_FLASH_HOLD) antes de desvanecer, para
-		-- que dure un poco más. El token invalida el hold si llega otro heal.
 		task.delay(HEAL_FLASH_HOLD, function()
 			if _healFlashToken ~= token then
 				return
 			end
-			-- Vuelta al estado base del self (contorno negro, sin fill).
 			local tweenOut = TweenService:Create(highlight, TI_HEAL_FLASH_OUT, {
 				FillColor = COLOR_LOCAL,
 				OutlineColor = COLOR_LOCAL,
@@ -171,10 +134,7 @@ local function _flashLocalHeal()
 	tweenIn:Play()
 end
 
--- Desvanece el highlight a transparente en `fadeTime` segundos, en sync con el
--- fundido del cuerpo del kill effect. Cuando el server destruye el cadáver al
--- terminar el fundido, AncestryChanged → _detach elimina el Highlight ya invisible
--- (sin pop). Lineal para casar con el tween lineal del cuerpo (RagdollCleanup).
+-- Lineal para casar con el tween del cuerpo en RagdollCleanup.
 local function _fadeOutHighlight(model: Model, fadeTime: number)
 	local highlight = _trackedHighlights[model]
 	if not highlight then
@@ -220,7 +180,6 @@ local function _attach(model: Model)
 
 	local conns: { RBXScriptConnection } = {}
 
-	-- Players reales pueden cambiar de team mid-match.
 	local player = Players:GetPlayerFromCharacter(model)
 	if player then
 		table.insert(conns, player:GetPropertyChangedSignal("Team"):Connect(function()
@@ -228,14 +187,9 @@ local function _attach(model: Model)
 		end))
 	end
 
-	-- _shouldTrack ya garantizó que el model tiene Humanoid, pero guardamos por si
-	-- acaso. Lo reusamos para el flash de heal (local) y el fade al morir (todos).
-	local humanoid = model:FindFirstChildOfClass("Humanoid")
+	local humanoid = model:FindFirstChildOfClass("Humanoid") :: Humanoid
 
-	-- Char del jugador local: detectar heals discretos (orbe de vida, etc.) para
-	-- el flash verde. Umbral filtra la regen lenta. lastHealth se reinicia por
-	-- char (respawn) y se compara solo cuando ya hay baseline.
-	if player == localPlayer and humanoid then
+	if player == localPlayer then
 		_localLastHealth = humanoid.Health
 		table.insert(conns, humanoid.HealthChanged:Connect(function(newHealth: number)
 			if _localLastHealth ~= nil and newHealth - _localLastHealth >= HEAL_FLASH_THRESHOLD then
@@ -245,33 +199,18 @@ local function _attach(model: Model)
 		end))
 	end
 
-	-- Al eliminar al character (player o NPC) quitamos su highlight de golpe, en
-	-- vez de dejarlo acompañar al cadáver durante el ragdoll y desvanecerse al
-	-- final en sync con el cuerpo (KillEffectFadeOut). Enabled=false es instantáneo
-	-- y no toca los colores; el highlight se destruye luego por AncestryChanged
-	-- cuando el cuerpo sale del workspace. El respawn crea un char nuevo → _attach
-	-- fresco, así que nunca queda oculto un highlight que deba volver.
-	if humanoid then
-		table.insert(conns, humanoid.Died:Connect(function()
-			-- `highlight` es el de este _attach (capturado). Si el cuerpo ya salió
-			-- del workspace, _detach habría desconectado esta conn, así que aquí
-			-- siempre es válido.
-			highlight.Enabled = false
-		end))
-	end
+	-- Se oculta de golpe al morir; el respawn crea un char nuevo con highlight propio.
+	table.insert(conns, humanoid.Died:Connect(function()
+		highlight.Enabled = false
+	end))
 
-	-- Re-evaluar color cuando llegue/cambie cualquier atributo de team. Para
-	-- bots los atributos no mutan, pero el primer set vía replicación puede
-	-- llegar después del _attach inicial — sin este listener el color quedaría
-	-- rojo (default cuando getSide devuelve nil).
+	-- Los atributos de team pueden replicar después del _attach (sin team = rojo).
 	for _, attrName in TEAM_ATTRS_TO_WATCH do
 		table.insert(conns, model:GetAttributeChangedSignal(attrName):Connect(function()
 			_refreshColor(model)
 		end))
 	end
 
-	-- Fundido del highlight en sync con el fundido del cuerpo (kill effect). El
-	-- server pone FADE_OUT_ATTR = duración al empezar a disolver el cadáver.
 	table.insert(conns, model:GetAttributeChangedSignal(FADE_OUT_ATTR):Connect(function()
 		local fadeTime = model:GetAttribute(FADE_OUT_ATTR)
 		if type(fadeTime) == "number" and fadeTime > 0 then
@@ -279,8 +218,6 @@ local function _attach(model: Model)
 		end
 	end))
 
-	-- Cleanup cuando el char sale del workspace (death/despawn/removal).
-	-- AncestryChanged cubre tanto Destroy() como reparenteo.
 	table.insert(conns, model.AncestryChanged:Connect(function(_, parent)
 		if parent == nil then
 			_detach(model)
@@ -290,8 +227,6 @@ local function _attach(model: Model)
 	_trackedConns[model] = conns
 	_refreshColor(model)
 
-	-- Adjuntado tarde sobre un cadáver que YA está en fundido (p.ej. attr replicó
-	-- antes de que el model fuese trackeable): arrancar el fundido de inmediato.
 	local pendingFade = model:GetAttribute(FADE_OUT_ATTR)
 	if type(pendingFade) == "number" and pendingFade > 0 then
 		_fadeOutHighlight(model, pendingFade)
@@ -304,15 +239,8 @@ local function _refreshAll()
 	end
 end
 
--- ────────────────────────────────────────────────────────────────
--- Wiring
--- ────────────────────────────────────────────────────────────────
-
--- Pending retries para Models que entraron al workspace sin Humanoid aún.
--- Mantenemos las conns para limpiarlas cuando el model sale o se attacha.
 local _pendingRetryConns: { [Model]: { RBXScriptConnection } } = {}
--- Threads de los task.delay de retry: sin cancelarlos mantenían viva la
--- referencia al model hasta 2s tras salir del workspace (retraso de GC).
+-- Se cancelan al limpiar para no retener el model hasta que venzan los delays.
 local _pendingRetryThreads: { [Model]: { thread } } = {}
 
 local function _cleanupRetry(model: Model)
@@ -326,8 +254,7 @@ local function _cleanupRetry(model: Model)
 	local threads = _pendingRetryThreads[model]
 	if threads then
 		for _, t in threads do
-			-- pcall: el thread que ejecuta este cleanup (o uno ya terminado) no
-			-- es cancelable; los pendientes sí, liberando la referencia al model.
+			-- pcall: el thread que ejecuta este cleanup no es cancelable.
 			pcall(task.cancel, t)
 		end
 		_pendingRetryThreads[model] = nil
@@ -340,10 +267,7 @@ local function _onDescendantAdded(instance: Instance)
 	end
 	local model = instance :: Model
 
-	-- Audit mobile: filter heurística. Sin esto, _attach + 7 conns + 3
-	-- task.delay se enganchaban a CADA Model que entra al workspace
-	-- (props decorativos del mapa incluidos). Solo nos interesan
-	-- characters de gameplay (player chars o bots en workspace.Bots).
+	-- Filtro barato para no enganchar retries a cada prop del mapa.
 	local parent = model.Parent
 	local isBotChild = parent ~= nil and parent.Name == "Bots"
 	local hasHumanoid = model:FindFirstChildOfClass("Humanoid") ~= nil
@@ -360,20 +284,7 @@ local function _onDescendantAdded(instance: Instance)
 		return
 	end
 
-	-- Casos que NO requieren retry:
-	-- 1. Ya tiene Humanoid + algún team attr + owner check ya falló → no es un
-	--    target válido (dummy del locker/menu, NPC sin team, etc.). Skip.
-	-- 2. Es local player char (filtrado en _shouldTrack).
-	-- En cualquier otro caso quedan dos posibles deltas: Humanoid o team attr
-	-- llegando tarde por replicación. Conectamos ambos retries.
-	-- (reutilizamos `hasHumanoid` calculado arriba en lugar de re-declararlo)
-	local hasTeamAttr = _hasAnyTeamAttribute(model)
-	if hasHumanoid and hasTeamAttr then
-		-- Tiene todo lo que necesita pero _shouldTrack lo descartó (e.g. owner ==
-		-- localPlayer). No reintentar.
-		return
-	end
-
+	-- Humanoid o atributos de team pueden llegar tarde por replicación.
 	local conns: { RBXScriptConnection } = {}
 	_pendingRetryConns[model] = conns
 
@@ -384,7 +295,6 @@ local function _onDescendantAdded(instance: Instance)
 		end
 	end
 
-	-- Humanoid llegando tarde
 	if not hasHumanoid then
 		table.insert(conns, model.ChildAdded:Connect(function(child)
 			if child:IsA("Humanoid") then
@@ -393,8 +303,6 @@ local function _onDescendantAdded(instance: Instance)
 		end))
 	end
 
-	-- Atributos de team llegando tarde (típico en bots: el Model replica antes
-	-- que BotTeam/Team/TeamSide). Conectar a los 5 attrs que TeamUtils consulta.
 	for _, attrName in TEAM_ATTRS_TO_WATCH do
 		table.insert(conns, model:GetAttributeChangedSignal(attrName):Connect(tryRetry))
 	end
@@ -405,10 +313,8 @@ local function _onDescendantAdded(instance: Instance)
 		end
 	end))
 
-	-- Fallback temporal: GetAttributeChangedSignal a veces NO dispara cuando un
-	-- atributo se "establece" por replicación inicial (vs cuando muta en runtime).
-	-- Reintentamos a 100ms, 500ms y 2s para cubrir replicación lenta sin polling
-	-- continuo. Si ya se attachó, los retries son no-ops.
+	-- GetAttributeChangedSignal no siempre dispara con la replicación inicial de un
+	-- atributo: reintentos puntuales como red de seguridad.
 	_pendingRetryThreads[model] = {
 		task.delay(0.1, tryRetry),
 		task.delay(0.5, tryRetry),
@@ -419,8 +325,6 @@ end
 local function _wirePlayer(player: Player)
 	local function onChar(char: Model)
 		_attach(char)
-		-- Si es el LocalPlayer, refrescar TODOS los highlights porque cambió la
-		-- referencia local — los enemigos/aliados pueden necesitar re-color.
 		if player == localPlayer then
 			_refreshAll()
 		end
@@ -437,14 +341,8 @@ function CharacterHighlightController:Start(prescannedModels: { Model }?)
 	end
 	_started = true
 
-	-- Scan compartido inicial (Models del workspace en el momento del Start).
-	-- prescannedModels viene de match/init.luau para evitar un GetDescendants
-	-- propio (compartido con HealthBillboardController).
-	--
-	-- Usamos _onDescendantAdded en vez de _attach directo: el pre-scan recoge
-	-- models que pueden tener attrs aún no replicados (cliente entra a un match
-	-- con bots ya spawneados). _attach fallaría silenciosamente; _onDescendantAdded
-	-- conecta retries para volver a intentar cuando llegue Humanoid/team attr.
+	-- prescannedModels: GetDescendants compartido desde match/init.luau. Pasan por
+	-- _onDescendantAdded (no _attach) para tener retries si aún no replicó el team.
 	if prescannedModels then
 		for _, model in prescannedModels do
 			_onDescendantAdded(model)
@@ -457,14 +355,10 @@ function CharacterHighlightController:Start(prescannedModels: { Model }?)
 		end
 	end
 
-	-- DescendantAdded: filtro IsA("Model") descarta de inmediato la mayoría
-	-- de adds (BaseParts, attachments, partículas, beams, etc.).
 	table.insert(_moduleConns, workspace.DescendantAdded:Connect(_onDescendantAdded))
 
-	-- Cuando el jugador local cambia de equipo, re-evaluar todos los chars.
 	table.insert(_moduleConns, localPlayer:GetPropertyChangedSignal("Team"):Connect(_refreshAll))
 
-	-- Players reales: cubrir altas (PlayerAdded) y las que ya están conectadas.
 	table.insert(_moduleConns, Players.PlayerAdded:Connect(_wirePlayer))
 	for _, p in Players:GetPlayers() do
 		_wirePlayer(p)
@@ -482,7 +376,6 @@ function CharacterHighlightController:Stop()
 	end
 	table.clear(_moduleConns)
 
-	-- Limpiar tracked: copiamos las keys porque _detach muta _trackedHighlights.
 	local toDetach: { Model } = {}
 	for model in _trackedHighlights do
 		table.insert(toDetach, model)
@@ -491,8 +384,6 @@ function CharacterHighlightController:Stop()
 		_detach(model)
 	end
 
-	-- Limpiar también los retries pendientes (chars que entraron sin Humanoid
-	-- y aún no lo recibieron).
 	local pendingModels: { Model } = {}
 	for model in _pendingRetryConns do
 		table.insert(pendingModels, model)

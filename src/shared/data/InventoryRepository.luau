@@ -1,19 +1,8 @@
 --!strict
 --[[
-	InventoryRepository.luau
-	Lecturas de ownership / loadout sobre `profile.Data`. Single source of
-	truth de cómo está estructurado el inventario en el schema actual.
-
-	Por qué existe: ShopService, LoadoutService y BattlePassService
-	tenían cada uno su propia versión de "¿el jugador posee X?". Cuando el
-	schema cambie (e.g. WeaponWrapsByWeapon migra a otra rama), todos esos
-	helpers tendrían que actualizarse en sincronía. Aquí está la lógica una vez.
-
-	Convención: `weaponId == "Default"` siempre se considera poseído porque
-	viene en el DataTemplate inicial. `wrapId == "Default"` también.
-
-	NO valida que `profileData` no sea nil — los callers deben verificar
-	`dataService:GetProfile(player)` antes de llamar a este módulo.
+	Única fuente de verdad de cómo se lee la posesión en `profile.Data`.
+	El arma y el wrap "Default" cuentan como poseídos: vienen en el DataTemplate.
+	NO valida que `profileData` no sea nil: el caller debe comprobar GetProfile antes.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -24,7 +13,6 @@ local InventoryRepository = {}
 
 export type WeaponCategory = WeaponCategoryMod.WeaponCategory
 
--- True si el jugador posee el ítem en `profileData.Inventory[category][itemId]`.
 function InventoryRepository.ownsItem(profileData: any, category: string, itemId: string): boolean
 	local categoryInv = if profileData.Inventory then profileData.Inventory[category] else nil
 	if type(categoryInv) ~= "table" then
@@ -33,7 +21,6 @@ function InventoryRepository.ownsItem(profileData: any, category: string, itemId
 	return categoryInv[itemId] == true
 end
 
--- True si el jugador posee el arma. "Default" siempre es true.
 function InventoryRepository.ownsWeapon(profileData: any, category: WeaponCategory, weaponId: string): boolean
 	if weaponId == ItemDefaults.ITEM_ID then
 		return true
@@ -41,9 +28,7 @@ function InventoryRepository.ownsWeapon(profileData: any, category: WeaponCatego
 	return InventoryRepository.ownsItem(profileData, category, weaponId)
 end
 
--- True si el jugador posee el wrap específico para esa arma.
--- "Default" wrap siempre es true.
--- Soporta dos shapes: { [wrapId] = true } o { [wrapId] = count }.
+-- Los wraps pueden guardarse como { [wrapId] = true } o { [wrapId] = count }.
 function InventoryRepository.ownsWeaponWrap(profileData: any, category: WeaponCategory, weaponId: string, wrapId: string): boolean
 	if wrapId == ItemDefaults.ITEM_ID then
 		return true

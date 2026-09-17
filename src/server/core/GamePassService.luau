@@ -1,41 +1,17 @@
 --!strict
 --[[
-	GamePassService.luau  (Server)
+	Caché de posesión de `StoreProducts.GamePasses` para consultarla SIN yield
+	(`UserOwnsGamePassAsync` es una llamada web). Prefetch en PlayerAdded, se
+	actualiza con PromptGamePassPurchaseFinished y se tira en PlayerRemoving.
 
-	Caché de posesión de los gamepasses de `StoreProducts.GamePasses`, para que
-	cualquier beneficio (bonus VIP de resultados, arma a la espalda…) pueda
-	preguntarlo SIN bloquear: `UserOwnsGamePassAsync` es una llamada web y
-	consultarla en caliente metería un yield en medio del spawn o del cierre de
-	ronda.
+	La presencia de la entrada por jugador significa "sigue conectado": un fetch
+	tardío no puede repoblar el mapa tras irse.
 
-	Cómo se mantiene el caché:
-	  · prefetch en PlayerAdded de todos los passes declarados;
-	  · `PromptGamePassPurchaseFinished` lo actualiza al comprar en la sesión;
-	  · PlayerRemoving lo tira entero (un re-join lo repuebla con el prefetch).
+	`OnOwnershipGained` existe porque el prefetch es asíncrono y quien pregunta al
+	spawnear (el holster) suele hacerlo antes de que resuelva.
 
-	La entrada por jugador se crea en PlayerAdded y se borra en PlayerRemoving,
-	así que su presencia es la señal de "sigue conectado": un fetch que resuelve
-	tarde (o una compra confirmada después de irse) no puede repoblar el mapa y
-	dejar una entrada huérfana por userId para siempre.
-
-	`OnOwnershipGained` existe porque el prefetch es asíncrono: el beneficio que
-	se aplica al spawnear (el holster) suele preguntar ANTES de que el fetch
-	resuelva, así que necesita enterarse del false→true en lugar de sondear. La
-	compra a mitad de sesión entra por el mismo camino.
-
-	Nada de esto se persiste en el profile: la posesión de un gamepass la sirve
-	Roblox y guardarla sólo abriría la puerta a que un beneficio siguiera activo
-	tras un refund.
-
-	La COMPRA sí se registra (ROBUX_PURCHASE, kind "GamePass"). Antes no: el
-	servicio no tocaba telemetría, así que los gamepasses eran el único ingreso
-	del juego que no aparecía en el dashboard — y sin embargo su consecuencia sí
-	(el faucet `MatchEnd::VIP` que paga el pase VIP en cada partida). Se veía el
-	gasto que genera un producto y no el dinero que entra por él.
-
-	En Studio hay un override para poder probar (ver STUDIO_OWNERSHIP_OVERRIDE):
-	ni las cuentas simuladas de un local server poseen nada, ni Studio deja
-	completar una compra real.
+	No se persiste en el profile: la posesión la sirve Roblox y guardarla dejaría
+	beneficios activos tras un refund. La compra sí va a telemetría (kind "GamePass").
 ]]
 
 local MarketplaceService = game:GetService("MarketplaceService")
@@ -49,53 +25,36 @@ local StoreProducts = require(Shared.constants.StoreProducts)
 local TelemetryService = require(script.Parent.TelemetryService)
 
 --[[
-	Override SÓLO de Studio, para poder probar los dos lados del gate sin una
-	cuenta alt: en un local server ("Server & Clients") los jugadores son
-	identidades simuladas que no poseen nada, y Studio tampoco deja completar una
-	compra real, así que sin esto el beneficio no se puede ver.
-
-	  true  → todo el mundo posee todos los passes (probar el beneficio).
-	  false → nadie posee nada (probar la cara bloqueada y el botón de la tienda).
-	  nil   → comportamiento real: se consulta a Roblox, igual que en producción.
-
-	No hay forma de que esto se cuele en el juego publicado: la constante de
-	abajo sólo se mira si `RunService:IsStudio()`, que en un servidor de Roblox
-	es false. Mismo patrón que ENABLE_CLEAR_COMMAND en ClearDataCommandService.
+	Override SÓLO de Studio (en un local server nadie posee nada ni se puede comprar):
+	  true  → todos poseen todos los passes.
+	  false → nadie posee nada.
+	  nil   → comportamiento real.
+	Fuera de Studio se ignora (ver _override).
 ]]
 local STUDIO_OWNERSHIP_OVERRIDE: boolean? = true
 
 local GamePassService = {}
 
--- Resuelto una vez: nil fuera de Studio pase lo que pase en la constante.
 local _override: boolean? = if RunService:IsStudio() then STUDIO_OWNERSHIP_OVERRIDE else nil
 
 local _started = false
 
 -- userId → passId → posee. Sin tabla de jugador = desconectado; sin entrada de
--- pass = todavía sin resolver (nunca se cachea el "no" de un fetch fallido:
--- volverá a intentarse en la siguiente consulta).
+-- pass = sin resolver (un fetch fallido no se cachea).
 local _ownedByUserId: { [number]: { [number]: boolean } } = {}
 
--- Fetches en vuelo, para no lanzar N llamadas web del mismo pass mientras la
--- primera sigue esperando respuesta.
 local _pendingByUserId: { [number]: { [number]: boolean } } = {}
 
 local _gainedListeners: { (player: Player, passId: number) -> () } = {}
 
--- ── Helpers internos ─────────────────────────────────────────
-
 local function _fire(player: Player, passId: number)
 	for _, listener in _gainedListeners do
-		-- task.spawn por listener: un beneficio que reviente no debe impedir que
-		-- se apliquen los demás.
+		-- Por listener: uno que reviente no debe impedir los demás.
 		task.spawn(listener, player, passId)
 	end
 end
 
---[[
-	Guarda el resultado y avisa si el jugador NO lo tenía y ahora sí.
-	No-op si el jugador ya se fue (ver cabecera).
-]]
+-- Avisa solo en false→true. No-op si el jugador ya se fue.
 local function _store(player: Player, passId: number, owns: boolean)
 	local owned = _ownedByUserId[player.UserId]
 	if not owned then
@@ -111,9 +70,7 @@ local function _store(player: Player, passId: number, owns: boolean)
 end
 
 local function _resolve(player: Player, passId: number)
-	-- Con el override puesto la respuesta ya está decidida: la llamada web sólo
-	-- gastaría tiempo y, con los userId falsos de un local server, además fallaría
-	-- y llenaría el Output de warnings que no significan nada.
+	-- Con override, la llamada web fallaría con los userId falsos de un local server.
 	if _override ~= nil or passId <= 0 then
 		return
 	end
@@ -153,22 +110,11 @@ local function _resolve(player: Player, passId: number)
 	end)
 end
 
---[[
-	Registra la compra de un gamepass.
-
-	No hay receipt ni purchaseId: Roblox no lo entrega en este evento. La clave
-	de idempotencia se construye con userId y passId, que es exacta —un pass se
-	posee o no, no se compra dos veces— y deja al backend descartar el duplicado
-	si el evento llegara repetido.
-
-	`cashGranted = 0` es correcto y no un hueco: un gamepass no concede moneda,
-	concede un beneficio permanente. El importe que importa es el de Robux.
-]]
+-- Roblox no entrega receipt en este evento: userId+passId es clave de idempotencia
+-- exacta (un pass no se compra dos veces). cashGranted = 0 es correcto.
 local function _recordPurchase(player: Player, passId: number)
 	local pass = StoreProducts.GamePasses.ByPassId[passId]
 	if not pass then
-		-- Un pass comprado que no está en el catálogo es una compra real que no
-		-- se puede valorar: mejor saberlo que perderla en silencio.
 		warn(`[GamePassService] compra de un pass fuera del catálogo ({passId}) — se registra sin precio`)
 	end
 
@@ -192,19 +138,10 @@ local function _track(player: Player)
 	end
 end
 
--- ── API pública ──────────────────────────────────────────────
-
---[[
-	¿El jugador tiene el pass? Lectura síncrona del caché.
-
-	Un pass sin resolver (o sin id configurado) devuelve `false` y lanza el fetch
-	en segundo plano: quien dependa del resultado debe suscribirse con
-	`OnOwnershipGained` en vez de asumir que este `false` es definitivo.
-]]
+-- Síncrono. Un pass sin resolver devuelve `false` y lanza el fetch: quien dependa
+-- del resultado debe suscribirse con `OnOwnershipGained`.
 function GamePassService.Owns(player: Player, passId: number): boolean
-	-- El override va antes que el chequeo de id: así también desbloquea los
-	-- passes que todavía no tienen id en el panel, que es justo cuando más falta
-	-- hace poder probar el beneficio.
+	-- Antes del chequeo de id: así también desbloquea passes aún sin id.
 	if _override ~= nil then
 		return _override
 	end
@@ -226,13 +163,8 @@ function GamePassService.Owns(player: Player, passId: number): boolean
 	return owned[passId] == true
 end
 
---[[
-	Registra un callback para cuando un jugador pasa a tener un pass (lo compra,
-	o el prefetch confirma que ya lo tenía). Se llama en un thread propio.
-
-	Sin unsubscribe a propósito: los consumidores son services de vida infinita
-	que se registran una sola vez al arrancar.
-]]
+-- Compra o prefetch confirmado; thread propio. Sin unsubscribe: los consumidores
+-- son services que se registran una vez.
 function GamePassService.OnOwnershipGained(listener: (player: Player, passId: number) -> ())
 	table.insert(_gainedListeners, listener)
 end
@@ -243,9 +175,6 @@ function GamePassService.Start()
 	end
 	_started = true
 
-	-- Ruidoso a propósito: con el override puesto, todo lo que dependa de un
-	-- pass miente, y eso tiene que verse en el Output antes de sacar conclusiones
-	-- de una prueba en Studio.
 	if _override ~= nil then
 		warn(string.format(
 			"[GamePassService] Override de Studio ACTIVO: todos los gamepasses %s. En producción no se aplica.",

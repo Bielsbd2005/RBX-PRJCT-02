@@ -1,38 +1,17 @@
 --!strict
 --[[
-	TelemetryService.luau
-	Pipeline HTTP de telemetría hacia el backend de GUNNERS Analytics. Es la
-	ÚNICA salida de analítica del juego.
+	Única salida de analítica del juego: HTTP al backend de GUNNERS Analytics (el
+	AnalyticsService de Roblox no se usa porque no se puede leer).
 
-	Hubo un `EconomyAnalytics.luau` que hacía dual-write al AnalyticsService de
-	Roblox (Creator Hub). Se eliminó: ese destino es WRITE-ONLY —no hay API para
-	leerlo— así que no podía alimentar el dashboard y sólo duplicaba las
-	llamadas en cada call site. Lo que aportaba de propio (items y pasos de
-	funnel) vive ahora aquí como `RecordItem` y `RecordFunnelStep`.
+	Contrato: nunca lanza (todo en pcall), nunca bloquea al caller (Record* solo
+	mutan memoria; el IO va en loops propios) y la cola está acotada.
 
-	CONTRATO — se cumple sin excepciones:
-	  1. Nunca lanza. Todo va en pcall; un backend caído no rompe una compra.
-	  2. Nunca bloquea al caller. `RecordFlow`/`RecordPurchase` sólo mutan tablas
-	     en memoria; el IO vive en loops propios.
-	  3. Nunca crece sin límite. Cola acotada con descarte del MÁS VIEJO.
+	Eventos propios: SESSION_END, ROBUX_PURCHASE, SERVER_FLUSH, FUNNEL_STEP,
+	ITEM_PURCHASE, LEVEL_UP, ASSET_MANIFEST; las features añaden los suyos con
+	Enqueue (MATCH_END, MAP_VOTE). Tiempos: server/core/TelemetryConfig.luau.
 
-	Eventos propios (ver `server/core/TelemetryConfig.luau` para los tiempos):
-	  • SESSION_END   — uno por sesión de jugador, desde DataService.ProfileUnloading.
-	  • ROBUX_PURCHASE— transaccional, desde los tres caminos de ProcessReceipt.
-	  • SERVER_FLUSH  — agregado por servidor cada ServerFlushSeconds.
-	  • FUNNEL_STEP   — un paso de embudo (onboarding, BP Premium).
-	  • ITEM_PURCHASE — transaccional, desde ShopService: la compra con el nivel,
-	                    el tiempo jugado y el saldo del jugador EN ESE INSTANTE.
-	  • LEVEL_UP      — transaccional, desde DataService.LeveledUp: el instante
-	                    exacto de cada subida de nivel. Sin él la progresión sólo
-	                    se puede reconstruir restando SESSION_END consecutivos,
-	                    que da el nivel al SALIR y nunca el ritmo real.
-	Las features encolan además los suyos vía `Enqueue` (MATCH_END, MAP_VOTE).
-
-	ACUMULADOR: los flujos de cash no se envían uno a uno (serían miles). Se
-	acumulan por jugador y los drena quien llegue antes — SERVER_FLUSH o
-	SESSION_END. Drenar RESETEA, así que el backend puede sumar sin arriesgar
-	doble conteo.
+	Los flujos se acumulan por jugador y los drena SERVER_FLUSH o SESSION_END;
+	drenar resetea, así que el backend puede sumar sin doble conteo.
 ]]
 
 local HttpService = game:GetService("HttpService")
@@ -41,25 +20,14 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local ServerStorage = game:GetService("ServerStorage")
 
--- TelemetryConfig vive en server/core (NO en shared/constants): nada del
--- cliente lo necesita, y así el nombre del secreto (SecretKey, no su valor)
--- ni el resto de la config interna se replican a ReplicatedStorage.
+-- En server/core y no en shared: no debe replicarse al cliente.
 local TelemetryConfig = require(script.Parent.TelemetryConfig)
 
 local DataServiceMod = require(script.Parent.data.DataService)
 type DataService = DataServiceMod.DataServiceModule
 
--- ────────────────────────────────────────────────────────────
--- TIPOS
--- ────────────────────────────────────────────────────────────
-
 export type FlowDirection = "source" | "sink"
---[[
-	Moneda del movimiento. Es una DIMENSIÓN, no una etiqueta cosmética: sin
-	ella, los Gems del Battle Pass se sumarían a los faucets de Coin y el
-	Faucet/Sink ratio del dashboard —la métrica sobre la que se decide el
-	balance económico— quedaría inservible.
-]]
+-- Dimensión, no etiqueta: mezclar Gems con Cash invalida el ratio Faucet/Sink.
 export type Currency = "Cash" | "Gems"
 export type PurchaseKind = "CashPack" | "GemPack" | "BattlePassPremium" | "SkipTier" | "Gift" | "GamePass"
 
@@ -75,17 +43,9 @@ export type PurchasePayload = {
 }
 
 --[[
-	Compra de un ítem de tienda con el ESTADO del jugador en ese instante.
-
-	El acumulador de flujos ya registra la compra (Shop::<categoría>, itemId,
-	precio), pero agregada por día y sin nivel ni tiempo jugado: con eso se sabe
-	QUÉ se vendió, no CUÁNDO en la vida del jugador. Este evento es el dato que
-	valida una escalera de precios — "un Rare debería costar ~1,75 h" sólo se
-	comprueba mirando a qué hora y a qué nivel se compra de verdad.
-
-	`timePlayedSeconds` lo completa RecordItemPurchase con la sesión en curso:
-	Stats.TimePlayedSeconds sólo se incrementa al cerrar sesión, así que a mitad
-	de partida va atrasado exactamente lo que dura la sesión actual.
+	Compra de tienda con el estado del jugador en ese instante (el acumulador solo
+	dice qué se vendió, no cuándo). timePlayedSeconds lo completa RecordItemPurchase:
+	Stats.TimePlayedSeconds solo se incrementa al cerrar sesión.
 ]]
 export type ItemPurchasePayload = {
 	userId: number,
@@ -102,14 +62,8 @@ export type ItemPurchasePayload = {
 }
 
 --[[
-	Entrada del acumulador. Se guarda como tabla (y no como un simple número)
-	para conservar las dos dimensiones que el dashboard necesita sin tener que
-	parsear claves compuestas en el backend:
-	  t = transactionType ("Kill", "Shop::Hats", "MatchEnd::Victory", ...)
-	  i = itemId / sku opcional (weaponId de la kill, itemId comprado, ...)
-	  c = moneda ("Cash" | "Gems" | "Items")
-	  a = importe acumulado
-	  n = nº de transacciones
+	Claves cortas porque viajan miles por batch: t = transactionType, i = itemId/sku
+	opcional, c = moneda o pseudo-moneda, a = importe acumulado, n = nº de transacciones.
 ]]
 type FlowEntry = { t: string, i: string?, c: string, a: number, n: number }
 type Accumulator = {
@@ -120,29 +74,15 @@ type Accumulator = {
 }
 
 --[[
-	Entrada del acumulador de COMBATE. Claves cortas por la misma razón que en
-	FlowEntry: viajan miles por batch y el nombre largo no aporta nada.
-	  cat = categoría del arma ("Main" | "Special")
-	  w   = weaponId tal y como aparece en ItemsConfig
-	  v   = naturaleza de la víctima ("human" | "bot")
-	  k   = kills acumuladas
-	  h   = subconjunto de k que fueron headshot
-
-	POR QUÉ NO SE DERIVA DE LA ECONOMÍA
-	El acumulador de flujo ya recibe el weaponId como itemId en las kills, así
-	que parece que estos datos ya existían. No sirven: RewardService sólo
-	registra la kill si CONCEDE recompensa, y MatchCashCap/MatchXPCap la cortan
-	a mitad de partida. El recuento se trunca justo para quien más mata — la
-	población que decide el balance. El combate necesita su propio contador.
+	cat = "Main" | "Special", w = weaponId de ItemsConfig, v = "human" | "bot",
+	k = kills, h = subconjunto de k con headshot.
+	No se deriva del acumulador de economía: RewardService solo registra kills que
+	dan recompensa, y MatchCashCap/MatchXPCap las cortan a mitad de partida.
 ]]
 type CombatEntry = { cat: string, w: string, v: string, k: number, h: number }
 type CombatAccumulator = { [string]: CombatEntry }
 
 local TelemetryService = {}
-
--- ────────────────────────────────────────────────────────────
--- ESTADO
--- ────────────────────────────────────────────────────────────
 
 local _started = false
 local _shuttingDown = false
@@ -163,10 +103,6 @@ local _serverStartClock = os.clock()
 
 local INGEST_PATH = "/api/v1/telemetry/batch"
 
--- ────────────────────────────────────────────────────────────
--- UTILIDADES
--- ────────────────────────────────────────────────────────────
-
 local function _debug(message: string)
 	if TelemetryConfig.Debug then
 		print("[Telemetry] " .. message)
@@ -180,16 +116,12 @@ local function _newEventId(): string
 	if ok and type(guid) == "string" then
 		return guid
 	end
-	-- Fallback: jobId + reloj monotónico. Sigue siendo único por servidor.
 	return tostring(game.JobId) .. "-" .. tostring(os.clock())
 end
 
 --[[
-	Cabecera de auth. `HttpService:GetSecret` devuelve un objeto Secret que sólo
-	puede viajar dentro de una request — su valor nunca es legible desde Luau.
-	Si el secreto no está configurado (Studio, primer arranque) seguimos sin
-	auth: el backend en local lo acepta y en producción lo rechazará con 401,
-	que es exactamente el comportamiento deseado.
+	El Secret de GetSecret solo es usable dentro de una request. Sin secreto
+	(Studio) se envía sin auth y en producción el backend responde 401.
 ]]
 local function _resolveAuthHeader()
 	local ok, secret = pcall(function()
@@ -215,14 +147,6 @@ local function _newAccumulator(): Accumulator
 	}
 end
 
---[[
-	Drena el acumulador de un jugador y lo resetea. Devuelve nil si no había
-	nada — así los payloads no se llenan de tablas vacías.
-]]
---[[
-	Drena el acumulador de combate de un jugador. Devuelve nil si no hay nada,
-	para que el payload no cargue una tabla vacía en cada sesión sin kills.
-]]
 local function _drainCombatAccumulator(userId: number): CombatAccumulator?
 	local acc = _combatAccumulators[userId]
 	if not acc or next(acc) == nil then
@@ -243,22 +167,9 @@ local function _drainAccumulator(userId: number): { faucets: any, sinks: any }?
 	return drained
 end
 
--- ────────────────────────────────────────────────────────────
--- COLA
--- ────────────────────────────────────────────────────────────
-
 --[[
-	Eventos IRREEMPLAZABLES: los que no se pueden reconstruir desde ninguna otra
-	fuente si se pierden.
-
-	  • SESSION_END / SERVER_FLUSH portan acumuladores DRENADOS — `_drainAccumulator`
-	    resetea al leer, así que ese delta viaja exactamente una vez.
-	  • ROBUX_PURCHASE / ITEM_PURCHASE / LEVEL_UP / MATCH_END son transaccionales:
-	    describen un hecho puntual que no vuelve a ocurrir.
-
-	El resto (MAP_VOTE, FUNNEL_STEP) son observaciones repetidas: perder una
-	votación de doce deja la serie casi igual; perder un SESSION_END borra la
-	economía entera de una sesión.
+	Eventos que no se pueden reconstruir si se pierden: acumuladores ya drenados
+	(SESSION_END, SERVER_FLUSH) o hechos transaccionales. Son los últimos en descartarse.
 ]]
 local IRREPLACEABLE_EVENTS: { [string]: boolean } = {
 	SESSION_END = true,
@@ -267,25 +178,12 @@ local IRREPLACEABLE_EVENTS: { [string]: boolean } = {
 	ITEM_PURCHASE = true,
 	LEVEL_UP = true,
 	MATCH_END = true,
-	-- Uno por servidor: si se pierde, el dashboard no sabe qué modelos hay en
-	-- el place hasta el siguiente arranque.
 	ASSET_MANIFEST = true,
 }
 
 --[[
-	Encola con tope duro. Al desbordar se descarta POR IMPORTANCIA, no por
-	antigüedad.
-
-	Antes se tiraba siempre el más viejo, y eso hacía la pérdida SESGADA: bajo
-	presión (backend caído, circuito abierto) los primeros en caer eran los
-	MATCH_END, ITEM_PURCHASE y ROBUX_PURCHASE del principio de la ventana —
-	justo los que no se pueden reconstruir. Un pico sostenido por encima de
-	4 ev/s vaciaba la cabeza de la cola en menos de un minuto.
-
-	Ahora se busca el descarte entre los eventos reemplazables (el más viejo de
-	ellos) y sólo si no queda ninguno se sacrifica uno irreemplazable, que se
-	cuenta aparte: `droppedCritical` en el SERVER_FLUSH distingue "faltan
-	votaciones" de "falta dinero", que son dos incidentes muy distintos.
+	Al desbordar se descarta el reemplazable más viejo; solo si no queda ninguno cae
+	uno irreemplazable, contado aparte en droppedCritical.
 ]]
 local function _dropOne()
 	for index = 1, #_queue do
@@ -313,9 +211,7 @@ local function _enqueue(eventType: string, payload: any)
 	payload.placeId = game.PlaceId
 	payload.jobId = game.JobId
 	payload.gameVersion = TelemetryConfig.GameVersion
-	-- La versión REAL del binario publicado. `gameVersion` es una constante
-	-- escrita a mano que nadie actualiza al desplegar; sin ésta no se puede
-	-- atribuir un cambio de balance a la versión que lo introdujo.
+	-- gameVersion es una constante manual; placeVersion es la versión publicada real.
 	payload.placeVersion = game.PlaceVersion
 
 	table.insert(_queue, payload)
@@ -334,20 +230,11 @@ local function _takeBatch(): { any }
 	return batch
 end
 
--- ────────────────────────────────────────────────────────────
--- ENVÍO
--- ────────────────────────────────────────────────────────────
-
 local function _isCircuitOpen(): boolean
 	return os.clock() < _circuitOpenUntil
 end
 
---[[
-	Backoff exponencial CON JITTER. El jitter no es cosmético: con ~6 jugadores
-	por servidor, 12k CCU son ~2.000 servidores. Sin jitter, todos reintentarían
-	en el mismo instante tras una caída y convertirían la recuperación del
-	backend en un segundo incidente (efecto manada).
-]]
+-- El jitter evita que miles de servidores reintenten a la vez tras una caída.
 local function _backoffSeconds(attempt: number): number
 	local exponential = TelemetryConfig.BackoffBaseSeconds * (2 ^ (attempt - 1))
 	local capped = math.min(exponential, TelemetryConfig.BackoffMaxSeconds)
@@ -411,14 +298,9 @@ local function _postBatch(batch: { any }, urgent: boolean): boolean
 end
 
 --[[
-	Un ciclo de envío. El guard `_sending` garantiza como mucho una request en
-	vuelo por servidor: evita apilar peticiones contra un backend lento y
-	mantiene el orden de los batches.
-
-	Si el batch falla tras todos los reintentos se DESCARTA. Es deliberado:
-	reencolarlo haría que una caída larga bloqueara los eventos nuevos detrás de
-	los viejos, y en telemetría el dato fresco vale más. El circuit breaker
-	evita seguir martilleando un backend caído.
+	Como mucho una request en vuelo por servidor (mantiene el orden). Un batch que
+	falla tras los reintentos se descarta a propósito: reencolarlo bloquearía los
+	eventos nuevos durante una caída larga.
 ]]
 local function _flushOnce(urgent: boolean?)
 	if _sending or #_queue == 0 or not TelemetryConfig.Enabled then
@@ -446,15 +328,7 @@ local function _flushOnce(urgent: boolean?)
 	_sending = false
 end
 
--- ────────────────────────────────────────────────────────────
--- CONSTRUCCIÓN DE EVENTOS
--- ────────────────────────────────────────────────────────────
-
---[[
-	Claves numéricas de un map, ordenadas. `bp.Claimed` viaja de Luau a JSON
-	como objeto con claves string ("12"), y un array ordenado de números es lo
-	que el backend puede guardar e histogramar directamente.
-]]
+-- JSON convertiría el map en objeto con claves string; el backend quiere un array ordenado.
 local function _sortedNumericKeys(t: any): { number }
 	local keys: { number } = {}
 	if type(t) ~= "table" then
@@ -492,9 +366,7 @@ local function _buildSessionEnd(player: Player): any?
 		sessionSeconds = sessionSeconds,
 		economy = economy,
 		combat = _drainCombatAccumulator(userId),
-		-- Sesión de un play-test de Studio o de un servidor publicado. Es lo
-		-- que permite al dashboard saber qué temporada corre en producción
-		-- (`placeVersion` en Studio suele ser 0).
+		-- placeVersion en Studio suele ser 0.
 		isStudio = RunService:IsStudio(),
 	}
 
@@ -509,21 +381,14 @@ local function _buildSessionEnd(player: Player): any?
 		payload.joinCount = meta.JoinCount
 		payload.createdAt = meta.CreatedAt
 		payload.country = meta.Country
-		-- La versión con la que se jugó ESTA sesión y la de la primera. Ambas
-		-- están en el perfil desde siempre; simplemente no viajaban, y sin
-		-- ellas el único marcador de versión era la constante `gameVersion`,
-		-- escrita a mano y nunca actualizada.
 		payload.clientVersion = meta.LastClientVersion
 		payload.firstSessionVersion = meta.FirstSessionVersion
-		-- Momento del load. Con `createdAt` da los días de vida del jugador y,
-		-- entre sesiones consecutivas, los días de ausencia — retención sin
-		-- ningún join en el backend.
+		-- Momento del load, no de la salida.
 		payload.lastSeen = meta.LastSeen
 		payload.balances = { cash = stats.Cash, gems = stats.Gems or 0 }
 		payload.lifetime = {
 			totalCashEarned = stats.TotalCashEarned,
-			-- `or 0`: un perfil cargado por un server anterior a este campo no
-			-- lo tiene todavía (Reconcile lo rellena al siguiente load).
+			-- `or 0`: el campo puede faltar hasta que Reconcile lo rellene en el siguiente load.
 			totalCashPurchased = stats.TotalCashPurchased or 0,
 			totalGemsEarned = stats.TotalGemsEarned or 0,
 			totalRobuxSpent = stats.TotalRobuxSpent,
@@ -532,12 +397,9 @@ local function _buildSessionEnd(player: Player): any?
 			deaths = stats.Deaths,
 			matchesPlayed = stats.MatchesPlayed,
 			wins = stats.Wins,
-			-- Ya incluye ESTA sesión: DataService hace el Increment de
-			-- TimePlayedSeconds ANTES de disparar ProfileUnloading.
+			-- Ya incluye esta sesión: DataService lo incrementa antes de ProfileUnloading.
 			timePlayedSeconds = stats.TimePlayedSeconds,
-			-- Combate y progresión. Estaban en el perfil desde el principio;
-			-- simplemente no viajaban. Headshots/Longshots/MeleeKills son
-			-- SUBSETS de Kills (ver DataTemplate), no se suman aparte.
+			-- Headshots/Longshots/MeleeKills son subconjuntos de Kills.
 			assists = stats.Assists or 0,
 			headshots = stats.Headshots or 0,
 			longshots = stats.Longshots or 0,
@@ -551,17 +413,12 @@ local function _buildSessionEnd(player: Player): any?
 			losses = stats.Losses or 0,
 			friendsInvited = stats.FriendsInvited or 0,
 			xp = stats.XP or 0,
-			-- El DENOMINADOR de `xp`. `xp` es XP DENTRO del nivel actual, no
-			-- acumulada: sin cuánto pedía ese nivel, el progreso fraccionario
-			-- no es reconstruible salvo replicando LevelingConfig en el backend.
+			-- Denominador de `xp`, que es XP dentro del nivel actual, no acumulada.
 			xpToNextLevel = stats.XPToNextLevel or 0,
 		}
 
-		-- Kills acumuladas por arma (las que ya alimentan la maestría de wraps
-		-- en el Locker). Son de POR VIDA: el backend saca el periodo restando
-		-- sesiones consecutivas del mismo jugador. Sirven de control cruzado
-		-- del acumulador de combate — si no cuadran, hay una ruta de kill sin
-		-- instrumentar.
+		-- De por vida (el backend resta sesiones consecutivas); sirve de control cruzado
+		-- del acumulador de combate.
 		local weaponKills = data.WeaponKills
 		if weaponKills then
 			payload.weaponKills = {
@@ -575,20 +432,12 @@ local function _buildSessionEnd(player: Player): any?
 			totalXPEarned = bp.TotalXPEarned,
 			premiumOwned = bp.PremiumOwned,
 			claimedCount = _countKeys(bp.Claimed),
-			-- Progreso DENTRO del tier actual: cuánto le faltaba al jugador
-			-- para el siguiente cuando cerró. `currentTier` solo dice el
-			-- peldaño; esto dice si lo abandonó recién empezado o a un paso.
+			-- Progreso dentro del tier actual.
 			xp = bp.XP or 0,
-			-- QUÉ tiers reclamó, no cuántos. El recuento no dice DÓNDE se
-			-- abandona el pase, que es la única pregunta que decide si el
-			-- calendario de recompensas está bien repartido.
 			claimedTiers = _sortedNumericKeys(bp.Claimed),
 			grantedSkips = _countKeys(bp.GrantedSkips),
 		}
 
-		-- Racha de login: se calcula en cada load (DataService) y hasta ahora
-		-- no salía del servidor. Es la métrica de retención diaria más barata
-		-- que tiene el juego y no costaba nada emitirla.
 		local streak = data.LoginStreak
 		if streak then
 			payload.loginStreak = {
@@ -597,8 +446,6 @@ local function _buildSessionEnd(player: Player): any?
 			}
 		end
 
-		-- Cuántos ítems posee por categoría: mide saturación del catálogo (un
-		-- jugador que ya lo tiene todo deja de tener sinks donde gastar).
 		local inventory = data.Inventory
 		if inventory then
 			local owned: { [string]: number } = {}
@@ -610,8 +457,6 @@ local function _buildSessionEnd(player: Player): any?
 			payload.inventoryCounts = owned
 		end
 
-		-- Arma equipada al salir. En MATCH_END sólo viaja para quien sigue en
-		-- el servidor al cerrar la ronda; aquí llega siempre.
 		local loadout = data.Loadout
 		if loadout then
 			payload.loadout = {
@@ -633,16 +478,13 @@ local function _buildServerFlush(): any
 	for userId in _accumulators do
 		local drained = _drainAccumulator(userId)
 		if drained then
-			-- Clave string: JSONEncode convierte las tablas con claves numéricas
-			-- en arrays con huecos. El backend hace tonumber().
+			-- Clave string: JSONEncode convierte claves numéricas en arrays con huecos.
 			economyByUser[tostring(userId)] = drained
 			hasAny = true
 		end
 	end
 
-	-- Combate huérfano: kills de jugadores que siguen en partida cuando vence
-	-- el flush. Sin esto, una sesión larga acumularía todas sus kills en
-	-- memoria hasta el SESSION_END y las perdería entera si el servidor cae.
+	-- Drena también el combate de quien sigue en partida, por si el servidor cae.
 	local combatByUser: { [string]: any } = {}
 	local hasCombat = false
 	for userId in _combatAccumulators do
@@ -669,18 +511,11 @@ local function _buildServerFlush(): any
 	return {
 		uptimeSeconds = math.floor(os.clock() - _serverStartClock),
 		playerCount = #Players:GetPlayers(),
-		-- Con RealPlayerCapPerServer=6 y TotalParticipantsTarget=8, ~25% de los
-		-- participantes de combate son bots. Sin este campo el backend no puede
-		-- separarlos y toda métrica de combate queda contaminada.
+		-- Para separar bots de humanos en las métricas de combate.
 		botCount = botCount,
 		droppedEvents = dropped,
-		-- Cuántos de esos descartes eran irreemplazables (dinero, sesiones,
-		-- partidas). `droppedEvents > 0` con esto a cero es ruido; con esto
-		-- por encima de cero hay un agujero real en la contabilidad.
+		-- Descartes irreemplazables: > 0 es un agujero real en la contabilidad.
 		droppedCritical = droppedCritical,
-		-- Salud del propio pipeline. Un servidor con el circuito abierto sigue
-		-- emitiendo SERVER_FLUSH con datos incompletos y hasta ahora el backend
-		-- no tenía forma de saberlo: leía el hueco como una caída de actividad.
 		queueSize = #_queue,
 		consecutiveFailures = _consecutiveFailures,
 		circuitOpen = _isCircuitOpen(),
@@ -689,15 +524,7 @@ local function _buildServerFlush(): any
 	}
 end
 
--- ────────────────────────────────────────────────────────────
--- API PÚBLICA
--- ────────────────────────────────────────────────────────────
-
---[[
-	Cuerpo compartido por `RecordFlow` y `RecordItem`. Toma la moneda como
-	string suelto —y no como `Currency`— porque "Items" no es una moneda del
-	juego y no debe colarse en las firmas públicas que sí lo son.
-]]
+-- Moneda como string: "Items" y "XP" no son monedas y no deben entrar en las firmas públicas.
 local function _recordFlow(
 	player: Player,
 	direction: FlowDirection,
@@ -712,10 +539,7 @@ local function _recordFlow(
 	if not player or type(amount) ~= "number" or amount <= 0 then
 		return
 	end
-	-- Una dirección desconocida NO puede caer en faucets por defecto: invertir
-	-- un sumidero convierte gasto en ingreso y da la vuelta al balance de la
-	-- economía sin ningún aviso. El tipo `FlowDirection` sólo protege en
-	-- análisis estático; esto protege en ejecución.
+	-- Validar en runtime: una dirección inválida tratada como faucet invertiría el balance.
 	if direction ~= "source" and direction ~= "sink" then
 		warn(
 			("[Telemetry] dirección de flujo inválida %q en %q: el movimiento se descarta"):format(
@@ -734,8 +558,7 @@ local function _recordFlow(
 	end
 
 	local bucket = if direction == "sink" then acc.sinks else acc.faucets
-	-- La moneda entra en la clave: el mismo transactionType puede mover Cash y
-	-- Gems (p. ej. un tier del pase que da una u otra) y son series distintas.
+	-- La moneda entra en la clave: un mismo transactionType puede mover Cash y Gems.
 	local key = resolvedCurrency .. "|" .. transactionType .. "|" .. (itemId or "")
 
 	local entry = bucket[key]
@@ -750,15 +573,9 @@ local function _recordFlow(
 end
 
 --[[
-	RecordFlow: registra un movimiento de cash. Sólo muta memoria — sin IO, sin
-	yields, sin errores. Se puede llamar desde cualquier hot path.
-
-	`transactionType` es la taxonomía que verá el dashboard como faucet o sink.
-	Etiquetas en uso: "Kill", "Shop::Hats", "MatchEnd::Victory",
-	"BattlePassClaim", "Gift", "RobuxPurchase".
-
-	`currency` por defecto es "Cash". Pasar "Gems" en todo movimiento de la
-	moneda premium — omitirlo mezcla las dos economías en una sola serie.
+	Solo muta memoria: apto para hot paths. `transactionType` es la etiqueta de
+	faucet/sink del dashboard (p.ej. "Kill", "Shop::Hats", "MatchEnd::Victory").
+	Pasar currency "Gems" en todo movimiento de moneda premium.
 ]]
 function TelemetryService.RecordFlow(
 	player: Player,
@@ -772,16 +589,8 @@ function TelemetryService.RecordFlow(
 end
 
 --[[
-	RecordItem: adquisición de un bien virtual (skin, wrap, sombrero). No mueve
-	moneda, así que entra como un faucet de cantidad 1 bajo la pseudo-moneda
-	"Items" — el mismo convenio que usaba el AnalyticsService de Roblox.
-
-	Va por el acumulador y no por `_enqueue` a propósito: un solo BatchUpdate de
-	maestría puede desbloquear varios wraps de golpe, y como eventos sueltos eso
-	serían N requests para una información que se agrega igual de bien.
-
-	Al viajar como moneda propia, los items NUNCA contaminan el Faucet/Sink
-	ratio de Cash o Gems: `c` forma parte de la clave del acumulador.
+	Bien virtual adquirido: faucet de 1 bajo la pseudo-moneda "Items". Va por el
+	acumulador porque un BatchUpdate de maestría puede desbloquear varios de golpe.
 ]]
 function TelemetryService.RecordItem(player: Player, transactionType: string, itemId: string)
 	if type(itemId) ~= "string" or itemId == "" then
@@ -790,34 +599,14 @@ function TelemetryService.RecordItem(player: Player, transactionType: string, it
 	_recordFlow(player, "source", transactionType, 1, itemId, "Items")
 end
 
---[[
-	RecordXP: XP concedida por una acción.
-
-	Va por el acumulador bajo la pseudo-moneda "XP", el mismo convenio que usa
-	`RecordItem` con "Items": al formar parte de la clave, la XP NUNCA se suma a
-	los faucets de Cash ni contamina el Faucet/Sink ratio.
-
-	Por qué hacía falta: el juego concede XP en casi cada acción y no la
-	registraba en ninguna parte. `RewardService.Award` sólo llamaba a telemetría
-	cuando el cash era > 0, así que una acción de sólo XP era invisible. La
-	consecuencia práctica es que el ritmo de XP por hora —el que decide a qué
-	nivel se desbloquea cada ítem del catálogo— era un número DE DISEÑO que
-	nadie podía contrastar con lo que ocurre de verdad.
-]]
+-- Pseudo-moneda "XP" en el acumulador: no se mezcla con los faucets de Cash.
 function TelemetryService.RecordXP(player: Player, transactionType: string, amount: number, itemSku: string?)
 	_recordFlow(player, "source", transactionType, amount, itemSku, "XP")
 end
 
 --[[
-	RecordLevelUp: una subida de nivel, con el instante en que ocurrió.
-
-	Evento suelto y no acumulador: lo que importa es CUÁNDO se cruza cada nivel
-	(con las horas jugadas y el nivel de partida), y agregarlo por día perdería
-	exactamente eso. Son pocos por jugador —cruzar el nivel 55 lleva horas—, así
-	que el coste en requests es despreciable.
-
-	`timePlayedSeconds` incluye la sesión en curso por el mismo motivo que en
-	ITEM_PURCHASE: el contador del perfil sólo se incrementa al cerrar sesión.
+	Evento suelto (no acumulador): importa cuándo se cruza cada nivel.
+	timePlayedSeconds suma la sesión en curso, igual que ITEM_PURCHASE.
 ]]
 function TelemetryService.RecordLevelUp(
 	player: Player,
@@ -854,14 +643,7 @@ function TelemetryService.RecordLevelUp(
 	})
 end
 
---[[
-	RecordFunnelStep: un paso de embudo de conversión.
-
-	`sessionId` agrupa los pasos de un MISMO intento: sin él no se puede
-	distinguir "un jugador que lo intentó tres veces" de "tres jugadores que lo
-	intentaron una". Es opcional porque el embudo de onboarding es único por
-	jugador (sólo corre con JoinCount == 1) y ahí no hay nada que desambiguar.
-]]
+-- `sessionId` agrupa los pasos de un mismo intento; opcional en onboarding (un único intento por jugador).
 function TelemetryService.RecordFunnelStep(
 	player: Player,
 	funnel: string,
@@ -883,16 +665,8 @@ function TelemetryService.RecordFunnelStep(
 end
 
 --[[
-	RecordCombat: una kill atribuida a un arma.
-
-	Corre en la ruta caliente de combate (_creditKillToAttacker), así que es
-	SOLO escritura en una tabla en memoria — igual que _enqueue, sin yields ni
-	llamadas a servicios. El envío vive en el loop de flush.
-
-	`victimIsBot` es una DIMENSIÓN, no un filtro. Con ~25% de bots entre los
-	participantes, agregarlos con los humanos falsea cualquier K/D o win rate
-	por arma; guardarlos por separado deja la decisión al dashboard y permite
-	cambiar de criterio sin reinstrumentar el juego.
+	Hot path de combate: solo escribe en memoria. victimIsBot es dimensión, no
+	filtro: el dashboard decide si mezclarlos.
 ]]
 function TelemetryService.RecordCombat(
 	player: Player,
@@ -938,12 +712,7 @@ function TelemetryService.RecordCombat(
 	end
 end
 
---[[
-	RecordPurchase: compra con Robux. No pasa por el acumulador — cada compra es
-	un evento individual porque su valor unitario justifica el request y porque
-	`purchaseId` da idempotencia natural en el backend (mismo criterio que
-	`ProcessedReceipts` en DataTemplate).
-]]
+-- Evento individual: `purchaseId` da idempotencia en el backend.
 function TelemetryService.RecordPurchase(payload: PurchasePayload)
 	if not TelemetryConfig.Enabled or not _started then
 		return
@@ -965,16 +734,8 @@ function TelemetryService.RecordPurchase(payload: PurchasePayload)
 end
 
 --[[
-	RecordItemPurchase: una compra de tienda con el estado del jugador.
-
-	Va por `_enqueue` y no por el acumulador a propósito: el acumulador agrega
-	por clave y perdería justo lo que este evento existe para conservar (el
-	instante, el nivel y el tiempo jugado de CADA compra). Las compras son
-	pocas —una por ítem y jugador, porque el juego rechaza recomprar— así que
-	el coste en requests es despreciable.
-
-	Sin `purchaseId` de Roblox no hay clave natural: el `eventId` del sobre es
-	la idempotencia, y el backend lo usa como PK.
+	Por _enqueue y no por el acumulador, que perdería el instante, nivel y tiempo
+	jugado de cada compra. Sin purchaseId, la idempotencia es el eventId (PK en backend).
 ]]
 function TelemetryService.RecordItemPurchase(player: Player, payload: ItemPurchasePayload)
 	if not TelemetryConfig.Enabled or not _started then
@@ -1004,7 +765,6 @@ function TelemetryService.RecordItemPurchase(player: Player, payload: ItemPurcha
 	})
 end
 
--- Escotilla genérica para eventos futuros sin tocar este módulo.
 function TelemetryService.Enqueue(eventType: string, payload: any)
 	if type(payload) == "table" then
 		_enqueue(eventType, payload)
@@ -1012,23 +772,9 @@ function TelemetryService.Enqueue(eventType: string, payload: any)
 end
 
 --[[
-	Moneda de bienvenida de un jugador nuevo.
-
-	`DataTemplate` da Cash (y potencialmente Gems) a todo perfil recién creado.
-	Ese saldo aparece por `Reconcile`, sin pasar por `RewardService` ni por
-	ninguna llamada a telemetría: cada alta inyectaba moneda que el balance del
-	dashboard nunca veía entrar. Con pocos jugadores es ruido; con una campaña
-	de adquisición es la mayor fuente de inflación del juego, y era invisible.
-
-	Se lee del perfil recién cargado en vez de de la plantilla a propósito: si
-	mañana el grant cambia, el faucet sigue diciendo la verdad sin tocar nada.
-
-	NO se toca `TotalCashEarned` (que arranca en 0 mientras el saldo arranca en
-	150). Sumarlo cuadraría el supply, pero ese contador alimenta el "Coin
-	ganado jugando" del que sale el ritmo por hora que calibra los precios, y
-	un regalo de bienvenida no es grind: inflaría la tasa justo en las primeras
-	horas, que son las que más pesan en la escalera. El cuadre correcto es
-	restar este faucet en el backend, donde ya viaja con etiqueta propia.
+	El saldo inicial de DataTemplate entra por Reconcile sin pasar por RewardService:
+	se registra como faucet "NewPlayerGrant", leído del perfil (no de la plantilla).
+	No se suma a TotalCashEarned: ese contador mide el ritmo de grind que calibra precios.
 ]]
 local function _recordNewPlayerGrant(player: Player)
 	local profile = _dataService and _dataService:GetProfile(player)
@@ -1036,9 +782,7 @@ local function _recordNewPlayerGrant(player: Player)
 	if not data or not data.Metadata or not data.Stats then
 		return
 	end
-	-- JoinCount lo incrementa DataService en el load, así que 1 es la primera
-	-- sesión de la vida del perfil (y también la primera tras un /resetdata,
-	-- que es justo cuando se reinyecta el grant).
+	-- JoinCount == 1 también tras un /resetdata, que reinyecta el grant.
 	if data.Metadata.JoinCount ~= 1 then
 		return
 	end
@@ -1053,14 +797,8 @@ local function _recordNewPlayerGrant(player: Player)
 	end
 end
 
--- ────────────────────────────────────────────────────────────
--- MANIFIESTO DE ASSETS
--- ────────────────────────────────────────────────────────────
-
 local MANIFEST_MAX_NAMES = 500
 
--- Nombres de los hijos de una carpeta (tal cual están en el DataModel), o lista
--- vacía si la carpeta no existe. Tope de MANIFEST_MAX_NAMES por lista.
 local function _childNames(root: Instance?, ...: string): { string }
 	local node: Instance? = root
 	for _, childName in { ... } do
@@ -1109,11 +847,8 @@ local function _killEffectIds(): { string }
 end
 
 --[[
-	Qué modelos hay en ESTE place. Hats, outfits, tools y modelos de display
-	viven sólo en el place (Rojo no los sincroniza), así que el repo no puede
-	saber si el arte de un ítem existe: lo cuenta el servidor al arrancar y el
-	dashboard cruza los nombres con ItemsConfig. `placeVersion` en Studio suele
-	ser 0: por eso viaja `isStudio` y el ingest guarda el último recibido.
+	Hats, outfits, tools y displays viven solo en el place (Rojo no los sincroniza):
+	el servidor los lista y el dashboard los cruza con ItemsConfig.
 ]]
 local function _buildAssetManifest(): any
 	local shared = ReplicatedStorage:FindFirstChild("Shared")
@@ -1134,14 +869,7 @@ local function _buildAssetManifest(): any
 	}
 end
 
---[[
-	Start: arranca loops y suscripciones.
-
-	`botCountProvider` se INYECTA (lo cablea ServerBootstrap con
-	`AIService:GetBotRoster`) en vez de requerir AI desde aquí: `core` no debe
-	depender de `features`. Mismo criterio que el resto de cross-cutting
-	concerns del bootstrap.
-]]
+-- botCountProvider se inyecta desde ServerBootstrap: core no debe depender de features.
 function TelemetryService.Start(dataService: DataService, botCountProvider: (() -> number)?)
 	if _started or not TelemetryConfig.Enabled then
 		return
@@ -1152,8 +880,7 @@ function TelemetryService.Start(dataService: DataService, botCountProvider: (() 
 
 	_resolveAuthHeader()
 
-	-- Manifiesto de assets, una vez por servidor. Con retraso para que el
-	-- place haya terminado de cargar las carpetas de modelos.
+	-- Con retraso para que el place termine de cargar las carpetas de modelos.
 	task.delay(5, function()
 		if not _started then
 			return
@@ -1175,9 +902,7 @@ function TelemetryService.Start(dataService: DataService, botCountProvider: (() 
 		_recordNewPlayerGrant(player)
 	end)
 
-	-- Subidas de nivel. DataService las emite como signal en vez de llamar
-	-- aquí directamente porque `core.data` no puede requerir este módulo: éste
-	-- ya requiere aquél y el ciclo no compilaría.
+	-- Por señal porque core.data no puede requerir este módulo (ciclo).
 	dataService.LeveledUp:Connect(function(player: Player, fromLevel: number, toLevel: number, xpGained: number, source: string?)
 		pcall(TelemetryService.RecordLevelUp, player, fromLevel, toLevel, xpGained, source)
 	end)
@@ -1191,7 +916,6 @@ function TelemetryService.Start(dataService: DataService, botCountProvider: (() 
 		end
 	end)
 
-	-- Loop de envío.
 	task.spawn(function()
 		while _started do
 			task.wait(TelemetryConfig.FlushIntervalSeconds)
@@ -1201,7 +925,6 @@ function TelemetryService.Start(dataService: DataService, botCountProvider: (() 
 		end
 	end)
 
-	-- Loop de SERVER_FLUSH.
 	task.spawn(function()
 		while _started do
 			task.wait(TelemetryConfig.ServerFlushSeconds)
@@ -1214,15 +937,7 @@ function TelemetryService.Start(dataService: DataService, botCountProvider: (() 
 		end
 	end)
 
-	--[[
-		Apagado. Roblox ejecuta los BindToClose EN PARALELO, así que este no se
-		encola detrás de los 25s que consume el de DataService: corre a la vez y
-		termina mucho antes.
-
-		Sin este handler se pierde el último batch en CADA apagado de servidor —
-		y no es pérdida aleatoria: sesga sistemáticamente contra las sesiones
-		largas y contra los estados de fin de partida.
-	]]
+	-- Los BindToClose corren en paralelo: este no espera al de DataService.
 	game:BindToClose(function()
 		if not TelemetryConfig.Enabled then
 			return
@@ -1235,11 +950,7 @@ function TelemetryService.Start(dataService: DataService, botCountProvider: (() 
 			task.wait(0.1)
 		end
 
-		-- 2. Recoger acumuladores huérfanos (jugadores sin SESSION_END emitido).
-		-- Se encola AUNQUE no haya economía que reportar: este flush es el
-		-- único portador de `droppedEvents`, y exigir movimientos de cash
-		-- hacía que el recuento de descartes del último tramo se perdiera
-		-- justo en el cierre, que es cuando más eventos se pierden.
+		-- 2. Se encola aunque no haya economía: es el único portador de droppedEvents.
 		local ok, payload = pcall(_buildServerFlush)
 		if ok and payload then
 			_enqueue("SERVER_FLUSH", payload)
@@ -1267,8 +978,6 @@ function TelemetryService.Destroy()
 	_shuttingDown = false
 	table.clear(_queue)
 	table.clear(_accumulators)
-	-- El de combate se quedaba fuera: tras un Destroy/Start las kills de la
-	-- vida anterior del servicio se atribuían a la sesión nueva.
 	table.clear(_combatAccumulators)
 end
 

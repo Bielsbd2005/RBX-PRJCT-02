@@ -1,33 +1,14 @@
 --!strict
 --[[
-	WeaponsConfig (Shared/constants/WeaponsConfig)
-	Fuente única de verdad de la configuración de COMBATE de cada arma.
+	Fuente única de verdad de la config de combate de cada arma (replicada, así el
+	locker enseña stats sin red). Los Tools no llevan `Configuration`.
+	  Definitions/<Category>/<Id>.luau → { WeaponType, Config }; Category e Id salen de la ruta.
+	  Schema.luau → claves válidas, tipo y default por WeaponType.
 
-	Antes cada Tool de ServerStorage.WeaponTools llevaba una `Configuration`
-	con ValueBases que BaseWeapon escuchaba. Eso vivía en el .rbxl (sin diff ni
-	review), no se replicaba al cliente (el locker necesitaba un round-trip de
-	red para enseñar stats) y duplicaba defaults en varios sitios.
-
-	Ahora:
-	  • Definitions/<Category>/<Id>.luau  — un módulo por arma. Devuelve
-	    { WeaponType, Config } (ver Types.luau). Category e Id salen de la ruta.
-	  • Schema.luau   — claves válidas, tipo y default POR TIPO DE ARMA.
-	  • DisplayStats  — stats derivados para UI (locker), sin red.
-
-	Identidad de un Tool en runtime:
-	  El id es el NOMBRE del Tool: el resto del código ya lo asume (LoadoutService
-	  busca el template, equipa y sube de nivel por nombre). Lo único que hace
-	  falta aparte es la categoría, porque la carpeta se pierde al clonar el arma
-	  a la mochila y el cliente no ve ServerStorage: va en el atributo
-	  `WeaponCategory` (ver StampTool), y sin él "Default" sería ambiguo (existe
-	  en Main y en Special). Como respaldo, un Tool sin atributo se busca por
-	  nombre en Main y luego en Special. Un Tool sin definición no se instancia
-	  como arma (WeaponsSystem avisa).
-
-	Validación:
-	  Al cargar se valida cada definición contra el esquema. En Studio un
-	  problema es un error (falla rápido); en producción es un warn y la
-	  definición se registra igual.
+	El id de un Tool es su NOMBRE. La categoría va en el atributo `WeaponCategory`
+	(StampTool) porque la carpeta se pierde al clonar a la mochila y "Default" existe
+	en Main y en Special; sin atributo se busca por nombre en ese orden.
+	Una definición inválida es error en Studio y warn en producción (se registra igual).
 ]]
 
 local RunService = game:GetService("RunService")
@@ -45,12 +26,9 @@ export type RegisteredWeapon = Types.RegisteredWeapon
 
 local WeaponsConfig = {}
 
--- Atributo que fija la categoría del arma de un Tool (el id es su nombre).
 WeaponsConfig.CATEGORY_ATTRIBUTE = "WeaponCategory"
 
 WeaponsConfig.Schema = Schema
-
--- ── Carga ────────────────────────────────────────────────────
 
 local _registry: { [string]: { [string]: RegisteredWeapon } } = {}
 
@@ -120,9 +98,6 @@ local function loadAll()
 	end
 end
 
--- Un arma del catálogo (ItemsConfig) sin definición jugará con la
--- Configuration legacy de su Tool (o con defaults si tampoco la tiene).
--- Se avisa una vez, consolidado, para que no pase desapercibido.
 local function warnCatalogWithoutDefinition()
 	local missing: { string } = {}
 	for _, category in WeaponCategory.ALL do
@@ -145,24 +120,17 @@ end
 loadAll()
 warnCatalogWithoutDefinition()
 
--- ── Consulta ─────────────────────────────────────────────────
-
---- Definición registrada de un arma, o nil si no existe.
 function WeaponsConfig.Get(category: string, weaponId: string): RegisteredWeapon?
 	local byCategory = _registry[category]
 	return if byCategory then byCategory[weaponId] else nil
 end
 
---- Config de un arma (tabla congelada), o nil si no hay definición.
 function WeaponsConfig.GetConfig(category: string, weaponId: string): WeaponConfig?
 	local definition = WeaponsConfig.Get(category, weaponId)
 	return if definition then definition.Config else nil
 end
 
---[[
-	Valor de una clave para un arma: lo definido o, si no está, el default del
-	esquema de su WeaponType. nil si el arma no existe o la clave es desconocida.
-]]
+-- Cae al default del Schema de su WeaponType.
 function WeaponsConfig.GetValue(category: string, weaponId: string, keyName: string): any
 	local definition = WeaponsConfig.Get(category, weaponId)
 	if not definition then
@@ -175,12 +143,10 @@ function WeaponsConfig.GetValue(category: string, weaponId: string, keyName: str
 	return Schema.GetDefault(definition.WeaponType, keyName)
 end
 
---- Todas las definiciones: { [category] = { [weaponId] = RegisteredWeapon } }.
 function WeaponsConfig.GetAll(): { [string]: { [string]: RegisteredWeapon } }
 	return _registry
 end
 
---- Ids de las armas definidas en una categoría (orden alfabético).
 function WeaponsConfig.GetIds(category: string): { string }
 	local ids: { string } = {}
 	for id in _registry[category] or {} do
@@ -190,18 +156,10 @@ function WeaponsConfig.GetIds(category: string): { string }
 	return ids
 end
 
--- ── Identidad de Tools ───────────────────────────────────────
-
---- Fija la categoría en un Tool para que cliente y servidor resuelvan lo mismo.
 function WeaponsConfig.StampTool(tool: Instance, category: string)
 	tool:SetAttribute(WeaponsConfig.CATEGORY_ATTRIBUTE, category)
 end
 
---[[
-	Resuelve (category, weaponId) de un Tool. El id es siempre su nombre; la
-	categoría sale del atributo y, si no lo lleva, de buscar ese nombre en Main
-	y luego en Special. Devuelve nil, nil si no hay definición que encaje.
-]]
 function WeaponsConfig.ResolveToolIdentity(tool: Instance): (string?, string?)
 	local weaponId = tool.Name
 
@@ -219,7 +177,6 @@ function WeaponsConfig.ResolveToolIdentity(tool: Instance): (string?, string?)
 	return nil, nil
 end
 
---- Definición del arma que representa un Tool, o nil.
 function WeaponsConfig.GetForTool(tool: Instance): RegisteredWeapon?
 	local category, weaponId = WeaponsConfig.ResolveToolIdentity(tool)
 	if not category or not weaponId then
@@ -228,7 +185,6 @@ function WeaponsConfig.GetForTool(tool: Instance): RegisteredWeapon?
 	return WeaponsConfig.Get(category, weaponId)
 end
 
---- Valor (o default del esquema) de una clave para el arma de un Tool; nil si no se resuelve.
 function WeaponsConfig.GetValueForTool(tool: Instance, keyName: string): any
 	local category, weaponId = WeaponsConfig.ResolveToolIdentity(tool)
 	if not category or not weaponId then

@@ -1,13 +1,8 @@
 --!strict
 --[[
-	LobbyFeature  (Client)
-	Mantiene el preview del personaje del jugador local en
-	Workspace.Lobby.Spawners.P1 sincronizado con el loadout equipado.
-
-	El preview en sí lo posee LobbyCharacterPreview (singleton compartido con el
-	Locker): aquí solo observamos DataController.Loadout y le pedimos que se
-	sincronice con lo equipado. Mientras el Locker tiene el preview tomado para
-	previsualizar una selección, syncToEquippedIfIdle es no-op y no lo pisa.
+	Mantiene el preview del jugador local (Workspace.Lobby.Spawners.P1) sincronizado
+	con el loadout equipado. El preview lo posee LobbyCharacterPreview (compartido con
+	el Locker); mientras el Locker lo tiene tomado, syncToEquippedIfIdle es no-op.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")

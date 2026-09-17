@@ -1,33 +1,14 @@
 --!strict
 --[[
-	RoamGraph — pool plano de destinos navegables por mapa.
+	Pool plano de destinos navegables por mapa: NO es un grafo conectado ni una
+	ruta, solo Vector3 sin orden.
 
-	NO es un grafo conectado ni una ruta ordenada. Es una lista de Vector3
-	sin orden ni numeración. Los bots piden puntos aleatorios cuando
-	necesitan un destino.
+	Requisito de Studio (todo mapa en producción): Workspace/Maps/<MapName>/AINav/RoamPoints/
+	con BaseParts (cualquier nombre, cualquier profundidad). Sin esa carpeta el
+	pool queda vacío y los bots no tienen destinos.
 
-	Authoring (contractual — todos los mapas en producción deben tenerlo):
-	  Workspace/Maps/<MapName>/AINav/RoamPoints/
-	  Cada hijo BasePart es un destino. Nombres no importan. Atributos Tags
-	  (string) y Weight (number) se leen e ignoran en v1.
-
-	Si la carpeta no existe al construir el RoamGraph, se emite un `warn`
-	ruidoso una sola vez y el pool queda vacío — `pickRandomNavigablePoint`
-	devolverá `nil` y los bots no recibirán destinos válidos. Es un bug de
-	level design, no debe ocurrir en producción.
-
-	Caché por mapRoot Instance. Invalidación explícita:
-	  • mapRoot.Parent == nil → entrada descartada (mapa destruido).
-	  • AINav/RoamPoints emite ChildAdded/ChildRemoved → rebuild (permite
-	    iterar en Studio sin restart de ronda).
-	  • Round restart con MISMO mapRoot → NO invalida; reusa pool.
-
-	API:
-	  RoamGraph.forMap(mapRoot) → RoamGraph
-	  :pickRandomNavigablePoint(originPos, minDist, maxDist) → Vector3?
-	  :nearestPoint(pos) → Vector3?
-	  :destroy() — libera listeners; el caché se limpia automáticamente
-	    cuando mapRoot.Parent == nil.
+	Caché por mapRoot: se descarta al destruirse el mapa; un reinicio de ronda con
+	el mismo mapRoot reusa el pool. En Studio se reconstruye al añadir/quitar puntos.
 ]]
 
 local RunService = game:GetService("RunService")
@@ -72,7 +53,6 @@ local function _rebuild(self: RoamGraph)
 	if folder then
 		self._points = _readAuthoredPoints(folder)
 	else
-		-- Bug de level design: no debería ocurrir en producción.
 		warn(string.format(
 			"[RoamGraph] map '%s' no tiene AINav/RoamPoints folder. Los bots no podrán hacer roaming en este mapa. Authoreá la carpeta en Studio (ver Pre-PR1 del plan).",
 			self._mapRoot.Name
@@ -83,9 +63,7 @@ end
 
 local function _wireListeners(self: RoamGraph)
 	local folder = _findAINavFolder(self._mapRoot)
-	-- Los listeners de authoring solo son útiles en Studio (iterar puntos
-	-- sin restartar ronda). En producción la geometría es estática tras
-	-- la compilación — no se necesitan rebuilds dinámicos.
+	-- Solo en Studio, para iterar puntos sin reiniciar ronda; en producción son estáticos.
 	if folder and IS_STUDIO then
 		local rebuildScheduled = false
 		local function scheduleRebuild()
@@ -103,7 +81,6 @@ local function _wireListeners(self: RoamGraph)
 			scheduleRebuild()
 		end))
 	end
-	-- mapRoot destruido → limpiar caché y desuscribir.
 	table.insert(self._conns, self._mapRoot.AncestryChanged:Connect(function(_, parent)
 		if parent == nil then
 			self:destroy()
@@ -148,11 +125,6 @@ function RoamGraph:size(): number
 	return #self._points
 end
 
--- Pick algoritmo (4 niveles de relax, sin handwave):
---   1. anillo [minDist, maxDist]
---   2. anillo [minDist * 0.5, maxDist * 2]
---   3. cualquier punto del pool
---   4. nil (pool vacío — mapa sin AINav o todavía no authoreado)
 function RoamGraph:pickRandomNavigablePoint(originPos: Vector3, minDist: number, maxDist: number): Vector3?
 	local points = self._points
 	if #points == 0 then
@@ -186,7 +158,6 @@ function RoamGraph:pickRandomNavigablePoint(originPos: Vector3, minDist: number,
 		return pick
 	end
 
-	-- Full fallback: cualquier punto del pool.
 	return points[math.random(1, #points)]
 end
 

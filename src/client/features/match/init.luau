@@ -249,7 +249,7 @@ function MatchFeature.start(menuController: any): any
 			while os.clock() < deadline do
 				task.wait(0.1)
 				if lightingGeneration ~= myGen then
-					return -- otra transición (o el teardown) tomó el control
+					return
 				end
 				local ready = resolveMapPresetNode()
 				if ready then
@@ -403,10 +403,7 @@ function MatchFeature.start(menuController: any): any
 	local function setPlayEnabled(enabled: boolean)
 		playEnabled = enabled
 
-		local currentPlayButton = matchMenu:getPlayButton() or playButton
-		if not currentPlayButton then
-			return
-		end
+		local currentPlayButton = (matchMenu:getPlayButton() or playButton) :: GuiButton
 
 		-- Clickeable también durante la votación: ahí Play abre la pantalla de
 		-- votación en vez de unirse a la partida.
@@ -914,8 +911,6 @@ function MatchFeature.start(menuController: any): any
 
 		killCam:start({
 			killerUserId = data.killerUserId,
-			killerName = data.killerName,
-			weaponId = data.weaponId,
 		})
 
 		-- Sin asesino (caída al vacío, reset de personaje, daño de entorno) la tarjeta
@@ -1066,8 +1061,6 @@ function MatchFeature.start(menuController: any): any
 	janitor:Add(function()
 		MatchState.reset()
 		isVoting = false
-		selectedVoteKey = ""
-		pendingAutoVote = false
 		setPlayEnabled(false)
 		hud:setScores(0, 0, GameConfig.MaxRoundDuration)
 		view:hide()

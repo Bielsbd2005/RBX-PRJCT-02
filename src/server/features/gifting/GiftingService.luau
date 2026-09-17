@@ -1,7 +1,5 @@
 --!strict
 --[[
-	GiftingService.luau  (Server)
-
 	Envío, entrega y claim de regalos (packs de cash comprados con Robux).
 
 	Envío (SendGift):
@@ -18,9 +16,9 @@
 	Entrega (ProcessReceipt — delegado desde ServerBootstrap ANTES del grant de
 	cash normal; devolver nil aquí = "no es un regalo, sigue el flujo normal"):
 	  • Idempotencia PRIMERO: un receipt ya en ProcessedReceipts se concede sin
-	    re-entregar, aunque la intención haya expirado o se haya limpiado entre
-	    reintentos (con el orden inverso, un reintento tardío caía al handler de
-	    cash y una compra pagaba dos veces).
+	    re-entregar aunque la intención haya expirado o se haya limpiado entre
+	    reintentos; si no, un reintento tardío caería al handler de cash y la compra
+	    pagaría dos veces.
 	  • Con GiftIntent activa para ese ProductId, el cash NO va al comprador:
 	    - receptor en este server → _depositGift a su PendingGifts (+ForceSave);
 	    - offline / otro server / cola llena → ProfileStore MessageAsync
@@ -81,10 +79,6 @@ local _sendCooldowns: { [number]: number } = {}
 local _claimCooldowns: { [number]: number } = {}
 local _receiverChecks: { [number]: { at: number, accepts: boolean, reason: string } } = {}
 
--- ────────────────────────────────────────────────────────────
--- HELPERS
--- ────────────────────────────────────────────────────────────
-
 local function _checkCooldown(map: { [number]: number }, player: Player, cooldown: number): boolean
 	local last = map[player.UserId] or 0
 	if time() - last < cooldown then
@@ -140,15 +134,12 @@ end
 --[[
 	¿El receptor puede recibir regalos? Devuelve (accepts, reason).
 
-	Online en este server → perfil en memoria (gratis, fresco). Si no →
-	snapshot read-only cacheado RECEIVER_CHECK_TTL. La vista de un perfil que
-	NUNCA existió llega con SessionLoadCount == 0 — ese regalo sería imposible
-	de entregar jamás, así que se corta ANTES de cobrar Robux. Con la API caída
-	(apiOk=false) se falla abierto: solo un "no" leído con éxito bloquea.
-
-	Nota TOCTOU asumida: esto se comprueba al ENVIAR; si el receptor desactiva
-	los regalos entre el prompt y el receipt, la entrega sigue (el Robux ya se
-	pagó y el opt-out es anti-spam, no una barrera dura).
+	Online en este server → perfil en memoria (gratis). Si no → snapshot read-only
+	cacheado RECEIVER_CHECK_TTL. Un perfil que NUNCA existió llega con
+	SessionLoadCount == 0: ese regalo no se podría entregar, así que se corta ANTES de
+	cobrar Robux. Con la API caída (apiOk=false) se falla abierto.
+	TOCTOU asumido: si el receptor desactiva los regalos entre el prompt y el receipt,
+	la entrega sigue (el Robux ya se pagó y el opt-out es anti-spam, no una barrera).
 ]]
 local function _receiverAcceptsGifts(receiverUserId: number): (boolean, string)
 	local receiver = Players:GetPlayerByUserId(receiverUserId)
@@ -194,10 +185,6 @@ local function _receiverAcceptsGifts(receiverUserId: number): (boolean, string)
 	end
 	return accepts, reason
 end
-
--- ────────────────────────────────────────────────────────────
--- ENVÍO
--- ────────────────────────────────────────────────────────────
 
 -- Corre en thread propio (yielda: view offline).
 function GiftingService:_handleSendGift(player: Player, data: { receiverUserId: string, productId: number }): ()
@@ -245,10 +232,6 @@ function GiftingService:_handleSendGift(player: Player, data: { receiverUserId: 
 	MarketplaceService:PromptProductPurchase(player, product.ProductId)
 end
 
--- ────────────────────────────────────────────────────────────
--- ENTREGA
--- ────────────────────────────────────────────────────────────
-
 --[[
 	Deposita un regalo en PendingGifts del receptor. ÚNICA puerta de entrada —
 	la usan la entrega online de ProcessReceipt y el consumo de messages — para
@@ -288,11 +271,6 @@ function GiftingService:_depositGift(player: Player, giftId: string, gift: any):
 	return if _dataService:SetValue(player, { "PendingGifts", giftId }, gift) then "deposited" else "error"
 end
 
---[[
-	Delegado del dispatcher central (ServerBootstrap) ANTES del grant de cash.
-	Devuelve nil si el receipt no corresponde a un regalo, para que el handler
-	de compra normal lo procese.
-]]
 function GiftingService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchaseDecision?
 	local product = StoreProducts.Cash.ByProductId[receiptInfo.ProductId]
 	if not product then
@@ -308,11 +286,8 @@ function GiftingService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchaseDe
 		return nil
 	end
 
-	-- Idempotencia ANTES de mirar la intención: un receipt ya procesado (como
-	-- regalo o como compra normal) jamás re-entrega ni re-concede — ni siquiera
-	-- si la intención expiró o se limpió entre reintentos. Con el orden inverso
-	-- un reintento tardío caía al handler de cash del bootstrap y una sola
-	-- compra pagaba dos veces (regalo entregado + cash al comprador).
+	-- Idempotencia ANTES de mirar la intención (ver cabecera): un receipt ya procesado
+	-- jamás re-entrega ni re-concede.
 	local purchaseId = tostring(receiptInfo.PurchaseId)
 	if _dataService:IsReceiptProcessed(buyer, purchaseId) then
 		if _dataService:ForceSave(buyer) then
@@ -327,18 +302,15 @@ function GiftingService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchaseDe
 		or intent.ProductId ~= receiptInfo.ProductId
 		or os.time() - (tonumber(intent.CreatedAt) or 0) > INTENT_TTL
 	then
-		-- Diagnóstico: si HABÍA intención para ESTE producto pero caducó, el
-		-- regalo se convierte en compra normal (cash al comprador). No es lo
-		-- normal — merece un warn para no perder un regalo en silencio.
+		-- Intención para ESTE producto pero caducada: el regalo pasa a compra normal; warn
+		-- para no perderlo en silencio.
 		if hasIntent and intent.ProductId == receiptInfo.ProductId then
 			warn(("[GiftingService] Intent de regalo para product %s caducó (edad %ds > %ds); receipt tratado como compra normal.")
 				:format(tostring(receiptInfo.ProductId), os.time() - (tonumber(intent.CreatedAt) or 0), INTENT_TTL))
 		end
-		-- Sin intención activa: compra normal de cash. Trade-off asumido: si la
-		-- ENTREGA de un regalo fallara en bucle durante más de INTENT_TTL, el
-		-- receipt acaba aquí y el comprador recibe el cash él mismo (valor no
-		-- perdido, regalo no entregado) — preferible a una intención eterna que
-		-- desvíe compras normales futuras del mismo pack.
+		-- Sin intención activa: compra normal. Trade-off asumido: si la entrega fallara en
+		-- bucle más de INTENT_TTL, el comprador recibe el cash él mismo, preferible a una
+		-- intención eterna que desvíe compras normales futuras del mismo pack.
 		return nil
 	end
 
@@ -413,10 +385,6 @@ function GiftingService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchaseDe
 
 	return Enum.ProductPurchaseDecision.PurchaseGranted
 end
-
--- ────────────────────────────────────────────────────────────
--- RECEPCIÓN
--- ────────────────────────────────────────────────────────────
 
 -- Consume un message "Gift" de ProfileStore → _depositGift. Llamar a
 -- `processed()` borra el message de la cola persistente; NO llamarlo lo deja
@@ -495,10 +463,6 @@ function GiftingService:_handleClaimGift(player: Player, giftId: string): ()
 	_respondClaim(player, true, giftId, "", amount)
 end
 
--- ────────────────────────────────────────────────────────────
--- START
--- ────────────────────────────────────────────────────────────
-
 function GiftingService:Start(dataService: DataService): ()
 	if _started then
 		return
@@ -555,13 +519,11 @@ function GiftingService:Start(dataService: DataService): ()
 		GiftingService:_handleClaimGift(player, data.giftId)
 	end)
 
-	-- Prompt cancelado → limpiar la intención para que una compra normal
-	-- posterior del mismo pack no se desvíe como regalo. En purchased=true NO
-	-- se toca nada: la consume ProcessReceipt al entregar (limpiar aquí
-	-- perdería la carrera contra el receipt). Residual asumido: si un regalo
-	-- YA COMPRADO sigue con el receipt reintentando (entrega fallando) y el
-	-- jugador cancela un prompt normal del mismo pack, esta limpieza convierte
-	-- ese receipt en compra normal — el cash va al comprador (valor no perdido).
+	-- Prompt cancelado → limpiar la intención para que una compra normal posterior del
+	-- mismo pack no se desvíe como regalo. Con purchased=true no se toca: la consume
+	-- ProcessReceipt (limpiar aquí perdería la carrera contra el receipt). Residual
+	-- asumido: si un regalo ya comprado sigue reintentando y el jugador cancela un prompt
+	-- normal del mismo pack, ese receipt pasa a compra normal (cash al comprador).
 	MarketplaceService.PromptProductPurchaseFinished:Connect(function(userId: number, productId: number, purchased: boolean)
 		if purchased then
 			return

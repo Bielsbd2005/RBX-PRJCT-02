@@ -1,22 +1,13 @@
 --!strict
 --[[
-	AssetIds.luau
 	Fuente única de los assets de Roblox referenciados desde la LÓGICA del juego
-	(UI, VFX, animaciones y sonidos). Un solo sitio donde cambiar un icono sin
-	ir fichero por fichero, y donde se ve de un vistazo si dos sitios comparten
-	el mismo asset.
+	(UI, VFX, animaciones y sonidos).
 
-	Qué NO vive aquí, a propósito:
-	  Los assets que son *contenido de catálogo* — el thumbnail de cada arma en
-	  ItemsConfig, el de cada nav del locker en LockerConfig, el de cada tarea en
-	  DailyTasks, el placeholder de cada mapa en GameConfig. Ahí la imagen es un
-	  campo del ítem al lado de su precio y su rareza: sacarla obligaría a saltar
-	  entre dos ficheros para leer una sola definición.
+	NO viven aquí, a propósito, los assets que son contenido de catálogo (thumbnails
+	en ItemsConfig, LockerConfig, DailyTasks, GameConfig): son un campo más del ítem.
 
-	Convención: los nombres describen el USO, no el arte. Dos entradas pueden
-	compartir id sin que eso signifique que deban cambiar juntas — si un día el
-	icono de "gems del locker" y el de "comprar con gems" divergen, aquí solo se
-	toca uno.
+	Los nombres describen el USO, no el arte: dos entradas pueden compartir id sin
+	que deban cambiar juntas.
 ]]
 
 local function asset(assetId: number): string
@@ -25,7 +16,6 @@ end
 
 local AssetIds = {}
 
--- ── Imágenes ─────────────────────────────────────────────────
 AssetIds.Images = table.freeze({
 	-- Locker: estado del ítem en la grid y acción del botón de compra.
 	LockerLocked = asset(86881935952206),
@@ -49,7 +39,6 @@ AssetIds.Images = table.freeze({
 	GiftNpc = asset(109044845487335),
 })
 
--- ── Animaciones ──────────────────────────────────────────────
 AssetIds.Animations = table.freeze({
 	-- Animaciones stock de Roblox para el rig R6 de los bots.
 	CharacterIdle = asset(507766388),
@@ -63,7 +52,6 @@ AssetIds.Animations = table.freeze({
 	KillerViewportIdle = asset(126774009783214),
 })
 
--- ── Sonidos ──────────────────────────────────────────────────
 AssetIds.Sounds = table.freeze({
 	Pickup = asset(5728423829),
 })

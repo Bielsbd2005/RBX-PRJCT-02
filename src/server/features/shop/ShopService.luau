@@ -1,24 +1,21 @@
 --!strict
 --[[
-	ShopService.luau  (Server)
-	Gestiona las transacciones de la tienda usando ByteNet para comunicación
-	de baja latencia (reemplaza RemoteFunction/RemoteEvent clásicos).
+	Transacciones de la tienda vía ByteNet.
 
 	Flujo de una compra (BuyItem):
-	  1. Cliente envía Network.Shop.BuyItem via ByteNet
+	  1. Cliente envía Network.Shop.BuyItem
 	  2. ShopService valida: cooldown → ítem existe → nivel suficiente → saldo suficiente → no poseído
 	  3. DataService:BatchUpdate aplica la transacción atómica (saldo − precio, ítem = true, auto-equip si aplica)
 	  4. Network.Shop.Response confirma al cliente
 
 	Flujo de equip (EquipItem):
-	  1. Cliente envía Network.Shop.EquipItem via ByteNet
+	  1. Cliente envía Network.Shop.EquipItem
 	  2. ShopService valida: cooldown → ítem existe → jugador lo posee
 	  3. DataService:SetValue actualiza el Loadout
 	  4. Network.Shop.Response confirma al cliente
 
-	Cache O(1):
-	  En Start(), se construye _itemCache: category → itemId → { config + category }.
-	  El lookup evita colisiones entre IDs repetidos de categorías distintas.
+	_itemCache se indexa category → itemId para evitar colisiones entre IDs
+	repetidos de categorías distintas.
 ]]
 
 local Players           = game:GetService("Players")
@@ -72,7 +69,6 @@ local function _resolveWeaponId(rawWeaponId: string?, fallbackWeaponId: string?)
 	return ItemDefaults.ITEM_ID
 end
 
--- Helpers de ownership delegan a InventoryRepository (single source of truth).
 local function _ownsTargetWeapon(profileData: any, weaponCategory: string, weaponId: string): boolean
 	if not WeaponCategory.isValid(weaponCategory) then
 		return false
@@ -87,38 +83,24 @@ local function _getOwnedWeaponWrap(profileData: any, weaponCategory: string, wea
 	return InventoryRepository.ownsWeaponWrap(profileData, weaponCategory :: WeaponCategory.WeaponCategory, weaponId, wrapId)
 end
 
--- Cooldown por acción (segundos)
+-- Segundos entre dos acciones del mismo tipo por jugador.
 local COOLDOWN = 0.3
 
--- Mensaje de saldo insuficiente por moneda (el %d es el precio). Los textos van
--- enteros y no concatenando la moneda para poder ajustar la frase por moneda.
+-- Frases enteras por moneda (el %d es el precio) para poder ajustarlas por moneda.
 local INSUFFICIENT_FUNDS_MESSAGE: { [string]: string } = {
 	[Currency.CASH] = "Not enough Cash. You need %d.",
 	[Currency.GEMS] = "Not enough Gems. You need %d.",
 }
 
--- ────────────────────────────────────────────────────────────
--- ESTADO DEL MÓDULO
--- ────────────────────────────────────────────────────────────
-
--- Cache por categoría → itemId → config.
 local _itemCache: { [string]: { [string]: any } } = {}
 
--- Cooldowns agrupados por jugador.
 local _cooldowns: { [number]: { [string]: number } } = {}
 
--- DataService inyectado en Start() — typed para que :GetProfile/:BatchUpdate
--- etc. se chequeen en compile-time (el `:: any` previo perdía toda la safety).
--- Cast a `any` al init: en runtime es nil hasta Start(), pero los call sites
--- siempre corren después (Start es la primera llamada del bootstrap).
+-- nil hasta Start(); los call sites siempre corren después (Start es la primera
+-- llamada del bootstrap).
 local _dataService: DataService = nil :: any
 local _started = false
 
--- ────────────────────────────────────────────────────────────
--- HELPERS
--- ────────────────────────────────────────────────────────────
-
--- Devuelve true si la acción está fuera de cooldown (no muta state).
 local function _isCooldownReady(player: Player, action: string): boolean
 	local playerCooldowns = _cooldowns[player.UserId]
 	if not playerCooldowns then
@@ -128,7 +110,7 @@ local function _isCooldownReady(player: Player, action: string): boolean
 	return time() - last >= COOLDOWN
 end
 
--- Marca el cooldown como activo. Llamar tras validación exitosa.
+-- Llamar solo tras éxito real.
 local function _markCooldown(player: Player, action: string)
 	local playerCooldowns = _cooldowns[player.UserId]
 	if not playerCooldowns then
@@ -138,10 +120,6 @@ local function _markCooldown(player: Player, action: string)
 	playerCooldowns[action] = time()
 end
 
---[[
-	Navega profile.Data con una ruta de claves.
-	Devuelve el valor en la hoja, o nil si algún nivel es nil.
-]]
 local function _getPath(data: any, path: { string }): any
 	local pointer: any = data
 	for _, key in path do
@@ -153,14 +131,9 @@ local function _getPath(data: any, path: { string }): any
 	return pointer
 end
 
--- ────────────────────────────────────────────────────────────
--- HANDLERS
--- ────────────────────────────────────────────────────────────
-
 local function _onBuyItem(data: { itemId: string, category: string, weaponCategory: string, weaponId: string }, player: Player): ()
-	-- Validación 0: tipos + caps de longitud. ByteNet no impone maxLength en
-	-- strings, así que rechazamos payloads con strings excesivos antes de hacer
-	-- gsub/concat/lookup (DoS asimétrico — cliente paga poco, server paga O(n)).
+	-- ByteNet no impone maxLength en strings: se rechazan payloads largos antes de
+	-- gsub/concat/lookup (DoS asimétrico).
 	if not NetGuards.validate(data, {
 		itemId         = M.Id,
 		category       = M.Category,
@@ -171,14 +144,13 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 		return
 	end
 
-	-- Validación 1: cooldown (sin marcar; se marca tras éxito real)
+	-- Cooldown sin marcar: se marca tras éxito real.
 	if not _isCooldownReady(player, "buy") then
 		Network.Shop.Response.SendTo({ success = false, message = "Too many requests. Slow down." }, player)
 		return
 	end
 
-	-- Validación 2: ítem existe en cache (la categoría queda implícitamente
-	-- whitelisted: solo claves de _itemCache son válidas).
+	-- Solo claves de _itemCache son válidas: la categoría queda whitelisted.
 	local categoryCache = _itemCache[data.category]
 	local itemConfig = categoryCache and categoryCache[data.itemId]
 	if not itemConfig then
@@ -202,7 +174,6 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 		return
 	end
 
-	-- Validación 3: perfil cargado
 	local profile = _dataService:GetProfile(player)
 	if not profile then
 		Network.Shop.Response.SendTo({ success = false, message = "Your data isn't loaded yet." }, player)
@@ -212,7 +183,6 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 	local weaponCategoryForWraps: string? = nil
 	local weaponIdForWraps: string? = nil
 
-	-- Validación 4: ítem no poseído ya
 	if data.category == LockerCategory.WEAPON_WRAPS then
 		weaponCategoryForWraps = _resolveWeaponCategory(data.weaponCategory)
 		if not weaponCategoryForWraps then
@@ -224,7 +194,6 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 		local equippedWeaponId = if weaponSlot then profile.Data.Loadout[weaponSlot] else nil
 		weaponIdForWraps = _resolveWeaponId(data.weaponId, equippedWeaponId)
 
-		-- Bloquea comprar wraps para armas que el jugador no posee.
 		if not _ownsTargetWeapon(profile.Data, weaponCategoryForWraps, weaponIdForWraps) then
 			Network.Shop.Response.SendTo({ success = false, message = "You don't own that weapon." }, player)
 			return
@@ -242,7 +211,6 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 		end
 	end
 
-	-- Validación 5: nivel suficiente
 	local playerLevel: number = profile.Data.Stats.Level or 1
 	if playerLevel < (itemConfig.LevelRequired or 1) then
 		Network.Shop.Response.SendTo({
@@ -252,9 +220,8 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 		return
 	end
 
-	-- Validación 6: saldo suficiente EN LA MONEDA DEL ÍTEM.
-	-- `Currency` es opcional en ItemsConfig y resolve() cae a Cash con cualquier
-	-- otro valor, así que un ítem sin el campo se cobra como siempre.
+	-- Saldo EN LA MONEDA DEL ÍTEM. `Currency` es opcional en ItemsConfig y resolve()
+	-- cae a Cash con cualquier otro valor.
 	local currency = Currency.resolve(itemConfig.Currency)
 	local balancePath = Currency.balancePath(currency)
 	local currentBalance: number = _getPath(profile.Data, balancePath) or 0
@@ -267,11 +234,9 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 		return
 	end
 
-	-- ── Transacción atómica ──────────────────────────────────
-	-- Si la categoría es equipable, la compra actualiza también el Loadout
-	-- en la misma operación para evitar un segundo request del cliente.
-	-- El saldo se descuenta con delta para evitar TOCTOU si otro flujo (kill,
-	-- claim, otra compra) muta el stat entre la lectura y el write.
+	-- Si la categoría es equipable, el Loadout se actualiza en la misma operación.
+	-- El saldo se descuenta con delta para evitar TOCTOU si otro flujo (kill, claim,
+	-- otra compra) muta el stat entre la lectura y el write.
 	local updates = {
 		{ path = balancePath, delta = -price },
 	}
@@ -283,7 +248,6 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 			path = { "Inventory", "WeaponWrapsByWeapon", resolvedWeaponCategory, resolvedWeaponId, data.itemId },
 			value = true,
 		})
-		-- Marcar metadata + NEW! flag para el wrap.
 		table.insert(updates, {
 			path = { "InventoryMeta", "WeaponWraps", data.itemId },
 			value = { AcquiredAt = os.time(), Source = "Shop" },
@@ -301,7 +265,6 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 			})
 		end
 	else
-		-- Categoría estándar: Inventory + InventoryMeta + NewItemFlags atómicos.
 		table.insert(updates, { path = { "Inventory", data.category, data.itemId }, value = true })
 		table.insert(updates, {
 			path = { "InventoryMeta", data.category, data.itemId },
@@ -332,23 +295,11 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 	if success then
 		_markCooldown(player, "buy")
 
-		--[[
-			Forzar el guardado ANTES de registrar la compra.
-
-			`BatchUpdate` sólo escribe en el perfil EN MEMORIA: el guardado real
-			es el autosave de ProfileStore, hasta 30 s después. Si el servidor
-			caía en esa ventana, el evento ya había salido (o salía con el
-			flush de cierre) y la compra no existía al volver a entrar: un sink
-			fantasma que restaba de la masa monetaria del dashboard un dinero
-			que el jugador seguía teniendo, y un ítem vendido que nadie poseía.
-
-			Los caminos de receipts de Robux ya hacían esto; la tienda, que es
-			donde ocurre la mayoría de las transacciones del juego, no.
-
-			Si el Save falla se registra igual y se avisa: el jugador YA tiene
-			el ítem y el saldo descontado en memoria, así que callarse el
-			movimiento crearía el error contrario (un sink real que no aparece).
-		]]
+		-- Forzar el guardado ANTES de registrar la compra: BatchUpdate solo escribe en
+		-- memoria y el autosave de ProfileStore llega hasta 30 s después; si el server
+		-- cae en esa ventana, la telemetría tendría un sink fantasma y un ítem vendido
+		-- que nadie posee. Si el Save falla se registra igual y se avisa: el jugador ya
+		-- tiene el ítem y el saldo descontado en memoria.
 		if not _dataService:ForceSave(player) then
 			warn(("[ShopService] compra de %s por %s registrada sin guardado confirmado"):format(
 				tostring(data.itemId),
@@ -356,14 +307,12 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 			))
 		end
 
-		-- `itemId` viaja como campo propio (no concatenado al transactionType):
-		-- la vista de Shop necesita desglose por ítem, y así el backend no tiene
-		-- que parsear claves compuestas.
+		-- `itemId` va como campo propio (no concatenado al transactionType): la vista
+		-- de Shop desglosa por ítem sin parsear claves compuestas.
 		TelemetryService.RecordFlow(player, "sink", "Shop::" .. data.category, price, data.itemId, currency)
 		TelemetryService.RecordItem(player, "ShopItem::" .. data.category, data.itemId)
-		-- El estado del jugador EN la compra: es lo que valida la escalera de
-		-- precios (a qué nivel y con cuántas horas se compra cada cosa). El
-		-- acumulador de arriba no lo conserva: agrega por día.
+		-- Estado del jugador EN la compra (nivel, horas) para validar la escalera de
+		-- precios; el acumulador de RecordFlow agrega por día y no lo conserva.
 		TelemetryService.RecordItemPurchase(player, {
 			userId = player.UserId,
 			category = data.category,
@@ -395,7 +344,6 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 end
 
 local function _onEquipItem(data: { category: string, itemId: string, weaponCategory: string, weaponId: string }, player: Player): ()
-	-- Validación 0: tipos + caps de longitud (ver _onBuyItem).
 	if not NetGuards.validate(data, {
 		category       = M.Category,
 		itemId         = M.Id,
@@ -406,13 +354,11 @@ local function _onEquipItem(data: { category: string, itemId: string, weaponCate
 		return
 	end
 
-	-- Validación 1: cooldown (sin marcar; se marca tras éxito real)
 	if not _isCooldownReady(player, "equip") then
 		Network.Shop.Response.SendTo({ success = false, message = "Too many requests. Slow down." }, player)
 		return
 	end
 
-	-- Validación 2: ítem existe en cache (whitelist implícita de category).
 	local categoryCache = _itemCache[data.category]
 	local itemConfig = categoryCache and categoryCache[data.itemId]
 	if not itemConfig then
@@ -420,7 +366,6 @@ local function _onEquipItem(data: { category: string, itemId: string, weaponCate
 		return
 	end
 
-	-- Validación 3: perfil cargado
 	local profile = _dataService:GetProfile(player)
 	if not profile then
 		Network.Shop.Response.SendTo({ success = false, message = "Your data isn't loaded yet." }, player)
@@ -450,7 +395,6 @@ local function _onEquipItem(data: { category: string, itemId: string, weaponCate
 		local equippedWeaponId = profile.Data.Loadout[weaponSlot]
 		local targetWeaponId = _resolveWeaponId(data.weaponId, equippedWeaponId)
 
-		-- Re-validar ownership del arma objetivo y del wrap.
 		if not _ownsTargetWeapon(profile.Data, weaponCategory, targetWeaponId) then
 			Network.Shop.Response.SendTo({ success = false, message = "You don't own that weapon." }, player)
 			return
@@ -463,21 +407,18 @@ local function _onEquipItem(data: { category: string, itemId: string, weaponCate
 
 		ok = _dataService:SetValue(player, { wrapsRootPath[1], wrapsRootPath[2], targetWeaponId }, data.itemId)
 	else
-		-- Validación 4: el jugador posee el ítem
 		local isOwned = _getPath(profile.Data.Inventory, { data.category, data.itemId })
 		if not isOwned then
 			Network.Shop.Response.SendTo({ success = false, message = "You don't own this item." }, player)
 			return
 		end
 
-		-- Validación 5: categoría tiene un slot de Loadout válido
 		local loadoutSlot = CATEGORY_TO_LOADOUT_SLOT[data.category]
 		if not loadoutSlot then
 			Network.Shop.Response.SendTo({ success = false, message = "That category can't be equipped." }, player)
 			return
 		end
 
-		-- ── Actualizar Loadout ───────────────────────────────────
 		ok = _dataService:SetValue(player, { "Loadout", loadoutSlot }, data.itemId)
 	end
 
@@ -495,18 +436,10 @@ local function _onEquipItem(data: { category: string, itemId: string, weaponCate
 	end
 end
 
--- ────────────────────────────────────────────────────────────
--- MÓDULO PRINCIPAL
--- ────────────────────────────────────────────────────────────
-
 local ShopService = {}
 ShopService.__index = ShopService
 
---[[
-	Inicia el servicio.
-	  dataService  — instancia de DataService (inyección de dependencia,
-	                 evita require circular entre servicios)
-]]
+-- `dataService` se inyecta para evitar require circular entre servicios.
 function ShopService:Start(dataService: DataService): ()
 	if _started then
 		return
@@ -515,8 +448,6 @@ function ShopService:Start(dataService: DataService): ()
 	_started = true
 	_dataService = dataService
 
-	-- ── Construir cache O(1) ──────────────────────────────────
-	-- Itera ItemsConfig una vez y crea lookup por categoría + itemId.
 	for category, items in ItemsConfig do
 		_itemCache[category] = {}
 		for itemId, config in items do
@@ -528,7 +459,6 @@ function ShopService:Start(dataService: DataService): ()
 		_cooldowns[player.UserId] = nil
 	end)
 
-	-- ── Registrar listeners de ByteNet ────────────────────────
 	Network.Shop.BuyItem.Listen(_onBuyItem)
 	Network.Shop.EquipItem.Listen(_onEquipItem)
 end

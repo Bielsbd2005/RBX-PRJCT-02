@@ -1,63 +1,28 @@
 --!strict
 --[[
-	DataMigrations.luau  (Server)
+	Migraciones forward-only del PlayerProfile. Añadir un campo nuevo NO necesita
+	migración (Reconcile() lo rellena); renombrar, cambiar forma o mover datos sí.
 
-	Framework de migraciones forward-only para el schema del PlayerProfile.
+	Para añadir una: función en MIGRATIONS indexada por la versión de DESTINO que muta
+	`data` in-place y es idempotente; subir CURRENT_VERSION y Metadata.Version de
+	DataTemplate al mismo número.
 
-	Cuándo necesitas una migración:
-	  • Renombrar un campo (no auto-resuelto por Reconcile).
-	  • Cambiar el tipo o forma de un campo (p. ej. boolean → number con count).
-	  • Mover datos entre secciones (p. ej. reorganizar Stats).
-	  • Computar un valor derivado a partir de campos existentes.
-
-	Cuándo NO necesitas migración:
-	  • Añadir un campo nuevo: Reconcile() de ProfileStore lo rellena con el
-	    default del template automáticamente. Solo bumpea CURRENT_VERSION si
-	    quieres usar el contador para telemetría/diagnostics.
-
-	Cómo añadir una migración:
-	  1. Define la función en el bloque MIGRATIONS abajo, indexada por la
-	     versión de DESTINO. La función muta `data` in-place.
-	  2. Bumpea CURRENT_VERSION al nuevo número.
-	  3. Bumpea Metadata.Version en DataTemplate al mismo número.
-	  4. La migración debe ser idempotente: re-ejecutarla no debe corromper.
-
-	Garantías:
-	  • Las migraciones corren en orden estricto (from+1 .. CURRENT_VERSION).
-	  • Si una migración falla con error, NO avanzamos Version. Esto permite
-	    re-intentar en el siguiente login sin perder datos.
-	  • Migraciones corren ANTES de la creación de la Replica → mutaciones
-	    in-place son seguras (mismo contrato que el resto de _loadPlayer).
+	Si una falla, Version no avanza y se reintenta en el siguiente login. Corren antes
+	de crear la Replica, así que mutar in-place es seguro.
 ]]
 
 local DataMigrations = {}
 
--- Versión actual del schema. Bumpear al añadir una migración nueva, en sync
--- con `Metadata.Version` del DataTemplate.
+-- Debe coincidir con `Metadata.Version` del DataTemplate.
 DataMigrations.CURRENT_VERSION = 2
 
--- Registro de migraciones. Clave = versión de DESTINO. Valor = función
--- (data) -> () que muta data in-place.
---
--- Ejemplo (cuando exista una v3):
---   [3] = function(data)
---       -- Mover Stats.Headshots a una nueva sección CombatStats.
---       data.CombatStats = data.CombatStats or {}
---       data.CombatStats.Headshots = data.Stats.Headshots or 0
---       data.Stats.Headshots = nil
---   end,
 local MIGRATIONS: { [number]: (any) -> () } = {
-	-- v2 es la baseline actual; no hay migraciones aún.
+	-- v2 es la baseline.
 }
 
 DataMigrations.migrations = MIGRATIONS
 
---[[
-	Aplica todas las migraciones necesarias para llevar `data` desde su versión
-	actual hasta CURRENT_VERSION. Devuelve:
-	  • applied  — true si se ejecutó al menos una migración con éxito.
-	  • errored  — true si alguna migración lanzó error (Version no avanza).
-]]
+-- Devuelve (applied, errored).
 function DataMigrations.migrate(data: any): (boolean, boolean)
 	if type(data) ~= "table" or type(data.Metadata) ~= "table" then
 		return false, false
@@ -79,7 +44,7 @@ function DataMigrations.migrate(data: any): (boolean, boolean)
 			end
 			applied = true
 		end
-		-- Avanzar versión incluso para "no-op" migrations (gaps en MIGRATIONS).
+		-- También avanza en los huecos de MIGRATIONS.
 		data.Metadata.Version = v
 	end
 

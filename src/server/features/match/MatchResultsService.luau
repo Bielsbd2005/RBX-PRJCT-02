@@ -1,25 +1,9 @@
 --!strict
 --[[
-	MatchResultsService.luau  (Server)
-
-	Dueño de TODO lo relativo a las recompensas de fin de partida (pantalla de
-	Resultados). Mantiene MatchService delgado: este service computa, concede y
-	empaqueta; MatchService solo le da el contexto del jugador al terminar la ronda.
-
-	Responsabilidades:
-	  • VIP: lectura síncrona (IsVIPCached) del gamepass
-	    `StoreProducts.GamePasses.ByName.VIP` para no bloquear el envío de
-	    RoundEnded. El caché y su prefetch viven en GamePassService, compartidos
-	    con el resto de beneficios de pass.
-	  • Snapshot de inicio de partida (nivel + tier de BP) por jugador, para luego
-	    computar qué items se DESBLOQUEARON durante la partida (display-only — el
-	    granting de esos items ya lo hace la progresión: level-up / BP).
-	  • BuildResults(player, ctx): arma el paquete { outcome, cash, items } que el
-	    cliente renderiza. El cash se resuelve desde `ResultsRewards` (configurable).
-	  • GrantCash(player, cash): concede el cash NO bloqueado vía RewardService.
-
-	Importante: el cash se concede server-side a todos los elegibles, vean o no la
-	pantalla de Resultados (MatchService llama GrantCash en su loop de fin de ronda).
+	Recompensas de fin de partida (pantalla de Resultados): computa, concede y
+	empaqueta; MatchService solo aporta el contexto. Los ítems "desbloqueados" son
+	solo display (los concede la progresión). El cash se concede a todos los
+	elegibles, vean o no la pantalla.
 ]]
 
 local Players = game:GetService("Players")
@@ -36,8 +20,7 @@ local GamePassService = require(script.Parent.Parent.Parent.core.GamePassService
 local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
 type DataService = DataServiceMod.DataServiceModule
 
--- Tope de items mostrados en Resultados (un gran salto de niveles no debe
--- inundar la pantalla). Es solo display; lo concedido por progresión no se ve afectado.
+-- Solo display: lo concedido por progresión no se ve afectado.
 local MAX_ITEMS = 6
 
 export type MatchContext = ResultsRewards.MatchContext
@@ -51,20 +34,18 @@ export type ResultItem = {
 	name: string,
 }
 
--- Entrada de recompensa YA aplanada para el cliente (mismo template para cash e
--- items). `amount > 0` → es cash (se muestra Amount); `amount == 0` → es item.
+-- `amount == 0` indica ítem (el cliente oculta Amount).
 export type DisplayReward = {
-	title: string, -- texto de Title.Value ("VICTORY" | "UNLOCKED" | "PASS" | ...)
-	image: string, -- ImageLabel.Image (icono de cash o imagen del item)
-	amount: number, -- monto de cash (0 = item: se oculta Amount)
-	locked: boolean, -- bonus VIP no poseído → gris + Locked (no se concede)
+	title: string,
+	image: string,
+	amount: number,
+	locked: boolean, -- bonus VIP no poseído: se muestra como upsell, no se concede
 }
 
 export type MatchResults = {
 	outcome: string, -- "Victory" | "Defeat"
-	-- Lista resuelta de cash CON id (solo server, para GrantCash + analytics).
+	-- Con id, solo server (GrantCash + analytics).
 	cash: { ResultsRewards.ResolvedCashReward },
-	-- Lista aplanada (cash + items) que se serializa y renderiza en el cliente.
 	rewards: { DisplayReward },
 }
 
@@ -73,22 +54,15 @@ local MatchResultsService = {}
 local _started = false
 local _dataService: DataService = nil :: any
 
--- Snapshot de inicio de partida por userId (set-if-absent; se limpia por ronda).
+-- Set-if-absent: un re-join en la misma ronda no pisa el snapshot.
 local _startSnapshotByUserId: { [number]: { level: number, bpTier: number } } = {}
 
--- ── VIP ──────────────────────────────────────────────────────
-
--- Lectura síncrona (false si el prefetch de GamePassService aún no resolvió).
--- El bonus es display + grant de fin de ronda: un false tardío sólo puede
--- costarle el bonus a quien acaba de entrar a mitad de la última ronda.
+-- false si el prefetch de GamePassService aún no resolvió (síncrono para no
+-- bloquear RoundEnded).
 function MatchResultsService:IsVIPCached(player: Player): boolean
 	return GamePassService.Owns(player, StoreProducts.GamePasses.ByName.VIP.PassId)
 end
 
--- ── Snapshot de inicio de partida ────────────────────────────
-
--- Captura nivel + tier de BP del jugador al ENTRAR a la partida (set-if-absent,
--- para que un re-join en la misma ronda no pise el snapshot original).
 function MatchResultsService:CaptureMatchStart(player: Player)
 	if _startSnapshotByUserId[player.UserId] then
 		return
@@ -104,21 +78,14 @@ function MatchResultsService:CaptureMatchStart(player: Player)
 	local bpTier = if bp and type(bp.CurrentTier) == "number" then math.floor(bp.CurrentTier) else 1
 	_startSnapshotByUserId[player.UserId] = { level = level, bpTier = bpTier }
 
-	-- Reintento del prefetch de VIP al entrar a la partida (el descarte del
-	-- resultado es intencionado): si el de PlayerAdded falló, `Owns` relanza la
-	-- consulta y da toda la ronda para que resuelva antes del cierre.
+	-- Resultado descartado a propósito: si el prefetch de PlayerAdded falló, relanza la consulta.
 	MatchResultsService:IsVIPCached(player)
 end
 
--- Limpia los snapshots de inicio (llamado por MatchService al resetear la ronda).
 function MatchResultsService:ClearSnapshots()
 	table.clear(_startSnapshotByUserId)
 end
 
--- ── Items desbloqueados durante la partida (display-only) ─────
-
--- Items del locker cuyo LevelRequired == `level` (se desbloquean al alcanzarlo).
--- Se ignoran defaults (LevelRequired <= 1).
 local function _lockerItemsForLevel(level: number, out: { ResultItem })
 	if level <= 1 then
 		return
@@ -148,7 +115,6 @@ local function _lockerItemsForLevel(level: number, out: { ResultItem })
 	end
 end
 
--- Items del pase de batalla de los tiers COMPLETADOS durante la partida.
 local function _battlePassItemsBetweenTiers(startCompleted: number, endCompleted: number, out: { ResultItem })
 	if endCompleted <= startCompleted then
 		return
@@ -191,7 +157,6 @@ function MatchResultsService:_computeItemUnlocks(player: Player): { ResultItem }
 		return out
 	end
 
-	-- Locker (por crossing de niveles de character).
 	local endLevel = if profile.Data.Stats and type(profile.Data.Stats.Level) == "number"
 		then math.floor(profile.Data.Stats.Level)
 		else snapshot.level
@@ -202,8 +167,7 @@ function MatchResultsService:_computeItemUnlocks(player: Player): { ResultItem }
 		end
 	end
 
-	-- BattlePass (por tiers completados). CurrentTier = "progresando hacia N" →
-	-- completados = CurrentTier - 1.
+	-- CurrentTier es el tier hacia el que progresa: completados = CurrentTier - 1.
 	local bp = profile.Data.BattlePass
 	local endTier = if bp and type(bp.CurrentTier) == "number" then math.floor(bp.CurrentTier) else snapshot.bpTier
 	_battlePassItemsBetweenTiers(math.max(0, snapshot.bpTier - 1), math.max(0, endTier - 1), out)
@@ -211,12 +175,7 @@ function MatchResultsService:_computeItemUnlocks(player: Player): { ResultItem }
 	return out
 end
 
--- ── Build + grant ────────────────────────────────────────────
-
--- Arma el paquete de Resultados del jugador. Síncrono (no yield) para poder
--- enviarlo en el mismo frame que RoundEnded. Aplana cash + items en una sola
--- lista `rewards` (mismo template en el cliente); `cash` se conserva con id
--- para el granting/analytics.
+-- Síncrono (sin yields): se envía en el mismo frame que RoundEnded.
 function MatchResultsService:BuildResults(player: Player, ctx: MatchContext): MatchResults
 	local cash = ResultsRewards.resolveCash(ctx)
 	local items = self:_computeItemUnlocks(player)
@@ -246,15 +205,8 @@ function MatchResultsService:BuildResults(player: Player, ctx: MatchContext): Ma
 	}
 end
 
---[[
-	Concede el cash NO bloqueado del paquete. Los bonus VIP que el jugador no
-	posee llegan con locked=true → no se conceden (solo se muestran como upsell).
-
-	`matchId` viaja hasta la telemetría como sku del movimiento: es lo que
-	permite sumar cuánto Cash pagó UNA partida concreta y cruzarlo con su mapa,
-	su duración y su marcador. Sin él, los faucets `MatchEnd::*` y el evento de
-	fin de partida eran dos series sin ninguna clave en común.
-]]
+-- `matchId` viaja como sku a telemetría para cruzar los faucets MatchEnd::* con
+-- el evento de fin de partida.
 function MatchResultsService:GrantCash(
 	player: Player,
 	cash: { ResultsRewards.ResolvedCashReward },
@@ -266,8 +218,6 @@ function MatchResultsService:GrantCash(
 		end
 	end
 end
-
--- ── Lifecycle ────────────────────────────────────────────────
 
 function MatchResultsService:Start(deps: { dataService: DataService })
 	if _started then

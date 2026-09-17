@@ -1,26 +1,14 @@
 --!strict
 --[[
-	TelemetryConfig.luau
-	Parámetros del pipeline de telemetría HTTP hacia el backend de GUNNERS
-	Analytics. Es config pura: `TelemetryService` no hardcodea ningún número.
+	Config del pipeline de telemetría HTTP (única salida de analítica: el
+	AnalyticsService de Roblox no tiene API de lectura). TelemetryService no hardcodea números.
 
-	Es la única salida de analítica del juego: el dual-write al AnalyticsService
-	de Roblox (Creator Hub) se eliminó por ser WRITE-ONLY — no hay API pública
-	para leer esos datos, así que no podía alimentar el dashboard.
+	Vive en server/core y no en shared para que el cliente no vea ni el NOMBRE
+	del secreto ni los parámetros de reintento.
 
-	Vive en server/core (NO en shared/constants): es config puramente interna
-	de TelemetryService y nada del cliente la necesita. Mantenerla fuera de
-	ReplicatedStorage evita que un cliente pueda leer siquiera el NOMBRE del
-	secreto o los parámetros de reintento/circuit breaker.
-
-	Prerrequisitos operativos:
-	  • "Allow HTTP Requests" activado en Game Settings.
-	  • La clave registrada en el Secrets Store de Roblox bajo `SecretKey`.
-	    `SecretKey` es solo el NOMBRE de esa entrada — HttpService:GetSecret
-	    devuelve un objeto opaco cuyo valor nunca es legible desde Luau, ni
-	    siquiera por el propio script. El valor real jamás toca este archivo.
-	  • Studio SÍ alcanza `localhost`; un servidor de Roblox publicado NO.
-	    Para producción hace falta un túnel (cloudflared/ngrok) o el VPS.
+	Requisitos: "Allow HTTP Requests" en Game Settings; la clave en el Secrets
+	Store bajo el nombre `SecretKey` (HttpService:GetSecret devuelve un objeto
+	opaco). Studio alcanza `localhost`; un servidor publicado no.
 ]]
 
 local RunService = game:GetService("RunService")
@@ -50,8 +38,7 @@ export type TelemetryConfigType = {
 }
 
 local TelemetryConfig: TelemetryConfigType = {
-	-- Master switch. En false, TelemetryService se vuelve un no-op completo:
-	-- no encola, no arranca loops y no hace requests.
+	-- En false, TelemetryService es un no-op completo (no encola, ni loops, ni requests).
 	Enabled = true,
 
 	-- Base del servicio de ingesta. El endpoint concreto es `/api/v1/telemetry/batch`.
@@ -63,15 +50,12 @@ local TelemetryConfig: TelemetryConfigType = {
 	-- Se envía en cada evento para poder segmentar métricas por release.
 	GameVersion = "0.1.0",
 
-	-- ── Batching ───────────────────────────────────────────────
 	-- Un batch sale cuando se llena (BatchMaxEvents) o cuando vence el timer
 	-- (FlushIntervalSeconds), lo que ocurra antes.
 	BatchMaxEvents = 20,
 	FlushIntervalSeconds = 5,
 
-	-- Cada cuánto se emite el SERVER_FLUSH agregado. 300s = el diseño del
-	-- documento de arquitectura. Con 6 jugadores por servidor esto es ~0.2
-	-- req/min: un 0.04% del presupuesto de 500 req/min por servidor.
+	-- Segundos entre SERVER_FLUSH agregados.
 	ServerFlushSeconds = 300,
 
 	-- Cola acotada: al desbordar se descarta lo MÁS VIEJO. La telemetría nunca
@@ -80,44 +64,30 @@ local TelemetryConfig: TelemetryConfigType = {
 
 	RequestTimeoutSeconds = 10,
 
-	-- ── Reintentos ─────────────────────────────────────────────
-	-- El jitter no es opcional: a 12k CCU son ~2.000 servidores que reintentarían
-	-- en sincronía si la ingesta cae (efecto manada).
+	-- El backoff lleva jitter obligatorio: sin él todos los servidores reintentarían
+	-- en sincronía si la ingesta cae.
 	MaxRetries = 4,
 	BackoffBaseSeconds = 2,
 	BackoffMaxSeconds = 30,
 
-	-- Tras N fallos consecutivos dejamos de intentarlo durante el cooldown.
-	-- Evita quemar el presupuesto HTTP contra un backend caído.
+	-- Tras N fallos consecutivos no se intenta durante el cooldown (presupuesto HTTP).
 	CircuitBreakerThreshold = 8,
 	CircuitBreakerCooldownSeconds = 60,
 
-	-- ── Apagado ────────────────────────────────────────────────
-	-- DataService:BindToClose consume hasta 25s de la ventana de ~30s
-	-- (core/data/DataService.luau). Roblox corre los callbacks de BindToClose
-	-- EN PARALELO, así que el nuestro cabe holgadamente:
+	-- Roblox corre los callbacks de BindToClose en paralelo dentro de la ventana de ~30s:
 	--   Grace   → esperar a que ProfileUnloading encole los SESSION_END.
 	--   Deadline→ tope duro para drenar la cola.
 	ShutdownGraceSeconds = 2,
 	ShutdownDeadlineSeconds = 10,
 
-	-- Logs verbosos de batches enviados/fallidos. Dejar en false en producción.
+	-- Logs verbosos de batches. Dejar en false en producción.
 	Debug = false,
 }
 
---[[
-	Overrides que SOLO aplican en Studio.
-
-	Existen para que probar la telemetría no obligue a editar los valores de
-	producción y acordarse de revertirlos — el riesgo real no es olvidar un
-	`Debug = true`, es subir un `ServerFlushSeconds = 20` que multiplicaría por
-	15 las peticiones de todos los servidores en vivo.
-
-	En Studio interesa ver los eventos en segundos, no esperar cinco minutos.
-]]
+-- Solo en Studio. Probar aquí en vez de tocar los valores de producción: subir
+-- un ServerFlushSeconds bajo multiplicaría las peticiones de todos los servidores.
 local STUDIO_OVERRIDES: { [string]: any } = {
 	Debug = true,
-	-- Un flush agregado cada 20s: suficiente para ver movimiento sin esperar.
 	ServerFlushSeconds = 20,
 	FlushIntervalSeconds = 2,
 }

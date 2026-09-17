@@ -29,8 +29,7 @@ local NAV_ITEMS = table.freeze({
 	Effects = EFFECTS_NAV_ITEMS,
 })
 
--- Mapping nav-key → catalog category. Tras la unificación Wraps→WeaponWraps,
--- la única traducción no-identidad que queda es Body→Outfits.
+-- Nav-key → categoría del catálogo. La única traducción no-identidad es Body→Outfits.
 local ITEMS_CONFIG_BY_NAV = table.freeze({
 	Style = table.freeze({
 		Body = "Outfits",
@@ -50,10 +49,8 @@ local ITEMS_CONFIG_BY_NAV = table.freeze({
 local CATEGORY_TO_LOADOUT_SLOT = table.freeze({
 	Main = "MainWeapon",
 	Special = "SpecialWeapon",
-	-- WeaponWraps NO se mapea aquí: el wrap equipado es por-arma vía
-	-- MainWeaponWraps[weaponId] / SpecialWeaponWraps[weaponId]. Los call-sites
-	-- de WeaponWraps toman ramas explícitas (ver ShopService:_onBuyItem y
-	-- locker/init.luau item.Category == "WeaponWraps").
+	-- WeaponWraps no se mapea: el wrap equipado es por arma (MainWeaponWraps[weaponId] /
+	-- SpecialWeaponWraps[weaponId]); sus call-sites (ShopService, locker/init) tienen ramas explícitas.
 	KillEffects = "KillEffect",
 	Faces = "Face",
 	Hats = "Hat",

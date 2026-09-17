@@ -1,12 +1,6 @@
 --!strict
--- NavStaggerController: anima la aparición escalonada de los botones de uno
--- o varios containers Nav. Cada GuiButton entra con UIScale 0 → target
--- (NavSelectedScale para el activo, NavUnselectedScale para el resto) en
--- orden de child tree.
---
 -- Comparte el UIScale que ya usa NavTabController en cada botón (busca por
--- class): si hubiera dos UIScales hermanos, Roblox solo aplica uno y el
--- stagger no se vería.
+-- class): con dos UIScales hermanos Roblox solo aplica uno y el stagger no se vería.
 
 local TweenService = game:GetService("TweenService")
 
@@ -18,23 +12,16 @@ export type NavStaggerEntry = {
 	exclude: { Instance }?,
 }
 
-export type NavStaggerOptions = {
-	staggerDelay: number?,
-	tweenInfo: TweenInfo?,
-}
-
 export type NavStaggerController = {
 	_entries: { NavStaggerEntry },
-	_staggerDelay: number,
-	_tweenInfo: TweenInfo,
 	_scales: { [GuiButton]: UIScale },
 	_tweens: { [GuiButton]: Tween },
 	play: (self: NavStaggerController) -> (),
 	Destroy: (self: NavStaggerController) -> (),
 }
 
-local DEFAULT_STAGGER_DELAY = 0.12
-local DEFAULT_TWEEN_INFO = TweenInfo.new(0.45, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+local STAGGER_DELAY = 0.12
+local TWEEN_INFO = TweenInfo.new(0.45, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 
 local NavStaggerController = {}
 NavStaggerController.__index = NavStaggerController
@@ -48,11 +35,9 @@ local function ensureScale(btn: GuiButton): UIScale
 	return scale
 end
 
-function NavStaggerController.new(entries: { NavStaggerEntry }, options: NavStaggerOptions?): NavStaggerController
+function NavStaggerController.new(entries: { NavStaggerEntry }): NavStaggerController
 	local self = setmetatable({}, NavStaggerController) :: any
 	self._entries = entries
-	self._staggerDelay = (options and options.staggerDelay) or DEFAULT_STAGGER_DELAY
-	self._tweenInfo = (options and options.tweenInfo) or DEFAULT_TWEEN_INFO
 	self._scales = {}
 	self._tweens = {}
 	return self
@@ -63,9 +48,8 @@ function NavStaggerController:play()
 		tween:Cancel()
 	end
 	table.clear(self._tweens)
-	-- Si algún container es dinámico (botones recreados, p.ej. Nav2 del
-	-- Locker), las refs cacheadas pueden apuntar a instancias destruidas.
-	-- Reseteamos y se reconstruyen en este play.
+	-- Containers dinámicos (p.ej. Nav2 del Locker) recrean botones: las refs
+	-- cacheadas pueden estar destruidas, así que se reconstruyen en cada play.
 	table.clear(self._scales)
 
 	for _, entry in self._entries do
@@ -87,11 +71,11 @@ function NavStaggerController:play()
 				local targetScale = if btn.Name == selectedKey
 					then UITheme.NavSelectedScale
 					else UITheme.NavUnselectedScale
-				local tween = TweenService:Create(scale, self._tweenInfo, { Scale = targetScale })
+				local tween = TweenService:Create(scale, TWEEN_INFO, { Scale = targetScale })
 				self._tweens[btn] = tween
 				local thisTween = tween
 				local thisBtn = btn
-				task.delay((index - 1) * self._staggerDelay, function()
+				task.delay((index - 1) * STAGGER_DELAY, function()
 					if self._tweens[thisBtn] ~= thisTween then return end
 					thisTween:Play()
 				end)
@@ -105,8 +89,8 @@ function NavStaggerController:Destroy()
 		tween:Cancel()
 	end
 	table.clear(self._tweens)
-	-- Restauramos scale = 1 por si nos destruyen mid-stagger; sin esto los
-	-- botones quedarían invisibles para la próxima vida (hot reload).
+	-- Scale = 1 por si nos destruyen mid-stagger; si no, los botones quedarían
+	-- invisibles para la próxima vida (hot reload).
 	for _, scale in self._scales do
 		if scale.Parent ~= nil then
 			scale.Scale = 1

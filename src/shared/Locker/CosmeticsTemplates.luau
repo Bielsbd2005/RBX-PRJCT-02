@@ -1,16 +1,4 @@
 --!strict
---[[
-	CosmeticsTemplates.luau
-	Helpers compartidos para aplicar cosméticos a un Character/Tool:
-	  - findHatTemplate(hatId)
-	  - findWeaponDisplayTemplate(category, weaponId)
-	  - applyWeaponWrapToTool(tool, wrapId)
-	  - applyWeaponWrapToModel(weaponModel, wrapId)
-	  - applyFaceToHead(head, faceId)
-
-	Extraído de LoadoutService para que también lo consuma BotAppearance.
-	Sin estado: cada función es idempotente sobre la instancia que recibe.
-]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CollectionService = game:GetService("CollectionService")
@@ -63,10 +51,8 @@ local function _getOptionalMaterial(value: any): Enum.Material?
 	return nil
 end
 
--- Aplica (o restaura) el Material de la parte principal del arma. Guarda el
--- material original la primera vez que se toca la parte para poder volver a él
--- cuando una skin no define Material; así cambiar de skin nunca deja "pegado"
--- el material de la skin anterior.
+-- Guarda el material original la primera vez para restaurarlo cuando una skin no
+-- define Material: cambiar de skin nunca deja pegado el material anterior.
 local function _applyMaterialToPart(part: BasePart, material: Enum.Material?)
 	if part:GetAttribute(WRAP_ORIGINAL_MATERIAL_ATTR) == nil then
 		part:SetAttribute(WRAP_ORIGINAL_MATERIAL_ATTR, part.Material.Name)
@@ -86,10 +72,8 @@ local function _applyMaterialToPart(part: BasePart, material: Enum.Material?)
 	end
 end
 
--- Mismo orden de resolución que los previews del locker
--- (WeaponPreviewController.getWeaponPreviewPrimaryPart y el gemelo de
--- WeaponWrapPreviewer): los modelos de display se autoran en Studio y no todos
--- traen PrimaryPart seteado, así que hay que caer a los nombres de convención.
+-- Mismo orden de resolución que WeaponPreviewController.getWeaponPreviewPrimaryPart
+-- y WeaponWrapPreviewer: no todos los modelos de display traen PrimaryPart.
 local function _resolveWeaponPrimaryPart(root: Instance): BasePart?
 	if root:IsA("BasePart") then
 		return root :: BasePart
@@ -127,10 +111,9 @@ local function _getHatsRoot(): Folder?
 	return nil
 end
 
--- Resuelve el Accessory de un hat. Los assets se autoran en Studio nombrados por el
--- `Name` del catálogo ("Bunny"), no por el id ("Hat1"), así que se busca por Name
--- primero y se cae al id — mismo orden que el preview del locker (HatApplier). El
--- nodo puede ser el propio Accessory o un Model que lo contenga.
+-- Los assets de Studio se nombran por el `Name` del catálogo ("Bunny"), no por el
+-- id ("Hat1"): se busca por Name y luego por id, como HatApplier. El nodo puede
+-- ser el propio Accessory o un Model que lo contenga.
 function CosmeticsTemplates.findHatTemplate(hatId: string): Accessory?
 	if hatId == "" then
 		return nil
@@ -163,12 +146,9 @@ function CosmeticsTemplates.findHatTemplate(hatId: string): Accessory?
 	return nil
 end
 
--- Parentear un Accessory a un personaje solo lo suelda si su Attachment tiene
--- gemelo en el rig (normalmente Head.HatAttachment). Los bodies del juego se
--- autoran en Studio y no todos lo traen: ahí el hat se quedaba suelto — equipado
--- en datos pero invisible o caído en partida. Este helper reproduce el fallback
--- que ya hacía el preview del locker (HatApplier): si no hay gemelo, se coloca
--- sobre la cabeza y se suelda a mano.
+-- Parentear un Accessory solo lo suelda si su Attachment tiene gemelo en el rig
+-- (normalmente Head.HatAttachment) y no todos los bodies lo traen. Sin gemelo se
+-- coloca sobre la cabeza y se suelda a mano, como HatApplier.
 function CosmeticsTemplates.attachHatToCharacter(character: Model, accessory: Accessory)
 	accessory.Parent = character
 
@@ -273,8 +253,7 @@ local function _applyWrapToPrimaryPart(primaryPart: BasePart, wrapId: string)
 end
 
 -- Contrato de la Tool real (ServerStorage.WeaponTools): un Model descendiente
--- llamado `WeaponModel` con PrimaryPart seteado. Se mantiene estricto a
--- propósito — una Tool mal autorada debe no-opear, no adivinar una parte.
+-- `WeaponModel` con PrimaryPart. Estricto a propósito: una Tool mal autorada no-opea.
 function CosmeticsTemplates.applyWeaponWrapToTool(tool: Tool, wrapId: string)
 	local weaponModelNode = tool:FindFirstChild(WEAPON_MODEL_NODE_NAME, true)
 	if not weaponModelNode or not weaponModelNode:IsA("Model") then
@@ -289,9 +268,8 @@ function CosmeticsTemplates.applyWeaponWrapToTool(tool: Tool, wrapId: string)
 	_applyWrapToPrimaryPart(primaryPart, wrapId)
 end
 
--- Variante para modelos de display sueltos (Shared.Locker.weapons.*), que no
--- son Tools y no siempre traen PrimaryPart. Misma skin, misma animación: las
--- textures quedan tagueadas igual y WeaponWrapAnimator las mueve en cliente.
+-- Para modelos de display (Shared.Locker.weapons.*), que no siempre traen
+-- PrimaryPart. Las textures quedan tagueadas igual y WeaponWrapAnimator las anima.
 function CosmeticsTemplates.applyWeaponWrapToModel(weaponModel: Instance, wrapId: string)
 	local primaryPart = _resolveWeaponPrimaryPart(weaponModel)
 	if not primaryPart then
@@ -302,13 +280,9 @@ function CosmeticsTemplates.applyWeaponWrapToModel(weaponModel: Instance, wrapId
 end
 
 --[[
-	Modelo de display de un arma: `Shared.Locker.weapons.<categoría>.<weaponId>`,
-	con la misma cadena de fallback que los previews del locker
-	(weaponId → Name del catálogo → "Default").
-
-	Devuelve geometría pura, nunca una Tool: si el asset se autoró como Tool nos
-	quedamos con su `WeaponModel`. Quien sólo quiere *enseñar* un arma no debe
-	arrastrar Handle, scripts, sonidos ni el tag de WeaponsSystem.
+	`Shared.Locker.weapons.<categoría>.<weaponId>`, con fallback weaponId → Name
+	del catálogo → "Default" como los previews del locker. Devuelve geometría pura:
+	si el asset es una Tool se queda con su `WeaponModel`.
 ]]
 function CosmeticsTemplates.findWeaponDisplayTemplate(category: string, weaponId: string): Instance?
 	local locker = Shared:FindFirstChild("Locker")

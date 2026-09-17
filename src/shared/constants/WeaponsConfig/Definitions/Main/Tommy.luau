@@ -1,7 +1,7 @@
 --!strict
--- Main/Tommy (Rare). Subfusil de tambor: más cadencia y cargador que el AK a
--- cambio de menos daño por bala y más dispersión. Stats de partida escritos a
--- mano; este fichero ES la fuente de verdad. Claves y defaults: Schema.luau.
+-- Subfusil de tambor: más cadencia y cargador que el AK a cambio de menos daño por
+-- bala y más dispersión. Este fichero es la fuente de verdad de sus stats.
+-- Claves y defaults: Schema.luau.
 local Types = require(script.Parent.Parent.Parent.Types)
 
 return {

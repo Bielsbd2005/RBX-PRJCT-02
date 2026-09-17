@@ -1,33 +1,13 @@
 --!strict
 --[[
-	BackWeaponService.luau
-	Holster visual: clona en la parte `BackWeapon` del body el arma que NO está
-	equipada (Main ↔ Special) y la mantiene sincronizada con los cambios de arma.
-
-	Por qué el modelo y no la Tool:
-	  ServerStorage.WeaponTools.<cat>.<id> es la Tool funcional — Handle,
-	  sonidos, animaciones y el tag `WeaponsSystemWeapon` que hace que
-	  WeaponsSystem la instancie como arma viva. Clonarla para algo que sólo se
-	  mira pagaría todo eso (y registraría un arma fantasma). Además vive en
-	  ServerStorage, que no replica: el locker no la vería. El holster usa
-	  Shared.Locker.weapons.<cat>.<id>, geometría pura, la misma que ya usan los
-	  previews del locker — y que se GENERA desde el `WeaponModel` de esa misma
-	  Tool (tools/weapons/StudioMigration.luau), así que no hay dos copias que
-	  puedan desincronizarse.
-
-	Detección de equipado:
-	  Roblox reparenta la Tool Backpack→Character al equipar, y eso replica al
-	  servidor, así que `character.ChildAdded` es señal suficiente y no hace
-	  falta ningún remote. La categoría se lee del atributo `WeaponCategory` que
-	  estampa LoadoutService al clonar (el mismo que usa WeaponsConfig).
-
-	Gamepass:
-	  El holster es el beneficio del gamepass `StoreProducts.GamePasses.ByName
-	  .BackWeapon`. Se hace binding igualmente a quien no lo tenga —el binding es
-	  barato y no crea nada— y la posesión se comprueba en cada `_sync`: así el
-	  jugador que lo compre a mitad de partida (o cuyo prefetch de posesión
-	  todavía no había resuelto al spawnear) ve el arma aparecer sin esperar al
-	  respawn, vía `GamePassService.OnOwnershipGained`.
+	Holster visual: clona en la parte `BackWeapon` del body el arma NO equipada
+	(Main ↔ Special). Usa Shared.Locker.weapons.<cat>.<id> (geometría pura) y no
+	la Tool de ServerStorage.WeaponTools: esa no replica y lleva el tag
+	`WeaponsSystemWeapon`, que registraría un arma fantasma.
+	Equipar reparenta la Tool Backpack→Character y eso replica, así que basta
+	character.ChildAdded; la categoría sale del atributo que estampa LoadoutService.
+	Requiere el gamepass BackWeapon: la posesión se comprueba en cada _sync para
+	que una compra a mitad de partida lo muestre sin esperar al respawn.
 ]]
 
 local Players = game:GetService("Players")
@@ -42,19 +22,16 @@ local GamePassService = require(script.Parent.Parent.Parent.core.GamePassService
 
 local BackWeaponService = {}
 
--- Parte del body (autorada en Studio) que marca dónde y con qué orientación
--- se coloca el arma holsterada. Búsqueda recursiva: puede colgar del Torso,
--- del UpperTorso o de una carpeta intermedia según el rig.
+-- Parte del body autorada en Studio que marca posición y orientación del arma.
+-- Búsqueda recursiva: puede colgar del Torso, del UpperTorso o de una carpeta.
 local BACK_WEAPON_PART_NAME = "BackWeapon"
 local BACK_WEAPON_CLONE_NAME = "BackWeaponModel"
--- Espejo de ShoulderCamera.BACK_WEAPON_CLONE_ATTRIBUTE (mismo string literal,
--- misma convención que MatchLoadoutHat): la cámara lo lee para difuminar el
--- holster al apuntar, igual que hace con los hats del loadout.
+-- Debe coincidir con ShoulderCamera.BACK_WEAPON_CLONE_ATTRIBUTE: la cámara lo
+-- lee para difuminar el holster al apuntar.
 local BACK_WEAPON_CLONE_ATTRIBUTE = "BackWeaponClone"
 local BACK_WEAPON_CATEGORY_ATTRIBUTE = "BackWeaponCategory"
 local LOADOUT_CATEGORY_ATTRIBUTE = WeaponsConfig.CATEGORY_ATTRIBUTE
 
--- Gamepass que desbloquea el holster (ver cabecera).
 local BACK_WEAPON_PASS = StoreProducts.GamePasses.ByName.BackWeapon
 
 export type Slot = {
@@ -70,16 +47,13 @@ type Binding = {
 	slots: Slots,
 	-- Categoría actualmente colgada de la espalda; nil = nada colgado.
 	holstered: string?,
-	-- Los bodies se autoran en Studio: un rig sin la parte `BackWeapon` deja el
-	-- holster en no-op silencioso. Se avisa una vez por character en lugar de en
-	-- cada cambio de arma.
+	-- Un rig sin la parte `BackWeapon` deja el holster en no-op: se avisa una
+	-- vez por character.
 	warnedMissingAnchor: boolean,
 	connections: { RBXScriptConnection },
 }
 
 local _bindingByCharacter: { [Model]: Binding } = {}
-
--- ── Helpers internos ─────────────────────────────────────────
 
 local function _findBackWeaponPart(character: Model): BasePart?
 	local node = character:FindFirstChild(BACK_WEAPON_PART_NAME, true)
@@ -97,14 +71,8 @@ local function _clearHolster(character: Model)
 	end
 end
 
---[[
-	Prepara una parte del clon para vivir soldada al rig.
-
-	CanQuery=false es el flag crítico: sin él el arma de la espalda entra en los
-	raycasts de WeaponsSystem y absorbe disparos dirigidos al torso, comiéndose
-	daño que debería registrar hit. CanCollide/CanTouch/Massless evitan además
-	que un adorno puramente visual altere la física del personaje.
-]]
+-- CanQuery=false es crítico: sin él el arma de la espalda entra en los raycasts
+-- de WeaponsSystem y absorbe disparos dirigidos al torso.
 local function _prepareHolsterPart(part: BasePart, anchor: BasePart)
 	part.Anchored = false
 	part.CanCollide = false
@@ -112,10 +80,8 @@ local function _prepareHolsterPart(part: BasePart, anchor: BasePart)
 	part.CanQuery = false
 	part.Massless = true
 
-	-- WeldConstraint por parte contra el anchor en vez de confiar en las welds
-	-- internas del asset: los modelos de display se autoran en Studio para
-	-- verse en un ViewportFrame (a menudo anclados y sin soldar entre sí), así
-	-- que al desanclarlos se desmontarían en el aire.
+	-- WeldConstraint por parte contra el anchor: los modelos de display suelen
+	-- venir anclados y sin soldar entre sí, y al desanclarlos se desmontarían.
 	local weld = Instance.new("WeldConstraint")
 	weld.Name = "BackWeaponWeld"
 	weld.Part0 = part
@@ -156,11 +122,9 @@ local function _attach(binding: Binding, category: string, slot: Slot): boolean
 
 	CosmeticsTemplates.applyWeaponWrapToModel(clone, slot.wrapId)
 
-	-- Orden fijo y sin yields: parentear → posicionar → soldar. Un
-	-- WeldConstraint congela el offset del momento en que se activa, así que
-	-- mover después dejaría el arma flotando lejos del cuerpo; y como no se
-	-- cede el hilo, las partes nunca llegan a caer entre el desanclado y la
-	-- soldadura.
+	-- Orden fijo y sin yields: parentear → posicionar → soldar. WeldConstraint
+	-- congela el offset al activarse, y sin ceder el hilo las partes no caen
+	-- entre el desanclado y la soldadura.
 	clone.Parent = character
 
 	if clone:IsA("Model") then
@@ -189,7 +153,6 @@ local function _loadoutCategoryOf(tool: Instance, slots: Slots): string?
 	return nil
 end
 
---- Categoría de loadout de la Tool que el jugador lleva en la mano, o nil.
 local function _equippedCategory(character: Model, slots: Slots): string?
 	for _, child in character:GetChildren() do
 		if child:IsA("Tool") then
@@ -202,12 +165,7 @@ local function _equippedCategory(character: Model, slots: Slots): string?
 	return nil
 end
 
---[[
-	¿El dueño de este character tiene el gamepass del holster?
-
-	Los bots no son Players, así que se quedan fuera por el mismo camino que
-	quien no ha comprado el pass: nada que colgar de la espalda.
-]]
+-- Los bots no son Players: nunca tienen holster.
 local function _ownsBackWeaponPass(character: Model): boolean
 	local player = Players:GetPlayerFromCharacter(character)
 	if not player then
@@ -216,15 +174,12 @@ local function _ownsBackWeaponPass(character: Model): boolean
 	return GamePassService.Owns(player, BACK_WEAPON_PASS.PassId)
 end
 
--- `equippedTool` es la Tool recién parenteada al Character, cuando el sync
--- viene de un ChildAdded. Tiene prioridad sobre el escaneo: si el desequipado
--- de la anterior aún no se ha propagado, ambas están dentro un instante y el
--- orden de GetChildren decidiría al azar qué arma se cuelga de la espalda.
+-- `equippedTool` (la Tool del ChildAdded) tiene prioridad sobre el escaneo: si
+-- el desequipado de la anterior no se ha propagado, ambas están dentro un
+-- instante y el orden de GetChildren decidiría al azar.
 local function _sync(binding: Binding, equippedTool: Instance?)
-	-- El gate va lo primero: sin pass, nada que colgar. Y limpia además de
-	-- salir, porque la posesión la sirve un caché que se rehace por sesión: si
-	-- un "sí" pasara a "no", el arma no puede quedarse pegada a la espalda el
-	-- resto de la vida del character.
+	-- Sin pass limpia además de salir: la posesión viene de un caché por sesión
+	-- y un "sí" puede pasar a "no".
 	if not _ownsBackWeaponPass(binding.character) then
 		if binding.holstered ~= nil then
 			_clearHolster(binding.character)
@@ -236,15 +191,13 @@ local function _sync(binding: Binding, equippedTool: Instance?)
 	local equipped = (if equippedTool then _loadoutCategoryOf(equippedTool, binding.slots) else nil)
 		or _equippedCategory(binding.character, binding.slots)
 	if not equipped then
-		-- Al cambiar de arma Roblox saca la vieja del Character antes de meter
-		-- la nueva: reconstruir en ese hueco haría parpadear el holster. Se
-		-- conserva lo que hubiera y se espera al ChildAdded de la nueva Tool.
+		-- Al cambiar de arma Roblox saca la vieja antes de meter la nueva:
+		-- reconstruir en ese hueco haría parpadear el holster.
 		if binding.holstered ~= nil then
 			return
 		end
-		-- Estado inicial (tools aún sin repartir): el loadout siempre acaba
-		-- equipando la Main, así que se holstera la Special desde ya y el
-		-- equipado real no provocará ningún rebuild.
+		-- Estado inicial (tools sin repartir): el loadout acaba equipando la
+		-- Main, así que se holstera ya la Special y no habrá rebuild.
 		equipped = WeaponCategory.MAIN
 	end
 
@@ -269,14 +222,8 @@ local function _sync(binding: Binding, equippedTool: Instance?)
 	end
 end
 
---[[
-	Engancha, una sola vez por servidor, la señal de "acaba de conseguir un
-	pass" para rehacer el holster de quien ya estuviera spawneado.
-
-	Perezoso (desde `Bind`) y no en un `Start` propio: el service no tiene otro
-	ciclo de vida que el de los characters que gestiona, así que no hay un sitio
-	natural donde arrancarlo en el bootstrap.
-]]
+-- Se engancha perezosamente desde Bind: el service no tiene Start propio en el
+-- bootstrap.
 local _ownershipListenerConnected = false
 
 local function _ensureOwnershipListener()
@@ -289,9 +236,7 @@ local function _ensureOwnershipListener()
 		if passId ~= BACK_WEAPON_PASS.PassId then
 			return
 		end
-		-- Un jugador tiene como mucho un binding vivo (el de su character
-		-- actual); el barrido es sobre la tabla entera porque el índice es el
-		-- character, no el jugador.
+		-- El índice es el character, no el jugador: hay que barrer la tabla.
 		for character, binding in _bindingByCharacter do
 			if Players:GetPlayerFromCharacter(character) == player then
 				_sync(binding)
@@ -300,9 +245,6 @@ local function _ensureOwnershipListener()
 	end)
 end
 
--- ── API pública ──────────────────────────────────────────────
-
---- Suelta el tracking de un character y destruye su holster. Idempotente.
 function BackWeaponService.Unbind(character: Model)
 	local binding = _bindingByCharacter[character]
 	if not binding then
@@ -321,13 +263,9 @@ function BackWeaponService.Unbind(character: Model)
 end
 
 --[[
-	Empieza a mantener el holster del character. `slots` debe traer las dos
-	categorías ya resueltas (arma + wrap equipados), tal como las calcula
-	LoadoutService al repartir las tools.
-
-	Llamar ANTES de equipar la Main: así el ChildAdded de esa Tool ya encuentra
-	el binding montado. Re-llamar sobre el mismo character es seguro (rebinding
-	limpio); el binding se suelta solo cuando el character se destruye.
+	`slots` trae las dos categorías resueltas (arma + wrap) como las calcula
+	LoadoutService. Llamar ANTES de equipar la Main para que su ChildAdded ya
+	encuentre el binding. Re-llamar sobre el mismo character es seguro.
 ]]
 function BackWeaponService.Bind(character: Model, slots: Slots)
 	BackWeaponService.Unbind(character)

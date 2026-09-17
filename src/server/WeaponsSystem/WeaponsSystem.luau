@@ -1,15 +1,10 @@
-
 local function _isDescendantOfStarterGear(instance: Instance): boolean
-	-- W10: nativo en lugar de loop manual sobre la ancestría.
 	return instance:FindFirstAncestorOfClass("StarterGear") ~= nil
 end
 
--- Un Tool que vive en un almacén (ServerStorage.WeaponTools, ReplicatedStorage)
--- es un TEMPLATE: nadie lo empuña. El tag `WeaponsSystemWeapon` viaja en el
--- template, así que sin este filtro cada arma del catálogo se instanciaba
--- también como arma fantasma —en el servidor y en cada cliente— con sus
--- conexiones, sus sonidos pooleados y sus escrituras de atributos sobre el
--- propio template.
+-- Un Tool en un almacén (ServerStorage.WeaponTools, ReplicatedStorage) es un TEMPLATE:
+-- el tag `WeaponsSystemWeapon` viaja con él y sin este filtro se instanciaría como
+-- arma fantasma en servidor y clientes.
 local function _isWeaponTemplate(instance: Instance): boolean
 	return instance:FindFirstAncestorOfClass("ServerStorage") ~= nil
 		or instance:FindFirstAncestorOfClass("ReplicatedStorage") ~= nil
@@ -22,7 +17,6 @@ local ServerScriptService = game:GetService("ServerScriptService")
 local Teams = game:GetService("Teams")
 local IsServer = RunService:IsServer()
 
--- Dependencies
 local WeaponData = script.Parent:WaitForChild("WeaponData")
 local WeaponsSystemFolder = script.Parent
 local Shared = ReplicatedStorage:WaitForChild("Shared")
@@ -38,20 +32,11 @@ local SpringService = require(Libraries:WaitForChild("SpringService"))
 local ancestorHasTag = require(Libraries:WaitForChild("ancestorHasTag"))
 ShoulderCamera.SpringService = SpringService
 
--- ─── Servicios inyectables ───────────────────────────────────
--- WeaponsSystem usa estos servicios para conceder Cash/XP/dailies en kills.
--- Dos rutas para resolverlos:
---
---   1. Inyección explícita (preferida): ServerBootstrap llama
---      `WeaponsSystem.injectServices({ DataService = ..., MatchService = ..., ... })`
+-- Servicios para conceder Cash/XP/dailies en kills. Dos rutas:
+--   1. Inyección (preferida): ServerBootstrap llama `WeaponsSystem.injectServices({...})`
 --      antes de `WeaponsSystem.setup()`. Necesario para tests con mocks.
---
---   2. Autoload (fallback): si nadie inyecta, intentamos resolver los módulos
---      por nombre desde ServerScriptService.Server. Usamos WaitForChild con
---      timeout corto para tolerar carga concurrente (vs FindFirstChild antes).
---
--- Las variables son `local` para que las closures definidas más abajo capturen
--- el upvalue: re-asignar la variable se ve desde todas las funciones.
+--   2. Autoload (fallback): resolver por nombre desde ServerScriptService.Server.
+-- Son `local` para que las closures de abajo vean la reasignación vía upvalue.
 local MatchService = nil
 local DataService = nil
 local DailyTasksService = nil
@@ -137,10 +122,8 @@ local REMOTE_EVENT_NAMES = {
 }
 
 -- Solo estos eventos aceptan tráfico cliente→servidor. El resto son broadcasts
--- servidor→cliente: conectar su OnServerEvent permitía a un exploiter dispararlos
--- como input (p. ej. "WeaponReloaded" ejecutaba onReloaded server-side sobre
--- cualquier arma, sin ownership ni los guards de reload(), y tras ReloadTime
--- ponía CurrentAmmo = AmmoCapacity → munición infinita).
+-- servidor→cliente: conectar su OnServerEvent dejaría a un exploiter dispararlos
+-- como input (p. ej. "WeaponReloaded" → munición infinita sin ownership ni guards).
 local CLIENT_TO_SERVER_EVENTS = {
 	WeaponFired = true,
 	WeaponHit = true,
@@ -149,10 +132,8 @@ local CLIENT_TO_SERVER_EVENTS = {
 	WeaponActivated = true,
 }
 
--- Damage contributors per humanoid for assist tracking.
--- W9: weak keys (__mode = "k") aseguran que si un Humanoid se queda sin refs
--- fuertes (mapa re-parented, mob destruido sin disparar Died, etc.) el GC
--- limpia la entry. Defense-in-depth — el flujo normal usa Died/AncestryChanged.
+-- Contribuidores de daño por humanoid (asistencias). Claves débiles como red de
+-- seguridad; el flujo normal limpia con Died/AncestryChanged.
 local damageContributors: { [Humanoid]: { [Player]: number } } = setmetatable({}, { __mode = "k" }) :: any
 local assistDiedConnections: { [Humanoid]: RBXScriptConnection } = setmetatable({}, { __mode = "k" }) :: any
 local assistAncestryConnections: { [Humanoid]: RBXScriptConnection } = setmetatable({}, { __mode = "k" }) :: any
@@ -229,10 +210,8 @@ local function _clearDamageContributors(target: Humanoid)
 	end
 end
 
--- Forward declaration; body assigned after WeaponsSystem table exists
 local flushAssists: (target: Humanoid, killerPlayer: Player?) -> ()
 
---Set up WeaponTypes lookup table
 do
 	local function onNewWeaponType(weaponTypeModule)
 		if not weaponTypeModule:IsA("ModuleScript") then
@@ -270,20 +249,12 @@ WeaponsSystem._hotbarFallbackTarget = nil
 
 WeaponsSystem.CurrentWeaponChanged = Instance.new("BindableEvent")
 
--- Sprint 4 (P2 #21): hook + signal para desacoplar la lógica de rewards del
--- WeaponsSystem. Antes _defaultDamageCallback hardcodeaba calls a 5 services
--- (DataService, MatchService, DailyTasksService, BattlePassService,
--- CashBonusSystem) — el módulo era inreusable en otro modo.
---
--- killHook (sincronía):
---   Bootstrap registra una función que recibe (killer, victimHumanoid,
---   weaponName, wasHeadshot) y devuelve { xpGained } para el payload del
---   PlayerEliminated remote (UI del killer lo necesita en el mismo frame). Si
---   nadie registra el hook, valor default resuelto vía ActionRewards.
---
--- Killed.Event (asíncrono):
---   Se Fire después de aplicar damage + flush assists. Bootstrap conecta
---   listeners para DailyTasks/BattlePass/etc. WeaponsSystem solo notifica.
+-- Desacoplan las recompensas de kill de este módulo:
+--   killHook (síncrono): Bootstrap registra una función (killer, victimHumanoid,
+--   weaponName, wasHeadshot) → { xpGained } para el payload de PlayerEliminated,
+--   que la UI del killer necesita en el mismo frame. Sin hook: ActionRewards.
+--   Killed.Event (asíncrono): se dispara tras aplicar daño + flush de asistencias;
+--   Bootstrap conecta DailyTasks/BattlePass/etc.
 WeaponsSystem.Killed = Instance.new("BindableEvent")
 WeaponsSystem.killHook = (nil :: any) :: ((killer: Player, victimHum: Humanoid, weaponName: string, wasHeadshot: boolean) -> { xpGained: number? })?
 
@@ -299,9 +270,8 @@ function WeaponsSystem.setLastAttacker(humanoid: Humanoid, userId: number, weapo
 	LastAttackerStore.set(humanoid, userId, weaponId, headshot)
 end
 
--- Inyección explícita de servicios. Llama a esto desde ServerBootstrap antes
--- de WeaponsSystem.setup() para evitar el autoload por nombre y para tests.
--- Las claves son opcionales: solo se sobrescriben las pasadas.
+-- Llamar desde ServerBootstrap antes de WeaponsSystem.setup(). Claves opcionales:
+-- solo se sobrescriben las pasadas.
 function WeaponsSystem.injectServices(services: {
 	DataService: any?,
 	MatchService: any?,
@@ -316,15 +286,10 @@ function WeaponsSystem.injectServices(services: {
 	if services.RewardService ~= nil then RewardService = services.RewardService end
 end
 
--- Assign flushAssists body now that WeaponsSystem exists
 flushAssists = function(target: Humanoid, killerPlayer: Player?)
 	local assistEvent = WeaponsSystem.remoteEvents["PlayerAssist"]
 	if damageContributors[target] then
 		for contributor, _ in damageContributors[target] do
-			-- Guard estricto: contributor sigue en el server Y no es el killer.
-			-- Re-evaluamos contributor.Parent justo antes del write (puede haber
-			-- cambiado entre iteraciones si dispatchamos algo que yieldea, aunque
-			-- aquí no es el caso — defensa proactiva).
 			if contributor ~= killerPlayer and contributor.Parent then
 				if assistEvent then
 					assistEvent:FireClient(contributor)
@@ -475,9 +440,6 @@ local function _tryReequipHotbarFallback(previousWeapon): (boolean, any)
 			end
 		end
 
-		-- Liberar siempre, no solo cuando target sigue siendo el nuestro.
-		-- El watchdog ya cubre el caso degenerado, pero clear inmediato es lo
-		-- que queremos en el path normal.
 		if WeaponsSystem._hotbarFallbackTarget == fallbackTool then
 			WeaponsSystem._hotbarFallbackTarget = nil
 			WeaponsSystem._hotbarFallbackInProgress = false
@@ -506,15 +468,13 @@ function WeaponsSystem.setup()
 		warn("Warning: trying to run WeaponsSystem setup twice on the same module.")
 		return
 	end
-	--print(script.Parent:GetFullName(), "is now active.")
 
 	WeaponsSystem.doingSetup = true
 
-	-- Bind WeaponsNetwork singleton — antes de cualquier require de armas que lo use.
+	-- Antes de cualquier require de armas que use WeaponsNetwork.
 	local WeaponsNetwork = require(script.Parent:WaitForChild("Libraries"):WaitForChild("WeaponsNetwork"))
 	WeaponsNetwork.bind(WeaponsSystem)
 
-	--Setup network routing
 	if IsServer then
 		local networkFolder = Instance.new("Folder")
 		networkFolder.Name = "Network"
@@ -527,7 +487,6 @@ function WeaponsSystem.setup()
 			if CLIENT_TO_SERVER_EVENTS[remoteEventName] then
 				local callback = NetworkingCallbacks[remoteEventName]
 				if not callback then
-					--Connect a no-op function to ensure the queue doesn't pile up.
 					warn("There is no server callback implemented for the WeaponsSystem RemoteEvent \"%s\"!")
 					warn("A default no-op function will be implemented so that the queue cannot be abused.")
 					callback = function(...) end
@@ -538,8 +497,6 @@ function WeaponsSystem.setup()
 			end
 			WeaponsSystem.remoteEvents[remoteEventName] = remoteEvent
 		end
-		-- Q3: REMOTE_FUNCTION_NAMES está vacío (la WeaponsSystem no usa RemoteFunctions),
-		-- así que el bucle de setup era código muerto. Eliminado.
 
 		networkFolder.Parent = WeaponsSystemFolder
 		WeaponsSystem.networkFolder = networkFolder
@@ -567,7 +524,6 @@ function WeaponsSystem.setup()
 				WeaponsSystem.remoteEvents[remoteEventName] = remoteEvent
 			end)()
 		end
-		-- Q3: REMOTE_FUNCTION_NAMES vacío → bucle de setup de RemoteFunctions muerto. Eliminado.
 
 		Players.LocalPlayer.CharacterAdded:Connect(WeaponsSystem.onCharacterAdded)
 		if Players.LocalPlayer.Character then
@@ -578,7 +534,6 @@ function WeaponsSystem.setup()
 		WeaponsSystem.camera:setEnabled(false)
 	end
 
-	--Setup weapon tools and listening
 	WeaponsSystem.connections.weaponAdded = CollectionService:GetInstanceAddedSignal(WEAPON_TAG):Connect(WeaponsSystem.onWeaponAdded)
 	WeaponsSystem.connections.weaponRemoved = CollectionService:GetInstanceRemovedSignal(WEAPON_TAG):Connect(WeaponsSystem.onWeaponRemoved)
 
@@ -633,7 +588,6 @@ function WeaponsSystem.resetClientRuntimeState()
 end
 
 function WeaponsSystem.onCharacterAdded(character)
-	-- Reset client state on new character so camera/gui do not keep stale values.
 	WeaponsSystem.resetClientRuntimeState()
 
 	-- Make it so players unequip weapons while seated, then reequip weapons when they become unseated
@@ -716,7 +670,6 @@ function WeaponsSystem.createWeaponForInstance(weaponInstance)
 			return
 		end
 
-		-- We should be pretty sure we got a valid weaponType by now
 		assert(weaponType, "Got invalid weaponType")
 
 		local weapon = weaponType.new(WeaponsSystem, weaponInstance)
@@ -733,14 +686,11 @@ function WeaponsSystem.getWeaponForInstance(weaponInstance)
 	return WeaponsSystem.knownWeapons[weaponInstance]
 end
 
--- and (IsServer or weaponInstance:IsDescendantOf(Players.LocalPlayer))
-
 function WeaponsSystem.onWeaponAdded(weaponInstance)
 	if not weaponInstance:IsA("Tool") then
 		return
 	end
 
-	-- StarterGear tools are templates for respawn and should not be initialized as active weapons.
 	if _isDescendantOfStarterGear(weaponInstance) or _isWeaponTemplate(weaponInstance) then
 		return
 	end
@@ -810,10 +760,8 @@ function WeaponsSystem.setWeaponEquipped(weapon, equipped)
 		return
 	end
 
-	-- Red de seguridad: la cámara y la GUI de arma son SIEMPRE locales, así que un
-	-- arma que pertenece explícitamente a OTRO jugador nunca debe conducir el estado
-	-- equipado local (encendería ShoulderCamera/GUI por error). Las armas sin dueño
-	-- (player == nil, p. ej. montadas en el mundo) se dejan pasar como antes.
+	-- La cámara y la GUI de arma son locales: un arma de OTRO jugador nunca debe
+	-- conducir el estado equipado local. Las armas sin dueño (player == nil) pasan.
 	if weapon.player ~= nil and weapon.player ~= Players.LocalPlayer then
 		return
 	end
@@ -872,10 +820,8 @@ function WeaponsSystem.setWeaponEquipped(weapon, equipped)
 	end
 
 	if weaponChanged then
-		-- HARD KILL del reload progress bar al cambiar de arma. Cualquier reload
-		-- en progreso de la weapon anterior pierde su GUI inmediatamente — sin
-		-- esto, defers/broadcasts tardíos podían dejar barras encoladas para
-		-- weapons ya no equipadas tras cambios rápidos.
+		-- Cortar la barra de reload del arma anterior: con cambios rápidos, defers o
+		-- broadcasts tardíos dejaban barras encoladas de armas ya no equipadas.
 		if WeaponsSystem.gui and WeaponsSystem.gui.stopReloadProgressAnimation then
 			WeaponsSystem.gui:stopReloadProgressAnimation()
 		end
@@ -885,9 +831,6 @@ end
 
 
 function WeaponsSystem.getPlayerFromHumanoid(humanoid)
-	-- W5: nativo O(1) via tabla interna del servicio. Antes loop sobre
-	-- Players:GetPlayers() + IsDescendantOf por hit (caro en explosiones,
-	-- que llaman este por cada parte en el radio).
 	local parent = humanoid and humanoid.Parent
 	if not parent then
 		return nil
@@ -897,17 +840,9 @@ end
 
 
 --[[
-	Resuelve el humanoid del modelo padre del part hiteado, devolviendo además
-	si el hit fue un headshot.
-
-	Antes usábamos un BoolValue global (`dmiHandler`) que getHumanoid mutaba y
-	_defaultDamageCallback leía. Eso permitía races: dos hits concurrentes
-	(p. ej. múltiples parts en el radio de una explosión) podían interleavear
-	la mutación del flag y el siguiente hit leía el valor del anterior.
-
-	Ahora devolvemos `(humanoid, wasHeadshot)` como tuple. Los callers que
-	necesitan el flag (BulletWeapon.onHit) lo guardan en hitInfo y lo pasan
-	a doDamage; los que no, ignoran el segundo retorno.
+	Devuelve `(humanoid, wasHeadshot)` sin estado global: hits concurrentes (p. ej.
+	varias partes en el radio de una explosión) no deben compartir el flag.
+	BulletWeapon.onHit lo guarda en hitInfo y lo pasa a doDamage.
 ]]
 function WeaponsSystem.getHumanoid(part)
 	local wasHeadshot = false
@@ -925,7 +860,6 @@ function WeaponsSystem.getHumanoid(part)
 end
 
 
--- Función optimizada para servidor
 local TeamUtils = require(Shared.utils.TeamUtils)
 
 local function _defaultDamageCallback(system, target, amount, damageType, dealer, hitInfo, damageData)
@@ -933,7 +867,6 @@ local function _defaultDamageCallback(system, target, amount, damageType, dealer
 	local targetCharacter = target.Parent
 	if not targetCharacter then return end
 
-	-- Bloquear friendly fire: mismos equipos no se hacen daño
 	if dealer and dealer.Character then
 		if TeamUtils.isSameTeam(dealer.Character, targetCharacter :: Model) then
 			return
@@ -954,9 +887,8 @@ local function _defaultDamageCallback(system, target, amount, damageType, dealer
 			weaponName = damageData.Name
 		end
 	end
-	-- wasHeadshot llega via hitInfo (poblado por BulletWeapon.onHit usando el
-	-- segundo retorno de getHumanoid). Defensivo: si el caller no lo pasó
-	-- (e.g. damage de una explosión), tratamos como bodyshot.
+	-- wasHeadshot llega vía hitInfo (BulletWeapon.onHit); si no viene (p. ej. una
+	-- explosión), cuenta como bodyshot.
 	local wasHeadshot = type(hitInfo) == "table" and hitInfo.wasHeadshot == true
 	local finalDamage = wasHeadshot and (amount * 2) or amount
 	local isLethal = target.Health <= finalDamage
@@ -965,7 +897,6 @@ local function _defaultDamageCallback(system, target, amount, damageType, dealer
 		if dealerPlayer then
 			WeaponsSystem.setLastAttacker(target, dealerPlayer.UserId, weaponName, wasHeadshot)
 
-			-- Track damage contributor for assists
 			if not damageContributors[target] then
 				damageContributors[target] = {}
 				-- Listen for death caused by anything (including NPCs bypassing doDamage)
@@ -979,9 +910,8 @@ local function _defaultDamageCallback(system, target, amount, damageType, dealer
 						end)
 					end)
 				end
-				-- Listen for the humanoid leaving the data model (respawn, despawn, etc.)
-				-- Without this, contributor entries leak when bots are removed or characters
-				-- are destroyed without firing Died.
+					-- Sin esto las entradas se filtran cuando se quitan bots o se destruyen
+					-- characters sin disparar Died.
 				if not assistAncestryConnections[target] then
 					assistAncestryConnections[target] = target.AncestryChanged:Connect(function()
 						if not target:IsDescendantOf(game) then
@@ -1007,8 +937,7 @@ local function _defaultDamageCallback(system, target, amount, damageType, dealer
 					local targetHrp = targetCharacter:FindFirstChild("HumanoidRootPart")
 					local victimPos = targetHrp and targetHrp.Position or targetCharacter:GetPivot().Position
 
-					-- Hook sincrono — el bootstrap puede registrarlo para computar el
-					-- xp a mostrar. Si nadie registra, defaults.
+					-- Hook síncrono para computar el XP a mostrar.
 					local rewards: { xpGained: number? }? = nil
 					local hook = WeaponsSystem.killHook
 					if hook then
@@ -1020,9 +949,7 @@ local function _defaultDamageCallback(system, target, amount, damageType, dealer
 						end
 					end
 
-					-- Fallback solo cuando nadie registró killHook (uso standalone
-					-- del módulo). En el flujo normal el bootstrap registra el hook
-					-- y devuelve los valores reales de ActionRewards.
+					-- Fallback solo sin killHook (uso standalone del módulo).
 					local fallbackXp = ActionRewards.GetXP("Kill") + (wasHeadshot and ActionRewards.GetXP("Headshot") or 0)
 					local xpGained = (rewards and rewards.xpGained) or fallbackXp
 
@@ -1033,8 +960,6 @@ local function _defaultDamageCallback(system, target, amount, damageType, dealer
 			-- Flush assists immediately (cancels the deferred Died listener)
 			flushAssists(target, dealerPlayer)
 
-			-- Sprint 4: notificar listeners async (DailyTasks, BattlePass, etc.).
-			-- Antes hardcoded inline arriba; ahora bootstrap conecta los services.
 			if dealerPlayer then
 				WeaponsSystem.Killed:Fire(dealerPlayer, target, weaponName, wasHeadshot)
 			end
@@ -1052,21 +977,18 @@ function WeaponsSystem.doDamage(target, amount, damageType, dealer, hitInfo, dam
 			local targetPlayer = Players:GetPlayerFromCharacter(target.Parent)
 			local dealerHRP = dealer.Character:FindFirstChild("HumanoidRootPart")
 			if dealerHumanoid and target ~= dealerHumanoid and targetPlayer and dealerHRP then
-				-- Trigger the damage indicator
 				WeaponData:FireClient(targetPlayer, "HitByOtherPlayer", dealerHRP.Position)
 			end
 		end
 
 
-		-- NOTE:  damageData is a more or less free-form parameter that can be used for passing information from the code that is dealing damage about the cause.
-		-- .The most obvious usage is extracting icons from the various weapon types (in which case a weapon instance would likely be passed in)
-		-- ..The default weapons pass in that data
+		-- damageData es libre: información de la causa del daño (p. ej. la instancia
+		-- del arma, para iconos).
 		local handler = _damageCallback or _defaultDamageCallback
 		handler(WeaponsSystem, target, amount, damageType, dealer, hitInfo, damageData)
 	end
 end
 
--- antes devolvía siempre 0
 local function _defaultGetTeamCallback(player)
 	if not player or not player.Team then
 		return 0

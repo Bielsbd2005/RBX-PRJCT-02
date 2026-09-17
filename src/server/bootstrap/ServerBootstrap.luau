@@ -12,12 +12,8 @@ local StoreProducts = require(Shared:WaitForChild("constants"):WaitForChild("Sto
 local TelemetryService = require(script.Parent.Parent.core.TelemetryService)
 
 --[[
-	Packs de Robux que concede este dispatcher, uno por moneda. TODO lo que
-	distingue un pack de Cash de uno de Gems vive aquí como datos; el camino de
-	concesión (`grantPackPurchase`) es uno solo. Mientras fueron dos bloques
-	gemelos, cada arreglo de idempotencia o de durabilidad había que acordarse
-	de replicarlo en el otro.
-
+	Packs de Robux por moneda: lo que distingue un pack de Cash de uno de Gems vive aquí
+	como datos y el camino de concesión (`grantPackPurchase`) es uno solo.
 	Los packs sin ProductId configurado no entran en `ByProductId`, así que un
 	receipt nunca puede resolverse a un pack a medio crear.
 ]]
@@ -27,9 +23,8 @@ type PackKind = {
 	-- Stats del profile: saldo y contador acumulado de la moneda.
 	BalanceStat: string,
 	TotalEarnedStat: string,
-	-- Contador de lo COMPRADO, cuando la moneda lo separa. TotalCashEarned
-	-- suma todo (grind + packs + regalos); este es el que permite a la
-	-- telemetría restar y medir "Coin por hora jugada" sin las ventas dentro.
+	-- Contador de lo COMPRADO, cuando la moneda lo separa: TotalCashEarned suma todo y
+	-- este permite a la telemetría medir Coin por hora jugada sin las ventas.
 	TotalPurchasedStat: string?,
 	Currency: TelemetryService.Currency,
 	TelemetryKind: TelemetryService.PurchaseKind,
@@ -98,23 +93,17 @@ function ServerBootstrap.start(serverRoot: Script): ()
 
 	DataService:Start()
 
-	-- Antes que las features: el prefetch de posesión de gamepasses tarda una
-	-- llamada web, y quien pregunta (bonus VIP de resultados, holster del arma)
-	-- lo hace sin bloquear. Cuanto antes se pueble el caché, menos beneficios se
-	-- quedan apagados en los primeros segundos de sesión.
+	-- Antes que las features: el prefetch de posesión de gamepasses es una llamada web y
+	-- quien pregunta (bonus VIP, holster) no bloquea; cuanto antes se pueble el caché mejor.
 	GamePassService.Start()
 
 	--[[
-		TelemetryService antes que RewardService por el mismo motivo que
-		RewardService va antes que el resto: quien emite eventos necesita el
-		servicio listo. Si arrancara después, los flujos de cash de la ventana
-		inicial se perderían en silencio.
+		TelemetryService antes que RewardService: quien emite eventos necesita el servicio
+		listo o los flujos de cash de la ventana inicial se pierden en silencio.
 
-		El contador de bots se INYECTA en vez de requerir AI desde `core`
-		(invertiría la dependencia core → features). Se resuelve de forma lazy
-		dentro del closure porque MatchService carga AIService en su propio
-		Start, que corre más tarde que este bloque. `require` está memoizado en
-		Roblox, así que devuelve la misma instancia que usa MatchService.
+		El contador de bots se INYECTA en vez de requerir AI desde `core` (invertiría la
+		dependencia core → features). Se resuelve lazy porque MatchService carga AIService en
+		su Start, más tarde; `require` está memoizado, así que es la misma instancia.
 	]]
 	local _aiForTelemetry: any = nil
 	local function _botCount(): number
@@ -140,9 +129,8 @@ function ServerBootstrap.start(serverRoot: Script): ()
 
 	TelemetryService.Start(DataService, _botCount)
 
-	-- RewardService arranca justo después de DataService: cualquier service
-	-- que conceda XP o Cash (MatchService, RewardsService, DailyTasksService,
-	-- WeaponsSystem injected) lo necesita listo antes de su propio Start.
+	-- RewardService antes que cualquier service que conceda XP o Cash (MatchService,
+	-- RewardsService, DailyTasksService, WeaponsSystem inyectado).
 	RewardService.Start(DataService)
 	ShopService:Start(DataService)
 	SettingsService:Start(DataService)
@@ -152,14 +140,10 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	DailyTasksService:Start(DataService)
 
 	--[[
-		Concede un pack de Robux (Cash o Gems) y devuelve la decisión del receipt,
-		o nil si el ProductId no es de ningún pack (para que el dispatcher siga
-		probando handlers).
-
-		Ambas monedas comparten el camino entero; lo único que cambia son los
-		datos de PACK_KINDS. Contrato de durabilidad: idempotencia por PurchaseId
-		+ ForceSave confirmado ANTES de conceder, porque Roblox da por consumido
-		el receipt en cuanto devolvemos PurchaseGranted.
+		Concede un pack de Robux y devuelve la decisión del receipt, o nil si el ProductId no
+		es de ningún pack (el dispatcher sigue probando handlers).
+		Contrato de durabilidad: idempotencia por PurchaseId + ForceSave confirmado ANTES de
+		conceder, porque Roblox da por consumido el receipt al devolver PurchaseGranted.
 	]]
 	local function grantPackPurchase(receiptInfo: any): Enum.ProductPurchaseDecision?
 		local kind, product = resolvePack(receiptInfo.ProductId)
@@ -172,10 +156,8 @@ function ServerBootstrap.start(serverRoot: Script): ()
 			return Enum.ProductPurchaseDecision.NotProcessedYet
 		end
 
-		-- Idempotencia: si ya procesamos este PurchaseId, no re-otorgar la moneda.
-		-- Aun así forzamos un save: si un intento anterior concedió en memoria
-		-- pero no llegó a persistir, esto lo confirma antes de devolver
-		-- PurchaseGranted (Roblox consume el receipt al concederlo).
+		-- Ya procesado: no re-otorgar, pero forzar save por si un intento anterior concedió en
+		-- memoria sin llegar a persistir.
 		local purchaseId = tostring(receiptInfo.PurchaseId)
 		if DataService:IsReceiptProcessed(buyer, purchaseId) then
 			if DataService:ForceSave(buyer) then
@@ -201,8 +183,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 			return Enum.ProductPurchaseDecision.NotProcessedYet
 		end
 
-		-- Roblox no espera a nuestro write: save confirmado ANTES de conceder.
-		-- Si falla, NotProcessedYet hace que reentregue el receipt (la
+		-- Si el save falla, NotProcessedYet hace que Roblox reentregue el receipt (la
 		-- idempotencia de arriba evita el doble-grant).
 		if not DataService:ForceSave(buyer) then
 			return Enum.ProductPurchaseDecision.NotProcessedYet
@@ -223,10 +204,8 @@ function ServerBootstrap.start(serverRoot: Script): ()
 		return Enum.ProductPurchaseDecision.PurchaseGranted
 	end
 
-	-- ProcessReceipt dispatcher central: prueba BattlePass, luego regalos y por
-	-- último los packs de moneda (Cash y Gems). Vive aquí (cross-cutting) en
-	-- lugar de en una feature para que la responsabilidad sea explícita y no
-	-- quede acoplada a una sola.
+	-- Dispatcher central de ProcessReceipt: BattlePass, luego regalos y por último packs.
+	-- Vive aquí (cross-cutting) para no acoplarlo a una sola feature.
 	MarketplaceService.ProcessReceipt = function(receiptInfo: any): Enum.ProductPurchaseDecision
 		local bpDecision = BattlePassService:ProcessReceipt(receiptInfo)
 		if bpDecision ~= nil then
@@ -250,13 +229,10 @@ function ServerBootstrap.start(serverRoot: Script): ()
 		return Enum.ProductPurchaseDecision.NotProcessedYet
 	end
 
-	-- Inyectar servicios en WeaponsSystem ANTES de MatchService:Start, para
-	-- que las primeras kills/assists ya tengan DataService disponible. Si
-	-- inyectáramos después, kills procesadas en la window inicial perderían
-	-- cash silenciosamente (autoload usa upvalues nil hasta el inject).
-	-- WeaponsSystem.luau se clona a ReplicatedStorage por ServerWeaponsScript;
-	-- requerirlo desde ahí garantiza la misma instancia que usa el resto del
-	-- pipeline de armas. WaitForChild tolera el race con la clonación.
+	-- Inyectar servicios en WeaponsSystem ANTES de MatchService:Start: sin inject, el autoload
+	-- usa upvalues nil y las kills de la ventana inicial perderían cash en silencio.
+	-- ServerWeaponsScript clona WeaponsSystem.luau a ReplicatedStorage; requerirlo de ahí
+	-- da la misma instancia que el pipeline de armas. WaitForChild tolera la carrera.
 	local weaponsSystemFolder = ReplicatedStorage:WaitForChild("WeaponsSystem", 10)
 	local weaponsSystemModule = weaponsSystemFolder and weaponsSystemFolder:WaitForChild("WeaponsSystem", 10)
 	if weaponsSystemModule and weaponsSystemModule:IsA("ModuleScript") then
@@ -273,18 +249,13 @@ function ServerBootstrap.start(serverRoot: Script): ()
 			warn("[ServerBootstrap] WeaponsSystem.injectServices no disponible — usando autoload")
 		end
 
-		-- Sprint 4 (P2 #21): cross-cutting concerns del PvP kill flow viven aquí
-		-- en lugar de hardcoded en WeaponsSystem._defaultDamageCallback.
-		-- WeaponsSystem queda agnóstico al juego; el bootstrap es el único punto
-		-- que sabe qué services existen en este modo.
+		-- Los concerns del kill flow PvP viven aquí y no en WeaponsSystem, que queda agnóstico
+		-- al juego: el bootstrap es el único punto que sabe qué services existen.
 		if type(WeaponsSystem) == "table" then
-			-- killHook: sincronía. Calcula el payload del remote PlayerEliminated
-			-- (UI del killer en el mismo frame). NO concede cash/XP — eso lo hace
-			-- MatchService vía RewardService en _registerKillEvent. Aquí solo
-			-- replicamos lo que va a otorgar para que la UI no mienta.
+			-- killHook: síncrono, calcula el payload de PlayerEliminated (UI del killer en el mismo
+			-- frame). NO concede cash/XP (eso lo hace MatchService vía RewardService); solo replica
+			-- lo que se va a otorgar para que la UI no mienta.
 			WeaponsSystem.killHook = function(_killer: Player, _victimHum: Humanoid, _weaponName: string, wasHeadshot: boolean)
-				-- Valores reales de ActionRewards (no hardcoded). El cash/XP lo otorga
-				-- MatchService vía RewardService; aquí solo se replica el XP a mostrar.
 				local xpGained = ActionRewards.GetXP("Kill")
 				if wasHeadshot then
 					xpGained += ActionRewards.GetXP("Headshot")
@@ -295,26 +266,21 @@ function ServerBootstrap.start(serverRoot: Script): ()
 				}
 			end
 
-			-- Killed signal: notificaciones async para services side-effect.
-			-- Cualquier service futuro (Achievements, Quests, etc.) puede
-			-- subscribirse aquí sin tocar WeaponsSystem.luau.
+			-- Killed: notificaciones async para services con side-effects; los nuevos se
+			-- suscriben aquí sin tocar WeaponsSystem.luau.
 			if WeaponsSystem.Killed and WeaponsSystem.Killed.Event then
 				WeaponsSystem.Killed.Event:Connect(function(killer: Player, _victimHum: Humanoid, _weaponName: string, wasHeadshot: boolean)
-					-- Dailies: siguen la señal cruda a propósito — su payout está
-					-- acotado por diseño (3 tareas al día), no necesitan cap. OnKill
-					-- lleva dentro la racha de bajas; el headshot es su propia tarea.
+					-- Dailies siguen la señal cruda a propósito: su payout ya está acotado por diseño.
+					-- OnKill lleva dentro la racha de bajas; el headshot es su propia tarea.
 					if (DailyTasksService :: any).OnKill then
 						pcall(function() (DailyTasksService :: any):OnKill(killer) end)
 					end
 					if wasHeadshot and (DailyTasksService :: any).OnHeadshot then
 						pcall(function() (DailyTasksService :: any):OnHeadshot(killer) end)
 					end
-					-- Battle Pass: respeta el MatchXPCap igual que el XP de cuenta.
-					-- Sin este guard, farmear kills capaba el XP de nivel pero seguía
-					-- subiendo el pase sin límite: una season (~660 kills) se cerraba
-					-- en ~2h de feeding, con sus Gems y exclusivas incluidas.
-					-- El check va DENTRO del pcall: si `killer` llegara nil (kill de
-					-- entorno) no debe tumbar el handler de la señal.
+					-- Battle Pass respeta el MatchXPCap igual que el XP de cuenta, para que farmear
+					-- kills no suba el pase sin límite. El check va DENTRO del pcall: `killer` puede
+					-- llegar nil (kill de entorno) y no debe tumbar el handler.
 					if (BattlePassService :: any).OnKill then
 						pcall(function()
 							if not MatchService:IsXPCapReached(killer) then
@@ -334,12 +300,8 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	ClearDataCommandService:Start(DataService)
 	TrainingDummyService:Start()
 
-	-- ── Onboarding Funnel ──────────────────────────────────────
-	-- Track first-session players through: Joined → FirstMatch → FirstKill →
-	-- MatchCompleted → ReturnedToLobby. Only fires for JoinCount == 1.
-	--
-	-- Sin sessionId: el embudo corre UNA sola vez por jugador (el gate de
-	-- JoinCount == 1 lo garantiza), así que no hay intentos que desambiguar.
+	-- Embudo de primera sesión (solo JoinCount == 1). Sin sessionId: corre una sola vez por
+	-- jugador, así que no hay intentos que desambiguar.
 	local ONBOARDING_STEP_NAMES: { [number]: string } = {
 		[1] = "Joined",
 		[2] = "FirstMatchStarted",

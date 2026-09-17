@@ -1,14 +1,10 @@
 --!strict
 --[[
-	WeaponStatsPanel.luau (Client)
-	Vista + animación del panel de stats del arma seleccionada, con COMPARACIÓN
-	contra el arma equipada, estilo shooter AAA.
+	Panel de stats del arma seleccionada, con comparación contra el arma equipada.
 
-	El panel ya NO vive en la GUI del locker: es un BillboardGui en el mundo
-	(Workspace.Locker.Stats.Part.BillboardGui.WeaponStats), así que sólo debe
-	verse mientras se previsualiza un arma. Quien lo monta decide cuándo
-	mostrarlo (:setStats) y cuándo ocultarlo (:hide) — ocultar apaga el
-	BillboardGui entero, no sólo el frame.
+	Es un BillboardGui en el mundo (Workspace.Locker.Stats.Part.BillboardGui.WeaponStats),
+	así que sólo debe verse mientras se previsualiza un arma: quien lo monta llama a
+	:setStats y :hide, y ocultar apaga el BillboardGui entero.
 
 	Jerarquía esperada (autoría en Studio) — los CUATRO stats llevan barra:
 		Workspace.Locker.Stats.Part.BillboardGui.WeaponStats
@@ -18,24 +14,16 @@
 	FireRate) o directamente de `<Stat>` (Ammo, donde `Title` es el propio label
 	del nombre): se resuelven en ambas formas.
 
-	Cada `Bar` se descompone en dos tramos (delta bar):
-	  • Fill  = tramo sólido = min(seleccionada, equipada) — lo compartido.
-	  • Delta = tramo de la diferencia, posicionado al final de Fill, coloreado
+	Cada `Bar` se descompone en dos tramos:
+	  • Fill  = tramo sólido = min(seleccionada, equipada).
+	  • Delta = detrás del Fill hasta max(...), así que solo asoma la diferencia;
 	            VERDE si la seleccionada es mejor, ROJO si es peor (oculto si igual).
-	El nodo `Title.Delta` (y `Ammo.Delta`) muestra el número "+N"/"−N" con el
-	mismo color; "=" en blanco cuando no hay diferencia.
+	El label `Delta` muestra "+N"/"−N" con el mismo color; "=" en blanco si no hay diferencia.
 
-	Animaciones (:setStats):
-	  • Value: count-up numérico + color y prefijo de dirección vs la equipada
-	    ("+ X" mejor / "- X" peor / "X" igual; easeOutCubic).
-	  • Fill / Delta: tween de Size/Position vía Retween (cancela el anterior).
+	Si la UI no trae algún nodo, ese stat (o su delta) simplemente no se anima.
 
-	Resolución defensiva: si la UI no trae algún nodo, ese stat (o su delta)
-	simplemente no se anima — el resto sigue funcionando.
-
-	NOTA de layout: barras horizontales con AnchorPoint a la izquierda (Fill y
-	Delta crecen por Size.X.Scale; Delta arranca en Position.X.Scale = min). Si
-	en Studio crecen en otro eje, ajustar `applyBars`.
+	Layout: barras horizontales con AnchorPoint a la izquierda (crecen por
+	Size.X.Scale). Si en Studio crecen en otro eje, ajustar `applyBars`.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -47,7 +35,7 @@ local BAR_TWEEN_INFO = TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDir
 local COUNT_UP_TIME = 0.45
 local EPSILON = 1e-3
 
--- Colores del delta (barra y número). Equal usa blanco (sólo el número).
+-- Colores del delta (barra y número). Neutral solo aplica al número.
 local COLOR_GAIN = Color3.fromRGB(90, 200, 120)
 local COLOR_LOSS = Color3.fromRGB(232, 86, 86)
 local COLOR_NEUTRAL = Color3.fromRGB(255, 255, 255)
@@ -61,7 +49,6 @@ local function colorForDir(dir: string): Color3
 	return COLOR_NEUTRAL
 end
 
--- Prefijo del Value según la comparación: "+ " mejor, "- " peor, "" igual.
 local function valuePrefixForDir(dir: string): string
 	if dir == "up" then
 		return "+ "
@@ -71,7 +58,6 @@ local function valuePrefixForDir(dir: string): string
 	return ""
 end
 
--- Formateadores del Value principal.
 local function formatInt(n: number): string
 	return tostring(math.floor(n + 0.5))
 end
@@ -80,7 +66,6 @@ local function formatReload(n: number): string
 	return string.format("%.1fs", n)
 end
 
--- Formateadores del número delta (con signo; "=" cuando es ~0).
 local function formatDeltaInt(d: number): string
 	local r = math.floor(math.abs(d) + 0.5)
 	if r == 0 then
@@ -97,8 +82,6 @@ local function formatDeltaReload(d: number): string
 	return (if d > 0 then "+" else "−") .. string.format("%.1fs", a)
 end
 
--- Definición de cada stat: nodo bajo WeaponStats y sus formateadores. Todos
--- llevan barra; los que no traigan los nodos simplemente no la animan.
 local STAT_DEFS = {
 	{ key = "Damage", format = formatInt, formatDelta = formatDeltaInt },
 	{ key = "Reload", format = formatReload, formatDelta = formatDeltaReload },
@@ -113,7 +96,6 @@ type StatNodes = {
 	deltaBar: GuiObject?,
 	format: (number) -> string,
 	formatDelta: (number) -> string,
-	-- Estado de animación
 	displayed: number, -- último valor mostrado (origen del próximo count-up)
 	gen: number, -- generación del count-up activo (para cancelar el anterior)
 	fillSlot: Retween.Slot,
@@ -162,12 +144,10 @@ local function resolveGuiObject(parent: Instance?, name: string): GuiObject?
 	return if node and node:IsA("GuiObject") then node else nil
 end
 
--- easeOutCubic: arranca rápido y desacelera al llegar al objetivo.
 local function easeOutCubic(t: number): number
 	return 1 - (1 - t) ^ 3
 end
 
--- Tramo sólido (min) + tramo delta (diferencia, coloreado por dir) de la barra.
 local function applyBars(node: StatNodes, fill: number, compareFill: number, dir: string)
 	local lo = math.clamp(math.min(fill, compareFill), 0, 1)
 	local hi = math.clamp(math.max(fill, compareFill), 0, 1)
@@ -188,10 +168,8 @@ local function applyBars(node: StatNodes, fill: number, compareFill: number, dir
 		else
 			deltaBar.BackgroundColor3 = colorForDir(dir)
 			deltaBar.Visible = true
-			-- El Delta ocupa TODO el ancho hasta `hi` (= Fill + el extra) arrancando
-			-- en el mismo inicio que el Fill, y va DETRÁS de él: sólo asoma el tramo
-			-- sobrante (lo..hi). Así la unión no tiene hueco aunque las esquinas
-			-- sean redondeadas.
+			-- Delta arranca donde el Fill y llega hasta `hi` por DETRÁS de él: así la
+			-- unión no tiene hueco aunque las esquinas sean redondeadas.
 			local startScale, startOffset = 0, 0
 			if fillBar then
 				startScale = fillBar.Position.X.Scale
@@ -207,7 +185,6 @@ local function applyBars(node: StatNodes, fill: number, compareFill: number, dir
 	end
 end
 
--- Número delta "+N"/"−N"/"=" con color por dir.
 local function applyDelta(node: StatNodes, delta: number, dir: string)
 	local label = node.deltaLabel
 	if not label then
@@ -217,9 +194,8 @@ local function applyDelta(node: StatNodes, delta: number, dir: string)
 	label.TextColor3 = colorForDir(dir)
 end
 
--- `statsRoot` es el ancla del billboard en el mundo (Workspace.Locker.Stats):
--- dentro busca el BillboardGui y, dentro de él, el frame WeaponStats. Si falta
--- alguno, el panel queda inerte (todo el módulo es defensivo).
+-- `statsRoot` es el ancla en el mundo (Workspace.Locker.Stats); dentro se busca el
+-- BillboardGui y en él el frame WeaponStats. Si falta alguno, el panel queda inerte.
 local function resolveStatsNodes(statsRoot: Instance?): (BillboardGui?, GuiObject?)
 	if not statsRoot then
 		return nil, nil
@@ -246,19 +222,15 @@ function WeaponStatsPanel.new(statsRoot: Instance?, janitor: any): WeaponStatsPa
 	for _, def in STAT_DEFS do
 		local container = if statsGui then statsGui:FindFirstChild(def.key) else nil
 
-		-- Value/Delta cuelgan del contenedor `Title` cuando lo hay; si `Title` es
-		-- el propio label del nombre del stat (Ammo), se buscan bajo el stat.
 		local title = if container then container:FindFirstChild("Title") else nil
 		local labelParent = if title and not title:IsA("TextLabel") then title else container
 		local valueLabel = resolveTextLabel(labelParent, "Value") or resolveTextLabel(container, "Value")
 		local deltaLabel = resolveTextLabel(labelParent, "Delta") or resolveTextLabel(container, "Delta")
 
-		-- <Stat>.Bar.{Fill, Delta}
 		local bar = if container then container:FindFirstChild("Bar") else nil
 		local fill = resolveGuiObject(bar, "Fill")
 		local deltaBar = resolveGuiObject(bar, "Delta")
-		-- El Delta va DETRÁS del Fill: ocupa todo el ancho hasta `hi` y sólo
-		-- asoma el tramo sobrante del Fill, así que debe quedar por debajo.
+		-- El Delta debe quedar por debajo del Fill (ver applyBars).
 		if fill and deltaBar then
 			deltaBar.ZIndex = fill.ZIndex - 1
 		end
@@ -288,15 +260,13 @@ function WeaponStatsPanel.new(statsRoot: Instance?, janitor: any): WeaponStatsPa
 	-- lobby ni en las cámaras que no son la de armas.
 	self:_setVisible(false)
 
-	if janitor then
-		janitor:Add(self, "Destroy")
-	end
+	janitor:Add(self, "Destroy")
 
 	return self
 end
 
--- Apaga/enciende el BillboardGui entero (no basta con el frame: el billboard
--- seguiría ocupando y renderizando en el mundo).
+-- Apaga el BillboardGui entero: con solo el frame, el billboard seguiría
+-- renderizando en el mundo.
 function WeaponStatsPanel._setVisible(self: any, visible: boolean)
 	if self._billboard then
 		self._billboard.Enabled = visible
@@ -306,8 +276,6 @@ function WeaponStatsPanel._setVisible(self: any, visible: boolean)
 	end
 end
 
--- Anima el Value de un stat desde su valor mostrado hasta `target`. `dir` colorea
--- el label y le pone el prefijo de dirección ("+ "/"- "/"") vs el arma equipada.
 function WeaponStatsPanel._animateValue(self: any, node: StatNodes, target: number, dir: string)
 	local label = node.valueLabel
 	if not label then
@@ -321,7 +289,6 @@ function WeaponStatsPanel._animateValue(self: any, node: StatNodes, target: numb
 	local startValue = node.displayed
 	local span = target - startValue
 
-	-- Nueva generación: cancela cualquier count-up previo de este stat.
 	node.gen += 1
 	local myGen = node.gen
 
@@ -335,7 +302,7 @@ function WeaponStatsPanel._animateValue(self: any, node: StatNodes, target: numb
 	task.spawn(function()
 		while true do
 			if not self._alive or node.gen ~= myGen or not label.Parent then
-				return -- superado por otro count-up, panel destruido o label fuera
+				return
 			end
 			local t = (os.clock() - startClock) / COUNT_UP_TIME
 			if t >= 1 then
@@ -350,8 +317,7 @@ function WeaponStatsPanel._animateValue(self: any, node: StatNodes, target: numb
 	end)
 end
 
--- Muestra y anima los stats del arma. Sólo se animan los stats presentes en el
--- modelo; el resto se deja intacto.
+-- Sólo se animan los stats presentes en el modelo; el resto se deja intacto.
 function WeaponStatsPanel.setStats(self: any, model: StatsModel)
 	if not self._alive then
 		return
@@ -369,11 +335,10 @@ function WeaponStatsPanel.setStats(self: any, model: StatsModel)
 	end
 end
 
--- Oculta el panel y cancela animaciones en curso.
 function WeaponStatsPanel.hide(self: any)
 	self:_setVisible(false)
 	for _, node in self._nodes do
-		node.gen += 1 -- aborta count-up en curso
+		node.gen += 1
 		Retween.cancel(node.fillSlot)
 		Retween.cancel(node.deltaSlot)
 	end
@@ -381,12 +346,7 @@ end
 
 function WeaponStatsPanel.Destroy(self: any)
 	self._alive = false
-	self:_setVisible(false)
-	for _, node in self._nodes do
-		node.gen += 1
-		Retween.cancel(node.fillSlot)
-		Retween.cancel(node.deltaSlot)
-	end
+	self:hide()
 end
 
 return WeaponStatsPanel

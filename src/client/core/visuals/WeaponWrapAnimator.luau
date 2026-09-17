@@ -1,14 +1,8 @@
 --!strict
 --[[
-	WeaponWrapAnimator
-	Anima el OffsetStudsU/V de cada Texture taggeada como
-	`AnimatedWeaponWrapTexture` para crear el efecto de wrap "scrolling".
-
-	Sprint 3: en vez de `CollectionService:GetTagged()` cada RenderStepped
-	(60Hz × N textures + GetAttribute × 2 por texture), mantenemos un set
-	local actualizado por GetInstanceAddedSignal/GetInstanceRemovedSignal y
-	cacheamos las velocidades por texture al sumar (con AttributeChanged
-	para refrescar). El RenderStepped solo itera el set cacheado.
+	Anima el OffsetStudsU/V de cada Texture con tag `AnimatedWeaponWrapTexture`.
+	Velocidad por atributos WrapScrollSpeedU/V (studs/s). Atributos y StudsPerTile se
+	cachean por señales porque leerlos por frame con muchas texturas era caro en móvil.
 ]]
 
 local RunService = game:GetService("RunService")
@@ -27,9 +21,6 @@ type TrackedTexture = {
 	tileU: number,
 	tileV: number,
 	attrConn: RBXScriptConnection,
-	-- Audit mobile: cacheamos StudsPerTileU/V vía GetPropertyChangedSignal en
-	-- lugar de leerlos por frame. Antes con 72 textures (12 jugadores × 6 caras)
-	-- eran ~17K property reads/seg solo para los wraps animados.
 	tileUConn: RBXScriptConnection,
 	tileVConn: RBXScriptConnection,
 }
@@ -114,7 +105,6 @@ function WeaponWrapAnimator.start()
 		return
 	end
 
-	-- Snapshot inicial (textures ya en el mundo cuando arranca el feature).
 	for _, instance in CollectionService:GetTagged(ANIMATED_WRAP_TEXTURE_TAG) do
 		_track(instance)
 	end

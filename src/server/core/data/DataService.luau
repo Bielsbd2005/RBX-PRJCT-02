@@ -1,20 +1,9 @@
 --!strict
 --[[
-	DataService.luau  (Server)
-	Capa central de datos. Responsabilidades:
-	  1. Cargar / persistir perfiles con ProfileStore (session locking).
-	  2. Replicar datos al cliente con ReplicaService.
-	  3. Exponer mutaciones inmutables via Sift (nuevas referencias de tabla).
-	  4. Gestionar el ciclo de vida de cada sesión con Janitor.
+	Perfiles con ProfileStore (session locking), replicados con ReplicaService.
 
-	Garantía de inmutabilidad:
-	  Toda mutación genera una nueva referencia de tabla en el nivel de sección
-	  (Stats, Inventory, Loadout, Settings, Metadata). Esto garantiza que:
-	    - ReplicaService detecte el cambio y lo replique.
-	    - Fusion dispare sus observers en el cliente.
-
-	Política de reintentos:
-	  3 reintentos con backoff exponencial (1s → 2s → 4s) antes de kick.
+	Toda mutación crea una nueva referencia de tabla en su sección (vía Sift): sin
+	eso ReplicaService no detecta el cambio ni Fusion dispara observers en el cliente.
 ]]
 
 local LocalizationService = game:GetService("LocalizationService")
@@ -36,20 +25,13 @@ local DataTemplate = DataTemplateModule :: any
 local LevelingConfig = require(Shared.constants.LevelingConfig)
 local DataMigrations = require(script.Parent.DataMigrations)
 
--- Type re-export del schema canónico — los consumers leen esto en lugar de
--- DataTemplate directo para evitar acoplarse a la representación interna.
 export type PlayerProfile = DataTemplateModule.PlayerProfile
 
--- Profile/Replica: shape mínima que los consumers usan. Los packages externos
--- (ProfileStore, ReplicaService) tienen muchos más métodos; aquí solo se
--- expone lo que la API pública garantiza.
+-- Shape mínima garantizada; los objetos reales tienen más métodos.
 export type Profile = { Data: PlayerProfile }
 export type Replica = { Data: PlayerProfile }
 
---[[
-	Signal SÍNCRONO para ProfileUnloading. No es un RBXScriptSignal a propósito
-	— ver `_newProfileSignal` para el porqué.
-]]
+-- Signal SÍNCRONO para ProfileUnloading; ver `_newProfileSignal`.
 export type ProfileConnection = {
 	Disconnect: (self: ProfileConnection) -> (),
 }
@@ -59,16 +41,14 @@ export type ProfileSignal = {
 	Fire: (self: ProfileSignal, player: Player) -> (),
 }
 
--- Entry de un BatchUpdate. `value` o `delta` (no ambos) deben venir set.
+-- `value` o `delta`, no ambos.
 export type BatchUpdateEntry = {
 	path: { string },
 	value: any?,
 	delta: number?,
 }
 
--- Interface pública de DataService. Los services consumidores tipan
--- `_dataService: DataServiceModule` en lugar de `:: any`. Cualquier typo
--- (e.g. :GteProfile) ahora falla en compile-time.
+-- Los consumidores tipan `_dataService: DataServiceModule` en vez de `:: any`.
 export type DataServiceModule = {
 	Start: (self: DataServiceModule) -> (),
 	GetProfile: (self: DataServiceModule, player: Player) -> Profile?,
@@ -95,16 +75,12 @@ export type DataServiceModule = {
 local AUTO_SAVE_INTERVAL_SECONDS = 30
 local MAX_SAVES_PER_CYCLE = 8
 
--- Cap superior para cualquier campo numérico actualizado vía Increment / delta.
--- Defensa contra exploits o bugs que podrían inflar Cash/XP a infinito y romper
--- serialización JSON de ProfileStore o UI numérica del cliente.
+-- Tope para Increment/delta: evita que un bug o exploit rompa la serialización o la UI.
 local NUMERIC_CAP = 1e12
 
--- Cap absoluto de nivel para AddXP. Defensa contra loops infinitos si
--- LevelingConfig devuelve valores degenerados o si llega un amount enorme.
+-- Topes contra bucles infinitos en AddXP si LevelingConfig degenera.
 local MAX_LEVEL = 1000
 
--- Iteraciones máximas en el bucle de level-up de AddXP.
 local MAX_LEVELUP_ITERATIONS = 1000
 
 local function _clampNumeric(value: number): number
@@ -120,81 +96,38 @@ local function _clampNumeric(value: number): number
 	return value
 end
 
--- ────────────────────────────────────────────────────────────
--- ESTADO DEL MÓDULO
--- ────────────────────────────────────────────────────────────
-
--- ProfileStore key: bumpear cuando haya cambios destructivos del schema que
--- no puedan resolverse con Reconcile (campo renombrado/eliminado, semántica
--- cambiada). Cambiar la key abandona el datastore anterior y los perfiles
--- arrancan limpios desde DataTemplate.
+-- Cambiar la key ABANDONA el datastore anterior: todos los perfiles arrancan de cero.
 local _PlayerStore = ProfileStore.New("PlayerData_v2", DataTemplate)
 
--- ClassToken: identificador único del tipo de Replica para este juego.
 local _ProfileToken = ReplicaService.NewClassToken("PlayerProfile")
 
--- Tablas de estado indexadas por UserId
+-- Indexadas por UserId.
 local _profiles: { [number]: any } = {}
 local _replicas:  { [number]: any } = {}
 local _janitors:  { [number]: any } = {}
 local _dirtyProfiles: { [number]: boolean } = {}
--- Inicio de sesión por jugador. Necesario para que BindToClose pueda acumular
--- TimePlayedSeconds antes de EndSession (igual que el flujo de _unloadPlayer).
+-- Para acumular TimePlayedSeconds también en BindToClose.
 local _sessionStartByUserId: { [number]: number } = {}
 local _loadTokens: { [number]: number } = {}
 local _started = false
 local _serviceJanitor: any = nil
 local _serviceGeneration = 0
 
--- Signals públicos. Otros servicios se suscriben para reaccionar a eventos
--- del ciclo de vida del perfil sin tener que polling-ear GetProfile.
---
--- ProfileLoaded sigue siendo un BindableEvent (diferido): sus consumidores
--- pueden yieldear sin peligro porque el perfil sigue cargado cuando corren.
+-- Diferido a propósito: sus handlers pueden yieldear, el perfil sigue cargado.
 local _profileLoadedBindable = Instance.new("BindableEvent")
 
---[[
-	LeveledUp(player, fromLevel, toLevel, xpGained, source?)
-
-	El único punto del juego donde se cruza un nivel es `AddXP`, y no emitía
-	nada: la progresión sólo existía como foto en SESSION_END, así que no se
-	podía saber cuánto tarda un jugador en subir, sólo a qué nivel había
-	llegado al salir.
-
-	Es un signal y no una llamada directa a TelemetryService porque
-	`core.data` no puede requerirlo: TelemetryService ya requiere este módulo
-	y el ciclo no compilaría. Diferido (BindableEvent) a propósito: el handler
-	corre fuera de la ruta de escritura del perfil.
-]]
+-- Signal y no llamada directa a TelemetryService: este no puede requerirlo
+-- (TelemetryService ya requiere este módulo). Diferido: fuera de la ruta de escritura.
 local _leveledUpBindable = Instance.new("BindableEvent")
 
 --[[
-	_newProfileSignal: signal mínimo que ejecuta sus handlers EN EL ACTO.
+	Signal que ejecuta sus handlers EN EL ACTO. No es BindableEvent porque con
+	SignalBehavior = Deferred los handlers correrían DESPUÉS de EndSession y de
+	`_profiles[userId] = nil`, y GetProfile devolvería nil en silencio.
 
-	Por qué no un BindableEvent
-	---------------------------
-	Con `SignalBehavior = Deferred` (el default de Roblox) `BindableEvent:Fire()`
-	NO ejecuta los handlers en la llamada: los encola hasta el siguiente punto
-	de reanudación. En la ruta de descarga eso los hacía correr DESPUÉS de
-	`profile:EndSession()` y de `_profiles[userId] = nil`, así que cualquier
-	consumidor que llamara a `GetProfile(player)` recibía nil y leía un perfil
-	inexistente — en silencio, porque el guard habitual es `if profile then`.
-
-	Síntoma real que motivó el cambio: los SESSION_END de TelemetryService
-	llegaban al backend sin balances, sin createdAt y sin battle pass, con lo
-	que el dashboard calculaba supply, Gini y percentiles de riqueza sobre
-	ceros. La ruta de BindToClose no estaba afectada (allí `_profiles` no se
-	limpia dentro del bucle), lo que hacía el fallo aún más difícil de ver.
-
-	CONTRATO PARA LOS CONSUMIDORES
-	------------------------------
-	Los handlers corren inline dentro de la descarga del perfil, justo antes de
-	cerrar la sesión de ProfileStore. NO deben yieldear: un yield aquí retrasa
-	el EndSession y, por tanto, el guardado. Si necesitas trabajo con yield,
-	haz el snapshot síncrono aquí y difiere el resto con task.spawn.
-
-	Cada handler va envuelto en pcall: un consumidor roto nunca puede tumbar el
-	guardado de datos del jugador, que es la razón de ser de esta ruta.
+	Contrato: los handlers corren inline justo antes de EndSession y NO deben
+	yieldear (retrasan el guardado); para trabajo con yield, snapshot síncrono y
+	task.spawn. Cada handler va en pcall para no tumbar el guardado.
 ]]
 local function _newProfileSignal(signalName: string): ProfileSignal
 	local handlers: { [number]: (player: Player) -> () } = {}
@@ -213,8 +146,7 @@ local function _newProfileSignal(signalName: string): ProfileSignal
 		end,
 
 		Fire = function(_self, player)
-			-- Snapshot antes de iterar: un handler puede desconectarse a sí
-			-- mismo (o conectar otro) durante el propio Fire.
+			-- Snapshot: un handler puede (des)conectar durante el Fire.
 			local snapshot: { (player: Player) -> () } = {}
 			for _, handler in handlers do
 				table.insert(snapshot, handler)
@@ -231,21 +163,10 @@ end
 
 local _profileUnloadingSignal = _newProfileSignal("ProfileUnloading")
 
--- ────────────────────────────────────────────────────────────
--- HELPERS DE MUTACIÓN INMUTABLE
--- ────────────────────────────────────────────────────────────
-
 --[[
-	Actualiza de forma inmutable una sub-tabla en profundidad arbitraria.
-	Recorre path desde depth hasta #path creando nuevas referencias en cada nivel.
-
-	Ejemplo:
-	  _immutableUpdate(profile.Data.Inventory, {"Inventory","Main","Weapon2"}, 2, true)
-	  →  nuevo Inventory con Inventory.Main.Weapon2 = true
-
-	Sanity cap de profundidad: nuestros paths reales nunca superan ~5 niveles
-	(WeaponWrapsByWeapon → Main → weaponId → wrapId). Un path > 32 indica un
-	bug del caller; mejor abortar que stack-overflow.
+	Crea nuevas referencias en cada nivel de path[depth..#path].
+	_immutableUpdate(profile.Data.Inventory, {"Inventory","Main","Weapon2"}, 2, true)
+	→ nuevo Inventory con Main.Weapon2 = true
 ]]
 local MAX_PATH_DEPTH = 32
 
@@ -276,24 +197,15 @@ local function _deepCopy(value: any): any
 	return copy
 end
 
--- ────────────────────────────────────────────────────────────
--- MÓDULO PRINCIPAL
--- ────────────────────────────────────────────────────────────
-
 local DataService = {}
 DataService.__index = DataService
 
--- Signals públicos. Suscribirse vía `DataService.ProfileLoaded:Connect(fn)`.
---   ProfileLoaded(player)    — disparado tras crear la Replica; GetProfile/
---                              GetReplica devuelven valores válidos.
---   ProfileUnloading(player) — disparado ANTES de destruir la Replica y cerrar
---                              la sesión; el perfil aún es modificable.
---                              SÍNCRONO: el handler corre inline y NO debe
---                              yieldear (ver _newProfileSignal).
+--   ProfileLoaded(player)    — tras crear la Replica.
+--   ProfileUnloading(player) — ANTES de destruir la Replica y cerrar sesión; el
+--                              perfil aún es modificable. SÍNCRONO, no yieldear.
 DataService.ProfileLoaded = _profileLoadedBindable.Event
 DataService.ProfileUnloading = _profileUnloadingSignal
---   LeveledUp(player, from, to, xpGained, source?) — una o más subidas de
---                              nivel ya persistidas. Diferido.
+--   LeveledUp(player, from, to, xpGained, source?) — subidas ya persistidas.
 DataService.LeveledUp = _leveledUpBindable.Event
 
 local function _isGenerationActive(generation: number): boolean
@@ -328,8 +240,6 @@ local function _autoSaveDirtyProfiles(generation: number): ()
 			continue
 		end
 
-		-- Snapshot de candidatos. Limitamos por ciclo para no saturar el
-		-- DataStore en servers con muchos perfiles dirty simultáneamente.
 		local toSave: { number } = {}
 		for userId in _dirtyProfiles do
 			table.insert(toSave, userId)
@@ -338,8 +248,7 @@ local function _autoSaveDirtyProfiles(generation: number): ()
 			end
 		end
 
-		-- Guardar en paralelo: cada Save yielda independientemente esperando
-		-- al DataStore. En serie con N perfiles podía bloquear N * latencia.
+		-- En paralelo: cada Save yielda esperando al DataStore.
 		local pending = #toSave
 		for _, userId in toSave do
 			task.spawn(function()
@@ -349,22 +258,16 @@ local function _autoSaveDirtyProfiles(generation: number): ()
 						profile:Save()
 					end)
 					if ok then
-						-- Solo limpiar dirty si el save tuvo éxito; si falló
-						-- queremos reintentar en el siguiente ciclo.
 						_dirtyProfiles[userId] = nil
 					end
 				else
-					-- Perfil ya no activo: la entrada dirty es huérfana.
 					_dirtyProfiles[userId] = nil
 				end
 				pending -= 1
 			end)
 		end
 
-		-- Esperar a que termine el batch antes de iniciar el siguiente ciclo.
-		-- Deadline duro: si una task se queda colgada (improbable, pero la
-		-- alternativa es bloquear el loop entero), continuamos al siguiente
-		-- ciclo y dejamos los dirty pendientes para el próximo intento.
+		-- Deadline duro para que un Save colgado no bloquee el loop.
 		local deadline = os.clock() + (AUTO_SAVE_INTERVAL_SECONDS - 5)
 		while pending > 0 and _isGenerationActive(generation) and os.clock() < deadline do
 			task.wait(0.1)
@@ -375,21 +278,14 @@ local function _autoSaveDirtyProfiles(generation: number): ()
 	end
 end
 
--- ─── CARGA CON REINTENTOS ───────────────────────────────────
-
---[[
-	Intenta cargar el perfil del jugador.
-	Si ProfileStore devuelve nil (DataStore temporalmente inaccesible),
-	reintenta con backoff exponencial: 2^attempt segundos (1s, 2s, 4s).
-	Tras 3 intentos fallidos rechaza la Promise para que el jugador sea kickeado.
-]]
+-- ProfileStore devuelve nil con el DataStore inaccesible: backoff exponencial y,
+-- agotados los reintentos, se rechaza para kickear al jugador.
 local function _loadWithRetry(player: Player, attempt: number): any
 	return Promise.new(function(resolve: (any) -> (), reject: (any) -> ())
 		local profile = _PlayerStore:StartSessionAsync(
 			"Player_" .. player.UserId,
 			{
 				Cancel = function()
-					-- Cancela si el jugador ya abandonó el servidor
 					return player.Parent ~= Players
 				end,
 			}
@@ -401,7 +297,6 @@ local function _loadWithRetry(player: Player, attempt: number): any
 		end
 	end):catch(function(err: string)
 		if attempt < 3 then
-			-- Backoff exponencial: 1s, 2s, 4s
 			return Promise.delay(2 ^ attempt):andThen(function()
 				return _loadWithRetry(player, attempt + 1)
 			end)
@@ -409,8 +304,6 @@ local function _loadWithRetry(player: Player, attempt: number): any
 		return Promise.reject(err)
 	end)
 end
-
--- ─── CICLO DE VIDA DEL JUGADOR ──────────────────────────────
 
 local function _loadPlayer(player: Player): ()
 	local userId = player.UserId
@@ -426,27 +319,15 @@ local function _loadPlayer(player: Player): ()
 				return
 			end
 
-			-- Reconcile: rellena claves faltantes del template sin tocar valores existentes.
-			-- Si en el futuro añadimos un campo nuevo a DataTemplate, los jugadores
-			-- existentes recibirán el valor por defecto automáticamente.
 			profile:Reconcile()
 
-			-- Migraciones forward-only. Reconcile cubre cambios aditivos; las
-			-- migraciones cubren transformaciones (renames, splits, derivados).
-			-- Ver DataMigrations.luau para añadir una nueva.
+			-- Reconcile cubre lo aditivo; las migraciones (forward-only), renames y derivados.
 			DataMigrations.migrate(profile.Data)
 
-			-- ⚠ Contrato de mutación in-place:
-			-- Todo lo siguiente muta `profile.Data` directamente. Es seguro porque
-			-- todavía no se ha creado la Replica: no hay cliente ni observers. Una
-			-- vez creada (`replica = ReplicaService.NewReplica{...}` más abajo),
-			-- `replica.Data` y `profile.Data` comparten referencia, así que toda
-			-- mutación posterior DEBE ir por SetValue/BatchUpdate para replicarse
-			-- y disparar ListenToChange en el cliente.
+			-- ⚠ Hasta crear la Replica se puede mutar `profile.Data` in-place. Después comparte
+			-- referencia con replica.Data y toda mutación DEBE ir por SetValue/BatchUpdate.
 
-			-- Prune de ProcessedReceipts antiguos. Roblox mantiene receipts
-			-- válidos ~3 días; mantenemos 7 días por seguridad. Sin prune,
-			-- esta tabla crecería indefinidamente.
+			-- Roblox reintenta receipts ~3 días; se guardan 7 por margen.
 			if type(profile.Data.ProcessedReceipts) == "table" then
 				local cutoff = os.time() - (7 * 24 * 3600)
 				for purchaseId, processedAt in profile.Data.ProcessedReceipts do
@@ -458,9 +339,7 @@ local function _loadPlayer(player: Player): ()
 				profile.Data.ProcessedReceipts = {}
 			end
 
-			-- Prune de ClaimedGifts (ledger anti doble-claim de GiftingService):
-			-- las re-entregas de un mismo regalo no sobreviven más de unos días
-			-- de reintentos; 30 días de margen mantienen la tabla acotada.
+			-- Las re-entregas de un regalo no duran más de unos días; 30 de margen.
 			if type((profile.Data :: any).ClaimedGifts) == "table" then
 				local cutoff = os.time() - (30 * 24 * 3600)
 				for giftId, claimedAt in (profile.Data :: any).ClaimedGifts do
@@ -472,12 +351,9 @@ local function _loadPlayer(player: Player): ()
 				(profile.Data :: any).ClaimedGifts = {}
 			end
 
-			-- GDPR: asociar UserId para cumplimiento de políticas de privacidad.
+			-- GDPR.
 			profile:AddUserId(player.UserId)
 
-			-- ── Tracking de sesión ────────────────────────────────────
-			-- Metadata se actualiza antes de crear la Replica (mutación in-place
-			-- segura — ver contrato arriba).
 			local now = os.time()
 			local meta = profile.Data.Metadata
 			meta.LastSeen = now
@@ -490,9 +366,7 @@ local function _loadPlayer(player: Player): ()
 			if meta.FirstSessionVersion == "" then
 				meta.FirstSessionVersion = placeVersion
 			end
-			-- Country: GetCountryRegionForPlayerAsync yielda y puede tardar.
-			-- Lo lanzamos en paralelo y escribimos via SetValue cuando llegue,
-			-- así el load del perfil no se bloquea por el API de localización.
+			-- En paralelo para no bloquear el load; llega tras la Replica, así que va por SetValue.
 			if meta.Country == "" then
 				task.spawn(function()
 					local ok, code = pcall(function()
@@ -501,7 +375,6 @@ local function _loadPlayer(player: Player): ()
 					if not ok or type(code) ~= "string" or code == "" then
 						return
 					end
-					-- Verificar que el perfil sigue cargado (jugador no se fue).
 					local stillLoaded = _profiles[player.UserId]
 					if stillLoaded == profile then
 						DataService:SetValue(player, { "Metadata", "Country" }, code)
@@ -509,21 +382,15 @@ local function _loadPlayer(player: Player): ()
 				end)
 			end
 
-			-- ── LoginStreak ───────────────────────────────────────────
-			-- Resolución por día UTC consecutivo. Definir la "fecha de hoy"
-			-- en UTC evita saltos por timezone del servidor.
+			-- LoginStreak por día UTC, independiente de la zona horaria del servidor.
 			local todayKey = os.date("!%Y-%m-%d", now) :: string
 			local streak = profile.Data.LoginStreak
 			if streak.LastLoginDateKey ~= todayKey then
 				local newCurrent: number? = nil
 				if streak.LastLoginDateKey == "" then
-					-- Primera sesión registrada.
 					newCurrent = 1
 				else
-					-- Parsear LastLoginDateKey con guard estricto. Si está
-					-- corrupto (formato distinto de YYYY-MM-DD), NO reseteamos
-					-- ni avanzamos: warn y dejamos el streak intacto. Resetear
-					-- silenciosamente borraría progreso del jugador.
+					-- Key corrupta: no resetear ni avanzar, borraría progreso del jugador.
 					local y, m, d = string.match(streak.LastLoginDateKey, "^(%d%d%d%d)-(%d%d)-(%d%d)$")
 					if y and m and d then
 						local lastTime = os.time({
@@ -542,15 +409,11 @@ local function _loadPlayer(player: Player): ()
 						if dayDelta == 1 then
 							newCurrent = (streak.Current or 0) + 1
 						elseif dayDelta > 1 then
-							-- Gap > 1 día → reset.
 							newCurrent = 1
 						elseif dayDelta == 0 then
-							-- Mismo día UTC pese a key distinta → no-op
-							-- (puede ocurrir si la key se escribió raro).
 							newCurrent = streak.Current or 1
 						else
-							-- dayDelta < 0 → fecha futura. Server con clock
-							-- desincronizado o key manipulada. No tocamos.
+							-- Fecha futura: reloj desincronizado o key manipulada.
 							warn(("[DataService] LoginStreak: dayDelta negativo (%d) para user %d, key=%s"):format(dayDelta, player.UserId, streak.LastLoginDateKey))
 						end
 					else
@@ -579,8 +442,6 @@ local function _loadPlayer(player: Player): ()
 				existingJanitor:Destroy()
 			end
 
-			-- Crear Replica: ReplicaService envía profile.Data al cliente al conectarse.
-			-- Replication = player  →  solo este jugador recibe esta réplica.
 			local replica = ReplicaService.NewReplica({
 				ClassToken  = _ProfileToken,
 				Tags        = { Player = player },
@@ -588,7 +449,6 @@ local function _loadPlayer(player: Player): ()
 				Replication = player,
 			})
 
-			-- Janitor por jugador: garantiza limpieza de memoria al salir.
 			local janitor = Janitor.new()
 
 			_profiles[userId] = profile
@@ -596,9 +456,7 @@ local function _loadPlayer(player: Player): ()
 			_janitors[userId] = janitor
 			_markDirty(userId)
 
-			-- ── Guardia de sesión robada (session steal) ──
-			-- Si otro servidor toma la sesión, OnSessionEnd dispara.
-			-- Kickeamos al jugador para evitar estado corrupto.
+			-- Otro servidor tomó la sesión: kick para evitar estado corrupto.
 			local connection = profile.OnSessionEnd:Connect(function()
 				player:Kick(
 					"Tu sesión de datos fue terminada externamente. "
@@ -607,22 +465,13 @@ local function _loadPlayer(player: Player): ()
 			end)
 			janitor:Add(connection, "Disconnect")
 
-			-- ── Orden de limpieza al salir ──
-			-- 1. Acumular TimePlayedSeconds vía Increment (atómico, marca dirty,
-			--    se replica al cliente — útil si hay UI mostrándolo en tiempo
-			--    real al final de partida).
-			-- 2. Disparar ProfileUnloading. El signal es síncrono, así que los
-			--    consumidores ven el perfil todavía vivo (GetProfile funciona);
-			--    a cambio no pueden yieldear sin retrasar el EndSession de (4).
-			-- 3. Destruir Replica (desreplica al cliente).
-			-- 4. Finalizar sesión de ProfileStore (guarda y libera lock).
+			-- Orden de limpieza importante: TimePlayedSeconds → ProfileUnloading (perfil aún
+			-- vivo) → destruir Replica → EndSession (guarda y libera el lock).
 			local sessionStart = os.time()
 			_sessionStartByUserId[userId] = sessionStart
 			janitor:Add(function()
 				local sessionSeconds = math.max(0, os.time() - sessionStart)
 				if sessionSeconds > 0 then
-					-- Increment es síncrono y no yielda; pasa por SetValue
-					-- → marca dirty → autosave / EndSession lo persiste.
 					DataService:Increment(player, { "Stats", "TimePlayedSeconds" }, sessionSeconds)
 				end
 
@@ -640,10 +489,7 @@ local function _loadPlayer(player: Player): ()
 				end
 			end, true)
 
-			-- Disparar el signal público después de poblar las tablas y
-			-- registrar el cleanup; los consumidores pueden llamar a
-			-- GetProfile/GetReplica de inmediato. task.spawn aísla yields
-			-- de subscribers para que no bloqueen el load.
+			-- Tras poblar las tablas: los handlers pueden llamar a GetProfile de inmediato.
 			task.spawn(function()
 				_profileLoadedBindable:Fire(player)
 			end)
@@ -671,7 +517,6 @@ end
 local function _unloadPlayer(player: Player): ()
 	local userId = player.UserId
 
-	-- Invalida cualquier carga async en curso para este UserId.
 	_nextLoadToken(userId)
 
 	local janitor = _janitors[userId]
@@ -687,11 +532,6 @@ local function _unloadPlayer(player: Player): ()
 	_loadTokens[userId] = nil
 end
 
--- ─── API PÚBLICA ─────────────────────────────────────────────
-
---[[
-	Inicia el servicio: conecta eventos de jugadores y carga los ya presentes.
-]]
 function DataService:Start(): ()
 	if _started then
 		return
@@ -753,13 +593,8 @@ function DataService:Start(): ()
 	end), "Disconnect")
 
 	game:BindToClose(function()
-		-- Roblox da ~30s antes de matar el servidor. Si destruimos el janitor
-		-- de forma normal, los EndSession() corren secuencialmente (cada uno
-		-- yielda esperando al DataStore). Con muchos jugadores eso puede exceder
-		-- el presupuesto y perder writes. En su lugar:
-		--   1. Snapshot de profiles activos.
-		--   2. EndSession en paralelo (cada uno yielda independientemente).
-		--   3. Esperar hasta que todos hayan finalizado o se agote el tiempo.
+		-- ~30s antes de matar el servidor: destruir los janitors haría los EndSession en
+		-- serie y podría perder writes. Se hacen en paralelo con deadline.
 		_started = false
 
 		local profilesToEnd = {}
@@ -778,9 +613,7 @@ function DataService:Start(): ()
 
 		for userId, profile in profilesToEnd do
 			task.spawn(function()
-				-- Replicar el flujo de _unloadPlayer para que la sesión actual
-				-- no pierda TimePlayedSeconds ni los cambios que dependen de
-				-- ProfileUnloading (servicios que escuchan para flush final).
+				-- Mismo flujo que _unloadPlayer (TimePlayedSeconds + ProfileUnloading).
 				local sessionStart = _sessionStartByUserId[userId]
 				if sessionStart then
 					local sessionSeconds = math.max(0, os.time() - sessionStart)
@@ -801,7 +634,6 @@ function DataService:Start(): ()
 					end
 				end)
 				pcall(function()
-					-- EndSession yielda hasta confirmar el save y liberar el lock.
 					profile:EndSession()
 				end)
 				_dirtyProfiles[userId] = nil
@@ -809,7 +641,7 @@ function DataService:Start(): ()
 			end)
 		end
 
-		-- Esperar con timeout duro (25s) para dejar margen al cierre de Roblox.
+		-- Deadline por debajo de los ~30s de Roblox.
 		local deadline = os.clock() + 25
 		while pending > 0 and os.clock() < deadline do
 			task.wait(0.1)
@@ -820,7 +652,7 @@ function DataService:Start(): ()
 		end
 	end)
 
-	-- Jugadores que ya estaban en el servidor al cargar este script (en Studio)
+	-- Jugadores que ya estaban antes de Start (Studio).
 	for _, player in Players:GetPlayers() do
 		task.spawn(function()
 			if not _isGenerationActive(generation) then
@@ -839,31 +671,17 @@ function DataService:Destroy(): ()
 	end
 end
 
---[[
-	Devuelve el Profile de ProfileStore de un jugador, o nil si no está cargado.
-]]
 function DataService:GetProfile(player: Player): any
 	return _profiles[player.UserId]
 end
 
---[[
-	Devuelve la Replica de ReplicaService de un jugador, o nil.
-]]
 function DataService:GetReplica(player: Player): any
 	return _replicas[player.UserId]
 end
 
 --[[
-	Establece un valor en el perfil usando una ruta de claves.
-
-	Garantía de inmutabilidad:
-	  Crea una nueva referencia en el nivel de sección (path[1]),
-	  lo que dispara ListenToChange({"<section>"}) en el cliente.
-
-	path    {string}  — e.g. {"Stats", "Cash"} o {"Inventory", "Main", "Weapon2"}
-	value   any       — valor nuevo
-
-	Devuelve true si tuvo éxito, false si el jugador no está cargado.
+	path: {"Stats", "Cash"}, {"Inventory", "Main", "Weapon2"}… Crea una nueva
+	referencia en path[1], que dispara ListenToChange({"<section>"}) en el cliente.
 ]]
 function DataService:SetValue(player: Player, path: { string }, value: any): boolean
 	local profile = _profiles[player.UserId]
@@ -872,26 +690,19 @@ function DataService:SetValue(player: Player, path: { string }, value: any): boo
 		return false
 	end
 
-	-- Validar path: debe ser tabla no vacía con primer elemento string.
 	if type(path) ~= "table" or #path == 0 or type(path[1]) ~= "string" then
 		warn(("[DataService] SetValue: path inválido para user %d"):format(player.UserId))
 		return false
 	end
 
-	-- Clamp consistente para valores numéricos (mismo cap que Increment / delta).
 	if type(value) == "number" then
 		value = _clampNumeric(value)
 	end
 
 	local section = path[1]
-	-- _immutableUpdate construye una nueva tabla desde depth=2 hasta el leaf.
 	local newSection = _immutableUpdate(profile.Data[section] :: { [string]: any }, path, 2, value)
 
-	-- SetValue({section}, newSection) en ReplicaService:
-	--   1. Establece replica.Data[section] = newSection  (nueva referencia)
-	--   2. Envía el cambio al cliente vía RemoteEvent
-	-- Como replica.Data ES profile.Data (mismo reference), profile.Data[section]
-	-- también queda actualizado.
+	-- replica.Data ES profile.Data: esto actualiza también el perfil.
 	local ok, err = pcall(replica.SetValue, replica, { section }, newSection)
 	if not ok then
 		warn(("[DataService] replica:SetValue failed for user %d, section %s: %s"):format(player.UserId, tostring(section), tostring(err)))
@@ -902,20 +713,13 @@ function DataService:SetValue(player: Player, path: { string }, value: any): boo
 	return true
 end
 
---[[
-	Incrementa un campo numérico del perfil.
-	Nunca baja de 0 (ideal para Cash, XP, etc.).
-
-	Devuelve (success, newValue).
-]]
+-- Clamp a [0, NUMERIC_CAP].
 function DataService:Increment(player: Player, path: { string }, amount: number): (boolean, number)
 	local profile = _profiles[player.UserId]
 	if not profile then
 		return false, 0
 	end
 
-	-- Navegar hasta el valor actual con guards por hop (igual que BatchUpdate):
-	-- un path no mapeado devuelve (false, 0) en vez de lanzar al indexar nil.
 	local pointer: any = profile.Data
 	for i = 1, #path - 1 do
 		if type(pointer) ~= "table" then
@@ -936,10 +740,6 @@ function DataService:Increment(player: Player, path: { string }, amount: number)
 	return ok, newValue
 end
 
---[[
-	Incrementa el contador de kills del jugador para un arma concreta.
-	Devuelve (success, newValue).
-]]
 function DataService:IncrementWeaponKills(player: Player, weaponCategory: string, weaponId: string, amount: number?): (boolean, number)
 	if not WeaponCategory.isValid(weaponCategory) then
 		return false, 0
@@ -954,12 +754,6 @@ function DataService:IncrementWeaponKills(player: Player, weaponCategory: string
 	return self:Increment(player, { "WeaponKills", weaponCategory, weaponId }, delta)
 end
 
---[[
-	Añade XP al jugador y procesa subidas de nivel en cascada.
-	Mantiene consistentes: Stats.XP, Stats.Level y Stats.XPToNextLevel.
-
-	Devuelve (success, newLevel, newXP, newXPToNextLevel).
-]]
 function DataService:AddXP(player: Player, amount: number, source: string?): (boolean, number, number, number)
 	local profile = _profiles[player.UserId]
 	local replica = _replicas[player.UserId]
@@ -988,8 +782,6 @@ function DataService:AddXP(player: Player, amount: number, source: string?): (bo
 		iterations += 1
 	end
 
-	-- Si llegamos al cap de nivel, descartar XP sobrante para evitar acumular
-	-- progreso "fantasma" hacia un nivel inalcanzable.
 	if level >= MAX_LEVEL then
 		level = MAX_LEVEL
 		xp = 0
@@ -1009,8 +801,7 @@ function DataService:AddXP(player: Player, amount: number, source: string?): (bo
 		return false, 0, 0, 0
 	end
 
-	-- Sólo después de persistir: un level-up anunciado que el BatchUpdate no
-	-- guardó sería un evento de una subida que el jugador no tiene.
+	-- Solo después de persistir.
 	if level > startingLevel then
 		_leveledUpBindable:Fire(player, startingLevel, level, math.floor(amount), source)
 	end
@@ -1019,28 +810,9 @@ function DataService:AddXP(player: Player, amount: number, source: string?): (bo
 end
 
 --[[
-	Aplica múltiples actualizaciones atómicamente, generando exactamente
-	1 mensaje de red por sección modificada (vs N mensajes individuales).
-
-	updates  {{ path: {string}, value: any?, delta: number? }}
-
-	Cada entry usa `value` (set absoluto) o `delta` (incremento numérico
-	relativo al valor actual, clamp a ≥ 0). Los `delta` se resuelven contra
-	la sección acumulada en el momento de aplicar — eliminando TOCTOU entre
-	el read del caller y el write final.
-
-	Algoritmo:
-	  1. Por cada update, acumula los cambios en un mapa de secciones.
-	  2. Cada sección acumulada es inmutable (Sift merge en cadena).
-	  3. Si todas las secciones se construyen sin error, aplica los SetValue.
-	     Si algún SetValue falla, devuelve false (estado parcialmente aplicado;
-	     ReplicaService.SetValue no debería fallar en condiciones normales).
-
-	Ejemplo (comprar un arma con delta):
-	  {
-	    { path = {"Stats",     "Cash"},              delta = -100 },
-	    { path = {"Inventory", "Main", "Weapon2"}, value = true },
-	  }
+	Un mensaje de red por sección modificada. `delta` se resuelve contra la sección
+	acumulada al aplicar (sin TOCTOU con la lectura del caller) y se clampa a ≥ 0.
+	{ { path = {"Stats", "Cash"}, delta = -100 }, { path = {"Inventory", "Main", "Weapon2"}, value = true } }
 ]]
 function DataService:BatchUpdate(
 	player: Player,
@@ -1052,35 +824,26 @@ function DataService:BatchUpdate(
 		return false
 	end
 
-	-- Mapa: section → nueva tabla inmutable acumulada
 	local accumulated: { [string]: { [string]: any } } = {}
 
 	for i, update in updates do
 		local path = update.path
-		-- Validar path: debe ser tabla no vacía con primer elemento string.
-		-- Sin guard, _immutableUpdate o profile.Data[nil] crashearían y se
-		-- abortaría el batch entero (con secciones previas ya aplicadas).
 		if type(path) ~= "table" or #path == 0 or type(path[1]) ~= "string" then
 			warn(("[DataService] BatchUpdate update[%d]: path inválido"):format(i))
 			continue
 		end
 
-		-- Validar payload: debe traer value o delta (no ambos nil). Sin esto,
-		-- un caller que olvide el campo sobrescribe la clave con nil y borra
-		-- el campo del schema, replicando el delete al cliente.
+		-- Sin esto, value=nil borraría el campo del schema y replicaría el delete.
 		if update.delta == nil and update.value == nil then
 			warn(("[DataService] BatchUpdate update[%d]: falta value/delta"):format(i))
 			continue
 		end
 
 		local section = path[1]
-		-- Usar la versión acumulada como base si ya procesamos esta sección,
-		-- así los deltas posteriores ven los efectos de los anteriores.
 		local base: { [string]: any } = accumulated[section] or (profile.Data[section] :: { [string]: any })
 
 		local newValue: any
 		if update.delta ~= nil then
-			-- Resolver el valor actual desde la base acumulada.
 			local pointer: any = base
 			for j = 2, #path - 1 do
 				pointer = if type(pointer) == "table" then pointer[path[j]] else nil
@@ -1096,9 +859,6 @@ function DataService:BatchUpdate(
 			newValue = _clampNumeric(current + delta)
 		else
 			newValue = update.value
-			-- Si el caller pasa un número vía `value=`, aplicar el mismo cap
-			-- que aplicamos en deltas/Increment para garantizar consistencia.
-			-- No-op para strings/booleans/tablas.
 			if type(newValue) == "number" then
 				newValue = _clampNumeric(newValue)
 			end
@@ -1107,16 +867,9 @@ function DataService:BatchUpdate(
 		accumulated[section] = _immutableUpdate(base, path, 2, newValue)
 	end
 
-	-- Aplicar: un SetValue por sección modificada. Atomicidad best-effort:
-	-- snapshot de las referencias de sección actuales ANTES de aplicar, abortar
-	-- al primer fallo, y hacer rollback de las secciones ya escritas. Sin esto,
-	-- un fallo a mitad (p.ej. compra que toca Stats + Inventory) podía dejar el
-	-- perfil mixto — descontar Cash sin entregar el ítem (o al revés).
-	--
-	-- Por qué es "best-effort" y no atomicidad perfecta: el SetValue de rollback
-	-- también podría lanzar. Pero como BatchUpdate NO yielda entre escrituras y
-	-- el replica se valida arriba, un fallo parcial es de por sí muy improbable;
-	-- el rollback cubre el caso raro de que ReplicaService lance por un valor.
+	-- Atomicidad best-effort: al primer fallo, rollback de las secciones ya escritas
+	-- (una compra no debe quedar con Cash descontado y sin ítem). El propio rollback
+	-- podría fallar.
 	local prevSections: { [string]: any } = {}
 	for section in accumulated do
 		prevSections[section] = profile.Data[section]
@@ -1156,20 +909,8 @@ function DataService:BatchUpdate(
 end
 
 --[[
-	Idempotencia de MarketplaceService.ProcessReceipt.
-
-	Roblox puede invocar ProcessReceipt varias veces para el mismo PurchaseId
-	si: el server crashea entre Increment y PurchaseGranted, o el Decision
-	devuelto fue NotProcessedYet. Sin idempotencia se otorga la recompensa
-	múltiples veces (duping de Cash via DevProducts).
-
-	Patrón en el caller:
-	    if DataService:IsReceiptProcessed(player, receiptInfo.PurchaseId) then
-	        return Enum.ProductPurchaseDecision.PurchaseGranted
-	    end
-	    -- otorgar recompensa (Increment, etc.)
-	    DataService:MarkReceiptProcessed(player, receiptInfo.PurchaseId)
-	    return Enum.ProductPurchaseDecision.PurchaseGranted
+	Idempotencia de ProcessReceipt: Roblox puede reinvocarlo con el mismo PurchaseId.
+	Si IsReceiptProcessed → PurchaseGranted sin conceder; si no, conceder y MarkReceiptProcessed.
 ]]
 function DataService:IsReceiptProcessed(player: Player, purchaseId: string): boolean
 	local profile = _profiles[player.UserId]
@@ -1190,17 +931,7 @@ function DataService:MarkReceiptProcessed(player: Player, purchaseId: string): b
 	return self:SetValue(player, { "ProcessedReceipts", purchaseId }, os.time())
 end
 
---[[
-	Otorga un ítem de inventario en una transacción atómica:
-	  1. Inventory[category][itemId] = true (ownership boolean).
-	  2. InventoryMeta[category][itemId] = { AcquiredAt, Source }.
-	  3. NewItemFlags[category][itemId] = true (badge "NEW!" en UI).
-
-	Source: una etiqueta corta para analytics ("Shop", "Reward", "Default",
-	"Code", "Gift", etc.).
-
-	Devuelve true si todas las escrituras tuvieron éxito.
-]]
+-- source: etiqueta para analytics ("Shop", "Reward", "Default", "Code", "Gift"…).
 function DataService:GrantItem(player: Player, category: string, itemId: string, source: string): boolean
 	if type(category) ~= "string" or category == "" then
 		return false
@@ -1221,13 +952,8 @@ function DataService:GrantItem(player: Player, category: string, itemId: string,
 end
 
 --[[
-	Marca un ítem como visto por el jugador (UI quita el badge NEW!).
-	Idempotente: llamarlo múltiples veces no causa problema.
-
-	Implementación: SetValue con path al leaf y value=nil. _immutableUpdate
-	usa Sift.Dictionary.set, que con nil borra la clave. Esto evita la race
-	de "construir copia parcial del padre y reescribirla" que clobberaría
-	limpiezas concurrentes para items distintos en la misma categoría.
+	Idempotente. SetValue al leaf con nil (Sift.Dictionary.set borra la clave) en vez
+	de reescribir el padre, que pisaría limpiezas concurrentes de la misma categoría.
 ]]
 function DataService:MarkItemSeen(player: Player, category: string, itemId: string): boolean
 	if type(category) ~= "string" or category == "" then
@@ -1240,7 +966,6 @@ function DataService:MarkItemSeen(player: Player, category: string, itemId: stri
 	if not profile then
 		return false
 	end
-	-- Early-return si no estaba marcado (evita writes redundantes).
 	local flags = profile.Data.NewItemFlags
 	if type(flags) ~= "table" then
 		return true
@@ -1250,27 +975,13 @@ function DataService:MarkItemSeen(player: Player, category: string, itemId: stri
 		return true
 	end
 
-	-- SetValue al leaf con nil. _immutableUpdate solo toca la clave del item;
-	-- otros writes concurrentes (otros items en la misma categoría) afectan
-	-- claves distintas y no se pisan.
 	return self:SetValue(player, { "NewItemFlags", category, itemId }, nil)
 end
 
 --[[
-	Resetea TODO el perfil del jugador a los defaults del DataTemplate.
-	Útil para comandos de testing como /clear.
-
-	Devuelve true si pudo aplicar todos los SetValue (replicación al cliente).
-	El save al DataStore es asíncrono — el autosave loop persiste el cambio en
-	el siguiente ciclo (≤30s). Para forzar persistencia inmediata, llama a
-	`profile:Save()` desde el caller (rara vez necesario).
-
-	Por qué NO llamamos `profile:Save()` aquí:
-	  ProfileStore's `:Save()` no expone éxito/fallo del DataStore write — el
-	  pcall solo captura errores Lua, no rejects del backend. Confiar en su
-	  retorno para limpiar el dirty flag puede ocultar saves que ProfileStore
-	  reintentará silenciosamente. Mejor: marcamos dirty y dejamos que el loop
-	  oficial maneje persistencia + retries.
+	Para comandos de testing (/clear). No guarda en el acto: lo persiste el autosave.
+	Ojo: ProfileStore :Save() no expone el éxito del write al backend (el pcall solo
+	captura errores Lua).
 ]]
 function DataService:ResetProfile(player: Player): boolean
 	local profile = _profiles[player.UserId]
@@ -1279,8 +990,6 @@ function DataService:ResetProfile(player: Player): boolean
 		return false
 	end
 
-	-- Pre-construir todas las secciones nuevas antes de aplicar ningún SetValue,
-	-- para que un fallo intermedio no deje al cliente con perfil mixto.
 	local newSections: { { section: string, value: any } } = {}
 	for section, defaultSectionValue in DataTemplate do
 		table.insert(newSections, { section = section, value = _deepCopy(defaultSectionValue) })
@@ -1295,35 +1004,18 @@ function DataService:ResetProfile(player: Player): boolean
 		end
 	end
 
-	-- Sea éxito o fallo parcial, marcamos dirty para que el autosave persista
-	-- el estado actual (incluso si quedó mixto, queremos guardarlo para que
-	-- el siguiente login refleje la realidad).
+	-- Dirty incluso con fallo parcial: el siguiente login debe reflejar la realidad.
 	_markDirty(player.UserId)
 
 	return allOk
 end
 
 --[[
-	Fuerza un guardado durable del perfil al DataStore y devuelve si el write
-	corrió sin error. A diferencia de SetValue/BatchUpdate (que sólo marcan
-	dirty y dejan que el autosave persista hasta 30s después), esto bloquea
-	hasta que ProfileStore termina el Save.
-
-	Caso de uso: MarketplaceService.ProcessReceipt. Roblox da por CONSUMIDO el
-	receipt en cuanto el handler devuelve PurchaseGranted — NO espera a tu write
-	al DataStore. Si concedes la recompensa con sólo un dirty flag y el servidor
-	crashea dentro de la ventana de autosave, el receipt desaparece (no se
-	reentrega) y el jugador pierde una compra pagada con Robux. Patrón correcto:
-	concede → ForceSave → sólo devuelve PurchaseGranted si esto retornó true;
-	si no, devuelve NotProcessedYet para que Roblox reentregue (la idempotencia
-	vía ProcessedReceipts evita el doble-grant en el reintento).
-
-	Limitación heredada (ver nota en ResetProfile): ProfileStore's :Save() no
-	expone el éxito/fallo del backend write — el pcall sólo captura errores Lua.
-	Aun así, forzar el Save ahora (vs. esperar al autosave) cierra casi por
-	completo la ventana de crash, que es el objetivo.
-
-	Devuelve false si el perfil no está cargado/activo o si :Save() lanzó.
+	Bloquea hasta que ProfileStore termina el Save. Para ProcessReceipt: Roblox da el
+	receipt por CONSUMIDO al devolver PurchaseGranted, sin esperar al DataStore.
+	Patrón: conceder → ForceSave → PurchaseGranted solo si devolvió true; si no,
+	NotProcessedYet (ProcessedReceipts evita el doble grant). :Save() no expone el
+	éxito del write al backend, pero cierra casi toda la ventana de crash.
 ]]
 function DataService:ForceSave(player: Player): boolean
 	local profile = _profiles[player.UserId]
@@ -1339,21 +1031,15 @@ function DataService:ForceSave(player: Player): boolean
 		return false
 	end
 
-	-- No limpiamos el dirty flag a propósito: dejar que el autosave persista
-	-- de nuevo es una segunda red de seguridad barata y deseable aquí.
+	-- Dirty sin limpiar a propósito: el autosave es una segunda red de seguridad.
 	return true
 end
 
 --[[
-	Ejecuta fn en un thread aparte y espera como mucho timeoutSeconds a que
-	termine. ProfileStore (MessageAsync/GetAsync) reintenta con backoff
-	INDEFINIDAMENTE ante errores del DataStore — un caller síncrono (p. ej.
-	MarketplaceService.ProcessReceipt) no puede permitirse ese cuelgue: debe
-	devolver NotProcessedYet y dejar que Roblox reintente.
-
-	Devuelve (finished, ok, result). Con finished=false el thread sigue vivo y
-	puede completar más tarde — los callers deben tolerar ese "éxito tardío"
-	(las operaciones que pasan por aquí son idempotentes por diseño).
+	ProfileStore (MessageAsync/GetAsync) reintenta INDEFINIDAMENTE si el DataStore
+	falla; un caller como ProcessReceipt no puede colgarse.
+	Con finished=false el thread sigue vivo y puede completar tarde: las operaciones
+	que pasan por aquí deben ser idempotentes.
 ]]
 local function _runBounded(timeoutSeconds: number, fn: () -> any): (boolean, boolean, any)
 	local finished = false
@@ -1373,17 +1059,9 @@ local function _runBounded(timeoutSeconds: number, fn: () -> any): (boolean, boo
 end
 
 --[[
-	Envía un message de ProfileStore al perfil de un usuario ARBITRARIO — offline
-	o con sesión en otro servidor. Yielda (acotado a timeoutSeconds, default 10).
-	El mensaje queda en una cola persistente dentro del perfil y lo consume el
-	MessageHandler que el servicio interesado registre al cargarse la sesión
-	(via ProfileLoaded).
-
-	Caso de uso: entrega de regalos a receptores que no están en este servidor.
-
-	Devuelve true si ProfileStore confirmó el enqueue dentro del timeout. Un
-	false por timeout puede aun así entregar tarde — el consumidor debe deduplicar
-	por la key del mensaje (los regalos usan el PurchaseId + ledger de claims).
+	Para usuarios offline o en otro servidor. Lo consume el MessageHandler que el
+	servicio interesado registre en ProfileLoaded. Un false por timeout puede entregar
+	tarde: el consumidor debe deduplicar (los regalos, por PurchaseId + ClaimedGifts).
 ]]
 function DataService:MessageProfile(userId: number, message: any, timeoutSeconds: number?): boolean
 	local finished, ok, result = _runBounded(timeoutSeconds or 10, function()
@@ -1401,19 +1079,9 @@ function DataService:MessageProfile(userId: number, message: any, timeoutSeconds
 end
 
 --[[
-	Snapshot READ-ONLY del perfil de un usuario sin sesión en este servidor
-	(ProfileStore:GetAsync). Yielda (acotado, default 10s). NO usar para mutar
-	ni para jugadores presentes (para esos, GetProfile).
-
-	Devuelve (view, apiOk):
-	  • apiOk=false  → timeout o error de API; el caller decide su fallback.
-	  • view         → Profile view. OJO: para un perfil que NUNCA existió,
-	                   GetAsync NO devuelve nil — devuelve una vista sembrada
-	                   del template con view.SessionLoadCount == 0. Esa es la
-	                   señal de "usuario que nunca jugó aquí".
-
-	Caso de uso: consultar Settings.GiftsEnabled / existencia del receptor de
-	un regalo.
+	READ-ONLY, para usuarios sin sesión en este servidor. apiOk=false = timeout o error.
+	OJO: para un perfil que NUNCA existió GetAsync no devuelve nil sino una vista del
+	template con view.SessionLoadCount == 0.
 ]]
 function DataService:ViewProfileAsync(userId: number, timeoutSeconds: number?): (any, boolean)
 	local finished, ok, view = _runBounded(timeoutSeconds or 10, function()

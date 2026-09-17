@@ -1,29 +1,18 @@
 --!strict
 --[[
-	ScreenFade
-	Fundido a negro liso a pantalla completa (sin iris ni figuras): se cubre,
-	se hace el cambio con la pantalla en negro, y se descubre.
-
-	Uso:
-		local fade = ScreenFade.new(playerGui)
+	Fundido a negro liso a pantalla completa, por encima de toda la UI:
 		fade:cover(function()
 			-- pantalla completamente negra: mover cámara, cambiar preset…
 			fade:reveal()
 		end)
 
-	Cubre por encima de todo (DisplayOrder alto): la UI del panel que haya debajo
-	aparece al descubrir, no durante el viaje de la cámara.
-
-	Llamar `cover` mientras hay otra transición en curso cancela la anterior y su
-	callback ya no se ejecuta (un contador de operación descarta las obsoletas),
-	así que abrir y cerrar rápido no deja la pantalla en negro ni ejecuta el
-	cambio de cámara del panel que ya se cerró.
+	Un `cover` durante otra transición la cancela y su callback ya no se ejecuta
+	(contador de operación), así que abrir y cerrar rápido no deja la pantalla en negro.
 ]]
 
 local TweenService = game:GetService("TweenService")
 
-local COVER_INFO = TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-local REVEAL_INFO = TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local FADE_INFO = TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local GUI_NAME = "ScreenFadeGui"
 
 local ScreenFade = {}
@@ -32,14 +21,13 @@ ScreenFade.__index = ScreenFade
 export type ScreenFade = typeof(setmetatable(
 	{} :: {
 		_veil: Frame,
-		_screenGui: ScreenGui,
 		_activeTween: Tween?,
 		_opId: number,
 	},
 	ScreenFade
 ))
 
-local function _build(playerGui: PlayerGui): (ScreenGui, Frame)
+local function _build(playerGui: PlayerGui): Frame
 	local screenGui = Instance.new("ScreenGui")
 	screenGui.Name = GUI_NAME
 	screenGui.ResetOnSpawn = false
@@ -61,11 +49,11 @@ local function _build(playerGui: PlayerGui): (ScreenGui, Frame)
 	veil.ZIndex = 9999
 	veil.Parent = screenGui
 
-	return screenGui, veil
+	return veil
 end
 
--- Singleton por playerGui, igual que IrisTransition: reusa el GUI si otra
--- feature ya lo creó, en vez de apilar overlays negros.
+-- Singleton por playerGui (como IrisTransition): reusa el GUI si otra feature ya
+-- lo creó, en vez de apilar overlays.
 function ScreenFade.new(playerGui: PlayerGui): ScreenFade
 	local existing = playerGui:FindFirstChild(GUI_NAME)
 	if existing and existing:IsA("ScreenGui") then
@@ -73,7 +61,6 @@ function ScreenFade.new(playerGui: PlayerGui): ScreenFade
 		if existingVeil and existingVeil:IsA("Frame") then
 			return setmetatable({
 				_veil = existingVeil,
-				_screenGui = existing,
 				_activeTween = nil,
 				_opId = 0,
 			}, ScreenFade)
@@ -81,16 +68,15 @@ function ScreenFade.new(playerGui: PlayerGui): ScreenFade
 		existing:Destroy()
 	end
 
-	local screenGui, veil = _build(playerGui)
+	local veil = _build(playerGui)
 	return setmetatable({
 		_veil = veil,
-		_screenGui = screenGui,
 		_activeTween = nil,
 		_opId = 0,
 	}, ScreenFade)
 end
 
-function ScreenFade:_beginTransition(targetTransparency: number, tweenInfo: TweenInfo): (number, Tween)
+function ScreenFade:_beginTransition(targetTransparency: number): (number, Tween)
 	self._opId += 1
 	local opId = self._opId
 
@@ -105,7 +91,7 @@ function ScreenFade:_beginTransition(targetTransparency: number, tweenInfo: Twee
 	-- botones no deben quedarse muertos si algo interrumpe el fundido.
 	veil.Active = false
 
-	local tween = TweenService:Create(veil, tweenInfo, { BackgroundTransparency = targetTransparency })
+	local tween = TweenService:Create(veil, FADE_INFO, { BackgroundTransparency = targetTransparency })
 	self._activeTween = tween
 	tween:Play()
 
@@ -115,14 +101,12 @@ end
 --- Funde a negro. `onBlack` se llama con la pantalla completamente cubierta.
 function ScreenFade:cover(onBlack: (() -> ())?): ()
 	task.spawn(function()
-		local opId, tween = self:_beginTransition(0, COVER_INFO)
+		local opId, tween = self:_beginTransition(0)
 		local playbackState = tween.Completed:Wait()
 		if self._activeTween == tween then
 			self._activeTween = nil
 		end
 
-		-- Otra transición tomó el relevo (o el fundido se canceló): el cambio que
-		-- pedía este cover ya no toca hacerlo.
 		if self._opId ~= opId or playbackState ~= Enum.PlaybackState.Completed then
 			return
 		end
@@ -133,10 +117,9 @@ function ScreenFade:cover(onBlack: (() -> ())?): ()
 	end)
 end
 
---- Descubre la pantalla.
 function ScreenFade:reveal(): ()
 	task.spawn(function()
-		local opId, tween = self:_beginTransition(1, REVEAL_INFO)
+		local opId, tween = self:_beginTransition(1)
 		local playbackState = tween.Completed:Wait()
 		if self._activeTween == tween then
 			self._activeTween = nil
@@ -148,7 +131,6 @@ function ScreenFade:reveal(): ()
 	end)
 end
 
---- Deja la pantalla descubierta sin animación.
 function ScreenFade:reset(): ()
 	self._opId += 1
 	if self._activeTween then

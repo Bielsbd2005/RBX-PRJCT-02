@@ -11,10 +11,9 @@ local FOV_DOT_THRESHOLD = 0.7
 local ALLY_PROXIMITY_RADIUS = 30
 local ALLY_BONUS_PER_NEARBY = 10
 
--- Spawn-uniqueness guards. Burst spawns (round start: up to 8 bots + players in
--- the same frames) pick their points before any body has been teleported, so
--- physical occupancy alone can't prevent two entities choosing the same point —
--- the reuse window covers the gap between selection and the body landing.
+-- Spawn-uniqueness guards. Burst spawns (round start) pick their points before any
+-- body has been teleported, so physical occupancy alone can't prevent two entities
+-- choosing the same point: the reuse window covers selection → body landing.
 local SPAWN_REUSE_WINDOW = 2
 local OCCUPIED_RADIUS = 6
 

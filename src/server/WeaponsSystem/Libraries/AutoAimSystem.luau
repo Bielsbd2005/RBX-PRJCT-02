@@ -1,5 +1,4 @@
 --[[
-	AutoAimSystem.luau
 	Client-side auto-aim and auto-fire system.
 	Detects enemy players near the center of the screen and automatically fires.
 ]]
@@ -13,22 +12,17 @@ local TeamUtils = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild(
 
 local AutoAimSystem = {}
 
--- Configuration
 AutoAimSystem.SCREEN_RADIUS_THRESHOLD = 80		-- Pixels from screen center to consider a target
 AutoAimSystem.MAX_DISTANCE = 300				-- Max studs distance to detect enemies
 
--- Raycast params for visibility check (reused to avoid GC pressure)
+-- RaycastParams y filtro reutilizados entre llamadas para no alocar por call.
 local raycastParams = RaycastParams.new()
 raycastParams.FilterType = Enum.RaycastFilterType.Exclude
 raycastParams.IgnoreWater = true
--- Filter array reusado entre llamadas. Mutamos [1] in-place y asignamos
--- FilterDescendantsInstances al mismo array — evita el table literal por call.
 local visibilityFilter: { Instance } = table.create(1)
 
--- W9: tablas reusadas para el sweep de targets. findBestTarget corre 20Hz por
--- arma equipada local. Antes cada call alocaba charactersToCheck = {} +
--- 2 closures (addNpcModelIfEnemy, scanBotsIn). Ahora reusamos el buffer y
--- las funciones son module-level con un upvalue mutable (_localCharacter).
+-- findBestTarget corre a 20 Hz por arma local equipada: buffer y helpers a nivel de
+-- módulo (con el upvalue mutable _localCharacter) para no alocar por llamada.
 local _charactersBuffer: { Model } = {}
 local _localCharacter: Model? = nil
 
@@ -53,7 +47,6 @@ local function _scanBotsIn(container: Instance)
 	end
 end
 
--- Find the best enemy target near the screen center
 function AutoAimSystem.findBestTarget(weaponsSystem)
 	local camera = workspace.CurrentCamera
 	if not camera then return nil, nil end
@@ -72,12 +65,10 @@ function AutoAimSystem.findBestTarget(weaponsSystem)
 	local bestScreenDist = math.huge
 	local bestWorldPos = nil
 
-	-- Setup upvalue para los helpers + limpiar buffer reusado.
 	_localCharacter = localPlayer.Character
 	table.clear(_charactersBuffer)
 	local charactersToCheck = _charactersBuffer
 
-	-- Add enemy players
 	for _, player in ipairs(Players:GetPlayers()) do
 		if player == localPlayer then continue end
 		if not player.Character then continue end
@@ -86,16 +77,13 @@ function AutoAimSystem.findBestTarget(weaponsSystem)
 		end
 	end
 
-	-- Add NPCs: una sola pasada por workspace:GetChildren(); cada hijo cuenta
-	-- como NPC potencial Y se inspecciona su carpeta "Bots" directa (sin
-	-- FindFirstChild recursivo, que escanearía subárboles enteros).
+	-- Una sola pasada por workspace:GetChildren(): cada hijo es NPC potencial y se mira su
+	-- carpeta "Bots" directa (sin FindFirstChild recursivo, que escanearía subárboles).
 	for _, child in ipairs(workspace:GetChildren()) do
 		_addNpcModelIfEnemy(child)
 		_scanBotsIn(child)
-		-- Los bots reales viven en workspace.ActiveMap.<mapModel>.Bots (MatchService
-		-- clona el mapa dentro del contenedor ActiveMap), así que necesitamos un
-		-- nivel extra de profundidad solo dentro de ese contenedor — barato porque
-		-- ActiveMap suele tener un único hijo (el mapModel cargado).
+		-- Los bots de partida viven en workspace.ActiveMap.<mapModel>.Bots (MatchService clona el
+		-- mapa dentro de ActiveMap): un nivel extra solo ahí, barato porque suele tener un hijo.
 		if child.Name == "ActiveMap" then
 			for _, sub in ipairs(child:GetChildren()) do
 				_scanBotsIn(sub)
@@ -115,11 +103,9 @@ function AutoAimSystem.findBestTarget(weaponsSystem)
 		local worldPos = targetPart.Position
 		local cameraPos = camera.CFrame.Position
 
-		-- Distance check
 		local worldDist = (worldPos - cameraPos).Magnitude
 		if worldDist > AutoAimSystem.MAX_DISTANCE then continue end
 
-		-- Screen position check
 		local screenPos, onScreen = camera:WorldToViewportPoint(worldPos)
 		if not onScreen then continue end
 
@@ -130,7 +116,6 @@ function AutoAimSystem.findBestTarget(weaponsSystem)
 
 		if screenDist > AutoAimSystem.SCREEN_RADIUS_THRESHOLD then continue end
 
-		-- Pick the closest to screen center
 		if screenDist < bestScreenDist then
 			bestScreenDist = screenDist
 			bestTarget = targetPart
@@ -141,14 +126,12 @@ function AutoAimSystem.findBestTarget(weaponsSystem)
 	return bestTarget, bestWorldPos
 end
 
--- Check if a target is visible (no walls blocking line of sight)
 function AutoAimSystem.isTargetVisible(origin, targetPart)
 	if not targetPart or not targetPart.Parent then return false end
 
 	local targetPos = targetPart.Position
 	local direction = targetPos - origin
 
-	-- Reuse module-level filter (mutate slot 1) en lugar de table literal por call.
 	local localCharacter = LocalPlayer and LocalPlayer.Character
 	visibilityFilter[1] = localCharacter
 	raycastParams.FilterDescendantsInstances = visibilityFilter
@@ -156,11 +139,9 @@ function AutoAimSystem.isTargetVisible(origin, targetPart)
 	local result = workspace:Raycast(origin, direction, raycastParams)
 
 	if not result then
-		-- No hit means clear line of sight (target is within range but nothing blocking)
 		return true
 	end
 
-	-- Check if what we hit belongs to the target's character
 	local hitPart = result.Instance
 	if hitPart and targetPart.Parent and hitPart:IsDescendantOf(targetPart.Parent) then
 		return true

@@ -1,10 +1,4 @@
 --!strict
---[[
-	LoadoutService.luau
-	Gestión de loadout de partida: armas (main + special), wraps,
-	sombreros (hats) y caras (faces). Extraído de MatchService para
-	mantener responsabilidades separadas.
-]]
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -21,15 +15,12 @@ local BackWeaponService = require(script.Parent:WaitForChild("BackWeaponService"
 
 local LoadoutService = {}
 
--- ── Constantes ───────────────────────────────────────────────
 local WEAPON_TOOLS_ROOT_NAME = "WeaponTools"
 local BODIES_ROOT_NAME = "Bodies"
 local DEFAULT_BODY_ID = "Default"
 local MATCH_BODY_CLONE_ATTRIBUTE = "MatchBodyClone"
 local MATCH_LOADOUT_TOOL_ATTRIBUTE = "MatchLoadoutTool"
 local MATCH_LOADOUT_HAT_ATTRIBUTE = "MatchLoadoutHat"
-
--- ── Helpers internos ─────────────────────────────────────────
 
 local function _getOptionalString(value: any): string?
 	if type(value) == "string" and value ~= "" then
@@ -38,10 +29,7 @@ local function _getOptionalString(value: any): string?
 	return nil
 end
 
--- Defense-in-depth: aunque ShopService valide ownership en la compra/equip,
--- si una sola capa upstream falla (typo en path, race en BatchUpdate, exploit
--- de mutación directa de Loadout), aquí se rechaza al equipar. Delegamos en
--- InventoryRepository para consistencia con el resto de los services.
+-- Defensa en profundidad: se revalida posesión al equipar aunque ShopService ya lo haga.
 local _ownsWeapon = InventoryRepository.ownsWeapon
 local _ownsWeaponWrap = InventoryRepository.ownsWeaponWrap
 
@@ -66,7 +54,7 @@ local function _findLoadoutToolTemplate(loadoutCategory: WeaponCategory.WeaponCa
 		return nil
 	end
 
-	-- Ruta canónica: ServerStorage.WeaponTools.<categoría>.<weaponId>
+	-- ServerStorage.WeaponTools.<categoría>.<weaponId>
 	local byCategory = root:FindFirstChild(loadoutCategory)
 	if byCategory then
 		local direct = byCategory:FindFirstChild(weaponId)
@@ -86,11 +74,8 @@ local function _clearMatchLoadoutHat(character: Model)
 	end
 end
 
--- Resuelve el wrap equipado para un arma concreta. Sin fallback al slot
--- `wrapsTable.Default`: esa entrada es la slot del arma con id "Default", no
--- un default que se propaga al resto de armas. Equipar es estrictamente
--- per-weapon. Un wrap global del Battle Pass solo otorga *ownership* para
--- todas las armas; equiparlo a cada una sigue siendo manual vía el locker.
+-- Sin fallback a `wrapsTable.Default`: es el slot del arma con id "Default", no un
+-- default global. Equipar wraps es estrictamente por arma.
 local function _resolveWeaponWrapForLoadout(profileData: any, loadoutCategory: WeaponCategory.WeaponCategory, weaponId: string): string
 	local loadout = profileData.Loadout
 	if type(loadout) ~= "table" then
@@ -131,9 +116,8 @@ local function _clearMatchLoadoutTools(player: Player)
 	end
 end
 
--- Devuelve (éxito, reintentable, mainWeaponId, slots). `slots` lleva arma+wrap
--- ya resueltos de ambas categorías; lo consume BackWeaponService para holsterar
--- la que no se equipe.
+-- Devuelve (éxito, reintentable, mainWeaponId, slots). `slots` lo consume
+-- BackWeaponService para holsterar la que no se equipe.
 local function _grantMatchLoadoutTools(
 	player: Player,
 	dataService: any
@@ -148,10 +132,6 @@ local function _grantMatchLoadoutTools(
 	local mainWeaponId = if type(loadout.MainWeapon) == "string" and loadout.MainWeapon ~= "" then loadout.MainWeapon else ItemDefaults.ITEM_ID
 	local specialWeaponId = if type(loadout.SpecialWeapon) == "string" and loadout.SpecialWeapon ~= "" then loadout.SpecialWeapon else ItemDefaults.ITEM_ID
 
-	-- Defense-in-depth: rechazar weapon ID que no esté en el inventario.
-	-- Mantiene al jugador con la weapon "Default" en lugar de equiparle algo
-	-- que no compró, si ShopService o el flujo de equip dejaron el Loadout
-	-- en un estado inválido (race, exploit, profile corrupto).
 	if not _ownsWeapon(profileData, WeaponCategory.MAIN, mainWeaponId) then
 		warn(string.format("[LoadoutService] %s tiene Loadout.MainWeapon=%s pero no lo posee — fallback a Default.", player.Name, mainWeaponId))
 		mainWeaponId = ItemDefaults.ITEM_ID
@@ -182,12 +162,8 @@ local function _grantMatchLoadoutTools(
 		local backpackClone = template:Clone()
 		CosmeticsTemplates.applyWeaponWrapToTool(backpackClone, wrapId)
 		backpackClone:SetAttribute(MATCH_LOADOUT_TOOL_ATTRIBUTE, true)
-		-- Categoría de la slot ("Main"/"Special"). El nombre de la Tool es el
-		-- weaponId, que no basta: el mismo id existe en los dos catálogos
-		-- ("Default"). Con ella, BaseWeapon y el Hotbar resuelven la definición de
-		-- WeaponsConfig en cliente y servidor, y BackWeaponService sabe qué arma
-		-- cuelga de la espalda. Se reestampa aunque el template ya la traiga:
-		-- aquí la categoría es autoritativa.
+		-- El nombre de la Tool (weaponId) no basta: "Default" existe en los dos catálogos.
+		-- BaseWeapon, Hotbar y BackWeaponService leen esta categoría; aquí es autoritativa.
 		WeaponsConfig.StampTool(backpackClone, loadoutCategory)
 		backpackClone.Parent = backpack
 		return true
@@ -245,9 +221,6 @@ local function _equipMainLoadoutTool(player: Player, mainWeaponId: string): bool
 	return true
 end
 
--- ── API pública ──────────────────────────────────────────────
-
---- Aplica cosméticos (hat + face) al personaje de forma síncrona.
 function LoadoutService.applyCosmetics(player: Player, character: Model, dataService: any)
 	_clearMatchLoadoutHat(character)
 
@@ -279,13 +252,9 @@ function LoadoutService.applyCosmetics(player: Player, character: Model, dataSer
 	end
 end
 
--- ── Body swap (StarterCharacter por jugador) ─────────────────
---
--- Roblox lee StarterPlayer.StarterCharacter al llamar player:LoadCharacter().
--- Para servir bodies distintos por jugador, clonamos el template desde
--- Shared.Bodies[outfitId], lo parenteamos como StarterCharacter,
--- llamamos LoadCharacter (yields) y limpiamos. El mutex serializa swaps
--- concurrentes para que dos LoadCharacter simultáneos no se pisen el template.
+-- Body por jugador: Roblox lee StarterPlayer.StarterCharacter en LoadCharacter(),
+-- así que se instala un clon de Shared.Bodies[outfitId] justo antes y se limpia.
+-- El mutex evita que dos LoadCharacter simultáneos se pisen el template.
 
 local _bodySwapBusy = false
 
@@ -302,12 +271,7 @@ local function _resolveFullBodyTemplate(outfitId: string?): Model?
 	return if fallback and fallback:IsA("Model") then fallback :: Model else nil
 end
 
---- Carga el Character del jugador usando el body equipado en Loadout.Outfit.
---- Bloquea mientras otro swap esté en curso para no contaminar el StarterCharacter.
--- BODY_SWAP_LOCK_TIMEOUT: cap del busy-wait. Si un swap anterior se cuelga
--- (yield perdido en LoadCharacter, error fuera del pcall, etc.), el lock se
--- libera forzado para que respawns posteriores no queden bloqueados para
--- siempre. 10s cubre incluso un LoadCharacter lento + clone install.
+-- Si un swap anterior se cuelga, el lock se libera forzado tras este timeout (s).
 local BODY_SWAP_LOCK_TIMEOUT = 10
 function LoadoutService.loadCharacterWithBody(player: Player, dataService: any)
 	if player.Parent ~= Players then
@@ -325,11 +289,9 @@ function LoadoutService.loadCharacterWithBody(player: Player, dataService: any)
 	end
 	_bodySwapBusy = true
 
-	-- Wrap todo el critical section en pcall para garantizar que _bodySwapBusy
-	-- se libera incluso si una operación intermedia (Clone, SetAttribute,
-	-- LoadCharacter, Destroy) tira un error inesperado.
+	-- pcall para que _bodySwapBusy se libere aunque algo intermedio falle.
 	local ok, err = pcall(function()
-		-- Limpieza defensiva: si un swap previo crasheó dejó su clon en StarterPlayer.
+		-- Un swap previo que crasheó pudo dejar su clon en StarterPlayer.
 		local leftover = StarterPlayer:FindFirstChild("StarterCharacter")
 		if leftover and leftover:GetAttribute(MATCH_BODY_CLONE_ATTRIBUTE) == true then
 			leftover:Destroy()
@@ -374,14 +336,13 @@ function LoadoutService.loadCharacterWithBody(player: Player, dataService: any)
 	end
 end
 
---- Entrega armas del loadout con reintentos (blocking). Llamar en task.spawn.
+--- Bloquea: llamar en task.spawn.
 function LoadoutService.grantWeaponsWithRetry(player: Player, dataService: any, timeoutSec: number)
 	local endAt = time() + math.max(0.5, timeoutSec)
 	while player.Parent == Players do
 		local success, retryable, mainWeaponId, slots = _grantMatchLoadoutTools(player, dataService)
 		if success then
-			-- Antes de equipar: el Bind engancha character.ChildAdded, y así el
-			-- equipado de la Main de más abajo ya entra por esa vía.
+			-- Antes de equipar: Bind engancha character.ChildAdded y el equipado entra por ahí.
 			local character = player.Character
 			if character and slots then
 				BackWeaponService.Bind(character, slots)

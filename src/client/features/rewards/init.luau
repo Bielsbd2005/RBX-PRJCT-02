@@ -1,24 +1,8 @@
 --!strict
 --[[
-	rewards/init.luau (Client Feature)
-	Panel de recompensas (UserInterface.Rewards):
-
-		Rewards
-		  Action
-		    Container
-		      ClaimBtn      ← unirse al grupo y reclamar
-		  Redeem
-		    Content
-		      Header
-		        CloseBtn
-		      Container
-		        RedeemBtn   ← canjear código
-		        TextBox     ← input del código
-
-	Action: la fuente de verdad es Rewards.GroupClaimed (server). Una vez
-	reclamado, el frame Action se oculta para siempre (al cargar y tras un
-	claim exitoso). El grupo a unirse es el de la experiencia (game.CreatorId),
-	que es justo el que el server comprueba con player:IsInGroup.
+	Action se oculta para siempre una vez reclamado; la fuente de verdad es
+	Rewards.GroupClaimed (server). El grupo es el dueño de la experiencia
+	(game.CreatorId), el mismo que el server comprueba con player:IsInGroup.
 ]]
 
 local Players = game:GetService("Players")
@@ -53,7 +37,6 @@ function RewardsFeature.start(menuController: any): any
 	local player = Players.LocalPlayer
 	local playerGui = player:WaitForChild("PlayerGui")
 
-	-- Botón de apertura en Menu.Container.TopFrame.RightContainer.Rewards
 	local menuGui = menuController:getGui()
 	local container = menuGui:WaitForChild("Container")
 	local topFrame = container:WaitForChild("TopFrame")
@@ -81,7 +64,6 @@ function RewardsFeature.start(menuController: any): any
 	local panel = PanelController.new(menuController, frame, menuBtn, closeBtn, {
 		onOpen = function()
 			BlurController.acquire(BLUR_KEY)
-			-- Empezar siempre con el input de código limpio al (re)entrar.
 			codeTextBox.Text = ""
 		end,
 		onClose = function()
@@ -109,7 +91,6 @@ function RewardsFeature.start(menuController: any): any
 		redeemBtn.AutoButtonColor = not pending
 	end
 
-	-- Reclamado → ocultar para siempre (persistido en GroupClaimed server-side).
 	local function hideAction()
 		action.Visible = false
 	end
@@ -170,7 +151,6 @@ function RewardsFeature.start(menuController: any): any
 		success: boolean,
 		message: string,
 		claimType: string,
-		rewardCash: number,
 	})
 		if data.success then
 			Notify.success(data.message)
@@ -179,13 +159,11 @@ function RewardsFeature.start(menuController: any): any
 		end
 
 		if data.claimType == "LikeJoin" then
-			likeToken += 1
 			setLikePending(false)
 			if data.success then
 				hideAction()
 			end
 		elseif data.claimType == "Code" then
-			codeToken += 1
 			setCodePending(false)
 			if data.success then
 				codeTextBox.Text = ""

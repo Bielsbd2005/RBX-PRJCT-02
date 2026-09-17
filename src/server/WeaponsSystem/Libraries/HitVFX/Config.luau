@@ -1,29 +1,13 @@
 --!strict
 --[[
-	HitVFX/Config.luau — Ajustes del sistema de VFX de impacto de balas.
+	VFX de impacto de bala; solo cuerpo y cabeza (los impactos contra el mundo no
+	producen nada). Ver docs/HIT-VFX.md.
 
-	Sólo hay DOS efectos: "Body" (impacto en cuerpo) y "Headshot" (impacto en
-	cabeza). Los impactos contra el mundo (suelo, metal, ...) no producen nada.
-
-	Los efectos viven SIEMPRE en una carpeta de Studio, nunca en código:
-
-	    ReplicatedStorage/HitVFX/
-	        Body        ← Attachment (o Part) con tus ParticleEmitters + Sounds
-	        Headshot    ← idem
-
-	Cada plantilla (nombrada EXACTO "Body" / "Headshot") contiene SÓLO partículas:
-	    · uno o varios ParticleEmitter  → atributo opcional "EmitCount" (number,
-	        nº de partículas por ráfaga; def. 15). En móvil se multiplica por
-	        Config.MobileScale.
-
-	EL SONIDO NO VA AQUÍ. El sonido de hit/headshot vive en
-	SoundService.Audio.Gameplay.HitSound/Headshot y lo dispara DamageBillboardHandler
-	(2D, con pitch progresivo de combo). El motor ignora cualquier Sound que pongas
-	en la plantilla, para no reproducir el mismo sonido dos veces.
-
-	El motor clona la plantilla, la orienta a la normal del impacto (las
-	partículas salen "hacia arriba" del Attachment → EmissionDirection = Top) y
-	la reusa en pool. Tuneas todo en Studio en vivo, sin tocar código.
+	Requisito de Studio: ReplicatedStorage/Templates/HitVFX/{Body,Headshot}, cada
+	uno Attachment o Part con ParticleEmitters (atributo opcional "EmitCount",
+	def. 15). Se orienta a la normal del impacto: usar EmissionDirection = Top.
+	Los Sound de la plantilla se ignoran: el sonido lo dispara DamageBillboardHandler
+	desde SoundService.Audio.Gameplay.
 ]]
 
 local Config = {}
@@ -41,10 +25,8 @@ Config.MobileScale = 0.5
 -- Techo de efectos simultáneos en el pool; los extra se descartan.
 Config.MaxConcurrent = 16
 
--- Carpeta de plantillas (hijo directo de ReplicatedStorage).
 Config.FolderName = "HitVFX"
 
--- Nombres de las dos plantillas dentro de la carpeta.
 Config.BodyCategory = "Body"
 Config.HeadshotCategory = "Headshot"
 

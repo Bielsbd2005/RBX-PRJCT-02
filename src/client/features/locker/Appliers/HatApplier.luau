@@ -2,9 +2,6 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local LockerConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("LockerConfig"))
-local LockerCategory = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("LockerCategory"))
-
 local HatApplier = {}
 HatApplier.__index = HatApplier
 
@@ -101,13 +98,6 @@ function HatApplier:Apply(itemData: any)
 		hatTemplate = hatsFolder:FindFirstChild(itemId)
 	end
 
-	if not hatTemplate and type(itemData.qualifiedId) == "string" then
-		local idSuffix = string.match(itemData.qualifiedId, "[^%.]+$")
-		if idSuffix then
-			hatTemplate = hatsFolder:FindFirstChild(idSuffix)
-		end
-	end
-
 	if not hatTemplate or not hatTemplate:IsA("Accessory") then
 		warn("[HatApplier] No se encontro el sombrero:", itemName or itemId or "<sin nombre>")
 		return
@@ -129,9 +119,8 @@ function HatApplier:Apply(itemData: any)
 	if headAttachment and headAttachment:IsA("Attachment") then
 		handle.CFrame = headAttachment.WorldCFrame * (if hatAttachment then hatAttachment.CFrame:Inverse() else CFrame.new())
 	else
-		-- Asset mal formado (sin HatAttachment ni el attachment esperado): sin esto
-		-- el WeldConstraint congela la CFrame por defecto del clone (cerca del
-		-- origen del mundo). Posicionar el Handle sobre la cabeza como fallback.
+		-- Asset sin el attachment esperado: sin esto el WeldConstraint congela la
+		-- CFrame por defecto del clone (cerca del origen del mundo).
 		handle.CFrame = head.CFrame * CFrame.new(0, head.Size.Y * 0.5, 0)
 	end
 
@@ -163,7 +152,6 @@ function HatApplier:ApplyItemId(itemId: string?)
 	end
 
 	self:Apply({
-		qualifiedId = LockerConfig.makeQualifiedId(LockerCategory.HATS, itemId),
 		id = itemId,
 		Name = itemConfig.Name,
 	})

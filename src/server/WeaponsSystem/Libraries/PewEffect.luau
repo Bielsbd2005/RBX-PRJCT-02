@@ -1,23 +1,11 @@
 --!strict
 --[[
-	PewEffect
-	Animación visual del "pew" que tiene cada arma. Cada Tool tiene la
-	estructura:
+	Animación del "pew" de cada arma. Estructura requerida en la Tool:
 		Tool.PewPart.PewEffect.ImageLabel
+	PewEffect.play(tool) es noop si falta. Llamadas repetidas reinician el tween (automáticas).
 
-	El ImageLabel arranca invisible (Visible=false / Transparency=1 / Size=0,
-	Rotation=-10), crece+aparece+rota en 0.08s ("expand"), y luego se contrae
-	+desvanece+rota al lado contrario en 0.12s ("contract"). Llamadas repetidas
-	cancelan el tween en vuelo y reinician — útil para automáticas.
-
-	Uso:
-		PewEffect.play(tool)  -- noop si la Tool no tiene la estructura esperada
-
-	Cliente only. Las modificaciones a GUIs en Workspace desde un LocalScript
-	no replican, así que cada cliente que ejecuta `play(tool)` ve su efecto
-	localmente — el caller lo invoca desde simulateFire (que ya corre en cada
-	cliente cuando cualquier jugador dispara), así todos ven el efecto sobre
-	la tool del que dispara.
+	Solo cliente: los cambios a GUIs en Workspace desde un LocalScript no replican, así
+	que se invoca desde simulateFire, que ya corre en cada cliente cuando alguien dispara.
 ]]
 
 local TweenService = game:GetService("TweenService")
@@ -42,9 +30,7 @@ type State = {
 	conn: RBXScriptConnection?,
 }
 
--- Estado por ImageLabel: la mismo arma puede dispararse muchas veces seguidas
--- (full-auto) y cada disparo cancela el tween anterior. Como el módulo lo
--- llaman varias armas en paralelo, no podemos usar singletons de módulo.
+-- Estado por ImageLabel y no de módulo: varias armas lo usan en paralelo.
 local states: { [ImageLabel]: State } = {}
 
 local function cancelState(state: State)
@@ -77,8 +63,7 @@ local function ensureState(label: ImageLabel): State
 	local state: State = { tween = nil, conn = nil }
 	states[label] = state
 
-	-- Cuando el ImageLabel se destruye (despawn de la Tool), liberamos la
-	-- entrada del map para que no acumule referencias muertas.
+	-- Liberar la entrada cuando la Tool se despawnea.
 	label.AncestryChanged:Connect(function(_child, parent)
 		if parent == nil then
 			cancelState(state)

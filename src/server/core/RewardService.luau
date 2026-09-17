@@ -1,11 +1,6 @@
 --!strict
 --[[
-	RewardService.luau
 	Punto único de aplicación de recompensas (XP + Cash) para jugadores.
-
-	Sustituye el patrón disperso de `DataService:Increment(player, {"Stats",
-	"Cash"}, n)` + `DataService:AddXP(player, n)` que estaba esparcido por
-	MatchService, WeaponsSystem, DailyTasksService y RewardsService.
 
 	API:
 	  RewardService.Award(player, actionKey, extraUpdates?) -> (ok, xp, cash)
@@ -47,18 +42,11 @@ function RewardService.Start(dataService: DataService): ()
 end
 
 --[[
-	Award: concede XP y Cash de `actionKey` al jugador, aplicando opcionalmente
-	`extraUpdates` atómicamente con el Cash.
-
-	Retorna (ok, xpGranted, cashGranted). ok=true incluso si xpGranted=0 o
-	cashGranted=0 (acciones cuya tabla tenga 0 son legítimas — siempre que la
-	clave exista). Devuelve (false, 0, 0) si la clave no existe o el profile
-	no está cargado.
-
-	`opts.skipCash` / `opts.skipXP` permiten suprimir una de las dos monedas
-	(L14): el caller puede capar cash y xp de forma INDEPENDIENTE. Si se salta
-	una moneda, su monto concedido vuelve como 0 y no se persiste ni registra en
-	analytics. `extraUpdates` se aplican siempre (no dependen de las monedas).
+	Award: concede XP y Cash de `actionKey`, aplicando `extraUpdates` atómicamente con el Cash.
+	Retorna (ok, xpGranted, cashGranted); ok=true aunque una tabla dé 0. (false, 0, 0) si la
+	clave no existe o el profile no está cargado.
+	`opts.skipCash` / `opts.skipXP` suprimen una moneda de forma independiente: su monto
+	vuelve como 0 y no se persiste ni registra. `extraUpdates` se aplican siempre.
 ]]
 type AwardOptions = {
 	skipCash: boolean?,
@@ -85,9 +73,8 @@ function RewardService.Award(
 	end
 
 	if not _dataService:GetProfile(player) then
-		-- Sin profile no podemos persistir nada. Los callers que necesiten esperar
-		-- al ProfileLoaded deben encolar ellos mismos (p.ej. MatchService ya tiene
-		-- _deferUntilProfile para kills durante el join window).
+		-- Sin profile no se persiste nada: los callers que deban esperar al ProfileLoaded
+		-- encolan ellos mismos (p.ej. MatchService._deferUntilProfile).
 		return false, 0, 0
 	end
 
@@ -105,11 +92,8 @@ function RewardService.Award(
 		end
 	end
 
-	-- `cashOk` va aparte de `ok` A PROPÓSITO. Compartían variable, así que un
-	-- fallo al conceder la XP marcaba `ok = false` y suprimía el registro de
-	-- un Cash que YA se había persistido: el saldo del jugador subía y el
-	-- faucet no aparecía en ninguna parte. El balance faucet/sink del
-	-- dashboard se quedaba corto sin que nada lo dijera.
+	-- `cashOk` va aparte de `ok` a propósito: si falla la XP, el Cash ya persistido debe
+	-- registrarse igual o el balance faucet/sink del dashboard queda corto.
 	local cashOk = true
 	if #updates > 0 then
 		local batchOk, batchErr = pcall(function()
@@ -119,7 +103,6 @@ function RewardService.Award(
 			warn(("[RewardService] BatchUpdate falló para %s (action=%s): %s"):format(player.Name, actionKey, tostring(batchErr)))
 			cashOk = false
 		elseif batchErr == false then
-			-- BatchUpdate devolvió false (sin error pero sin éxito).
 			cashOk = false
 		end
 	end
@@ -143,11 +126,8 @@ function RewardService.Award(
 		TelemetryService.RecordFlow(player, "source", actionKey, cashAmount, itemSku, "Cash")
 	end
 
-	-- La XP se registra aparte, y no dentro de la guarda del cash: la mayoría
-	-- de acciones del catálogo dan XP sin dar Cash (asistencias, objetivos), y
-	-- todas ellas eran invisibles porque el único registro colgaba de
-	-- `cashAmount > 0`. Sin esto, el ritmo de XP por hora del que dependen los
-	-- niveles de desbloqueo del catálogo no se puede medir, sólo suponer.
+	-- La XP se registra fuera de la guarda del cash: muchas acciones dan XP sin Cash
+	-- y sin este registro el ritmo de XP/hora no se puede medir.
 	if xpOk and xpAmount > 0 then
 		TelemetryService.RecordXP(player, actionKey, xpAmount, itemSku)
 	end
@@ -156,19 +136,12 @@ function RewardService.Award(
 end
 
 --[[
-	AwardCash: concede un monto de cash ARBITRARIO (no atado a ActionRewards),
-	con su registro de analytics. Pensado para bonus configurables fuera del
-	catálogo de acciones — p. ej. los bonus de fin de partida (MatchResultsService),
-	cuyos montos viven en `shared/constants/ResultsRewards.luau`.
+	AwardCash: concede un monto de cash arbitrario (no atado a ActionRewards), p. ej. los
+	bonus de fin de partida (montos en shared/constants/ResultsRewards.luau).
 
-	`sourceLabel` es el transactionType para la telemetría (p. ej.
-	"MatchEnd::Victory"). Devuelve true si se persistió.
-
-	`itemSku` es la clave con la que el movimiento se puede unir a otra serie.
-	Los bonus de fin de partida pasan ahí el `matchId` de la ronda que los
-	pagó: sin él, el Cash de fin de partida y el MATCH_END viven en dos tablas
-	que no comparten ninguna columna, y "cuánto pagó esta partida" no tiene
-	respuesta.
+	`sourceLabel` es el transactionType de telemetría ("MatchEnd::Victory"). Devuelve true
+	si se persistió. `itemSku` une el movimiento con otra serie: los bonus de fin de
+	partida pasan el `matchId`, sin el cual no se puede cruzar con MATCH_END.
 ]]
 function RewardService.AwardCash(player: Player, amount: number, sourceLabel: string, itemSku: string?): boolean
 	if not _dataService or not player or type(amount) ~= "number" or amount <= 0 then
@@ -201,18 +174,13 @@ end
 
 --[[
 	AwardGems: concede Gems (moneda premium).
-
-	Deliberadamente NO pasa por `ActionRewards`: ese catálogo describe lo que se
-	gana JUGANDO, y los Gems solo se obtienen por Battle Pass o comprando packs
-	con Robux. Mantenerlo fuera evita que alguien añada por descuido un faucet
-	de Gems a una kill.
-
-	Callers legítimos (los únicos dos que debería haber):
+	Deliberadamente NO pasa por `ActionRewards` (lo que se gana JUGANDO): los Gems solo
+	salen del Battle Pass o de packs con Robux, y así nadie añade un faucet de Gems a una kill.
+	Únicos callers legítimos:
 	  • BattlePassService — recompensa de tier con Kind = "Gems".
 	  • ServerBootstrap.ProcessReceipt — compra de un pack de Gems con Robux.
 
-	`sourceLabel` es el transactionType para analytics ("BattlePassClaim",
-	"RobuxPurchase"). Devuelve true si se persistió.
+	`sourceLabel` es el transactionType para analytics. Devuelve true si se persistió.
 ]]
 function RewardService.AwardGems(player: Player, amount: number, sourceLabel: string, itemSku: string?): boolean
 	if not _dataService or not player or type(amount) ~= "number" or amount <= 0 then
@@ -245,11 +213,8 @@ end
 
 --[[
 	SpendGems: descuenta Gems. Devuelve false si el saldo es insuficiente.
-
-	El descuento va por `delta` negativo, no por asignación: si otro flujo
-	(una compra concurrente, un claim) muta Stats.Gems entre la lectura del
-	saldo y la escritura, un `value` absoluto perdería ese cambio. Mismo
-	criterio que ya usa ShopService con el Cash.
+	El descuento va por `delta` negativo, no por asignación: un `value` absoluto perdería
+	cambios concurrentes a Stats.Gems entre la lectura del saldo y la escritura.
 ]]
 function RewardService.SpendGems(player: Player, amount: number, sinkLabel: string, itemSku: string?): boolean
 	if not _dataService or not player or type(amount) ~= "number" or amount <= 0 then

@@ -1,19 +1,6 @@
 --!strict
---[[
-	LockerService.luau (Server)
-	Endpoints server-side para acciones de UX del Locker.
-
-	Por ahora:
-	  • MarkItemSeen — el cliente avisa que el jugador vio un ítem nuevo;
-	    server limpia el flag de NewItemFlags para que el badge desaparezca
-	    en futuras sesiones.
-
-	Validación:
-	  • Rate limit: 0.05s para evitar spam.
-	  • category/itemId tipados; sin whitelist específica (cualquier flag
-	    presente puede limpiarse — no hay riesgo de abuso porque MarkItemSeen
-	    solo BORRA, nunca crea ownership).
-]]
+-- MarkItemSeen limpia el flag de NewItemFlags sin whitelist de ítems: solo
+-- borra flags, nunca crea ownership, así que no hay riesgo de abuso.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")

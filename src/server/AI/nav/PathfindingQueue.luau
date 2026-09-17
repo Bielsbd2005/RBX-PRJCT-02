@@ -1,16 +1,11 @@
 --!strict
 --[[
-	PathfindingQueue — FIFO global de ComputeAsync para todos los bots.
+	FIFO global de ComputeAsync para todos los bots.
 
-	Roblox PathfindingService:ComputeAsync es síncrono; cuando muchos bots
-	intentan computar al mismo tiempo (round start con 8-16 bots), el frame
-	cae varios ms. Esta cola encadena los ComputeAsync a un ritmo fijo
-	(2 por Heartbeat por defecto) para diluir el spike a lo largo de varios
-	frames.
-
-	Cada request se ejecuta en `task.spawn` para que el yield del ComputeAsync
-	no detenga el Heartbeat ni los otros requests del mismo tick. El callback
-	recibe `ok: boolean` y debe consultar `path.Status` para verificar éxito.
+	ComputeAsync es caro y en round start muchos bots computan a la vez: la cola los
+	reparte a QueueRequestsPerHeartbeat por Heartbeat. Cada request va en `task.spawn`
+	para que su yield no detenga el Heartbeat. El callback recibe `ok` y debe
+	consultar `path.Status` para verificar éxito.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -19,9 +14,8 @@ local RunService = game:GetService("RunService")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local BotConfig = require(Shared:WaitForChild("constants"):WaitForChild("BotConfig"))
 
--- `originPart` en lugar de un Vector3 capturado al encolar: con backlog en la
--- cola el bot ya no está donde estaba al pedir el path, y el path arrancaba
--- detrás de él. La posición se lee al momento de lanzar ComputeAsync.
+-- `originPart` y no un Vector3: con backlog el bot ya no está donde pidió el path.
+-- La posición se lee al lanzar ComputeAsync.
 type Entry = {
 	path: Path,
 	originPart: BasePart,
@@ -31,24 +25,15 @@ type Entry = {
 
 local PathfindingQueue = {}
 
--- Audit: head/tail pointer en lugar de table.remove(_queue, 1) que era
--- O(n). Con 16 bots en round-start, la cola encola ~16 entries y drainar
--- a 2/Heartbeat producía 16+14+12+... shifts. Trivial en absoluto pero
--- innecesario.
 local _queue: { Entry } = {}
 local _head = 1
 local _tail = 0
--- Semáforo de in-flight: el budget per-Heartbeat sólo limita enqueues. Sin
--- tope concurrente, un repath storm spawnea N coroutines paralelas que ceden
--- mid-ComputeAsync y el spike se acumula en lugar de diluirse.
+-- Tope de in-flight: el budget por Heartbeat solo limita lanzamientos; sin tope, un
+-- repath storm acumula coroutines que ceden mid-ComputeAsync.
 local _inFlight = 0
--- Per-Path serialization: ComputeAsync is not reentrant on the same Path
--- object. A Navigator can have two queued entries for its single shared Path
--- (e.g., recomputeLast while the first entry is still queued during a
--- backlog); running both concurrently makes the first pcall fail spuriously.
--- Entries whose Path is mid-compute are requeued instead of spawned.
--- Self-cleaning: each compute clears its own flag on completion, so paths of
--- dead Navigators never linger here.
+-- ComputeAsync is not reentrant on the same Path, and a Navigator can have two
+-- queued entries for its single Path (e.g. recomputeLast during a backlog). Entries
+-- whose Path is mid-compute are requeued. Each compute clears its own flag.
 local _busyPaths: { [Path]: boolean } = {}
 
 function PathfindingQueue.enqueue(path: Path, originPart: BasePart, dest: Vector3, callback: (ok: boolean) -> ())
@@ -65,10 +50,8 @@ function PathfindingQueue.getDepth(): number
 	return _tail - _head + 1
 end
 
--- Purga la cola al OnRoundEnd. Las callbacks pendientes verifican
--- Navigator._stopped, así que no es funcionalmente necesario, pero libera
--- los closures (que retienen refs a Path + Navigator) sin esperar al
--- drain natural a 2/Heartbeat.
+-- Las callbacks pendientes ya comprueban Navigator._stopped; purgar solo libera los
+-- closures sin esperar al drain.
 function PathfindingQueue.clear()
 	table.clear(_queue)
 	_head = 1
@@ -110,9 +93,6 @@ RunService.Heartbeat:Connect(function()
 			end)
 		end
 	end
-	-- Compact: si la cola se drenó completa, reseteamos punteros para evitar
-	-- crecimiento monotónico de los índices (irrelevante en práctica con
-	-- doubles, pero higiene).
 	if _head > _tail then
 		_head = 1
 		_tail = 0

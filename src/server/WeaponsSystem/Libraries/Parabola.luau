@@ -1,8 +1,6 @@
 local MIN_HORZ_SPEED = 0.01 --The minimum X and Z velocity for a physical-launch parabola to be considered vertical, helps avoid numerical instability
--- Default = 1 (cast lineal único). Antes 32 era footgun: cualquier Parabola.new()
--- sin override hacía 32 raycasts/bala/frame de vuelo. BulletWeapon llama
--- setNumSamples explícitamente justo después de new(), así que el cambio
--- no afecta callers actuales — solo previene la trampa para futuros.
+-- Cast lineal único por defecto: cada sample es un raycast por bala por frame.
+-- BulletWeapon fija setNumSamples justo después de new().
 local DEFAULT_NUM_SAMPLES = 1
 local DEFAULT_NORMAL = Vector3.new(0, 1, 0)
 local ROT_OFFSET = {
@@ -109,8 +107,6 @@ function Parabola:sampleVelocity(t)
 	return self.referenceFrame:vectorToWorldSpace(Vector3.new(0, yVelocity, -xVelocity))
 end
 
--- RaycastParams cacheado a nivel módulo. Antes FindPartOnRayWithIgnoreList
--- (deprecated) por sample × shotgun proyectil × frame; ahora workspace:Raycast.
 local _parabolaCastParams: RaycastParams? = nil
 
 function Parabola:_penetrateCast(ray, ignoreList)
@@ -128,9 +124,8 @@ function Parabola:_penetrateCast(ray, ignoreList)
 	local tries = 0
 	local hitPart, hitPoint, hitNormal, hitMaterial =
 		nil, ray.Origin + ray.Direction, UP_VECTOR, Enum.Material.Air
-	-- P3: cap de penetración bajado de 50 a 8 (paridad con ShoulderCamera).
-	-- 50 raycasts por sample por frame eran un frame-killer en GPUs de gama baja,
-	-- p.ej. una escopeta (NumProjectiles=8) en auto-fire.
+	-- Tope de penetración en paridad con ShoulderCamera: son raycasts por sample por
+	-- frame (una escopeta en auto-fire los multiplica).
 	while tries < 8 do
 		tries = tries + 1
 		local result = workspace:Raycast(ray.Origin, ray.Direction, params)
@@ -214,7 +209,6 @@ end
 
 function Parabola:renderToBeam(beam)
 	local att0, att1 = beam.Attachment0, beam.Attachment1
-	--assert(att0 and att1 and att0.Parent and att0.Parent:IsA("BasePart") and att1.Parent and att1.Parent:IsA("BasePart"), "Beam must have valid attachments that are in a BasePart")
 
 	if not att0.Parent or not att1.Parent then
 		return

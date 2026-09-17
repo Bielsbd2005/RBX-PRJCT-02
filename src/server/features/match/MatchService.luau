@@ -46,12 +46,8 @@ local _started = false
 -- roster; ReturnToMenu hace LoadCharacter).
 local REMOTE_RATE_LIMIT_SECONDS = 0.5
 
--- Tras morir, el cuerpo del jugador se reubica en el LobbySpawn pasado este margen
--- (deja que el kill effect / ragdoll cosmético se vea COMPLETO). Mínimo 4s pedido;
--- con la propiedad de red en el servidor (KillEffectUtils.setServerOwnership) el
--- ragdoll ya no se congela a ~1s, así que estos segundos muestran la caída real.
--- Solo aplica si el jugador NO respawnea antes (el guard de deathStamp lo cancela).
--- Poner a 0 reubica de inmediato (perdería el ragdoll visible).
+-- Tras morir, el cuerpo se reubica en el LobbySpawn pasado este margen para que el
+-- kill effect / ragdoll se vea completo. Solo si no respawnea antes (guard de deathStamp).
 local DEATH_BODY_TO_LOBBY_DELAY = 4.5
 -- Debounce mínimo entre reapariciones de lobby por jugador (anti-bucle infinito si
 -- una muerte en lobby vuelve a disparar el respawn de lobby de inmediato).
@@ -70,19 +66,15 @@ local _teamB: Team? = nil
 local _AIService: any = nil
 local _dataService: DataService = nil :: any
 
--- ── PlayerSession ────────────────────────────────────────────
--- TODO el estado por-jugador vive en un único registro por userId: se crea en
--- PlayerAdded, se destruye atómicamente en PlayerRemoving (sin checklist de
--- tablas paralelas que limpiar). Los campos de scope RONDA se resetean en
--- bloque al desmontar la ronda (_resetSessionRoundState); el resto persiste
--- toda la sesión.
+-- Estado por-jugador: un único registro por userId, creado en PlayerAdded y destruido
+-- atómicamente en PlayerRemoving. Los campos de scope RONDA se resetean en bloque al
+-- desmontar la ronda (_resetSessionRoundState); el resto persiste toda la sesión.
 type PlayerSession = {
 	-- ── scope ronda ──
 	team: ("A" | "B")?,
 	inMenu: boolean,
-	-- Join request en vuelo (de RequestJoinMatch hasta spawn/abort). Hace
-	-- también de debounce del handler — el viejo _joinDebounceByUserId era un
-	-- duplicado exacto de este flag.
+	-- Join request en vuelo (de RequestJoinMatch hasta spawn/abort); también hace
+	-- de debounce del handler.
 	pendingSpawn: boolean,
 	deathAt: number, -- 0 = vivo / sin muerte registrada
 	respawnDebounce: boolean,
@@ -141,10 +133,8 @@ local function _isPlayerInMenu(userId: number): boolean
 	return session == nil or session.inMenu
 end
 
--- ── Round ────────────────────────────────────────────────────
--- TODO el estado con scope ronda vive en un objeto creado en _enterInRound y
--- tirado entero al desmontar (_enterResults). No hay "reset" de tablas de
--- ronda: la ronda nueva nace limpia por construcción.
+-- Estado de ronda: objeto creado en _enterInRound y tirado entero al desmontar
+-- (_enterResults); la ronda nueva nace limpia por construcción.
 -- Las stats se indexan por userId e INCLUYEN bots (fakeUserIds negativos).
 type CombatStats = {
 	kills: number,
@@ -153,41 +143,25 @@ type CombatStats = {
 }
 
 type Round = {
-	--[[
-		Identificador de la partida, compartido por TODAS las series que la
-		describen: el MATCH_END, la votación que eligió su mapa y los bonus de
-		fin de partida que pagó.
-
-		Antes se generaba en el instante de emitir el MATCH_END y no se
-		guardaba en ninguna parte, así que kills, faucets `MatchEnd::*` y
-		votación no compartían ni una columna: preguntas como "cuánto Cash
-		pagó esta partida" o "el mapa más votado, ¿es el que más recompensa?"
-		no tenían respuesta con la instrumentación puesta.
-	]]
+	-- Id de la partida, compartido por todas las series que la describen: MATCH_END,
+	-- la votación que eligió su mapa y los bonus de fin de partida.
 	matchId: string,
-	-- os.time() del arranque de la ronda. Sólo lo usa la telemetría, para
-	-- poder distinguir una partida que acabó por marcador de una que agotó
-	-- MaxRoundDuration: la proporción entre ambas dice si la economía de
-	-- ronda está bien calibrada.
+	-- os.time() del arranque. Solo telemetría: distinguir fin por marcador de fin
+	-- por MaxRoundDuration.
 	startedAt: number,
 	scoreA: number,
 	scoreB: number,
 	statsByUserId: { [number]: CombatStats },
-	-- Cash/XP concedidos esta ronda (caps por moneda independientes — L14).
+	-- Cash/XP concedidos esta ronda (caps por moneda independientes).
 	cashEarnedByUserId: { [number]: number },
 	xpEarnedByUserId: { [number]: number },
 	-- Timestamps de kills recientes (ventana de multikill).
 	recentKillTimestampsByUserId: { [number]: { number } },
-	-- S2: elegibilidad server-side para health pickups. Los pickups son
-	-- puramente client-visuales (PickupDropEffect.luau spawnea el orbe en el
-	-- cliente y manda RequestPickup al recogerlo); no hay entidad server que
-	-- validar. Para evitar god-mode (spam de RequestPickup → +30 HP cada
-	-- 0.2s) registramos una cola de timestamps de kills NO reclamadas: cada
-	-- kill humana empuja un timestamp y cada RequestPickup válida consume el
-	-- más antiguo dentro de la ventana — nadie se cura más veces de las que
-	-- mata. GAP RESIDUAL (documentado): sin entidad server no se puede
-	-- verificar que el orbe existió ni la proximidad; el exploit queda
-	-- recortado de "ilimitado" a "1 heal por kill real".
+	-- Elegibilidad server-side de health pickups. Los pickups son solo visuales en el
+	-- cliente (PickupDropEffect manda RequestPickup), sin entidad server: cada kill
+	-- humana encola un timestamp y cada RequestPickup válida consume el más antiguo
+	-- dentro de la ventana, así nadie se cura más veces de las que mata. No se puede
+	-- verificar que el orbe existiera ni la proximidad.
 	pickupCreditsByUserId: { [number]: { number } },
 	-- Última muerte registrada cerca de cada spawn point; SpawnSelector lo usa
 	-- para penalizar respawnear donde alguien acaba de morir (anti spawn-trap).
@@ -198,9 +172,8 @@ type Round = {
 local _round: Round? = nil
 
 --[[
-	El matchId se acuña al abrir la votación, no al crear la ronda: la
-	votación es el primer hecho de la partida y tiene que poder etiquetarse con
-	el mismo id que el MATCH_END que llegará minutos después.
+	El matchId se acuña al abrir la votación, no al crear la ronda: el MAP_VOTE
+	tiene que llevar el mismo id que el MATCH_END que llegará después.
 ]]
 local _pendingMatchId = ""
 
@@ -292,17 +265,13 @@ local function _consumePickupEligibility(userId: number): boolean
 	return true
 end
 
--- ── Máquina de fases ─────────────────────────────────────────
--- Única fuente de verdad del flujo de partida:
+-- Máquina de fases, única fuente de verdad del flujo de partida:
 --   Idle → Voting → Loading → InRound → Results → Idle
--- `_phase` SOLO muta dentro de las transiciones (_enter*); el resto del código
--- la lee. Los viejos flags sueltos (_isMapLoading / _isPlayEnabled /
--- _isRoundActive) son derivados de la fase.
+-- `_phase` SOLO muta dentro de las transiciones (_enter*); el resto la lee.
 type Phase = "Idle" | "Voting" | "Loading" | "InRound" | "Results"
 local _phase: Phase = "Idle"
 -- Bumpeada en cada transición. Los timers de fase (round timer, ventana de
--- Results) la capturan y abortan si hubo una transición debajo (sustituye al
--- viejo _roundId).
+-- Results) la capturan y abortan si hubo una transición debajo.
 local _phaseGeneration = 0
 
 local function _isRoundActive(): boolean
@@ -337,9 +306,8 @@ local function _enterVoting()
 		Phase = "Voting",
 	})
 
-	-- B2: pre-warm bot rig pools during the vote (amortized, ~1 clone/frame)
-	-- so the round-start spawn burst takes warm rigs instead of paying
-	-- synchronous clones.
+	-- Precalentar los pools de rigs de bots durante la votación (~1 clone/frame),
+	-- para que el spawn de inicio de ronda no pague clones síncronos.
 	if _AIService and _AIService.PrewarmRigPools then
 		pcall(function()
 			_AIService:PrewarmRigPools()
@@ -370,9 +338,8 @@ local function _publishScore()
 	MatchSnapshot.set({ ScoreA = round.scoreA, ScoreB = round.scoreB })
 end
 
--- Wrappers que delegan al KillAttributionService (broadcast de stats de combate
--- al marcador, con dedupe interno). Nombres "Streak" heredados; la lógica de
--- rachas se eliminó.
+-- Delegan en KillAttributionService (broadcast de stats de combate con dedupe).
+-- El nombre "Streak" es heredado: ya no hay lógica de rachas.
 local function _sendPlayerStreakToAll(userId: number)
 	KillAttributionService:SendStreakBroadcast(userId)
 end
@@ -489,18 +456,11 @@ local function _resolveWeaponItem(weaponId: string?): (string?, string?)
 end
 
 --[[
-	Cola de acciones diferidas (session.pendingProfileActions) a la espera de
-	que el profile cargue. C2: Sin esto, kills/deaths/XP en la window inicial
-	(antes de que el profile esté listo) se pierden silenciosamente —
-	_dataService:GetProfile() devuelve nil y :Increment/:AddXP/:BatchUpdate
-	retornan early.
-
-	Cualquier helper de persistencia llama a _deferUntilProfile(player, fn) si
-	el profile aún no está. ProfileLoaded handler hace flush en orden FIFO.
+	Acciones diferidas (session.pendingProfileActions) hasta que cargue el profile:
+	sin esto, kills/deaths/XP antes de que esté listo se perderían (GetProfile
+	devuelve nil). ProfileLoaded hace flush FIFO. Cap por jugador (drop-oldest)
+	por si el profile no carga nunca.
 ]]
--- Audit mobile: cap por jugador para evitar acumulación si el profile nunca
--- carga (backend caído). El cap drop-oldest mantiene los últimos N, que es lo
--- que más probablemente importa cuando el profile finalmente cargue.
 local PROFILE_ACTION_QUEUE_CAP = 50
 
 local function _deferUntilProfile(player: Player, fn: () -> ()): ()
@@ -510,7 +470,6 @@ local function _deferUntilProfile(player: Player, fn: () -> ()): ()
 	end
 	local queue = session.pendingProfileActions
 	if #queue >= PROFILE_ACTION_QUEUE_CAP then
-		-- Drop oldest (FIFO): table.remove(queue, 1) es O(n) pero N <= cap.
 		table.remove(queue, 1)
 	end
 	table.insert(queue, fn)
@@ -520,17 +479,10 @@ local function _hasProfile(player: Player): boolean
 	return _dataService ~= nil and _dataService:GetProfile(player) ~= nil
 end
 
--- Cupo de recompensa disponible AHORA MISMO en la ronda en curso. El cap de
--- GameConfig es el tope de una ronda COMPLETA y aqui se devenga linealmente a
--- lo largo de MaxRoundDuration, partiendo de un colchon inicial
--- (MatchCapGraceFraction) para que las primeras kills no salgan capadas.
---
--- Era un cap plano por ronda, y funcionaba mientras toda ronda duraba 480s.
--- Con WinScoreLimit en 75 las palizas se cortan antes, y un cap plano habria
--- convertido ese corte en un agujero de farmeo: una ronda cortada a los 5-6
--- minutos concedia el mismo cupo entero que una de 8, y al caber mas rondas
--- por hora el techo por hora subia. Devengado, ese techo se mantiene plano
--- dure lo que dure la ronda (ver la cuenta en GameConfig).
+-- Cupo de recompensa disponible AHORA en la ronda en curso. El cap de GameConfig es
+-- el de una ronda COMPLETA y se devenga linealmente a lo largo de MaxRoundDuration,
+-- desde un colchón (MatchCapGraceFraction). Con un cap plano, las rondas cortadas por
+-- WinScoreLimit subirían el techo por hora.
 local function _capAllowance(fullCap: number): number
 	local round = _round
 	if not round then
@@ -542,17 +494,8 @@ local function _capAllowance(fullCap: number): number
 	return fullCap * (grace + (1 - grace) * (elapsed / full))
 end
 
--- Audit mobile: signature acepta Player directo en lugar de userId. Antes el
--- kill chain (_grantActionRewardsToAttacker, abajo) ya tenía `attacker`
--- resuelto y la función hacía GetPlayerByUserId redundante por cada call
--- (Kill + Headshot?). Ahora 1 lookup en el caller, reusado.
--- L14 fix: el cap de cash y el de XP son INDEPENDIENTES. Antes esto era un
--- AND-gate (`_isMatchCapReached` exigía AMBOS capados para frenar cualquier
--- grant), así que un jugador capado en una moneda seguía ganando la otra hasta
--- llegar al tope de ambas — y además, una vez capada una, seguía sumando la
--- otra sin límite por moneda. Ahora cada moneda se frena en cuanto ESA llega a
--- su cap; usamos opts.skipCash/skipXP en RewardService.Award para suprimir sólo
--- la moneda capada y dejar pasar la otra.
+-- Caps de cash y XP INDEPENDIENTES: cada moneda se frena cuando ESA llega a su cap
+-- (opts.skipCash/skipXP en RewardService.Award).
 local function _isCashCapReached(userId: number): boolean
 	local round = _round
 	local earned = if round then round.cashEarnedByUserId[userId] or 0 else 0
@@ -572,7 +515,6 @@ local function _grantActionRewardsToAttacker(attacker: Player?, action: string, 
 
 	local skipCash = _isCashCapReached(attacker.UserId)
 	local skipXP = _isXPCapReached(attacker.UserId)
-	-- Si ambas monedas ya están capadas no hay nada que conceder.
 	if skipCash and skipXP then
 		return
 	end
@@ -611,8 +553,7 @@ local function _grantMasteryWrapsIfEligible(player: Player, weaponCategory: stri
 	local categoryMap = if type(byWeapon) == "table" then byWeapon[weaponCategory] else nil
 	local weaponMap = if type(categoryMap) == "table" then categoryMap[weaponId] else nil
 
-	-- Acumular todos los wraps elegibles en un solo BatchUpdate. Antes hacíamos
-	-- N SetValues separados → N mensajes de red al cliente y N entradas dirty.
+	-- Todos los wraps elegibles en un solo BatchUpdate.
 	local updates: { { path: { string }, value: any } } = {}
 	for wrapKey, definition in weaponWrapsConfig do
 		if type(definition) == "table" then
@@ -663,7 +604,6 @@ local function _registerWeaponKillForAttacker(attackerUserId: number?, weaponId:
 		return
 	end
 
-	-- C2: si el profile aún no cargó, encolar y reintentar tras ProfileLoaded.
 	if not _hasProfile(attackerPlayer) then
 		_deferUntilProfile(attackerPlayer, function()
 			_registerWeaponKillForAttacker(attackerUserId, weaponId)
@@ -688,22 +628,15 @@ local function _registerWeaponKillForAttacker(attackerUserId: number?, weaponId:
 end
 
 --[[
-	Persiste Stats lifetime del atacante en UN BatchUpdate atómico:
-	  • Stats.Kills += 1
-	  • Stats.Headshots += 1 si headshot
-
-	(Stats.KillStreakBest ya no se escribe: la lógica de rachas se eliminó. El
-	campo se conserva en el guardado de datos para el sistema nuevo.)
-
-	Llamado desde el path PvP (_registerKillEvent) y PvE (onBotDied) para que
-	las kills lifetime se acumulen igual sea la víctima jugador o bot.
+	Persiste Stats lifetime del atacante en UN BatchUpdate atómico (Kills y
+	Headshots). Stats.KillStreakBest no se escribe (ya no hay rachas; el campo se
+	conserva en los datos). Lo usan los paths PvP y PvE.
 ]]
 local function _persistAttackerKillStats(attacker: Player, wasHeadshot: boolean)
 	if not _dataService then
 		return
 	end
 
-	-- C2: si el profile aún no cargó, encolar y reintentar tras ProfileLoaded.
 	if not _hasProfile(attacker) then
 		_deferUntilProfile(attacker, function()
 			_persistAttackerKillStats(attacker, wasHeadshot)
@@ -744,11 +677,8 @@ end
 	    de primera kill.
 	No toca a la víctima ni resuelve la atribución — eso es del caller.
 
-	`victimIsBot` sólo se usa para telemetría: con ~25% de bots entre los
-	participantes, un K/D o un win rate por arma que los mezcle con humanos no
-	sirve para balancear. El caller ya sabe qué era la víctima (el path PvP
-	tiene un deadPlayer y el PvE un botFakeUserId), así que se pasa en vez de
-	recalcularlo aquí.
+	`victimIsBot` sólo se usa para telemetría: un K/D o win rate por arma que mezcle
+	bots con humanos no sirve para balancear.
 ]]
 local function _creditKillToAttacker(
 	attackerUserId: number,
@@ -783,16 +713,14 @@ local function _creditKillToAttacker(
 	KillAttributionService:SendStreakBroadcast(attackerUserId)
 	_registerWeaponKillForAttacker(attackerUserId, weaponId)
 
-	-- Telemetría de combate. Va aquí y no colgada de RewardService a propósito:
-	-- las recompensas se cortan al llegar a MatchCashCap/MatchXPCap, así que
-	-- contar kills por esa vía las trunca justo para quien más mata. Sólo
-	-- escribe en memoria; el envío vive en el loop de flush.
+	-- Telemetría de combate aquí y no en RewardService: las recompensas se cortan en
+	-- MatchCashCap/MatchXPCap y truncarían las kills de quien más mata.
 	local telemetryCategory, telemetryWeapon = _resolveWeaponItem(weaponId)
 	if telemetryCategory and telemetryWeapon then
 		TelemetryService.RecordCombat(attacker, telemetryCategory, telemetryWeapon, victimIsBot, wasHeadshot)
 	end
-	-- S2: una kill humana dropea un health pickup client-side; registramos el
-	-- crédito para que el RequestPickup correspondiente se valide server-side.
+	-- Una kill humana dropea un health pickup en cliente; este crédito valida el
+	-- RequestPickup correspondiente.
 	_recordPickupEligibility(attackerUserId)
 	_grantActionRewardsToAttacker(attacker, "Kill", weaponId)
 	if wasHeadshot then
@@ -846,8 +774,6 @@ local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?, a
 		DailyTasksService:OnDeath(deadPlayer)
 	end)
 
-	-- Persistir Stats.Deaths lifetime del que muere (siempre que sea jugador).
-	-- C2: si el profile aún no cargó, encolar para flush en ProfileLoaded.
 	if _dataService then
 		if _hasProfile(deadPlayer) then
 			pcall(_dataService.Increment, _dataService, deadPlayer, { "Stats", "Deaths" }, 1)
@@ -862,9 +788,8 @@ local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?, a
 		return
 	end
 
-	-- Kills sobre jugadores solo se acreditan a HUMANOS (comportamiento
-	-- histórico del HUD: los bots solo suman contador al matar bots) y solo
-	-- si el atacante sigue in-match — la muerte cuenta igual.
+	-- Kills sobre jugadores solo se acreditan a HUMANOS in-match (los bots solo suman
+	-- contador al matar bots); la muerte cuenta igual.
 	if attackerUserId < 0 or _isPlayerInMenu(attackerUserId) then
 		return
 	end
@@ -897,8 +822,6 @@ local function _ensureTeams()
 	_teamB = getOrCreateTeam(GameConfig.Teams.B.Name, GameConfig.Teams.B.Color)
 end
 
--- _countActiveRealAssignments / _pickBalancedTeam / tie-break extraídos a
--- TeamAssignmentService. Aquí solo delegamos para mantener call sites estables.
 local function _countActiveRealAssignments(): (number, number)
 	return TeamAssignmentService:CountActiveRealAssignments()
 end
@@ -907,11 +830,8 @@ local function _pickBalancedTeam(userId: number): ("A" | "B")?
 	return TeamAssignmentService:PickBalancedTeam(userId)
 end
 
--- Audit mobile: coalescer múltiples calls a rebalance al mismo frame.
--- Con kill chains rápidas (3-5/s) y joins/leaves simultáneos, el camino sin
--- debounce hacía SetBotTargets + scan completo + JSONEncode roster por cada
--- evento. El dedupe interno de _broadcastBotRoster cubre el broadcast pero
--- no el SetBotTargets ni el _refreshAliveLists.
+-- Coalesce los rebalanceos del mismo frame: kill chains y joins/leaves simultáneos
+-- harían SetBotTargets + roster por evento.
 local _rebalancePending = false
 local _rebalanceLastReason: string? = nil
 
@@ -1093,10 +1013,7 @@ local function _registerDeathListener(player: Player, character: Model)
 				end
 			end
 
-			-- Killer es bot: sustituir stats por las fingidas de la identidad
-			-- (level + historicalKills del tier de personalidad). Mantiene la
-			-- ilusión de que el bot tiene "carrera" propia. Para players reales
-			-- el branch anterior ya cubrió los stats.
+			-- Killer bot: nivel y banner salen de su identidad (los bots no tienen perfil).
 			if attackerUserId and attackerUserId < 0 and _AIService and _AIService.GetBotIdentity then
 				local botIdentity = _AIService:GetBotIdentity(attackerUserId)
 				if botIdentity then
@@ -1115,11 +1032,10 @@ local function _registerDeathListener(player: Player, character: Model)
 			}, player)
 		end
 
-		-- El cuerpo se reubica al LobbySpawn tras un margen (deja ver el ragdoll del
-		-- kill effect). El jugador solo vuelve a partida pulsando spawn (RequestRespawn).
-		-- Guardas: cancelar si ya respawneó (deathAt vuelve a 0), murió de nuevo
-		-- (deathAt cambia), hay un respawn al mapa en curso, se fue al menú, salió, o
-		-- la ronda terminó.
+		-- El cuerpo se reubica al LobbySpawn tras un margen; el jugador solo vuelve a
+		-- partida pulsando spawn (RequestRespawn). Se cancela si respawneó o murió de
+		-- nuevo (deathAt cambia), hay un respawn en curso, se fue al menú, salió o
+		-- terminó la ronda.
 		local deathStamp = session.deathAt
 		task.delay(DEATH_BODY_TO_LOBBY_DELAY, function()
 			if player.Parent ~= Players or not _isRoundActive() then
@@ -1161,18 +1077,6 @@ local function _ensureActiveMapContainer(): BasePart
 	return container
 end
 
---[[
-	Congela los equipos de los bots mientras el roster todavía existe.
-
-	HAY QUE LLAMARLA ANTES DE `_AIService:OnRoundEnd()`: ese despawn hace
-	`table.clear(_identityByFakeUserId)` y `table.clear(_teamByFakeUserId)`
-	(AI/init.luau), así que `GetBotRoster()` devuelve `{}` a partir de ese
-	punto. La telemetría se emite 140 líneas más abajo, ya con el roster
-	vacío: sin equipo, cada bot caía por el filtro `team == "A" or "B"` y en
-	una ronda sólo de bots el roster quedaba vacío, la guarda `#players == 0`
-	abortaba el evento ENTERO y la partida no se registraba en ninguna parte.
-	Medido: 312 votaciones de mapa y 1 sola partida en 90 días.
-]]
 -- Cuenta las claves de un map. Los de esta ronda son por participante, así
 -- que nunca son grandes; sólo alimentan el diagnóstico del MATCH_END.
 local function _countKeys(t: { [any]: any }): number
@@ -1183,6 +1087,12 @@ local function _countKeys(t: { [any]: any }): number
 	return n
 end
 
+--[[
+	Congela los equipos de los bots mientras el roster todavía existe.
+	HAY QUE LLAMARLA ANTES DE `_AIService:OnRoundEnd()`: ese despawn vacía las
+	tablas de identidad y equipo (AI/init.luau) y `GetBotRoster()` devuelve `{}`;
+	sin equipo, los bots se caerían del MATCH_END.
+]]
 local function _captureBotTeams(): { [number]: string }
 	local botTeams: { [number]: string } = {}
 	if not _AIService then
@@ -1201,20 +1111,12 @@ local function _captureBotTeams(): { [number]: string }
 end
 
 --[[
-	Emite MATCH_END: una fila por ronda y una por participante.
+	Emite MATCH_END: una fila por ronda y una por participante. Se llama ANTES de
+	_round = nil, última ventana con marcador y stats de ronda vivos.
 
-	Se llama en el desmontaje, ANTES de _clearActiveMap() y de _round = nil,
-	que es la última ventana donde el mapa, el marcador y las stats de ronda
-	siguen vivos.
-
-	Bots incluidos, con su fakeUserId negativo. No se filtran aquí: el backend
-	guarda `is_bot` como dimensión para que separar humanos sea una consulta y
-	no obligue a reinstrumentar el juego si algún día cambia el criterio.
-
-	El loadout sale del perfil (Loadout.MainWeapon/SpecialWeapon) en lugar de
-	instrumentar el equipado en vivo: es el mismo dato y evita tocar la ruta
-	crítica de spawn. Cruzarlo con el resultado es lo que produce el win rate
-	por arma — la señal que distingue un arma rota de una simplemente popular.
+	Bots incluidos (fakeUserId negativo): el backend guarda `is_bot` como dimensión.
+	El loadout sale del perfil (Loadout.MainWeapon/SpecialWeapon) para no tocar la
+	ruta crítica de spawn; cruzado con el resultado da el win rate por arma.
 ]]
 local function _emitMatchEndTelemetry(botTeams: { [number]: string }): string?
 	local round = _round
@@ -1288,9 +1190,7 @@ local function _emitMatchEndTelemetry(botTeams: { [number]: string }): string?
 		-- El límite que produjo ese endReason. Sin su valor, una ronda de hace
 		-- tres meses y una de hoy no son comparables si alguien tocó la config.
 		winScoreLimit = GameConfig.WinScoreLimit,
-		-- Cuántos de los participantes eran bots. Se sabía (el roster está
-		-- justo arriba) y no se emitía, así que separar rondas de relleno de
-		-- rondas reales obligaba a contar filas en el backend.
+		-- Participantes bot, para separar rondas de relleno de rondas reales.
 		botCount = _countKeys(botTeams),
 		players = players,
 	})
@@ -1308,12 +1208,7 @@ local function _clearActiveMap()
 	SpawnService.InvalidateMapCache()
 end
 
--- Los helpers de votación viven en VotingService; aquí solo wireamos el
--- callback `onVoteFinished`.
-
--- Clone() no hace yield, así que la carga es síncrona — no hay timeout que
--- aplicar (el viejo _loadMapCloneWithTimeout tenía un watcher de polling que
--- nunca llegaba a correr antes de que el clone terminara).
+-- Clone() no hace yield: la carga es síncrona, sin timeout.
 local function _loadMapClone(mapName: string): (boolean, string)
 	local mapsFolder = ServerStorage:FindFirstChild("Maps")
 	if not mapsFolder then
@@ -1366,9 +1261,9 @@ local function _captureRoundEndEligiblePlayers(): { [number]: true }
 end
 
 -- InRound → Results. Reparte recompensas, devuelve a los elegibles al lobby y
--- desmonta la ronda; al expirar la ventana de Resultados pasa a Idle y relanza
--- la votación. La fase Results bloquea cualquier disparador anticipado de voto
--- (_tryStartVoting solo actúa en Idle).
+-- desmonta la ronda (bots, listeners, sesiones, Round). El MAPA se queda hasta que
+-- expira la ventana de Resultados, porque la pantalla se rueda dentro de él (podio
+-- Results.Player1..4 + Results.Camera del propio mapa); luego Idle y nueva votación.
 function _enterResults(winnerTeam: string)
 	if _phase ~= "InRound" then
 		return
@@ -1387,23 +1282,19 @@ function _enterResults(winnerTeam: string)
 		Phase = "Results",
 	})
 
-	-- El despawn de abajo vacía el roster de bots, y la telemetría de fin de
-	-- ronda lo necesita. Se congela aquí, que es la última línea en la que
-	-- todavía existe.
+	-- El despawn de abajo vacía el roster de bots, que la telemetría necesita.
 	local botTeams = _captureBotTeams()
 
 	-- Se copia porque el reparto de recompensas corre en `task.defer`, después
 	-- de que el desmontaje ponga `_round = nil`.
 	local matchId = round.matchId
 
-	-- Despawnear bots inmediatamente al finalizar la ronda.
 	if _AIService then
 		_AIService:OnRoundEnd()
 	end
 
 	Network.Match.DeathScreenHide.SendToAll({})
 
-	-- ── Recompensas de fin de partida ────────────────────────
 	-- MVP = jugador(es) con más kills de SU equipo (kills > 0). Solo players reales.
 	local function killsOf(userId: number): number
 		local stats = round.statsByUserId[userId]
@@ -1427,9 +1318,10 @@ function _enterResults(winnerTeam: string)
 		end
 	end
 
-	-- Computar + ENVIAR las recompensas a cada elegible ANTES de RoundEnded (el
-	-- cliente debe tenerlas al mostrar la pantalla). El cash se concede más abajo
-	-- (task.defer) — server-authoritative, independiente de que se vea o no.
+	-- Enviar recompensas antes de RoundEnded NO garantiza que lleguen antes: van por la
+	-- cola POR-JUGADOR de ByteNet y RoundEnded por la de BROADCAST, que se vacía antes.
+	-- El cliente las pinta al llegar (ResultsView:applyRewards). El cash se concede
+	-- abajo (task.defer), server-authoritative.
 	local resultsByUserId: { [number]: any } = {}
 	local winnerIsTeam = winnerTeam == "A" or winnerTeam == "B"
 	for userId in eligibleByUserId do
@@ -1464,13 +1356,8 @@ function _enterResults(winnerTeam: string)
 		scoreB = round.scoreB,
 	})
 
-	-- Daily task: WinMatches — solo jugadores elegibles (que jugaron la ronda)
-	-- y que estaban en el equipo ganador. Empate ("Tie") no cuenta.
-	-- Persistir Stats.MatchesPlayed para todos los elegibles + Wins/Losses
-	-- para el equipo correspondiente.
-	-- task.defer para que los N BatchUpdates no compitan por el mismo frame
-	-- que el broadcast de RoundEnded; UX percibida más fluida en partidas
-	-- llenas (16 BatchUpdates secuenciales = ~16 SetValues).
+	-- Stats.MatchesPlayed para los elegibles + Wins/Losses y la daily WinMatches (el
+	-- empate no cuenta). task.defer para no competir con el broadcast de RoundEnded.
 	local eligibleSnapshot: { number } = {}
 	for userId in eligibleByUserId do
 		table.insert(eligibleSnapshot, userId)
@@ -1539,15 +1426,8 @@ function _enterResults(winnerTeam: string)
 		end
 	end
 
-	-- Telemetría ANTES de desmontar: es la última ventana en la que el mapa,
-	-- el marcador y las stats de ronda siguen existiendo.
-	--
-	-- El pcall sigue ahí (un fallo de telemetría no puede impedir el
-	-- desmontaje de la ronda), pero ya no es MUDO: durante tres meses este
-	-- evento no se emitió ni una vez y no hubo un solo aviso en el Output,
-	-- porque tanto el error como los tres `return` tempranos salían en
-	-- silencio. Una caída sostenida de MATCH_END sólo se notaba en el
-	-- dashboard, semanas después, como partidas que faltaban.
+	-- Telemetría ANTES de desmontar: última ventana con mapa, marcador y stats de
+	-- ronda. El pcall no es mudo a propósito: un MATCH_END que no sale debe avisar.
 	local emitOk, emitResult = pcall(_emitMatchEndTelemetry, botTeams)
 	if not emitOk then
 		warn(("[MatchService] MATCH_END no se emitió (error): %s"):format(tostring(emitResult)))
@@ -1573,7 +1453,10 @@ function _enterResults(winnerTeam: string)
 	MatchResultsService:ClearSnapshots()
 	_lastBotRosterJsonBroadcast = nil
 
-	-- La votación no arranca hasta que termina la pantalla de Resultados.
+	-- La votación no arranca hasta que termina la pantalla de Resultados. Es
+	-- también cuando se desmonta el mapa: hasta aquí es el escenario de la
+	-- pantalla. (Si otra transición ganase la carrera, _loadMapClone vacía el
+	-- contenedor ActiveMap al cargar el siguiente, así que no queda basura.)
 	task.delay(GameConfig.EndResultsDuration, function()
 		if _phaseGeneration ~= generation then
 			return
@@ -1583,18 +1466,13 @@ function _enterResults(winnerTeam: string)
 	end)
 end
 
--- Handler de muerte de un bot de IA. Extraído del callback inline en
--- _AIService:OnRoundStart para que la lógica de kill attribution / score / win
--- check no esté embebida dentro del round-start flow. Llamado por AIService
--- cuando un bot muere — toca state interno de MatchService (scoreA/B, streaks,
--- match kills/deaths) y dispara broadcasts.
+-- Muerte de un bot (lo llama AIService): atribución de kill, score y victoria.
 local function _handleBotDied(botTeam: string, _botName: string, botHumanoid: Humanoid, botFakeUserId: number)
 	local round = _round
 	if not _isRoundActive() or not round then
 		return
 	end
 
-	-- Credit the kill to whoever killed this bot
 	local lastAttacker = LastAttackerStore.get(botHumanoid)
 	local attackerUserId = if lastAttacker then lastAttacker.UserId else nil
 	local attackerAt = if lastAttacker then lastAttacker.At else 0
@@ -1603,10 +1481,8 @@ local function _handleBotDied(botTeam: string, _botName: string, botHumanoid: Hu
 	if attackerAt > 0 and time() - attackerAt > GameConfig.KillAttributionWindow then
 		attackerUserId = nil
 	end
-	-- H5 fix: NO descartamos al atacante por estar en el menú. La ventana
-	-- KillAttributionWindow (2s) ya filtra daño viejo de cuando el jugador
-	-- estaba in-match. Si el daño es reciente y el bot muere justo cuando
-	-- vuelve al menú, la kill es legítima — no robarla.
+	-- No se descarta al atacante por estar en el menú: KillAttributionWindow ya filtra
+	-- daño viejo, y una kill con daño reciente es legítima.
 
 	local killerName = _resolveKillerName(attackerUserId)
 	-- Nombre ficticio del bot víctima (no su nombre crudo "Bot_B_08"). Fallback al
@@ -1635,7 +1511,6 @@ local function _handleBotDied(botTeam: string, _botName: string, botHumanoid: Hu
 	end
 	_sendPlayerStreakToAll(botFakeUserId)
 
-	-- Sumar score al equipo contrario (igual que cuando muere un jugador)
 	if botTeam == "A" then
 		round.scoreB += 1
 	else
@@ -1683,9 +1558,8 @@ local function _enterInRound()
 				mapRoot = _activeMapModel,
 				onBotDied = _handleBotDied,
 				selectSpawnPoint = SpawnService.SelectBotSpawnPoint,
-				-- B2: spawns are staggered across frames, so the roster
-				-- broadcast made right after SetBotTargets misses the pending
-				-- bots — the pump re-broadcasts when it finishes.
+				-- Los spawns se escalonan entre frames: el roster emitido tras
+				-- SetBotTargets no incluye los pendientes y el pump lo reenvía al acabar.
 				onRosterChanged = _broadcastBotRoster,
 			})
 		end)
@@ -1746,12 +1620,9 @@ local function _onRequestMatchSync(_: {}, player: Player)
 end
 
 local function _onCharacterAdded(player: Player, character: Model)
-	-- Asignar al grupo CHARACTERS para que jugadores vivos no colisionen con
-	-- cadáveres (ragdolls están en RAGDOLL via los kill effects). Snapshot
-	-- inmediato + DescendantAdded por si accesorios/tools cargan tarde.
-	-- Trackeamos la connection por userId para desconectarla en el siguiente
-	-- respawn / muerte / salida — el character viejo puede seguir parented por
-	-- ragdoll/kill effects hasta el GC, lo que acumularía listeners.
+	-- Grupo CHARACTERS para no colisionar con cadáveres (RAGDOLL). DescendantAdded por
+	-- si accesorios/tools cargan tarde; la connection vive en la sesión porque el
+	-- character viejo puede seguir parented por ragdoll y acumularía listeners.
 	CollisionGroups.setGroupForCharacter(character, CollisionGroups.CHARACTERS)
 	local session = _sessions[player.UserId]
 	if not session then
@@ -1890,11 +1761,8 @@ local function _onRequestRespawn(_: {}, player: Player)
 	end
 
 	local deathAt = session.deathAt
-	-- S5: enforce the full respawn cooldown server-side (was client-only via the
-	-- death screen bar — a modified client could respawn every 0.5s). Si conocemos
-	-- el momento de la muerte (deathAt > 0), exigimos GameConfig.RespawnCooldown
-	-- completo. Si no lo conocemos (deathAt == 0: arranque, edge cases), caemos al
-	-- floor anti-spam de 0.5s como fallback.
+	-- Cooldown de respawn server-side (un cliente modificado podría saltarse la barra).
+	-- Sin momento de muerte conocido (deathAt == 0), floor anti-spam de 0.5s.
 	if deathAt > 0 then
 		if time() - deathAt < GameConfig.RespawnCooldown then
 			return
@@ -1904,17 +1772,14 @@ local function _onRequestRespawn(_: {}, player: Player)
 	end
 
 	session.respawnDebounce = true
-	-- Marcamos "respawn al mapa en curso" de forma SÍNCRONA (antes del defer), para
-	-- que la reubicación al lobby por inactividad lo vea en cuanto se pulsa spawn y
-	-- no mande al jugador al lobby en vez de a la partida (carrera #1).
+	-- "Respawn al mapa en curso" de forma SÍNCRONA (antes del defer), para que la
+	-- reubicación al lobby por inactividad lo vea y no mande al jugador al lobby.
 	session.respawning = true
 	task.defer(function()
 		session.respawnDebounce = false
 
-		-- Reintento defensivo: al acabar la votación, jugadores y bots respawnean
-		-- a la vez y el body-swap puede fallar puntualmente (contención del lock,
-		-- rig a medio construir). Sin reintento, un fallo dejaba al jugador muerto
-		-- o cayendo al vacío. Reintentamos unas pocas veces con pausa corta.
+		-- Reintento: al acabar la votación jugadores y bots respawnean a la vez y el
+		-- body-swap puede fallar puntualmente (contención del lock, rig a medio construir).
 		local spawned = false
 		for _ = 1, 3 do
 			if player.Parent ~= Players or not _isRoundActive() or session.inMenu then
@@ -1935,9 +1800,6 @@ local function _onRequestRespawn(_: {}, player: Player)
 		end
 	end)
 end
-
--- HealthPickup logic extraída a HealthPickupService.luau (Sprint 4 P2 #17).
--- Se inicia desde MatchService:Start con predicates inyectados — ver allá.
 
 local function _onRequestReturnToMenu(_: {}, player: Player)
 	local session = _sessions[player.UserId]
@@ -1967,22 +1829,17 @@ local function _onRequestReturnToMenu(_: {}, player: Player)
 end
 
 --[[
-	Consulta pública del cap de XP de la ronda actual. Existe para que las
-	fuentes de XP que NO pasan por GrantCombatReward (hoy: el XP del Battle
-	Pass, colgado de WeaponsSystem.Killed en ServerBootstrap) puedan respetar
-	el mismo freno anti-farm que el XP de cuenta — sin él, farmear kills capaba
-	el XP de nivel pero seguía subiendo el pase (y sus Gems) sin límite.
-	Fuera de ronda no hay contador, así que nunca capa (igual que el resto).
+	Cap de XP de la ronda actual, para fuentes de XP que NO pasan por
+	GrantCombatReward (el XP del Battle Pass, colgado de WeaponsSystem.Killed en
+	ServerBootstrap). Fuera de ronda nunca capa.
 ]]
 function MatchService:IsXPCapReached(player: Player): boolean
 	return _isXPCapReached(player.UserId)
 end
 
 function MatchService:GrantCombatReward(player: Player, actionKey: string, extraUpdates: any?, itemSku: string?)
-	-- L14: cap por moneda independiente. Si ambas monedas están capadas pero NO
-	-- hay extraUpdates (que deben aplicarse igualmente, p. ej. Stats.Assists),
-	-- podemos cortar temprano. Si hay extraUpdates seguimos al Award con ambas
-	-- monedas suprimidas para persistirlos.
+	-- Caps por moneda independientes. Con ambas capadas solo se corta si no hay
+	-- extraUpdates (p. ej. Stats.Assists), que deben persistirse igualmente.
 	local skipCash = _isCashCapReached(player.UserId)
 	local skipXP = _isXPCapReached(player.UserId)
 	if skipCash and skipXP and extraUpdates == nil then
@@ -2073,10 +1930,8 @@ function MatchService:Start(dataService: DataService): ()
 		warn("[MatchService] Server.AI module not found (bots will not spawn)")
 	end
 
-	-- C2: flush de acciones diferidas cuando el profile termine de cargar.
-	-- Hooks compatibles tanto con Signal-style (ProfileLoaded) como con
-	-- BindableEvent.Event. Si DataService no expone la signal, se ignora —
-	-- el código sigue funcionando con la pérdida silenciosa preexistente.
+	-- Flush de acciones diferidas cuando el profile carga. Si DataService no expone
+	-- ProfileLoaded, las acciones diferidas se pierden.
 	if _dataService and _dataService.ProfileLoaded then
 		_dataService.ProfileLoaded:Connect(function(player: Player)
 			local session = _sessions[player.UserId]
@@ -2182,13 +2037,11 @@ function MatchService:Start(dataService: DataService): ()
 		end,
 	})
 
-	-- HealthPickup extraído (Sprint 4 P2 #17). Inyectamos predicates para
-	-- que el service no se acople a state interno de MatchService.
+	-- Predicates inyectados para no acoplar el service al estado de MatchService.
 	HealthPickupService:Start({
 		isRoundActive = _isRoundActive,
 		isPlayerInMenu = _isPlayerInMenu,
-		-- S2: el service consume un crédito de kill reciente por heal — ver
-		-- _consumePickupEligibility / _recordPickupEligibility.
+		-- Consume un crédito de kill reciente por heal (ver _recordPickupEligibility).
 		consumePickupEligibility = function(userId: number): boolean
 			return _consumePickupEligibility(userId)
 		end,
@@ -2217,9 +2070,8 @@ function MatchService:Start(dataService: DataService): ()
 		task.defer(function()
 			SpawnService.SpawnAtLobby(player)
 		end)
-		-- Intentar iniciar votación cuando un nuevo jugador llega (cubre el
-		-- caso de servidor vacío donde Start() se ejecutó con 0 players).
-		-- task.defer para que el jugador ya esté en Players:GetPlayers().
+		-- Cubre el servidor vacío donde Start() corrió con 0 players; defer para que
+		-- el jugador ya esté en Players:GetPlayers().
 		task.defer(_tryStartVoting)
 	end)
 

@@ -1,22 +1,13 @@
 --!strict
 --[[
-	MapVoteView.luau  (Client)
-
-	Pantalla de votación de mapas, ahora independiente en `UserInterface.Voting`
-	(ya no vive dentro del Menu). La visibilidad la gobierna un PanelController
-	externo; esta vista solo puebla y anima su contenido.
-
-	Estructura GUI esperada (todos los hijos son opcionales/tolerantes):
-	  Voting.Timer                         -- TextLabel (cuenta atrás, opcional)
-	  Voting.Random.Percentage / .Votes    -- opción Random: SIN MapName
-	  Voting.Option1.MapName/.Percentage/.Votes
-	  Voting.Option2.MapName/.Percentage/.Votes
-	  Voting.Option3.MapName/.Percentage/.Votes
-	  <Option>.Votes.Template              -- icono clonado por cada votante (avatar)
-
-	Cada slot (Random/Option1/2/3) es votable: se clickea el propio contenedor si
-	es GuiButton, o un GuiButton hijo. El voto enviado es la `voteKey`: el nombre
-	del mapa para Option1/2/3, o RANDOM_VOTE_KEY para Random.
+	Solo puebla y anima `UserInterface.Voting`; la visibilidad la gobierna un
+	PanelController externo. Estructura GUI esperada (todo opcional):
+	  Voting.Timer
+	  Voting.OptionsFrame.Random.Percentage/.Votes           -- Random: SIN MapName
+	  Voting.OptionsFrame.Option1..3.MapName/.Percentage/.Votes
+	  <Option>.Votes.Template                                -- icono clonado por votante
+	  <Option>.Shadow                                        -- overlay al perder
+	Cada slot se clickea en el propio contenedor si es GuiButton o en un GuiButton hijo.
 ]]
 
 local TweenService = game:GetService("TweenService")
@@ -49,7 +40,7 @@ export type VoterData = {
 }
 
 type SlotRefs = {
-	dataKey: string,            -- "random" | "option1" | "option2" | "option3"
+	dataKey: string,
 	isRandom: boolean,
 	container: GuiObject,
 	clickable: GuiButton?,
@@ -69,36 +60,28 @@ type SlotRefs = {
 
 local DEFAULT_MAP_IMAGE = "rbxasset://textures/ui/GuiImagePlaceholder.png"
 
--- Estilo de selección del voto propio. El stroke del contenedor y el texto del
--- MapName se resaltan en el slot votado; el resto vuelve a su estado por defecto.
 local SELECTED_HIGHLIGHT = Color3.fromRGB(252, 254, 183)
 local SELECTED_STROKE_TRANSPARENCY = 0
 local UNSELECTED_STROKE_COLOR = Color3.fromRGB(0, 0, 0)
 local UNSELECTED_STROKE_TRANSPARENCY = 0.6
 
--- Animación del ganador. El tamaño se anima con UIScale (no con Visible/Position):
--- UIGridLayout sobrescribe Position y hace reflow al cambiar Visible, lo que hacía
--- "saltar" al ganador. UIScale es invisible al layout → animación estable en grid.
--- Los perdedores NO desaparecen: se encogen un poco y muestran su frame "Shadow".
--- Tweens sutiles y limpios: easing Sine (sin rebote) y magnitudes pequeñas.
-local LOSER_RECEDE_SCALE = 0.96       -- los perdedores se encogen a esto (no a 0)
+-- Todo se anima con UIScale: UIGridLayout sobrescribe Position y hace reflow al
+-- cambiar Visible, lo que haría saltar las celdas.
+local LOSER_RECEDE_SCALE = 0.96
 local LOSER_RECEDE_INFO = TweenInfo.new(0.4, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
-local LOSER_STAGGER = 0.04            -- escalonado entre perdedores
-local WINNER_POP_DELAY = 0.1          -- deja recogerse a los perdedores antes del pop
+local LOSER_STAGGER = 0.04
+local WINNER_POP_DELAY = 0.1
 local WINNER_POP_SCALE = 1.05
 local WINNER_POP_INFO = TweenInfo.new(0.4, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
 local WINNER_SETTLE_INFO = TweenInfo.new(0.45, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
 local WINNER_HOLD_SECONDS = 2.2
 
--- Orden fijo de slots. Random primero; Option1/2/3 mapean a los datos del packet.
 local SLOT_SPECS: { { name: string, dataKey: string, isRandom: boolean } } = {
 	{ name = "Random", dataKey = "random", isRandom = true },
 	{ name = "Option1", dataKey = "option1", isRandom = false },
 	{ name = "Option2", dataKey = "option2", isRandom = false },
 	{ name = "Option3", dataKey = "option3", isRandom = false },
 }
-
--- ── Helpers ──────────────────────────────────────────────────
 
 local function _getHeadshotUrl(userId: number): string
 	return "rbxthumb://type=AvatarHeadShot&id=" .. tostring(userId) .. "&w=48&h=48"
@@ -137,8 +120,6 @@ local function _ensureAvatarImage(icon: GuiObject): ImageLabel
 	return img
 end
 
--- Elemento clickeable del slot: el propio contenedor si es botón, o un GuiButton
--- hijo ("Button" preferente). Sin botón → el slot no es votable (no-op tolerante).
 local function _resolveClickable(container: GuiObject): GuiButton?
 	if container:IsA("GuiButton") then
 		return container
@@ -150,9 +131,6 @@ local function _resolveClickable(container: GuiObject): GuiButton?
 	return container:FindFirstChildWhichIsA("GuiButton")
 end
 
--- Nodo de imagen para la miniatura del mapa. Si existe un hijo dedicado
--- ("Image", "Thumbnail", "Map") lo usa; de lo contrario, si el propio contenedor
--- es un ImageButton o ImageLabel, se usa el contenedor directamente.
 local function _resolveImageNode(container: GuiObject): (ImageLabel | ImageButton)?
 	for _, name in { "Image", "Thumbnail", "Map" } do
 		local node = container:FindFirstChild(name)
@@ -166,9 +144,8 @@ local function _resolveImageNode(container: GuiObject): (ImageLabel | ImageButto
 	return nil
 end
 
--- Reutiliza el mismo nodo "InteractiveScale" que InteractiveScaleTween: así el
--- hover/click y el pop del ganador comparten un único UIScale (dos UIScale en el
--- mismo objeto se pisarían, solo uno se aplica).
+-- Mismo nodo "InteractiveScale" que InteractiveScaleTween: dos UIScale en el
+-- mismo objeto se pisan y solo uno se aplica.
 local function _ensureScale(container: GuiObject): UIScale
 	local existing = container:FindFirstChild("InteractiveScale")
 	if existing and existing:IsA("UIScale") then
@@ -180,7 +157,6 @@ local function _ensureScale(container: GuiObject): UIScale
 	return scale
 end
 
--- UIStroke a resaltar: el del contenedor preferente, o el del clickeable.
 local function _resolveStroke(container: GuiObject, clickable: GuiButton?): UIStroke?
 	local direct = container:FindFirstChildWhichIsA("UIStroke")
 	if direct then
@@ -207,7 +183,6 @@ local function _resolveSlots(frame: GuiObject): { SlotRefs }
 		end
 
 		local clickable = _resolveClickable(container)
-		-- "Shadow": overlay negro semitransparente que se muestra al perder.
 		local shadowNode = container:FindFirstChild("Shadow")
 		local shadow = if shadowNode and shadowNode:IsA("GuiObject") then shadowNode else nil
 		local mapNameNode = container:FindFirstChild("MapName")
@@ -244,9 +219,6 @@ local function _hideVoteIcons(slot: SlotRefs)
 	end
 end
 
--- Estilo de selección de un slot. Seleccionado: stroke + MapName en el color de
--- resalte (252,254,183), stroke opaco. No seleccionado: stroke negro a 0.6 y el
--- MapName de vuelta a su color original.
 local function _applySlotSelection(slot: SlotRefs, selected: boolean)
 	if slot.stroke then
 		slot.stroke.Color = if selected then SELECTED_HIGHLIGHT else UNSELECTED_STROKE_COLOR
@@ -259,8 +231,6 @@ local function _applySlotSelection(slot: SlotRefs, selected: boolean)
 	end
 end
 
--- Muestra/oculta el overlay "Shadow" del slot. Un perdedor lo muestra (fade suave
--- desde transparente hasta su transparencia autorada) para marcar que ha perdido.
 local function _setShadow(slot: SlotRefs, shown: boolean)
 	local shadow = slot.shadow
 	if not shadow then
@@ -279,38 +249,26 @@ local function _setShadow(slot: SlotRefs, shown: boolean)
 	end
 end
 
--- ── Constructor ──────────────────────────────────────────────
-
--- Tolera frame nulo (GUI en migración): sin frame, todos los métodos son no-op.
--- Estructura: Voting.Timer (cuenta atrás) + Voting.OptionsFrame.{Random,Option1/2/3}.
--- Los slots se resuelven bajo OptionsFrame (donde vive el UIGridLayout).
+-- votingFrame nil → todos los métodos son no-op.
 function MapVoteView.new(votingFrame: GuiObject?): any
 	local self = setmetatable({}, MapVoteView)
-	self._frame = votingFrame
 	self._timerLabel = if votingFrame then votingFrame:FindFirstChild("Timer") :: TextLabel? else nil
 
 	local optionsRoot = if votingFrame then votingFrame:FindFirstChild("OptionsFrame") else nil
 	self._slots = if optionsRoot and optionsRoot:IsA("GuiObject") then _resolveSlots(optionsRoot) else {}
 
-	self._selectedKey = ""
-	self._duration = 1
 	self._onVote = nil :: ((string) -> ())?
-	-- Token de generación: un show()/hide()/showWinner() nuevo lo bumpea para que
-	-- un task.delay tardío de un showWinner viejo no oculte una votación fresca.
+	-- Token de generación: show()/hide()/showWinner() lo incrementan para que un
+	-- task.delay tardío de un showWinner viejo no actúe sobre una votación fresca.
 	self._voteToken = 0
-	-- Mientras se muestra el ganador, congelamos los votos/% (ignoramos updateVotes)
-	-- para que no se borren si el servidor limpia el snapshot al acabar la votación.
-	-- Se limpian recién en hide().
+	-- Mientras se muestra el ganador se ignora updateVotes: el servidor limpia el
+	-- snapshot al acabar la votación y borraría los votos/% finales.
 	self._showingWinner = false
 	-- Último estado de votos CON contenido; showWinner lo restaura si hace falta.
 	self._lastVoterData = nil :: VoterData?
 	self._connections = {} :: { RBXScriptConnection }
 	self._janitor = Janitor.new()
 
-	-- Hover/click en cada slot (escala el contenedor vía el nodo "InteractiveScale",
-	-- el mismo que usa el pop del ganador → un único UIScale por slot).
-	-- Hover/click sutiles (escalas pequeñas, más limpias que los valores por
-	-- defecto de UITheme que se usan en botones más grandes).
 	local canHover = UserInputService.MouseEnabled and not UserInputService.TouchEnabled
 	for _, slot in self._slots do
 		if slot.clickable then
@@ -340,14 +298,10 @@ function MapVoteView:bindVoteHandler(onVote: (string) -> ())
 	end
 end
 
--- ── Poblar / reset ───────────────────────────────────────────
-
 function MapVoteView:show(options: { option1: OptionModel, option2: OptionModel, option3: OptionModel }, duration: number)
 	self._voteToken += 1
 	self._showingWinner = false
 	self._lastVoterData = nil
-	self._duration = math.max(1, duration)
-	self._selectedKey = ""
 
 	for _, slot in self._slots do
 		slot.container.Visible = true
@@ -363,17 +317,11 @@ function MapVoteView:show(options: { option1: OptionModel, option2: OptionModel,
 		end
 
 		if not slot.isRandom then
-			local model = options[slot.dataKey :: any] :: OptionModel?
-			if model then
-				slot.voteKey = model.mapName
-				if slot.mapNameLabel then slot.mapNameLabel.Text = model.mapName end
-				if slot.imageNode then
-					slot.imageNode.Image = if model.mapImage ~= "" then model.mapImage else DEFAULT_MAP_IMAGE
-				end
-			else
-				-- Sin modelo para este slot (no debería pasar con 3 opciones fijas).
-				slot.voteKey = ""
-				slot.container.Visible = false
+			local model = options[slot.dataKey :: any] :: OptionModel
+			slot.voteKey = model.mapName
+			if slot.mapNameLabel then slot.mapNameLabel.Text = model.mapName end
+			if slot.imageNode then
+				slot.imageNode.Image = if model.mapImage ~= "" then model.mapImage else DEFAULT_MAP_IMAGE
 			end
 		end
 	end
@@ -386,7 +334,6 @@ function MapVoteView:hide()
 	self._voteToken += 1
 	self._showingWinner = false
 	self._lastVoterData = nil
-	self._selectedKey = ""
 	if self._timerLabel then self._timerLabel.Visible = true end
 	for _, slot in self._slots do
 		slot.container.Visible = true
@@ -403,38 +350,31 @@ function MapVoteView:hide()
 	end
 end
 
--- ── Selección local (feedback inmediato del voto propio) ─────
-
 function MapVoteView:setSelectedMap(voteKey: string)
-	self._selectedKey = voteKey
 	for _, slot in self._slots do
 		_applySlotSelection(slot, voteKey ~= "" and slot.voteKey == voteKey)
 	end
 end
 
--- ── Votos + porcentajes ──────────────────────────────────────
-
--- Render puro de votos/% (sin guard ni cache). showWinner lo reusa para restaurar
--- el estado final si el snapshot se limpió en la transición de fase.
+-- Render sin guard ni cache; showWinner lo reusa para restaurar el estado final.
 function MapVoteView:_renderVotes(voterData: VoterData)
-	-- Conteos por slot, total y voto máximo para saber cuál va ganando.
-	local countsByKey: { [string]: number } = {}
+	local voterIdsByKey: { [string]: { number } } = {}
 	local total = 0
 	local maxCount = 0
 	for _, slot in self._slots do
-		local n = #_parseVoterIds(voterData[slot.dataKey :: any] or "")
-		countsByKey[slot.dataKey] = n
-		total += n
-		if n > maxCount then
-			maxCount = n
+		local voterIds = _parseVoterIds(voterData[slot.dataKey :: any] or "")
+		voterIdsByKey[slot.dataKey] = voterIds
+		total += #voterIds
+		if #voterIds > maxCount then
+			maxCount = #voterIds
 		end
 	end
 
 	for _, slot in self._slots do
-		local count = countsByKey[slot.dataKey] or 0
+		local voterIds = voterIdsByKey[slot.dataKey]
+		local count = #voterIds
 		local isLeading = maxCount > 0 and count == maxCount
 
-		-- Porcentaje: se resalta con el color de seleccionado si va ganando.
 		if slot.percentageLabel then
 			local pct = if total > 0 then math.floor((count / total) * 100 + 0.5) else 0
 			slot.percentageLabel.Text = tostring(pct) .. "%"
@@ -443,11 +383,9 @@ function MapVoteView:_renderVotes(voterData: VoterData)
 				else (slot.percentageDefaultColor or slot.percentageLabel.TextColor3)
 		end
 
-		-- Avatares de los votantes.
 		_hideVoteIcons(slot)
 		if not slot.votesRoot or not slot.template then continue end
 
-		local voterIds = _parseVoterIds(voterData[slot.dataKey :: any] or "")
 		local pool = slot.spawnedVotes
 		for i, userId in voterIds do
 			local icon = pool[i]
@@ -464,34 +402,23 @@ function MapVoteView:_renderVotes(voterData: VoterData)
 end
 
 function MapVoteView:updateVotes(voterData: VoterData)
-	-- Mientras se muestra el ganador, ignoramos actualizaciones (incl. el snapshot
-	-- vaciado al acabar la votación): los votos/% quedan congelados hasta hide().
 	if self._showingWinner then
 		return
 	end
-	-- Cachea el último estado CON votos para poder restaurarlo al mostrar el ganador
-	-- (el servidor puede limpiar Votes1/2/3 en la transición, llegando aquí como
-	-- vacío justo antes de showWinner). No cacheamos el vacío para no perder el final.
+	-- No se cachea el snapshot vacío: el servidor limpia Votes1/2/3 justo antes
+	-- de showWinner y se perdería el estado final.
 	if voterData.random ~= "" or voterData.option1 ~= "" or voterData.option2 ~= "" or voterData.option3 ~= "" then
 		self._lastVoterData = voterData
 	end
 	self:_renderVotes(voterData)
 end
 
--- ── Ganador ──────────────────────────────────────────────────
-
 -- winnerMapName es siempre un mapa concreto (el servidor ya resolvió Random).
--- Animación 100% UIScale para no pelear con el UIGridLayout (ver constantes):
--- los perdedores se encogen escalonados en su celda (sin reflow) y el ganador
--- se resalta y hace un pop con rebote.
 function MapVoteView:showWinner(winnerMapName: string, onDone: (() -> ())?)
 	self._voteToken += 1
 	local token = self._voteToken
-	-- Congela los votos/% en su estado final mientras se resalta al ganador; un
-	-- updateVotes tardío (snapshot limpiado por el servidor) ya no los borra.
 	self._showingWinner = true
-	-- Restaura el estado final por si el snapshot ya se limpió justo antes (entonces
-	-- el display estaría a 0%/sin avatares). _renderVotes ignora el guard.
+	-- Por si el snapshot ya llegó vacío (display a 0%/sin avatares).
 	if self._lastVoterData then
 		self:_renderVotes(self._lastVoterData)
 	end
@@ -504,9 +431,6 @@ function MapVoteView:showWinner(winnerMapName: string, onDone: (() -> ())?)
 		end
 	end
 
-	-- Perdedores (y Random): NO desaparecen. Se encogen un poco (UIScale, sin tocar
-	-- Visible → la grid no hace reflow) y muestran su overlay "Shadow" para marcar
-	-- la derrota. Escalonado para un cierre más vivo.
 	local loserIndex = 0
 	for _, slot in self._slots do
 		if slot == winnerSlot then
@@ -527,7 +451,6 @@ function MapVoteView:showWinner(winnerMapName: string, onDone: (() -> ())?)
 		end)
 	end
 
-	-- Ganador: sin sombra, resalte (stroke + MapName + Percentage) y pop con rebote.
 	if winnerSlot then
 		local w = winnerSlot :: SlotRefs
 		_setShadow(w, false)
@@ -551,14 +474,10 @@ function MapVoteView:showWinner(winnerMapName: string, onDone: (() -> ())?)
 
 	local total = WINNER_POP_DELAY + WINNER_POP_INFO.Time + WINNER_SETTLE_INFO.Time + WINNER_HOLD_SECONDS
 	task.delay(total, function()
-		-- Si entró una votación nueva (show/hide/otro showWinner) durante el hold,
-		-- el token cambió y este callback obsoleto no debe disparar onDone.
 		if self._voteToken ~= token then return end
 		if onDone then onDone() end
 	end)
 end
-
--- ── Timer ────────────────────────────────────────────────────
 
 function MapVoteView:updateTimer(timeLeft: number)
 	if self._timerLabel then
@@ -577,8 +496,7 @@ function MapVoteView:Destroy()
 	if self._janitor then
 		self._janitor:Destroy()
 	end
-	-- _hideVoteIcons solo oculta (Visible=false); los clones de avatares quedan
-	-- residentes en el árbol GUI. Al teardown destruirlos de verdad libera el pool.
+	-- _hideVoteIcons solo oculta; aquí se destruyen los clones del pool.
 	for _, slot in self._slots do
 		for _, icon in slot.spawnedVotes do
 			icon:Destroy()

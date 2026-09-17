@@ -1,7 +1,5 @@
 --!strict
 --[[
-	BattlePassService.luau  (Server)
-
 	Mantiene el progreso de Battle Pass por jugador y otorga las recompensas
 	de cada tier al ser claimadas. La definición de seasons, tiers y rewards
 	vive en `shared/constants/BattlePassConfig.luau`.
@@ -17,9 +15,8 @@
 	  • AddXP(player, amount): cascading tier-up con cap.
 	  • Hook OnKill(player) llamado desde WeaponsSystem (inyectado).
 	  • ClaimTier(player, tier): valida y otorga la recompensa única del tier.
-	  • PromptPremium(player): compra del Premium con GEMS — chequeo de saldo +
-	    cobro y grant en un único BatchUpdate atómico sobre Stats.Gems (mismo
-	    patrón que ShopService). Sin receipt.
+	  • PromptPremium(player): compra del Premium con GEMS: chequeo de saldo, cobro y
+	    grant en un único BatchUpdate atómico sobre Stats.Gems. Sin receipt.
 	  • ProcessReceipt(receiptInfo): developer products Robux. Skips de +1 y +5
 	    niveles (el cliente lanza el prompt) y el Premium LEGACY, dormido con
 	    PremiumProductId = 0. Idempotente vía DataService:IsReceiptProcessed.
@@ -40,11 +37,8 @@ local TelemetryService = require(script.Parent.Parent.Parent.core.TelemetryServi
 
 local MAX_LEVELUP_ITERATIONS = 200 -- guard contra loops infinitos por XP descomunal
 
--- Rate-limit anti-spam para todos los handlers C→S. Aunque la lógica interna
--- es idempotente (claim del mismo tier dos veces no duplica recompensa), un
--- atacante puede spammear ClaimTier para forzar trabajo costoso (lookup de
--- season + GetProfile + BatchUpdate por cada request) o para pedir prompts
--- Robux en bucle. 0.3s por acción es generoso para UX y suficiente anti-spam.
+-- Rate-limit anti-spam para los handlers C→S. La lógica es idempotente, pero spammear
+-- ClaimTier fuerza trabajo costoso (season + GetProfile + BatchUpdate) o prompts en bucle.
 local ACTION_COOLDOWN = 0.3
 local _cooldowns: { [number]: { [string]: number } } = {}
 
@@ -69,10 +63,6 @@ local BattlePassService = {}
 local _dataService: DataService = nil :: any
 local _started = false
 
--- ────────────────────────────────────────────────────────────
--- HELPERS
--- ────────────────────────────────────────────────────────────
-
 local function _respond(player: Player, success: boolean, message: string, tierLevel: number?): ()
 	Network.BattlePass.Response.SendTo({
 		success = success,
@@ -81,8 +71,6 @@ local function _respond(player: Player, success: boolean, message: string, tierL
 	}, player)
 end
 
--- Resetea la sección BattlePass al estado inicial de la season indicada.
--- Una sola escritura: BatchUpdate sobre toda la sección (1 mensaje de red).
 local function _resetForSeason(player: Player, seasonId: string): boolean
 	if not _dataService then
 		return false
@@ -116,12 +104,9 @@ local function _deriveTierFromTotalXP(season: BattlePassConfig.Season, totalXP: 
 	return tier
 end
 
--- Backfill one-shot para perfiles que existían antes de que TotalXPEarned
--- formase parte del schema. Reconcile rellena el campo con 0, pero un
--- jugador con CurrentTier > 1 ya tiene XP "histórica" no contabilizada;
--- sin esto, la validación cruzada en ClaimTier les bloquea claims legítimos.
--- Reconstruimos el total mínimo desde la suma de XPRequired de tiers
--- completados + XP residual del tier actual.
+-- Perfiles sin TotalXPEarned (campo añadido después) llegan con 0 aunque CurrentTier > 1;
+-- sin backfill, la validación cruzada de ClaimTier bloquea claims legítimos. Reconstruye el
+-- mínimo desde la suma de XPRequired de tiers completados + XP residual del actual.
 local function _backfillTotalXPIfNeeded(player: Player, state: any, season: BattlePassConfig.Season): ()
 	if not _dataService then return end
 	local totalXP = math.floor(state.TotalXPEarned or 0)
@@ -166,13 +151,10 @@ local function _ensureSeason(player: Player): boolean
 	return true
 end
 
--- Otorga un WeaponWrap a TODAS las armas del jugador (Main + Special) en una
--- única BatchUpdate atómica. Cobertura = unión de (catálogo ItemsConfig.<cat>)
--- ∪ (armas que el jugador posee, Inventory.<cat>): así nuevos catálogo-additions
--- se cubren automáticamente y armas legacy (e.g. "Default" en Special) que no
--- aparecen en el catálogo pero sí en el inventario tampoco se pierden el wrap.
--- Idempotente: claves repetidas se reescriben a `true` y el gate de Claimed
--- impide invocarlo dos veces para el mismo tier.
+-- Otorga un WeaponWrap a TODAS las armas (Main + Special) en un BatchUpdate atómico.
+-- Cobertura = catálogo ItemsConfig.<cat> ∪ Inventory.<cat>, así se cubren armas nuevas
+-- del catálogo y armas que están en el inventario pero no en el catálogo ("Default").
+-- Idempotente; el gate de Claimed impide invocarlo dos veces para el mismo tier.
 local function _grantGlobalWeaponWrap(player: Player, wrapId: string): boolean
 	if not _dataService then return false end
 
@@ -231,9 +213,8 @@ local function _grantWeaponSpecificWrap(
 	})
 end
 
--- Resuelve la op de BatchUpdate para una recompensa Cash.
--- Para Item devuelve nil (el grant se hace fuera vía DataService:GrantItem,
--- que es la API documentada para crear Inventory + InventoryMeta + NewItemFlags).
+-- Op de BatchUpdate para recompensas Cash/Gems. Item devuelve nil: se concede fuera vía
+-- DataService:GrantItem (crea Inventory + InventoryMeta + NewItemFlags).
 local function _rewardToOp(reward: BattlePassConfig.Reward): { path: { string }, delta: number }?
 	if reward.Kind == "Cash" then
 		return { path = { "Stats", "Cash" }, delta = math.max(0, math.floor(reward.Amount or 0)) }
@@ -257,19 +238,11 @@ local function _shopPriceOf(category: string, itemId: string): (number, Currency
 end
 
 --[[
-	Atajo ya recorrido. Si el jugador YA tiene el ítem que regala el tier
-	(lo compró en la tienda antes de llegar aquí), GrantItem es idempotente y
-	el tier valía exactamente cero — sin aviso. Con 15 de los 22 ítems de
-	tienda del pase llegando después de la hora a la que la tienda los vende
-	(auditoría 2026-09-04), eso convertía el pase en un castigo por comprar
-	pronto y en una razón para no comprar nunca lo que "ya viene".
-
-	Se devuelve el precio de tienda en su moneda: quien compró acaba igual que
-	quien esperó (el ítem y el Cash intacto). No es emisión nueva: es el Cash
-	que el jugador ya pagó. Un wrap global devuelve el precio por cada arma
-	que ya lo tenía, que es exactamente lo que la tienda cobra (vende wraps
-	por arma). nil = no había nada que compensar.
-
+	Si el jugador YA tiene el ítem que regala el tier (lo compró antes), GrantItem es
+	idempotente y el tier valdría cero. Se devuelve el precio de tienda en su moneda: quien
+	compró acaba igual que quien esperó, y no es emisión nueva. Un wrap global devuelve el
+	precio por cada arma que ya lo tenía (la tienda vende wraps por arma). nil = nada que
+	compensar.
 	Hay que llamarlo ANTES del grant: el grant escribe Inventory a true y
 	después ya no se distingue lo comprado de lo recién concedido.
 ]]
@@ -326,10 +299,6 @@ local function _refundForOwnedReward(
 	return { amount = price * owned, currency = currency }
 end
 
--- ────────────────────────────────────────────────────────────
--- CORE: AddXP con cascading tier-up
--- ────────────────────────────────────────────────────────────
-
 function BattlePassService:AddXP(player: Player, amount: number): ()
 	if not _dataService then return end
 	local delta = math.max(0, math.floor(amount or 0))
@@ -382,10 +351,6 @@ function BattlePassService:OnKill(player: Player): ()
 	self:AddXP(player, BattlePassConfig.XPRates.PerKill)
 end
 
--- ────────────────────────────────────────────────────────────
--- CLAIM
--- ────────────────────────────────────────────────────────────
-
 function BattlePassService:ClaimTier(player: Player, tierLevel: number): ()
 	if not _dataService then return end
 	if type(tierLevel) ~= "number" then
@@ -427,7 +392,6 @@ function BattlePassService:ClaimTier(player: Player, tierLevel: number): ()
 	end
 	local effectiveTier = math.min(currentTier, expectedTier)
 
-	-- Tier debe estar COMPLETADO: tier < effectiveTier.
 	if tierLevel >= effectiveTier then
 		_respond(player, false, "TierLocked", tierLevel)
 		return
@@ -504,12 +468,9 @@ function BattlePassService:ClaimTier(player: Player, tierLevel: number): ()
 	end
 
 	--[[
-		Guardado durable antes de registrar: `BatchUpdate` sólo toca el perfil
-		en memoria y el autosave puede tardar hasta 30 s. Un crash en esa
-		ventana dejaba el evento emitido y la transacción inexistente (los Gems
-		volvían al saldo del jugador y el sink seguía contado en el dashboard).
-		Se registra igual si el Save falla —el jugador ya tiene el cambio en
-		memoria— pero con aviso.
+		Guardado durable antes de registrar: `BatchUpdate` solo toca el perfil en memoria y
+		el autosave puede tardar; un crash dejaría el evento emitido sin transacción. Si el
+		Save falla se registra igual (el cambio ya está en memoria), con aviso.
 	]]
 	if not _dataService:ForceSave(player) then
 		warn(("[BattlePassService] claim del tier %d de %s registrado sin guardado confirmado"):format(
@@ -536,9 +497,8 @@ function BattlePassService:ClaimTier(player: Player, tierLevel: number): ()
 		end
 	elseif reward.Kind == "Item" and reward.Category and reward.ItemId then
 		TelemetryService.RecordItem(player, "BattlePassItem", reward.Category .. "::" .. reward.ItemId .. "::" .. tierSku)
-		-- Etiqueta propia: en el dashboard sale como faucet aparte de
-		-- BattlePassClaim, que es justo lo que hace falta para saber cuánto
-		-- Cash devuelve el pase por ítems que ya se habían comprado.
+		-- Etiqueta propia: en el dashboard sale como faucet aparte de BattlePassClaim, para
+		-- medir cuánto devuelve el pase por ítems ya comprados.
 		if refund then
 			TelemetryService.RecordFlow(player, "source", "BattlePassRefund", refund.amount, tierSku, refund.currency)
 		end
@@ -547,19 +507,13 @@ function BattlePassService:ClaimTier(player: Player, tierLevel: number): ()
 	_respond(player, true, "OK", tierLevel)
 end
 
--- ────────────────────────────────────────────────────────────
--- PREMIUM (compra con Gems)
--- ────────────────────────────────────────────────────────────
-
 local _bpFunnelSessionByUserId: { [number]: string } = {}
 local _bpFunnelCounter = 0
 
 --[[
-	Embudo de conversión a Premium. La taxonomía vive aquí, junto al código que
-	la dispara, para que añadir un paso sea un cambio de un solo archivo.
-	Con la compra en Gems no hay prompt externo que esperar: el embudo se reduce
-	a click → cobro OK, y el drop entre 1 y 2 mide exactamente "quiso pero no
-	tenía Gems" — la señal que dispara la compra de packs.
+	Embudo de conversión a Premium; la taxonomía vive junto al código que la dispara.
+	Con la compra en Gems el embudo es click → cobro OK: el drop entre 1 y 2 mide
+	"quiso pero no tenía Gems".
 ]]
 local BP_PREMIUM_FUNNEL = "BattlePassPremium"
 local BP_PREMIUM_STEP_NAMES: { [number]: string } = {
@@ -618,14 +572,7 @@ function BattlePassService:PromptPremium(player: Player): ()
 		return
 	end
 
-	--[[
-		Guardado durable antes de registrar: `BatchUpdate` sólo toca el perfil
-		en memoria y el autosave puede tardar hasta 30 s. Un crash en esa
-		ventana dejaba el evento emitido y la transacción inexistente (los Gems
-		volvían al saldo del jugador y el sink seguía contado en el dashboard).
-		Se registra igual si el Save falla —el jugador ya tiene el cambio en
-		memoria— pero con aviso.
-	]]
+	-- Guardado durable antes de registrar (ver ClaimTier).
 	if not _dataService:ForceSave(player) then
 		warn(("[BattlePassService] premium de %s registrado sin guardado confirmado"):format(player.Name))
 	end
@@ -635,10 +582,6 @@ function BattlePassService:PromptPremium(player: Player): ()
 	TelemetryService.RecordFlow(player, "sink", "BattlePassPremium", price, season.Id, Currency.GEMS)
 	_respond(player, true, "PremiumGranted", 0)
 end
-
--- ────────────────────────────────────────────────────────────
--- SKIP DE NIVELES (developer products Robux)
--- ────────────────────────────────────────────────────────────
 
 -- Aplica un skip de `tierCount` niveles. Idempotente per-receipt vía
 -- GrantedSkips[purchaseId]. Rellena el XP que falta del nivel actual y el
@@ -664,11 +607,9 @@ local function _grantSkip(player: Player, purchaseId: string, tierCount: number,
 	local currentTier = math.max(1, math.floor(state.CurrentTier or 1))
 	local tiersToGrant = math.clamp(tierCount, 0, math.max(0, maxTier - currentTier + 1))
 
-	-- Contabilizar el gasto en el MISMO BatchUpdate atómico que GrantedSkips, no
-	-- en un Increment separado posterior. Si el Increment fallaba tras persistir
-	-- ProcessedReceipts, la reentrega devolvía PurchaseGranted sin reejecutarlo y
-	-- el gasto se subcontaba para siempre. El path no-op (ya concedido arriba) no
-	-- pasa por aquí, así que no hay doble conteo.
+	-- Gasto en el MISMO BatchUpdate que GrantedSkips: si fuera aparte y fallara tras
+	-- persistir ProcessedReceipts, la reentrega no lo reejecutaría y se subcontaría. El
+	-- path ya concedido no pasa por aquí, así que no hay doble conteo.
 	local updates: { any } = {
 		{ path = { "BattlePass", "GrantedSkips", purchaseId }, value = true },
 	}
@@ -697,12 +638,8 @@ local function _grantSkip(player: Player, purchaseId: string, tierCount: number,
 end
 
 --[[
-	ProcessReceipt: invocado desde el dispatcher central en ServerBootstrap.
-	Devuelve:
-	  • Enum.ProductPurchaseDecision si este servicio reconoce el producto
-	    (PurchaseGranted en éxito o idempotencia, NotProcessedYet en error).
-	  • nil si el producto no corresponde a un Battle Pass — el dispatcher
-	    debe seguir buscando handlers.
+	ProcessReceipt: invocado desde el dispatcher central en ServerBootstrap. Devuelve
+	ProductPurchaseDecision si reconoce el producto, o nil para que el dispatcher siga.
 ]]
 function BattlePassService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchaseDecision?
 	if not _dataService then
@@ -789,9 +726,6 @@ function BattlePassService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchas
 	if not _dataService:MarkReceiptProcessed(player, purchaseId) then
 		return Enum.ProductPurchaseDecision.NotProcessedYet
 	end
-	-- TotalRobuxSpent se contabiliza dentro del BatchUpdate atómico de _grantSkip
-	-- (antes era un Increment suelto aquí que podía perderse y subcontar el gasto).
-
 	-- Durabilidad del receipt: persistir el skip (GrantedSkips + ProcessedReceipts
 	-- + tier) confirmado antes de conceder. Si falla, NotProcessedYet → Roblox
 	-- reentrega y la idempotencia de GrantedSkips evita un segundo tier-up.
@@ -821,10 +755,6 @@ function BattlePassService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchas
 	return Enum.ProductPurchaseDecision.PurchaseGranted
 end
 
--- ────────────────────────────────────────────────────────────
--- LIFECYCLE
--- ────────────────────────────────────────────────────────────
-
 function BattlePassService:Start(dataService: DataService): ()
 	if _started then return end
 	_started = true
@@ -835,9 +765,8 @@ function BattlePassService:Start(dataService: DataService): ()
 		task.spawn(_ensureSeason, player)
 	end
 
-	-- Audit mobile: signal-driven en lugar de polling cada 1s × 30 iteraciones.
-	-- DataService.ProfileLoaded dispara una vez por player cuando su Replica
-	-- está lista. Si el profile ya está cargado al subscribir, fast-path.
+	-- ProfileLoaded dispara una vez por player; si el profile ya estaba cargado al
+	-- suscribir, el fast-path de PlayerAdded lo cubre.
 	Players.PlayerAdded:Connect(function(player)
 		if _dataService:GetProfile(player) then
 			_ensureSeason(player)
@@ -851,7 +780,6 @@ function BattlePassService:Start(dataService: DataService): ()
 		end)
 	end
 
-	-- Cleanup de cooldowns.
 	Players.PlayerRemoving:Connect(function(player: Player)
 		_cooldowns[player.UserId] = nil
 		_bpFunnelSessionByUserId[player.UserId] = nil

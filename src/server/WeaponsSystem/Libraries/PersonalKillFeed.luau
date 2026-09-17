@@ -6,34 +6,23 @@ local LocalPlayer = Players.LocalPlayer
 local ActionRewards = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("ActionRewards"))
 
 local DISPLAY_TIME = 3.5
--- Lee de ActionRewards para que la UI no mienta si el valor cambia (es la
--- misma cifra que MatchService concede vía RewardService.Award(_, "Headshot")).
+-- Misma fuente que concede el server (RewardService.Award(_, "Headshot")).
 local HEADSHOT_BONUS_XP = ActionRewards.GetXP("Headshot")
 local MAX_NOTIFS = 5
 
--- Count-up animado del XP del KO ("+ X" con los números subiendo hasta el
--- objetivo). Para cifras grandes no se cuenta desde 0: se anima sólo el último
--- tramo (XP_COUNT_UP_MAX_SPAN), así no tarda eternamente ni salta de golpe.
+-- Cifras grandes solo animan el último tramo (XP_COUNT_UP_MAX_SPAN).
 local XP_COUNT_UP_TIME = 0.45
 local XP_COUNT_UP_MAX_SPAN = 200
 
 local currentNotificationOrder = 0
 
--- ==============================================================================
--- Tiempos de Animación HEAVY
--- ==============================================================================
--- Entrada "juicy": slam con overshoot + punch elástico + flash de impacto.
-local TI_SLAM_IN    = TweenInfo.new(0.34, Enum.EasingStyle.Back, Enum.EasingDirection.Out)    -- posición (se pasa de 0 y vuelve)
-local TI_PUNCH_IN   = TweenInfo.new(0.55, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out) -- escala (rebota alrededor de 1)
-local TI_WOBBLE_IN  = TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out)      -- rotación settle (wobble)
-local TI_CONTENT_IN = TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)     -- contenido aparece casi instantáneo
+local TI_SLAM_IN    = TweenInfo.new(0.34, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+local TI_PUNCH_IN   = TweenInfo.new(0.55, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out)
+local TI_WOBBLE_IN  = TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+local TI_CONTENT_IN = TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
--- Salida (NUEVA: Directa a la Izquierda, sin rebote)
--- Usamos Exponential.In: Acelera brutalmente hacia la izquierda de forma limpia.
 local TI_SWIPE_OUT_LEFT = TweenInfo.new(0.3, Enum.EasingStyle.Exponential, Enum.EasingDirection.In)
 local TI_FADE_OUT_LEFT = TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
-
--- ==============================================================================
 
 local PersonalKillFeed = {}
 local activeNotifications = {}
@@ -98,10 +87,7 @@ local function applyTransparency(obj, info, target)
 	end
 end
 
--- Audit mobile: cache de descendants por instancia (frame de notification).
--- tweenChildrenTransparency se invoca 2× por notification (fade-in + fade-out),
--- antes hacía GetDescendants() en cada llamada → 2× iter por notification.
--- Con KO/Headshot/Assist en cadena el cost se acumula.
+-- Cache (claves débiles) para no repetir GetDescendants en fade-in y fade-out.
 local _descendantsCache: { [Instance]: { Instance } } = setmetatable({}, { __mode = "k" }) :: any
 
 local function _getCachedDescendants(parent: Instance): { Instance }
@@ -138,8 +124,6 @@ local function slideOutAndDestroy(notificationData)
 
 	local uiScale = frame:FindFirstChildOfClass("UIScale")
 
-	-- SALIDA LIMPIA Y DIRECTA
-	-- Va recto a X = -600. Quitamos cualquier rotación para que sea rígido y limpio.
 	local exitMove = TweenService:Create(frame, TI_SWIPE_OUT_LEFT, {
 		Position = UDim2.new(0, -600, 0, 0),
 		Rotation = 0
@@ -147,7 +131,6 @@ local function slideOutAndDestroy(notificationData)
 
 	tweenChildrenTransparency(frame, TI_FADE_OUT_LEFT, 1)
 
-	-- Se reduce ligeramente mientras se va para dar sensación de velocidad
 	if uiScale then
 		TweenService:Create(uiScale, TI_SWIPE_OUT_LEFT, {Scale = 0.8}):Play()
 	end
@@ -208,17 +191,11 @@ local function slideInFromRight(frame, container, isHeadshot)
 	wrapper.AutomaticSize = Enum.AutomaticSize.X
 	frame.Size = UDim2.new(0, 0, 1, 0)
 
-	-- Reusar la UIScale de la plantilla si la trae (las templates nuevas KO/
-	-- Headshot ya incluyen una). Crear una nueva además dejaría dos UIScale en
-	-- el mismo frame y Roblox sólo aplica una → el punch-in no se vería.
+	-- Reusar la UIScale de la plantilla: con dos, Roblox solo aplica una y el
+	-- punch-in no se vería.
 	local uiScale = frame:FindFirstChildOfClass("UIScale") or Instance.new("UIScale")
 	uiScale.Parent = frame
 
-	-- ── Estado inicial (pre-animación) ─────────────────────────────────────
-	-- Entra desde la derecha, sobredimensionado e inclinado. El headshot pega
-	-- más fuerte. El fondo del frame es transparente (el look viene del
-	-- contenido), así que NO tocamos BackgroundTransparency/Color: la juice es
-	-- puro movimiento.
 	local startOffsetX = isHeadshot and 130 or 110
 	local startScale = isHeadshot and 1.95 or 1.5
 	local startRot = isHeadshot and 13 or 7
@@ -233,18 +210,14 @@ local function slideInFromRight(frame, container, isHeadshot)
 	frame.Parent = wrapper
 	wrapper.Parent = container
 
-	-- ── Animaciones de entrada (en paralelo) ───────────────────────────────
-	TweenService:Create(frame, TI_SLAM_IN, { Position = UDim2.new(0, 0, 0, 0) }):Play() -- slam con overshoot
-	TweenService:Create(frame, TI_WOBBLE_IN, { Rotation = 0 }):Play()                    -- rotación con wobble propio
-	TweenService:Create(uiScale, TI_PUNCH_IN, { Scale = 1 }):Play()                      -- punch elástico
-	tweenChildrenTransparency(frame, TI_CONTENT_IN, 0)                                   -- contenido aparece rápido
+	TweenService:Create(frame, TI_SLAM_IN, { Position = UDim2.new(0, 0, 0, 0) }):Play()
+	TweenService:Create(frame, TI_WOBBLE_IN, { Rotation = 0 }):Play()
+	TweenService:Create(uiScale, TI_PUNCH_IN, { Scale = 1 }):Play()
+	tweenChildrenTransparency(frame, TI_CONTENT_IN, 0)
 
 	return wrapper
 end
 
--- Anima el texto de `label` como "+ N" subiendo desde un valor inicial hasta
--- `target` con easing. Cifras pequeñas cuentan desde 0; las grandes empiezan en
--- target - XP_COUNT_UP_MAX_SPAN. Aborta solo si la etiqueta se destruye antes.
 local function animateXpCountUp(label, xpGained)
 	local target = tonumber(xpGained) or 0
 	local startValue = if target > XP_COUNT_UP_MAX_SPAN then target - XP_COUNT_UP_MAX_SPAN else 0
@@ -258,13 +231,13 @@ local function animateXpCountUp(label, xpGained)
 	local startClock = os.clock()
 	task.spawn(function()
 		while true do
-			if not label.Parent then return end -- notificación expirada/expulsada
+			if not label.Parent then return end
 			local t = (os.clock() - startClock) / XP_COUNT_UP_TIME
 			if t >= 1 then
 				label.Text = "+ " .. tostring(target)
 				return
 			end
-			-- easeOutCubic: arranca rápido y desacelera al llegar al objetivo.
+			-- easeOutCubic
 			local eased = 1 - (1 - t) ^ 3
 			label.Text = "+ " .. tostring(math.floor(startValue + span * eased + 0.5))
 			task.wait()

@@ -1,6 +1,5 @@
 --!strict
--- HitFeedback.luau (Client/Server Library)
--- Gestiona los hitmarkers en pantalla, vibraciones hápticas (móviles) y efectos de highlight locales al impactar.
+-- Hitmarker, hápticos en móvil y highlight local sobre el objetivo al impactar.
 
 local Players = game:GetService("Players")
 local HapticService = game:GetService("HapticService")
@@ -60,10 +59,8 @@ function HitFeedback.new(weaponsGui: any)
 	local self = setmetatable({}, HitFeedback)
 	self.weaponsGui = weaponsGui
 
-	-- Claves débiles (Models golpeados): si el Model muere durante la ventana de
-	-- fade (~0.3s), Destroy() cancela los tweens y los callbacks Completed hacen
-	-- early-return sin borrar la entrada → quedaría huérfana pinneando el Model.
-	-- __mode='k' deja que el GC recoja el Model y su entrada.
+	-- Claves débiles: si el Model muere durante el fade, Destroy() cancela los tweens y
+	-- los Completed hacen early-return sin borrar la entrada, que pinnearía el Model.
 	self._activeHitHighlights = setmetatable({}, { __mode = "k" })
 	self._hitHighlightSerial = 0
 	self._mobileHapticPulseId = 0
@@ -211,10 +208,8 @@ function HitFeedback:onHitOtherPlayer(damage: number, humanoidHit: Humanoid, hit
 	local isHeadshot = hitPart and hitPart.Name == "Head" or false
 	self:_pulseMobileHaptics(isHeadshot)
 
-	-- hitMarker lo asigna setup() vía WaitForChild en un coroutine diferido; un
-	-- golpe que llegue antes de que complete indexaría nil. Ventana muy estrecha
-	-- (los hijos del clone local existen síncronamente), pero el guard evita el
-	-- error en consola sin coste. El háptico de arriba ya disparó.
+	-- hitMarker lo asigna setup() vía WaitForChild en un coroutine diferido: un golpe
+	-- anterior indexaría nil. El háptico de arriba ya disparó.
 	if not self.hitMarker then
 		return
 	end

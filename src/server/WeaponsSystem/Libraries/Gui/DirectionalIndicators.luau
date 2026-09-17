@@ -1,6 +1,4 @@
 --!strict
--- DirectionalIndicators.luau (Client/Server Library)
--- Enruta las notificaciones de daño recibido para mostrar indicadores de dirección de ataque.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local WeaponsSystemFolder = script.Parent.Parent.Parent
@@ -23,7 +21,6 @@ end
 function DirectionalIndicators:setup(gui: ScreenGui)
 	self.manager = DirectionalIndicatorGuiManager.new(self.weaponsGui)
 
-	-- Conectar evento para recibir daño de otros jugadores
 	self._conn = WeaponData.OnClientEvent:Connect(function(cmd, otherPlayerPosition)
 		if cmd == "HitByOtherPlayer" and self.manager then
 			self.manager:ActivateDirectionalIndicator("DamageIndicator", otherPlayerPosition)

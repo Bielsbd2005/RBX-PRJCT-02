@@ -1,7 +1,6 @@
 --!strict
--- Main/Groza. Migrado desde la Configuration del Tool
--- ServerStorage.WeaponTools.Main.Groza, que ya no la lleva: este fichero ES
--- la fuente de verdad. Claves y defaults: WeaponsConfig/Schema.luau.
+-- Fuente de verdad de la Groza (el Tool ServerStorage.WeaponTools.Main.Groza no lleva Configuration).
+-- Claves y defaults: WeaponsConfig/Schema.luau.
 local Types = require(script.Parent.Parent.Parent.Types)
 
 return {

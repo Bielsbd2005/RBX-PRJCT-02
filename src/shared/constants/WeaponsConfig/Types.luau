@@ -1,18 +1,7 @@
 --!strict
 --[[
-	WeaponsConfig/Types.luau
-	Tipos de la configuración de combate de las armas.
-
-	Cada TIPO de arma (WeaponType) tiene su propio conjunto de parámetros:
-	  • BaseWeaponConfig   — lo que entiende BaseWeapon (cargador, recarga,
-	                         animaciones, mira).
-	  • BulletWeaponConfig — BaseWeaponConfig + balística, daño, recoil, VFX.
-	  • BowWeaponConfig    — BowWeapon hereda de BulletWeapon y no añade claves
-	                         propias; se mantiene como alias para que una
-	                         definición pueda declararse con su tipo real.
-
-	Todas las claves son opcionales: una definición sólo escribe lo que
-	difiere del default (ver Schema.luau).
+	Todas las claves son opcionales: una definición sólo escribe lo que difiere del
+	default (Schema.luau). BowWeaponConfig es alias: BowWeapon no añade claves.
 ]]
 
 export type WeaponCategory = "Main" | "Special"
@@ -103,17 +92,14 @@ export type BowWeaponConfig = BulletWeaponConfig
 
 export type WeaponConfig = BulletWeaponConfig
 
---[[
-	Lo que devuelve cada fichero de Definitions/<Category>/<Id>.luau.
-	Category e Id NO se escriben en el fichero: los aporta el registro a partir
-	de la carpeta y el nombre del módulo, así no pueden desincronizarse.
-]]
+-- Lo que devuelve Definitions/<Category>/<Id>.luau. Category e Id los aporta el
+-- registro desde la carpeta y el nombre del módulo.
 export type WeaponDefinition = {
 	WeaponType: WeaponType,
 	Config: WeaponConfig,
 }
 
---- Definición ya registrada (con identidad resuelta y congelada).
+--- Con identidad resuelta y congelada.
 export type RegisteredWeapon = {
 	Category: WeaponCategory,
 	Id: string,
@@ -121,5 +107,4 @@ export type RegisteredWeapon = {
 	Config: WeaponConfig,
 }
 
--- Sólo tipos: el valor devuelto es irrelevante.
 return {}

@@ -1,32 +1,10 @@
 --!strict
 --[[
-	StuckViz — marca en el mapa los puntos donde los bots se quedan atascados.
+	Marca en el mapa dónde se atascan los bots. Se activa con el BoolValue
+	ServerStorage.ShowStuckMarkers; ponerlo a false limpia Workspace.BotStuckDebug.
 
-	Toggle con el BoolValue ServerStorage.ShowStuckMarkers:
-	  ServerStorage.ShowStuckMarkers.Value = true
-
-	Mientras está enabled, cada escalada de StuckDetector a partir del nivel 2
-	(repath, 2s sin progreso) deja una esfera neon rosa en la posición del bot,
-	dentro de Workspace/BotStuckDebug. Los markers son PERSISTENTES (no Debris):
-	la idea es dejar correr una partida entera y luego mirar el mapa para ver
-	qué zonas concentran atascos.
-
-	No se marca dentro de SPAWN_IGNORE_RADIUS de un spawn point (AIService pasa
-	la lista en OnRoundStart): los bots recién spawneados se empujan entre ellos
-	sobre el pad, y eso no es geometría a arreglar.
-
-	Agregación por celda de 8 studs: dos bots atascados en el mismo sitio
-	reutilizan el mismo marker, que crece con el nivel máximo alcanzado y lleva
-	un contador. Así una esquina mala se ve como UN marker grande con "x14" en
-	vez de 14 esferas solapadas.
-
-	Poner el BoolValue a false limpia la carpeta entera. También desde Command
-	Bar:
-	  require(...ServerScriptService.Server.AI.debug.StuckViz).clear()
-
-	Coste: cero cuando está off (early return sobre un bool cacheado). Enabled,
-	como mucho MAX_MARKERS Parts ancladas sin colisión ni query — despreciable,
-	pero NO dejarlo on en producción: las Parts replican a todos los clientes.
+	Markers persistentes y agregados por celda de GRID_SIZE para ver zonas
+	problemáticas tras una partida. No dejar on en producción: las Parts replican.
 ]]
 
 local ServerStorage = game:GetService("ServerStorage")
@@ -36,31 +14,23 @@ local FLAG_NAME = "ShowStuckMarkers"
 
 local FOLDER_NAME = "BotStuckDebug"
 local COLOR_PINK = Color3.fromRGB(255, 0, 170)
--- Naranja para los stalls del walk loop: son un fallo DISTINTO al del
--- StuckDetector y confundirlos hace imposible diagnosticar. Ver KIND_*.
+-- Stalls del walk loop: fallo distinto al del StuckDetector. Ver KIND_*.
 local COLOR_ORANGE = Color3.fromRGB(255, 140, 0)
-local GRID_SIZE = 8       -- studs por celda de agregación
-local MAX_MARKERS = 250   -- techo duro para no llenar el DataModel
+local GRID_SIZE = 8 -- studs por celda de agregación
+local MAX_MARKERS = 250
 
--- Dos fallos con síntomas opuestos, mismo mapa de calor:
---   STUCK — el StuckDetector escaló: el bot está QUIETO (velocidad neta por
---           debajo de StuckMoveEpsilon) el tiempo suficiente. `level` es el
---           peldaño de la escalada (2 repath / 3 jump / 4 teleport).
---   STALL — el walk loop abandonó un waypoint: el bot SE MUEVE pero no se
---           acerca al waypoint. El StuckDetector es ciego a esto porque solo
---           mira velocidad, no progreso hacia el destino. `level` no aplica.
+--   STUCK — el StuckDetector escaló: el bot está quieto. `level` = peldaño
+--           (2 repath / 3 jump / 4 teleport).
+--   STALL — el walk loop abandonó un waypoint: el bot se mueve pero no progresa
+--           (el StuckDetector solo mira velocidad). `level` no aplica.
 local KIND_STUCK = "stuck"
 local KIND_STALL = "stall"
 
--- Radio alrededor de cada spawn point donde NO se marca. Los amontonamientos
--- en el pad (varios bots spawneando a la vez, empujándose) no son un defecto
--- de geometría, y sin el filtro cada spawn acaba con un marker gigante que
--- tapa la señal real. Complementa la gracia temporal de StuckDetector: cubre
--- al bot que sale del spawn tarde, cuando la gracia ya expiró.
+-- Los empujones entre bots en el pad de spawn no son defecto de geometría.
+-- Complementa la gracia temporal de StuckDetector (bots que salen tarde).
 local SPAWN_IGNORE_RADIUS = 16
 local SPAWN_IGNORE_RADIUS2 = SPAWN_IGNORE_RADIUS * SPAWN_IGNORE_RADIUS
 
--- Tamaño de la esfera según el nivel de escalada más alto visto en la celda.
 local SIZE_BY_LEVEL: { [number]: number } = {
 	[2] = 2.5,
 	[3] = 4,
@@ -110,8 +80,7 @@ local function _ensureFolder(): Folder
 	return folder
 end
 
--- Bool cacheado (mismo patrón que RaycastViz): mark() se llama desde el tick
--- del StuckDetector, así que no queremos leer el BoolValue cada vez.
+-- Bool cacheado: mark() se llama desde el tick del StuckDetector.
 local function _bindFlag(flag: BoolValue)
 	_enabled = flag.Value
 	flag.Changed:Connect(function(value: boolean)
@@ -134,8 +103,6 @@ do
 				flag.ClassName
 			))
 		end
-		-- Si el BoolValue se añade en caliente (o el place lo crea tarde),
-		-- engancharlo sin necesidad de reiniciar el servidor.
 		local conn: RBXScriptConnection
 		conn = ServerStorage.ChildAdded:Connect(function(child)
 			if child.Name == FLAG_NAME and child:IsA("BoolValue") then
@@ -150,9 +117,8 @@ function StuckViz.isEnabled(): boolean
 	return _enabled
 end
 
--- AIService la llama en OnRoundStart con los spawn points del mapa. Se guardan
--- las posiciones (no las Parts) porque el mapa se destruye al acabar la ronda
--- y no queremos mantener referencias vivas a instancias borradas.
+-- AIService la llama en OnRoundStart. Se guardan posiciones y no Parts porque
+-- el mapa se destruye al acabar la ronda.
 function StuckViz.setSpawnPoints(points: { BasePart })
 	table.clear(_spawnPositions)
 	for _, part in points do
@@ -171,9 +137,7 @@ local function _isNearSpawn(pos: Vector3): boolean
 end
 
 local function _labelText(marker: Marker): string
-	-- STALL no lleva "lvl": no hay escalada, es un evento binario del walk loop.
-	-- Ponerle un número lo haría indistinguible de una escalada del
-	-- StuckDetector, que es justo lo que hay que poder separar de un vistazo.
+	-- STALL no lleva "lvl" para distinguirlo de un vistazo de una escalada.
 	local head = if marker.kind == KIND_STALL
 		then "STALL"
 		else string.format("STUCK · lvl %d", marker.maxLevel)
@@ -189,9 +153,8 @@ local function _applyLevelVisuals(marker: Marker)
 	marker.label.Text = _labelText(marker)
 end
 
--- Llamado por StuckDetector en cada escalada de nivel >= 2. `pos` es la
--- posición del rootPart en el momento del atasco (en nivel 4, ANTES del
--- teleport — si no, marcaríamos el destino en vez del problema).
+-- Llamado por StuckDetector en cada escalada de nivel >= 2. En nivel 4 `pos`
+-- debe ser la posición ANTES del teleport.
 function StuckViz.mark(pos: Vector3, level: number, botName: string, kind: string?)
 	if not _enabled then
 		return
@@ -203,8 +166,7 @@ function StuckViz.mark(pos: Vector3, level: number, botName: string, kind: strin
 
 	local markKind = kind or KIND_STUCK
 
-	-- El `kind` entra en la clave de agregación: un STALL y un STUCK en la misma
-	-- celda son dos diagnósticos distintos y tienen que salir como dos markers.
+	-- `kind` va en la clave: STALL y STUCK en la misma celda son markers distintos.
 	local key = string.format(
 		"%s|%d,%d,%d",
 		markKind,
@@ -248,9 +210,7 @@ function StuckViz.mark(pos: Vector3, level: number, botName: string, kind: strin
 	part.Position = pos
 	part:SetAttribute("Bot", botName)
 
-	-- AlwaysOnTop: el punto interesante suele estar pegado a geometría (esquina,
-	-- rampa, hueco), así que el marker queda medio enterrado. El billboard se ve
-	-- a través de las paredes para poder localizarlo desde lejos.
+	-- AlwaysOnTop: el marker suele quedar medio enterrado en geometría.
 	local billboard = Instance.new("BillboardGui")
 	billboard.Name = "StuckLabel"
 	billboard.Size = UDim2.fromScale(8, 1.6)
@@ -282,7 +242,7 @@ function StuckViz.mark(pos: Vector3, level: number, botName: string, kind: strin
 	_applyLevelVisuals(marker)
 end
 
--- Para Command Bar: borra todos los markers sin tocar el attribute.
+-- Para Command Bar: borra los markers sin tocar el BoolValue.
 function StuckViz.clear()
 	_clearAll()
 end

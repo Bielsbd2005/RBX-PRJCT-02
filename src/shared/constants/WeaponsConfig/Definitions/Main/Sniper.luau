@@ -1,7 +1,5 @@
 --!strict
--- Main/Sniper. Migrado desde la Configuration del Tool
--- ServerStorage.WeaponTools.Main.Sniper, que ya no la lleva: este fichero ES
--- la fuente de verdad. Claves y defaults: WeaponsConfig/Schema.luau.
+-- Fuente de verdad de la config (el Tool no lleva Configuration). Claves y defaults: WeaponsConfig/Schema.luau.
 local Types = require(script.Parent.Parent.Parent.Types)
 
 return {

@@ -133,10 +133,6 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 
 	for _, feature in deferredFeatures do
 		task.defer(function()
-			if not _started or not _janitor then
-				return
-			end
-
 			local success, featureHandle = pcall(feature.start, menuController)
 			if not success then
 				warn("[ClientBootstrap] Failed to start feature:", feature.label, featureHandle)
@@ -193,9 +189,6 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 	-- primer clic, hasta entonces la mesa salía vacía y el billboard se veía tal
 	-- cual viene del place. Diferido para no competir con el resto del arranque.
 	task.defer(function()
-		if not _started or not _janitor then
-			return
-		end
 		bootLockerFeature(false)
 	end)
 
@@ -213,11 +206,6 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 				lockerLazyConnection = nil
 			end
 		end, true)
-	else
-		-- Sin botón Locker en el menú (se quitó la barra inferior): el locker
-		-- igualmente arranca arriba — las armas y el billboard no dependen de que
-		-- se pueda abrir. Aquí sólo nos quedamos sin el enganche de apertura; el
-		-- propio LockerFeature conecta el botón si existe cuando él arranca.
 	end
 end
 

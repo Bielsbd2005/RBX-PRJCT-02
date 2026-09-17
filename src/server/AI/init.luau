@@ -38,13 +38,10 @@ type RoundStartConfig = {
 	spawnPoints: { BasePart },
 	mapRoot: Instance?,
 	onBotDied: ((string, string, Humanoid, number) -> ())?,
-	-- Spawn-point selection routed through SpawnService/SpawnSelector (same
-	-- scoring + reservation map as players). Injected by MatchService so the
-	-- AI module doesn't depend on match modules. Optional: when absent or when
-	-- it returns nil, _spawnOneBot falls back to a random point.
+	-- Inyectado por MatchService (SpawnSelector, mismas reservas que los jugadores)
+	-- para no depender de match. Si falta o devuelve nil, spawn aleatorio.
 	selectSpawnPoint: ((team: "A" | "B") -> BasePart?)?,
-	-- B2: notified when the staggered spawn pump finishes reconciling the
-	-- roster (typically wired to MatchService's roster broadcast).
+	-- Se llama cuando el spawn pump termina de rellenar el roster.
 	onRosterChanged: (() -> ())?,
 }
 
@@ -54,8 +51,7 @@ type BotRecord = {
 	team: "A" | "B",
 	deathConnection: RBXScriptConnection?,
 	hasDeathBeenReported: boolean,
-	-- Manejo de muerte (ragdoll + Destroy + cleanup). Se dispara desde Humanoid.Died
-	-- y, como fallback, desde _refreshAliveLists si Died no llega a correr.
+	-- Se dispara desde Humanoid.Died y, como fallback, desde _refreshAliveLists.
 	handleDeath: (() -> ())?,
 	ai: BotAI.BotAIInstance,
 	descendantConn: RBXScriptConnection?,
@@ -96,30 +92,21 @@ end
 local AIService = {}
 
 local _isRoundActive = false
--- Bumped on every OnRoundEnd. Each bot captures the generation it was spawned
--- in; the death handler compares before touching round-scoped bookkeeping.
--- Without this, the deferred death fallback (_refreshAliveLists) can run AFTER
--- OnRoundEnd cleared the pools and re-insert a stale identity whose fakeUserId
--- collides once _fakeUserIdCounter resets for the next round.
+-- Sube en cada OnRoundEnd. El death handler (que puede correr diferido) no toca
+-- estado de ronda si la generación cambió: reinsertaría una identidad cuyo
+-- fakeUserId colisiona tras reiniciarse _fakeUserIdCounter.
 local _roundGeneration = 0
 local _mapRoot: Instance? = nil
 local _roamGraph: RoamGraph.RoamGraph? = nil
 local _spawnPoints: { BasePart } = {}
 local _selectSpawnPoint: ((team: "A" | "B") -> BasePart?)? = nil
 local _onBotDied: ((string, string, Humanoid, number) -> ())? = nil
--- B2: fired when the staggered spawn pump finishes filling the roster, so
--- MatchService can re-broadcast it (SetBotTargets returns before the pump
--- completes; the broadcast made at that point misses the pending spawns).
+-- SetBotTargets vuelve antes de que el pump acabe: MatchService re-emite el roster aquí.
 local _onRosterChanged: (() -> ())? = nil
 local _botsByName: { [string]: BotRecord } = {}
--- D3: earliest os.clock() at which each team may spawn a REPLACEMENT for a
--- dead bot. Armed by the death handler when Lifecycle.RespawnDelay > 0
--- (default 0 = instant, historical behavior); the spawn pump skips a held
--- team without exiting. Round-start fills are never held (no death armed it).
+-- os.clock() mínimo para reemplazar a un bot muerto de cada equipo
+-- (BotConfig.Lifecycle.RespawnDelay). Los rellenos de inicio de ronda no esperan.
 local _spawnHoldUntil = { A = 0, B = 0 }
--- B6: index O(1) por FakeUserId para _findAttackerModel. Antes scan lineal
--- sobre aliveTargets por cada damage event (peor caso 16 events/100ms × 16
--- candidatos = 2560 comparaciones/seg).
 local _botModelByFakeUserId: { [number]: Model } = {}
 local _botNamesByTeam: { A: { string }, B: { string } } = {
 	A = {},
@@ -134,23 +121,8 @@ local _identityByFakeUserId: { [number]: BotIdentity } = {}
 local _teamByFakeUserId: { [number]: string } = {}
 local _botFakeUserIdByName: { [string]: number } = {}
 
--- ────────────────────────────────────────────────────────────────
--- ALIVE TARGETS CACHE (compartido entre todos los BotAI)
---
--- Mantiene una lista de Models vivos (chars de jugadores reales + bots)
--- que pueden ser objetivos de los bots. Se actualiza vía signals
--- (PlayerAdded/CharacterAdded/Died/AncestryChanged) — sin polling.
---
--- Antes cada bot iteraba `workspace:GetChildren()` + `mapRoot/Bots:GetChildren()`
--- en cada tick (60Hz Heartbeat × 8 bots = ~5760 raycasts/seg en peor caso).
--- Esta cache global elimina la iteración masiva — el bot solo pasea sobre
--- los ~16 candidatos relevantes.
--- ────────────────────────────────────────────────────────────────
-
--- B4: tupla en lugar de Model. Antes _getBestTarget hacía
--- FindFirstChildOfClass + FindFirstChild por cada candidato cada tick
--- (16 bots × 24 chars × 2 × 10Hz ≈ 7680 lookups/seg en PATROL).
--- Resuelto al add-time + lazy refresh si el ref muere (respawn streaming).
+-- Objetivos vivos (jugadores + bots) compartidos por todos los BotAI, mantenidos
+-- por señales. hum/root se resuelven al añadir; BotAI los refresca si mueren.
 export type AliveTarget = {
 	model: Model,
 	hum: Humanoid?,
@@ -175,7 +147,6 @@ local function _removeAliveTarget(model: Model)
 	local idx = _aliveTargetIndex[model]
 	if not idx then return end
 	_aliveTargetIndex[model] = nil
-	-- Swap-remove O(1): mover el último al hueco si no es el mismo.
 	local last = #_aliveTargets
 	if idx ~= last then
 		local moved = _aliveTargets[last]
@@ -185,10 +156,8 @@ local function _removeAliveTarget(model: Model)
 	_aliveTargets[last] = nil
 end
 
--- Dedupe: protege contra la race del module-load donde un jugador que
--- aparece entre Players.PlayerAdded:Connect y el for-loop inicial era
--- wired DOS veces (CharacterAdded:Connect duplicado → 2× AncestryChanged
--- y Died listeners por char en cada respawn).
+-- Dedupe: un jugador que entra entre el PlayerAdded:Connect y el bucle inicial
+-- llegaría dos veces.
 local _wiredPlayers: { [Player]: true } = {}
 
 local function _wirePlayerAliveTracking(player: Player)
@@ -198,16 +167,10 @@ local function _wirePlayerAliveTracking(player: Player)
 	_wiredPlayers[player] = true
 
 	local function onChar(char: Model)
-		-- Audit mobile: remove defensivo del char anterior. _addAliveTarget
-		-- ya dedupea por index, pero el char del respawn previo puede no
-		-- haber salido todavía (AncestryChanged tarda un frame) → la nueva
-		-- entry quedaría apuntando al char correcto pero la vieja seguiría
-		-- referenciada por _aliveTargetIndex con el mismo Model si Roblox
-		-- recicla la ref (raro pero posible al reusar rigs del LoadCharacter).
+		-- Remove defensivo: la entrada previa puede seguir si Roblox recicla el Model.
 		_removeAliveTarget(char)
 		_addAliveTarget(char)
-		-- El char puede ser destruido sin Died (respawn instantáneo, kick, etc.).
-		-- AncestryChanged lo cubre todos los casos sin duplicar lógica.
+		-- El char puede destruirse sin Died (respawn instantáneo, kick).
 		char.AncestryChanged:Connect(function(_, parent)
 			if parent == nil then
 				_removeAliveTarget(char)
@@ -239,10 +202,6 @@ Players.PlayerRemoving:Connect(function(player)
 	end
 end)
 
--- Graceful shutdown: cuando el servidor cierra, paramos los loops de todos los
--- bots para que no se queden ejecutando contra un DataModel a punto de morir.
--- Esto evita warnings/errores ruidosos durante el shutdown y permite que las
--- coroutines salgan limpiamente.
 game:BindToClose(function()
 	for _, record in pairs(_botsByName) do
 		if record and record.ai then
@@ -253,14 +212,8 @@ game:BindToClose(function()
 	end
 end)
 
--- Las identidades del pool son usuarios reales de Roblox (el headshot sale de
--- su UserId). Si uno de ellos entra al servidor, un bot con esa identidad
--- compartiría nombre y foto con él, así que queda descartada.
---
--- Se construye UNA vez por asignación el set de userIds y nombres (lowercase)
--- de los jugadores presentes, y cada entrada del pool se comprueba contra él.
--- Antes cada entrada del pool (223) hacía :lower() sobre Name y DisplayName de
--- cada jugador, por cada bot, dentro de los frames del spawn pump.
+-- Las identidades del pool son usuarios reales de Roblox: se descartan las que
+-- coincidan con un jugador presente (compartirían nombre y foto).
 type TakenIdentitySet = { userIds: { [number]: true }, names: { [string]: true } }
 
 local _lowerNameByPoolIndex: { [number]: string } = {}
@@ -290,7 +243,6 @@ end
 local function _assignIdentity(): (BotIdentity, number)
 	_fakeUserIdCounter -= 1
 	local fakeUserId = _fakeUserIdCounter
-	-- Pick an unused identity from the pool
 	local available = {}
 	local taken = _buildTakenIdentitySet()
 	for i, source in BotNames do
@@ -307,24 +259,16 @@ local function _assignIdentity(): (BotIdentity, number)
 		name = source.name
 		image = source.image
 	else
-		-- Fallback: pool agotado (>20 bots/team). Prefijo "Bot_" en lugar de
-		-- "Player" para evitar colisiones con usernames reales de Roblox que
-		-- empiezan por "Player".
+		-- Pool agotado. No usar prefijo "Player": colisiona con usernames reales.
 		name = "Bot_" .. tostring(math.abs(fakeUserId))
 		image = "rbxassetid://0"
 	end
 
-	-- Personality drives apariencia + stats fingidas. Se rolea una vez por
-	-- identidad: igual que appearance, sobrevive al recycle pool y se
-	-- re-randomiza solo en OnRoundEnd cuando se limpian las identidades.
 	local personalityId, personality = BotPersonality.rollPersonality()
 	local level, historicalKills = BotPersonality.rollStats(personality)
 
-	-- Construir identity fresca con apariencia cacheada. La apariencia
-	-- vive en la identity para que el recycle pool tras la muerte del bot
-	-- (init.luau:613) mantenga la misma hat/face/wrap durante todo el match.
-	-- En OnRoundEnd se limpian _usedIdentityIndices y _recycledByTeam, así
-	-- que la siguiente ronda re-rolea automáticamente.
+	-- Personalidad y apariencia viven en la identity: al reciclarse tras morir, el
+	-- bot mantiene su look toda la ronda; se re-rolean al limpiar en OnRoundEnd.
 	local identity: BotIdentity = {
 		name = name,
 		image = image,
@@ -345,18 +289,14 @@ local function _refreshAliveLists()
 	local deadUnreported: { BotRecord }? = nil
 	for name, bot in _botsByName do
 		if bot.model.Parent == nil then
-			-- Modelo ya destruido: solo limpiar bookkeeping.
 			if bot.deathConnection then
 				bot.deathConnection:Disconnect()
 				bot.deathConnection = nil
 			end
 			_botsByName[name] = nil
 		elseif bot.humanoid.Health <= 0 then
-			-- Muerto pero el modelo sigue presente. NO desconectamos su deathConnection
-			-- (hacerlo orfanaba el cuerpo: sin ragdoll ni Destroy, congelado para
-			-- siempre). Si su Died handler aún no corrió, lo disparamos como fallback
-			-- (diferido, fuera del bucle, para no re-entrar esta iteración). No se
-			-- cuenta como vivo.
+			-- NO desconectar deathConnection aquí: el cuerpo quedaría sin ragdoll ni
+			-- Destroy. Si Died no corrió, se dispara diferido como fallback.
 			if not bot.hasDeathBeenReported then
 				deadUnreported = deadUnreported or {}
 				table.insert(deadUnreported, bot)
@@ -370,8 +310,6 @@ local function _refreshAliveLists()
 		end
 	end
 
-	-- Fallback de limpieza: bots con Health<=0 cuyo Humanoid.Died no llegó a correr.
-	-- El guard hasDeathBeenReported evita doble ejecución si Died sí dispara luego.
 	if deadUnreported then
 		for _, bot in deadUnreported do
 			task.defer(function()
@@ -383,8 +321,6 @@ local function _refreshAliveLists()
 	end
 end
 
--- Fallback when the injected selector is absent or returns nil (no map,
--- empty spawn list mid-teardown).
 local function _getRandomSpawnPoint(): BasePart?
 	if #_spawnPoints == 0 then
 		return nil
@@ -454,32 +390,17 @@ end
 
 local _hasWarnedMissingTemplate = false
 
--- B5: pool async de Models pre-clonados. Desacopla el coste de Model:Clone
--- (con sus 30+ parts/accessories) del path crítico de _spawnOneBot. El refill
--- corre en task.spawn — la siguiente vez que un bot muere y se necesita uno
--- nuevo, el pool ya tiene un rig caliente listo.
---
--- No se reutilizan rigs entre vidas (no es un pool de "ressurect"): la
--- Humanoid en estado Dead no se puede revivir limpiamente sin reemplazar el
--- Humanoid entero. Esta variante mata complejidad pero no la ganancia de
--- decouplear cloning del spawn moment.
---
--- Pool por outfit: con apariencia variable, cada outfit es un Model distinto
--- en Shared.Bodies. Un único pool compartido implicaría todos los bots
--- con el mismo body. La key del pool es el outfitId.
+-- Pools de rigs pre-clonados por outfitId (Shared.Bodies.<outfitId>) para sacar
+-- el Clone del spawn. Los rigs no se reutilizan entre vidas: un Humanoid Dead no
+-- se puede revivir limpiamente.
 local _botRigPoolByKey: { [string]: { Model } } = {}
 local _botRigRefillingByKey: { [string]: boolean } = {}
 local BOT_RIG_POOL_TARGET = 3
--- C1: cap on TOTAL parked rigs across all outfit pools, so memory no longer
--- grows linearly with the outfit catalog (~30 parts per rig). The max
--- concurrent bot count is TeamSizeTarget × 2 (both teams, 8 today), so
--- TeamSizeTarget × 4 = 2× that keeps a full respawn wave warm; past the cap,
--- refills stop and a cold take pays one sync clone (rare).
+-- Tope global de rigs aparcados (la memoria no crece con el catálogo de outfits):
+-- 2× el máximo de bots simultáneos cubre una oleada completa de respawns.
 local MAX_TOTAL_PARKED_RIGS = GameConfig.TeamSizeTarget * 4
--- C1: pools shrink to this size between rounds. Identities re-roll every
--- round, so keeping every pool hot has no cross-round hit-rate benefit; one
--- rig per outfit keeps the first take warm and the Voting-phase prewarm
--- rebuilds the rest before the next round-start burst.
+-- Tamaño de cada pool entre rondas (las identidades se re-rolean); el prewarm de
+-- la fase Voting rellena el resto.
 local BOT_RIG_POOL_IDLE_TARGET = 1
 local _botRigParkFolder: Folder? = nil
 
@@ -487,7 +408,6 @@ local function _ensureParkFolder(): Folder
 	if _botRigParkFolder and _botRigParkFolder.Parent then
 		return _botRigParkFolder
 	end
-	-- ServerStorage no replica al cliente — los rigs parked no se ven.
 	local existing = ServerStorage:FindFirstChild("_BotRigPool")
 	if existing and existing:IsA("Folder") then
 		_botRigParkFolder = existing
@@ -504,8 +424,6 @@ local function _clonePreparedRig(poolKey: string): Model?
 	local template = BotAppearance.findBodyTemplate(poolKey)
 	if not template then return nil end
 	local clone = template:Clone()
-	-- Parented a ServerStorage para que Roblox no intente streaming/replicación
-	-- ni dispare ChildAdded en el workspace mientras está en el pool.
 	clone.Parent = _ensureParkFolder()
 	return clone
 end
@@ -518,7 +436,6 @@ local function _countParkedRigs(): number
 	return total
 end
 
--- C1: shrink every pool down to `perPoolTarget`, destroying the extras.
 local function _trimRigPools(perPoolTarget: number)
 	for _, pool in _botRigPoolByKey do
 		while #pool > perPoolTarget do
@@ -541,11 +458,9 @@ local function _refillBotRigPoolAsync(poolKey: string)
 		end
 		while #pool < BOT_RIG_POOL_TARGET and _countParkedRigs() < MAX_TOTAL_PARKED_RIGS do
 			local rig = _clonePreparedRig(poolKey)
-			if not rig then break end -- template missing → abandona refill
+			if not rig then break end
 			table.insert(pool, rig)
-			-- Yield between clones: without this the task.spawn body never
-			-- yields, so every clone still landed in a single frame — the
-			-- spike was moved, not amortized.
+			-- Sin este yield todos los clones caerían en el mismo frame.
 			task.wait()
 		end
 		_botRigRefillingByKey[poolKey] = false
@@ -560,15 +475,10 @@ local function _takeBotRigFromPool(poolKey: string): Model?
 		_refillBotRigPoolAsync(poolKey)
 		return rig
 	end
-	-- Pool vacío (e.g., burst inicial de spawns, primer take para este outfit)
-	-- → fallback sync.
 	_refillBotRigPoolAsync(poolKey)
 	return _clonePreparedRig(poolKey)
 end
 
--- Resuelve qué pool usar para un outfitId dado. Prefiere el outfit pedido si
--- su body existe; cae a "Default" si está. Devuelve nil si no hay ningún
--- body disponible → _createBotModel cae al rig barebones.
 local function _resolvePoolKeyForOutfit(outfitId: string?): string?
 	if outfitId and BotAppearance.findBodyTemplate(outfitId) then
 		return outfitId
@@ -589,10 +499,6 @@ local function _createBotModel(botName: string, outfitId: string?): Model
 		end
 	end
 
-	-- Audit P2: warn una sola vez por proceso. Antes el fallback silencioso
-	-- producía bots T-pose sin tool en producción y nadie se enteraba salvo
-	-- viendo en vivo. Si el template falta, todos los bots del round caen
-	-- al fallback — no necesitamos N warns iguales, solo uno con contexto.
 	if not _hasWarnedMissingTemplate then
 		_hasWarnedMissingTemplate = true
 		warn("[AIService] BotTemplate no encontrado (esperado en Shared.Bodies.<outfitId> o Shared.Bodies.Default). Usando modelo barebones — los bots aparecerán en T-pose y sin arma hasta que se restaure el template.")
@@ -600,15 +506,8 @@ local function _createBotModel(botName: string, outfitId: string?): Model
 	return _buildFallbackBotModel(botName)
 end
 
--- Warm-up: pre-rellena los pools de rigs para que la primera oleada de spawns
--- no pague el coste de Clone en el path crítico. Si no hay bodies,
--- _createBotModel cae al rig barebones.
---
--- B2: serialized — one pool refills at a time (each refill already yields
--- between clones), so warming N outfits costs ~1 clone per frame instead of
--- N. Runs at module load and again when MatchService opens the Voting phase,
--- rebuilding what the round-end trim (C1) released before the next
--- round-start burst.
+-- Serializado (un pool cada vez) para costar ~1 clone por frame. Corre al cargar
+-- y al abrir la fase Voting (MatchService).
 local _prewarmRunning = false
 local function _prewarmRigPools()
 	if _prewarmRunning then
@@ -642,7 +541,6 @@ local function _removeBotByName(botName: string, skipRefresh: boolean?)
 		bot.deathConnection = nil
 	end
 
-	-- Clean identity tracking so GetBotRoster no longer includes this bot
 	local fakeUserId = _botFakeUserIdByName[botName]
 	if fakeUserId then
 		_identityByFakeUserId[fakeUserId] = nil
@@ -704,8 +602,6 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 
 	local botName = string.format("Bot_%s_%d", team, _nextBotId)
 	_nextBotId += 1
-	-- Captured by handleBotDeath: round-scoped bookkeeping (identity recycle,
-	-- counters, _onBotDied) only runs if this round is still the active one.
 	local spawnGeneration = _roundGeneration
 
 	local identity: BotIdentity
@@ -735,23 +631,17 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 
 	_markBotTeam(botModel, team)
 
-	-- Stamp identity on model
 	botModel:SetAttribute("DisplayName", identity.name)
 	botModel:SetAttribute("FakeUserId", fakeUserId)
 	botModel:SetAttribute("ProfileImage", identity.image)
 	_botModelByFakeUserId[fakeUserId] = botModel
 	humanoid.DisplayName = identity.name
 
-	-- Apariencia (hat + face). El wrap se aplica dentro de BotAI:_setupTool
-	-- tras clonar el tool, vía el wrapId que pasamos al constructor.
+	-- El wrap no va aquí: lo aplica BotAI:_setupTool al clonar el tool.
 	BotAppearance.apply(botModel, identity.appearance)
 
 	local wrapId = if identity.appearance then identity.appearance.wrapId else nil
-	-- Weapon rolled with the identity (stable across respawns, like the rest
-	-- of the appearance).
 	local weaponId = if identity.appearance then identity.appearance.weaponId else nil
-	-- D1: combat skill from the identity's personality tier; nil combat block
-	-- (or unknown id) falls back to the global BotConfig.Combat profile.
 	local personality = BotPersonality.getById(identity.personalityId)
 	local botAIInstance = BotAI.new(botModel, team, fakeUserId, wrapId, if personality then personality.combat else nil, weaponId)
 
@@ -762,27 +652,17 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 		botsFolder.Parent = mapRoot
 	end
 
-	-- Position BEFORE parenting: avoids one frame of physics/replication at
-	-- the template's stored position. PivotTo (not root.CFrame): WeldConstraints
-	-- no son rígidos fuera del Workspace, así que asignar root.CFrame con el rig
-	-- aún en ServerStorage movía el esqueleto (Motor6D) pero dejaba atrás las
-	-- piezas de ropa unidas por WeldConstraint — al entrar al Workspace el
-	-- constraint se activaba con el offset roto (ropa descolocada). PivotTo
-	-- mueve TODOS los descendientes geométricamente, con o sin joints.
-	-- El offset compensa pivots que no coincidan con el HumanoidRootPart para
-	-- conservar la semántica exacta del viejo root.CFrame = spawn.
+	-- Posicionar antes de parentear, y con PivotTo (no root.CFrame): fuera del
+	-- Workspace los WeldConstraint no son rígidos y la ropa quedaría descolocada.
+	-- rootToPivot deja el HumanoidRootPart exactamente sobre el spawn.
 	local rootToPivot = root.CFrame:ToObjectSpace(botModel:GetPivot())
 	botModel:PivotTo((spawnPoint.CFrame + Vector3.new(0, 4, 0)) * rootToPivot)
 	botModel.Parent = botsFolder
 	humanoid.Health = humanoid.MaxHealth
 	humanoid.BreakJointsOnDeath = false
 
-	-- NPC humanoids never climb, swim, sit, or trip — disable the unused
-	-- state-machine branches (per-humanoid simulation cost + avoids accidental
-	-- transitions like FallingDown from collisions). Dead/Running/Jumping/
-	-- Freefall/Landed stay enabled: movement, animations and the Died signal
-	-- depend on them. Kill effects force ChangeState(Dead) themselves and do
-	-- not use the Ragdoll/FallingDown states.
+	-- Dead/Running/Jumping/Freefall/Landed deben seguir activos (movimiento,
+	-- animaciones y Died). Los kill effects no usan Ragdoll/FallingDown.
 	humanoid:SetStateEnabled(Enum.HumanoidStateType.Climbing, false)
 	humanoid:SetStateEnabled(Enum.HumanoidStateType.Swimming, false)
 	humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
@@ -791,32 +671,17 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 	humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
 	humanoid:SetStateEnabled(Enum.HumanoidStateType.GettingUp, false)
 
-	-- Grupo BOTS: choca con el mundo y con jugadores vivos, pero no con otros
-	-- bots ni con cadáveres. Bot↔bot OFF es deliberado — dos NPCs empujándose
-	-- contra la geometría se leen como "moving sin progreso" y disparan la
-	-- escalada del StuckDetector (repaths en cadena, pasos a tirones). Al
-	-- morir, el kill effect migra al grupo RAGDOLL. El watcher cubre
-	-- tools/accesorios que se parenten después.
+	-- Bot↔bot sin colisión a propósito: dos bots empujándose disparan el StuckDetector.
 	CollisionGroups.setGroupForCharacter(botModel, CollisionGroups.BOTS)
-	-- Audit mobile: guardar la conexión para desconectarla en el Died handler
-	-- antes del kill effect. El ragdoll/VFX parentea ~10 nuevos BaseParts y
-	-- el listener se dispararía para cada uno (se ejecuta el switch
-	-- CollisionGroup innecesario sobre un modelo en cleanup).
+	-- Se desconecta al morir, antes de que el kill effect añada sus parts.
 	local descendantConn = botModel.DescendantAdded:Connect(function(descendant)
 		if descendant:IsA("BasePart") then
 			descendant.CollisionGroup = CollisionGroups.groupForNewPart(botModel)
 		end
 	end)
 
-	-- Misma inmunidad al spawn que los jugadores (ver MatchService). ForceField
-	-- nativo, no se rompe al disparar, expira por tiempo vía Debris.
-	-- Audit mobile: Visible=false. El FF de los players sí se muestra
-	-- (UX del propio jugador), pero las esferas azules de 16 bots
-	-- recién spawneados clutterean móviles low-end sin valor de UX. El
-	-- jugador que dispare a un bot recién spawneado ve "0 daño visible"
-	-- durante 2s; el bot se mueve rápido y la situación se resuelve sola.
-	-- Attribute SpawnProtectedUntil para que BotAI._getBestTarget skipee
-	-- bots inmunes sin hacer FindFirstChildOfClass por candidato.
+	-- Inmunidad al spawn como los jugadores (MatchService), pero invisible por coste
+	-- en móvil. SpawnProtectedUntil lo lee BotAI._getBestTarget.
 	if GameConfig.SpawnProtectionDuration > 0 then
 		local forceField = Instance.new("ForceField")
 		forceField.Visible = false
@@ -825,8 +690,6 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 		botModel:SetAttribute("SpawnProtectedUntil", time() + GameConfig.SpawnProtectionDuration)
 	end
 
-	-- Registrar el bot en la cache global de targets para que otros bots
-	-- puedan elegirlo sin iterar workspace.
 	_addAliveTarget(botModel)
 
 	local record: BotRecord = {
@@ -842,41 +705,21 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 
 	botAIInstance:Start(mapRoot, _aliveTargets, _roamGraph, _botModelByFakeUserId)
 
-	-- Manejo de muerte extraído a función para poder dispararlo también como FALLBACK
-	-- desde _refreshAliveLists si el Humanoid.Died del servidor no llega a correr
-	-- (p.ej. cuando otro bot muriendo a la vez desconectaba este handler antes de
-	-- tiempo). El guard hasDeathBeenReported garantiza que corre UNA sola vez, venga
-	-- del evento Died o del fallback.
+	-- Idempotente (hasDeathBeenReported): lo llaman Died y el fallback de _refreshAliveLists.
 	local function handleBotDeath()
 		if record.hasDeathBeenReported then
 			return
 		end
 		record.hasDeathBeenReported = true
 
-		-- 0. Limpieza visual FIRST — orden crítico: estas operaciones tienen que
-		-- correr aunque la lógica de juego de abajo falle. Si están más abajo y
-		-- algo entre medias throws, el bot queda "corriendo tumbado" para
-		-- siempre. Cada una en pcall por separado para que un fallo no cancele
-		-- las demás.
-
-		-- 0a-pre. Cortar el listener de CollisionGroup antes del kill effect:
-		-- éste parentea N parts nuevos al ragdoll y dispararía el handler
-		-- innecesariamente sobre un modelo en cleanup.
+		-- Orden crítico: la limpieza visual va primero y cada paso en su pcall, para
+		-- que un error en la lógica de juego no deje al bot corriendo tumbado.
 		if record.descendantConn then
 			record.descendantConn:Disconnect()
 			record.descendantConn = nil
 		end
 
-		-- 0a. Destrucción programada SIEMPRE. Aunque todo lo demás falle, el bot
-		-- eventualmente desaparece. RagdollCleanup lo mantiene en pantalla el mínimo
-		-- pedido (4s) para que la caída ragdoll se vea COMPLETA — con la propiedad de
-		-- red en el servidor (ver KillEffectUtils.setServerOwnership) el cuerpo ya no
-		-- se congela tieso a ~1s. Al pasar el mínimo se destruye con un fundido suave
-		-- (no corte seco) para que la desaparición no sea brusca. `maxTime` es el tope
-		-- duro. Nota perf: 4s mantiene más cadáveres vivos que los 1.8-3s previos;
-		-- el fundido y el tope de 5s acotan la población en móvil.
-		-- Tiempos desde BotConfig.Lifecycle (antes hardcodeados 4/5 mientras
-		-- el config decía 3 y nadie lo leía).
+		-- Destrucción programada antes que nada: el bot desaparece aunque todo lo demás falle.
 		local ragdollMin = BotConfig.Lifecycle.RagdollCleanupDelay
 		RagdollCleanup.scheduleDestroy(botModel, {
 			minTime = ragdollMin,
@@ -884,17 +727,13 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 			fadeTime = 0.4,
 		})
 
-		-- 0b. Parar IA + animaciones. Antes sin pcall: si throwea, las
-		-- animaciones de correr siguen jugando aunque haya ragdoll.
 		pcall(function()
 			record.ai:Stop()
 		end)
 
-		-- 0c. Kill effect (ragdoll). Ya estaba en pcall.
 		local effectId = _getKillEffectForBotAttacker(humanoid)
 		pcall(KillEffectsRegistry.apply, effectId, botModel)
 
-		-- 0d. Quitar del cache de targets vivos.
 		pcall(_removeAliveTarget, botModel)
 
 		if record.deathConnection then
@@ -902,28 +741,17 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 			record.deathConnection = nil
 		end
 
-		-- Round-generation guard: if this handler runs late (deferred death
-		-- fallback after OnRoundEnd, or after the next round already started),
-		-- skip ALL round-scoped bookkeeping. Recycling into the cleared pools
-		-- would leak a stale identity whose fakeUserId collides after the
-		-- counter resets; _onBotDied would credit a kill in the wrong round.
-		-- Visual cleanup above already ran regardless.
+		-- Handler tardío (ronda ya terminada): nada de estado de ronda; _onBotDied
+		-- acreditaría la kill en la ronda equivocada.
 		if _roundGeneration ~= spawnGeneration then
 			return
 		end
 
-		-- 1. Lógica de juego: recycle identity, refresh lists, notify. Cualquier
-		-- error aquí ya no afecta la limpieza visual de arriba. En pcall
-		-- envolvente para no romper el bucle de spawn de otros bots.
 		pcall(function()
-			-- D3: hold this team's next replacement spawn for the configured
-			-- delay (0 = no-op). Players pay RespawnCooldown; this is the knob
-			-- for pacing parity.
 			if BotConfig.Lifecycle.RespawnDelay > 0 then
 				_spawnHoldUntil[team] = os.clock() + BotConfig.Lifecycle.RespawnDelay
 			end
 			table.insert(_recycledByTeam[team], { identity = identity, fakeUserId = fakeUserId })
-			-- B6: clear el index — el nuevo bot se asignará en _spawnOneBot.
 			_botModelByFakeUserId[fakeUserId] = nil
 			_botsByName[botName] = nil
 			_botIdentityByName[botName] = nil
@@ -931,8 +759,6 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 			_refreshAliveLists()
 		end)
 
-		-- 2. Callback externo de juego (persistencia, streak, remotes). Ya
-		-- estaba en pcall.
 		if _onBotDied then
 			local ok, err = pcall(_onBotDied, team, botName, humanoid, fakeUserId)
 			if not ok then
@@ -949,13 +775,9 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 	return true
 end
 
--- B2: spawns are staggered across Heartbeats instead of bursting in one
--- frame. SetBotTargets records the desired team sizes and wakes a single
--- pump coroutine that spawns at most MAX_SPAWNS_PER_STEP bots per step. The
--- pump re-reads desired targets and live counts on every iteration, so
--- rebalances landing mid-pump reconcile naturally — no double-spawns, no
--- spawns against a stale target. Removals stay synchronous: they're cheap,
--- and an over-target bot must not stay alive shooting people.
+-- Los spawns se reparten entre Heartbeats (MAX_SPAWNS_PER_STEP por paso). El pump
+-- relee objetivos y recuentos en cada iteración, así que los rebalanceos a mitad
+-- se reconcilian solos. Las bajas son síncronas: un bot sobrante no debe seguir disparando.
 local _desiredBotTargets: { A: number, B: number } = { A = 0, B = 0 }
 local _spawnPumpRunning = false
 local MAX_SPAWNS_PER_STEP = 2
@@ -967,10 +789,8 @@ local function _notifyRosterChanged()
 	end
 end
 
--- ── Colisión de identidad con un jugador real ───────────────────
--- _assignIdentity ya descarta las identidades de jugadores presentes, pero un
--- jugador puede entrar a mitad de ronda cuando un bot ya lleva su nombre/foto.
--- En ese caso el bot cambia de identidad en caliente en vez de duplicarlo.
+-- Un jugador que entra a mitad de ronda puede coincidir con la identidad de un
+-- bot ya spawneado: el bot la cambia en caliente.
 
 local _poolIndexByName: { [string]: number } = {}
 for index, source in BotNames do
@@ -982,9 +802,8 @@ local function _identityCollidesWith(identity: BotIdentity, player: Player): boo
 	return name == player.Name:lower() or name == player.DisplayName:lower()
 end
 
--- Toma la primera identidad libre que no choque con nadie del servidor y la
--- vuelca sobre `identity` (misma tabla: se propaga a _identityByFakeUserId y a
--- las entradas recicladas que la comparten). Devuelve true si hubo cambio.
+-- Muta `identity` en sitio: la tabla es compartida con _identityByFakeUserId y
+-- las entradas recicladas.
 local function _swapIdentityInPlace(identity: BotIdentity): boolean
 	local replacementIndex: number? = nil
 	local taken = _buildTakenIdentitySet()
@@ -1016,7 +835,6 @@ local function _reassignIdentitiesTakenBy(player: Player)
 	end
 	local swapped = false
 
-	-- Bots vivos: además de la identidad hay que repintar el modelo.
 	for botName, identity in _botIdentityByName do
 		if not _identityCollidesWith(identity, player) then
 			continue
@@ -1038,8 +856,6 @@ local function _reassignIdentitiesTakenBy(player: Player)
 		end
 	end
 
-	-- Identidades recicladas (bot muerto pendiente de respawn): no tienen modelo,
-	-- pero volverían a entrar con el nombre del jugador si no se cambian ahora.
 	for _, list in { _recycledByTeam.A, _recycledByTeam.B } do
 		for _, entry in list do
 			if _identityCollidesWith(entry.identity, player) and _swapIdentityInPlace(entry.identity) then
@@ -1055,7 +871,6 @@ end
 
 Players.PlayerAdded:Connect(_reassignIdentitiesTakenBy)
 
--- Synchronous half of the reconciliation: removals + recycled-identity trim.
 local function _trimTeamToTarget(team: "A" | "B", target: number)
 	local list = _botNamesByTeam[team]
 	while #list > target do
@@ -1066,7 +881,6 @@ local function _trimTeamToTarget(team: "A" | "B", target: number)
 		_removeBotByName(botName)
 	end
 
-	-- Trim excess recycled identities so roster matches the new target
 	local recycledPool = _recycledByTeam[team]
 	local maxRecycled = math.max(0, target - #list)
 	while #recycledPool > maxRecycled do
@@ -1087,31 +901,24 @@ local function _ensureSpawnPump()
 		return
 	end
 	_spawnPumpRunning = true
-	-- task.spawn resumes the body synchronously up to the first task.wait,
-	-- so the common churn case (1 bot died → 1 respawn) still completes
-	-- inside the SetBotTargets call, and a round-start burst gets its first
-	-- MAX_SPAWNS_PER_STEP bots with no added latency.
+	-- task.spawn corre síncrono hasta el primer task.wait: un respawn suelto se
+	-- completa dentro de la llamada a SetBotTargets.
 	task.spawn(function()
 		local spawnedAny = false
 		while _isRoundActive do
 			local budget = MAX_SPAWNS_PER_STEP
 			while budget > 0 do
-				-- D3: a held team (recent bot death + RespawnDelay) reports no
-				-- spawnable deficit this step, but the OUTER exit check below
-				-- uses the raw deficit, so the pump stays alive until the hold
-				-- expires and then spawns.
+				-- Un equipo en espera cuenta 0 aquí, pero la salida exterior usa el déficit
+				-- real: el pump sigue vivo hasta que expire la espera.
 				local now = os.clock()
 				local deficitA = if now >= _spawnHoldUntil.A then _spawnDeficit("A") else 0
 				local deficitB = if now >= _spawnHoldUntil.B then _spawnDeficit("B") else 0
 				if deficitA <= 0 and deficitB <= 0 then
 					break
 				end
-				-- Larger deficit first so neither team starves during bursts.
 				local team: "A" | "B" = if deficitA >= deficitB then "A" else "B"
 				if not _spawnOneBot(team) then
-					-- Spawn failure (round ended / no map / no spawn point /
-					-- bad template): give up like the old synchronous loop
-					-- did. The next rebalance re-arms the pump.
+					-- Fallo de spawn: abandonar; el próximo rebalanceo rearma el pump.
 					_spawnPumpRunning = false
 					if spawnedAny then
 						_notifyRosterChanged()
@@ -1127,8 +934,6 @@ local function _ensureSpawnPump()
 			task.wait()
 		end
 		_spawnPumpRunning = false
-		-- Clients got a roster broadcast when SetBotTargets returned (before
-		-- the pump finished); re-broadcast now that the roster is complete.
 		if spawnedAny then
 			_notifyRosterChanged()
 		end
@@ -1144,8 +949,6 @@ function AIService:OnRoundStart(config: RoundStartConfig)
 	_isRoundActive = true
 	_mapRoot = config.mapRoot
 	_spawnPoints = table.clone(config.spawnPoints or {})
-	-- Los markers de debug ignoran los atascos alrededor de los spawns (los
-	-- bots se empujan en el pad al aparecer; no es geometría a arreglar).
 	StuckViz.setSpawnPoints(_spawnPoints)
 	_selectSpawnPoint = config.selectSpawnPoint
 	_onBotDied = config.onBotDied
@@ -1159,9 +962,6 @@ function AIService:OnRoundStart(config: RoundStartConfig)
 	table.clear(_recycledByTeam.B)
 	table.clear(_identityByFakeUserId)
 	table.clear(_teamByFakeUserId)
-	-- RoamGraph cacheado por mapRoot. Si el mapa es el mismo del round
-	-- anterior, reusa el pool ya construido (cero coste). Si es distinto,
-	-- construye uno nuevo en el primer pickRandomNavigablePoint.
 	if _mapRoot then
 		_roamGraph = RoamGraph.forMap(_mapRoot)
 	else
@@ -1182,17 +982,14 @@ function AIService:SetBotTargets(targetA: number, targetB: number)
 	_ensureSpawnPump()
 end
 
--- B2: MatchService calls this when the Voting phase opens — rebuilds the rig
--- pools the round-end trim released (amortized, ~1 clone per frame) so the
--- round-start burst takes warm rigs instead of paying synchronous clones.
+-- MatchService lo llama al abrir la fase Voting.
 function AIService:PrewarmRigPools()
 	_prewarmRigPools()
 end
 
 function AIService:OnRoundEnd()
-	-- OnRoundStart also calls OnRoundEnd as defensive cleanup; the rig-pool
-	-- trim below must only run on a REAL round end (wasActive), or it would
-	-- destroy the rigs the Voting-phase prewarm just built.
+	-- OnRoundStart también llama aquí: el recorte de pools solo en un fin de ronda
+	-- real, o destruiría los rigs del prewarm de Voting.
 	local wasActive = _isRoundActive
 	_isRoundActive = false
 	_roundGeneration += 1
@@ -1216,19 +1013,14 @@ function AIService:OnRoundEnd()
 	_spawnPoints = {}
 	_selectSpawnPoint = nil
 	_mapRoot = nil
-	-- No destruir _roamGraph aquí: si la siguiente ronda usa el mismo mapRoot,
-	-- queremos reusar la caché. AncestryChanged limpia automáticamente cuando
-	-- el modelo del mapa se destruya.
+	-- No destruir: la siguiente ronda con el mismo mapRoot reusa la caché.
 	_roamGraph = nil
 	_onBotDied = nil
 	_onRosterChanged = nil
-	-- C1: release parked rigs down to the idle target between rounds; the
-	-- next Voting phase prewarm rebuilds them off the critical path.
 	if wasActive then
 		_trimRigPools(BOT_RIG_POOL_IDLE_TARGET)
 	end
-	-- Purgar la cola global. Las callbacks ya guardan _stopped, así que no
-	-- es funcional — solo libera closures con refs a Path/Navigator viejos.
+	-- No funcional (las callbacks miran _stopped): solo libera closures viejas.
 	PathfindingQueue.clear()
 	table.clear(_usedIdentityIndices)
 	table.clear(_botIdentityByName)
@@ -1244,8 +1036,7 @@ function AIService:GetBotRoster(): { { fakeUserId: number, displayName: string, 
 	for fakeUserId, identity in _identityByFakeUserId do
 		local team = _teamByFakeUserId[fakeUserId]
 		if team then
-			-- Apariencia (outfit/face/hat) para reconstruir la réplica del bot en la
-			-- pantalla de Resultados con el mismo look que tuvo en partida.
+			-- La apariencia la usa la pantalla de Resultados para reconstruir al bot.
 			local appearance = identity.appearance
 			table.insert(roster, {
 				fakeUserId = fakeUserId,
@@ -1268,9 +1059,6 @@ function AIService:GetBotDisplayName(fakeUserId: number): string?
 	return if identity then identity.name else nil
 end
 
---- Devuelve la identity completa (con level + historicalKills + personalityId
---- + appearance) por fakeUserId. Usado por MatchService para sustituir stats
---- de killer cuando el atacante es un bot. Devuelve nil si no se conoce.
 function AIService:GetBotIdentity(fakeUserId: number): BotIdentity?
 	return _identityByFakeUserId[fakeUserId]
 end

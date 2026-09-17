@@ -1,17 +1,8 @@
 --!strict
 --[[
-	WeaponsConfig/DisplayStats.luau
-	Stats de combate "de cara al jugador" derivados de WeaponsConfig, para el
-	panel de stats del locker. Sustituye al antiguo WeaponStatsService + el
-	namespace Network.WeaponStats: al vivir la config en Shared, el cliente
-	calcula esto en local sin round-trip.
-
-	  • damage       — BlastDamage si el arma explota al impactar, si no HitDamage.
-	  • fireRate     — balas por minuto = 60 / ShotCooldown.
-	  • reloadTime   — segundos de recarga.
-	  • ammoCapacity — tamaño del cargador.
-	Más los rangos del arsenal (damageMax / fireRateMax / reloadMin / ammoMax)
-	para normalizar barras 0..1 sin números mágicos.
+	Stats de combate de cara al jugador para el panel del locker, calculados en
+	el cliente desde WeaponsConfig. fireRate en balas/min; damage es BlastDamage
+	si el arma explota al impactar. Los rangos del arsenal normalizan barras 0..1.
 ]]
 
 local WeaponsConfig = require(script.Parent)
@@ -34,9 +25,8 @@ export type WeaponDisplayStats = BaseStats & Ranges
 
 local DisplayStats = {}
 
--- Un arma sin definición (Tool sin migrar, id inexistente) se pinta con los
--- defaults del esquema de BulletWeapon: mismo comportamiento que tendrá en
--- partida vía los defaults de BaseWeapon/BulletWeapon.
+-- Un arma sin definición se pinta con los defaults de BulletWeapon, que es lo
+-- que usará en partida.
 local FALLBACK_WEAPON_TYPE = "BulletWeapon"
 
 local _statsCache: { [string]: BaseStats } = {}
@@ -64,8 +54,6 @@ local function computeStats(category: string, weaponId: string): BaseStats
 		then num(valueOrDefault(category, weaponId, "BlastDamage"), 0)
 		else num(valueOrDefault(category, weaponId, "HitDamage"), 0)
 
-	-- ShotCooldown 0/negativo no tiene sentido físico; clamp para no dividir
-	-- por cero al pasar a balas/min.
 	local shotCooldown = math.max(num(valueOrDefault(category, weaponId, "ShotCooldown"), 0.1), 1 / 10000)
 	local fireRate = math.floor(60 / shotCooldown + 0.5)
 
@@ -124,7 +112,6 @@ function DisplayStats.GetRanges(): Ranges
 	return ranges
 end
 
---- Stats base + rangos, la forma que consume el panel del locker.
 function DisplayStats.Get(category: string, weaponId: string): WeaponDisplayStats
 	local base = DisplayStats.GetBase(category, weaponId)
 	local ranges = DisplayStats.GetRanges()

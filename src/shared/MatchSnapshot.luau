@@ -1,21 +1,10 @@
 --!strict
 --[[
-	MatchSnapshot.luau  (shared)
-	Estado ambiental de la partida replicado servidor → clientes vía attributes
-	de un Folder en ReplicatedStorage. Sustituye a los viejos paquetes
-	edge-triggered (MapLoadState / StartVote / VoteState / EndVote / RoundState):
+	Estado de la partida replicado servidor → clientes como attributes de un Folder
+	en ReplicatedStorage (un late joiner lee el estado actual; re-escribir el mismo
+	valor no replica). Los countdowns viajan como deadline (`PhaseEndsAt`).
 
-	  • Un late joiner lee el estado ACTUAL al conectar — no hay paquete que
-	    perder ni resync que pedir.
-	  • Los cambios llegan por GetAttributeChangedSignal.
-	  • Re-escribir el mismo valor no replica ni dispara la señal — el dedupe
-	    de broadcasts es gratis.
-	  • Los countdowns viajan como deadline (`PhaseEndsAt`, reloj de
-	    GetServerTimeNow, sincronizado entre server y clientes); cada cliente
-	    computa el tiempo restante localmente, sin ticks de red periódicos.
-
-	El schema completo es DEFAULTS: el servidor solo puede escribir esas claves
-	(set valida contra typos). Escritores: MatchService (Phase / PhaseEndsAt /
+	El schema completo es DEFAULTS. Escritores: MatchService (Phase / PhaseEndsAt /
 	MapName / Score*) y VotingService (Option* / Votes* / WinnerMapName).
 ]]
 
@@ -29,15 +18,13 @@ export type Phase = "Idle" | "Voting" | "Loading" | "InRound" | "Results"
 
 local DEFAULTS: { [string]: string | number } = {
 	Phase = "Idle",
-	-- Deadline (GetServerTimeNow) del fin programado de la fase actual; 0 = sin
-	-- deadline (Idle/Loading). Voting/InRound/Results lo fijan al entrar.
+	-- Deadline (GetServerTimeNow) del fin de la fase actual; 0 = sin deadline (Idle/Loading).
 	PhaseEndsAt = 0,
 	-- Mapa activo o en carga ("" fuera de Loading/InRound).
 	MapName = "",
 	ScoreA = 0,
 	ScoreB = 0,
-	-- Ganador de la última votación; se fija al cerrar el voto (para la
-	-- animación de ganador en clientes) y se limpia al arrancar el siguiente.
+	-- Se fija al cerrar el voto y se limpia al arrancar el siguiente.
 	WinnerMapName = "",
 	-- Opciones de la votación activa ("" fuera de Voting).
 	Option1Name = "",
@@ -77,7 +64,6 @@ local function getFolder(): Folder
 	return _folder :: Folder
 end
 
--- Reloj compartido para PhaseEndsAt (server y clientes leen el mismo).
 function MatchSnapshot.now(): number
 	return Workspace:GetServerTimeNow()
 end
@@ -102,10 +88,7 @@ end
 function MatchSnapshot.set(values: { [string]: string | number })
 	assert(RunService:IsServer(), "MatchSnapshot.set es server-only")
 	local folder = getFolder()
-	-- Validar TODAS las claves ANTES de escribir ninguna: si una clave inválida
-	-- aborta a mitad del bucle, las previas ya quedaban replicadas y se saltaba
-	-- Phase (escrito al final a propósito), violando la invariante "al cambiar la
-	-- fase, el resto ya está aplicado".
+	-- Validar TODAS antes de escribir ninguna: un assert a mitad rompería la invariante de Phase.
 	for key in values do
 		assert(DEFAULTS[key] ~= nil, "MatchSnapshot: clave desconocida " .. tostring(key))
 	end
@@ -119,8 +102,7 @@ function MatchSnapshot.set(values: { [string]: string | number })
 	end
 end
 
--- Conecta `callback` a los cambios de `key` y lo invoca de inmediato con el
--- valor actual (el caller reconcilia su UI al estado vigente al suscribirse).
+-- También invoca `callback` de inmediato con el valor actual.
 function MatchSnapshot.observe(key: string, callback: (value: any) -> ()): RBXScriptConnection
 	local folder = getFolder()
 	local connection = folder:GetAttributeChangedSignal(key):Connect(function()

@@ -1,14 +1,8 @@
 --!strict
--- IrisTransition: efecto de iris circular (círculo negro que crece/encoge) como transición de pantalla.
--- Uso:
---   local iris = IrisTransition.new(playerGui)
---   iris:close(function() ... end)  -- cierra el iris; el callback se invoca cuando la pantalla está completamente negra
---   iris:open()                      -- abre el iris (revela la pantalla)
 
 local TweenService = game:GetService("TweenService")
 
-local CLOSE_INFO = TweenInfo.new(0.45, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
-local OPEN_INFO  = TweenInfo.new(0.45, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
+local TWEEN_INFO = TweenInfo.new(0.45, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
 local SIZE_BIG   = UDim2.new(4, 0, 4, 0)
 local SIZE_SMALL = UDim2.new(0, 0, 0, 0)
 local GUI_NAME   = "IrisTransitionGui"
@@ -19,7 +13,6 @@ IrisTransition.__index = IrisTransition
 export type IrisTransition = typeof(setmetatable(
 	{} :: {
 		_circle: Frame,
-		_screenGui: ScreenGui,
 		_activeTween: Tween?,
 		_opId: number,
 	},
@@ -34,7 +27,6 @@ function IrisTransition.new(playerGui: PlayerGui): IrisTransition
 			return setmetatable(
 				{
 					_circle = existingCircle,
-					_screenGui = existing,
 					_activeTween = nil,
 					_opId = 0,
 				},
@@ -76,7 +68,6 @@ function IrisTransition.new(playerGui: PlayerGui): IrisTransition
 	return setmetatable(
 		{
 			_circle = circle,
-			_screenGui = screenGui,
 			_activeTween = nil,
 			_opId = 0,
 		},
@@ -96,15 +87,14 @@ local function _beginTransition(self: IrisTransition, targetSize: UDim2): (numbe
 	local circle = self._circle
 	circle.Visible = true
 
-	local tweenInfo = if targetSize == SIZE_BIG then CLOSE_INFO else OPEN_INFO
-	local tween = TweenService:Create(circle, tweenInfo, { Size = targetSize })
+	local tween = TweenService:Create(circle, TWEEN_INFO, { Size = targetSize })
 	self._activeTween = tween
 	tween:Play()
 
 	return opId, tween
 end
 
--- Cierra el iris (pantalla a negro). Llama onBlack cuando está completamente cubierta.
+-- onBlack solo se llama si la transición termina sin ser interrumpida por otra.
 function IrisTransition.close(self: IrisTransition, onBlack: (() -> ())?): ()
 	task.spawn(function()
 		local circle = self._circle
@@ -125,7 +115,6 @@ function IrisTransition.close(self: IrisTransition, onBlack: (() -> ())?): ()
 	end)
 end
 
--- Resetea el iris al estado abierto sin animación (para cleanup).
 function IrisTransition.reset(self: IrisTransition): ()
 	if self._activeTween then
 		self._activeTween:Cancel()
@@ -137,7 +126,6 @@ function IrisTransition.reset(self: IrisTransition): ()
 	circle.Visible = false
 end
 
--- Abre el iris (revela la pantalla). Llama onDone cuando está completamente abierta.
 function IrisTransition.open(self: IrisTransition, onDone: (() -> ())?): ()
 	task.spawn(function()
 		local circle = self._circle

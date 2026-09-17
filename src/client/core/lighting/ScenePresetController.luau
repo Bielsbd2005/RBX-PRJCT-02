@@ -1,45 +1,14 @@
 --!strict
 --[[
-	ScenePresetController
-	Aplica presets de iluminación AUTORADOS EN STUDIO desde una librería de
-	carpetas, dirigidos por el atributo `LightingPreset`. Cero código por preset:
-	el diseñador crea/tunea todo en Studio.
+	Aplica presets de iluminación autorados en Studio. Estructura requerida:
+	  ReplicatedStorage.LightingPresets.<PresetName> (Folder) con
+	    · un Configuration cuyos ATRIBUTOS son props de Lighting (Ambient, ClockTime…)
+	    · effects/Sky como hijos (inertes ahí; se clonan bajo Lighting).
+	Consumidor: cualquier instancia con atributo `LightingPreset = "<PresetName>"`.
 
-	── Librería (inerte hasta aplicar) ──────────────────────────
-	  ReplicatedStorage/
-	    LightingPresets/                (Folder)
-	      <PresetName>/                 (Folder = nombre del preset)
-	        Configuration               (Configuration; sus ATRIBUTOS son props del
-	                                      servicio Lighting: Ambient, Brightness,
-	                                      ClockTime, FogColor, FogStart, FogEnd,
-	                                      ColorShift_Top, ColorShift_Bottom, …)
-	        Atmosphere                  (instancias reales de effect/sky, aquí
-	        BloomEffect                  inertes porque no cuelgan de Lighting)
-	        ColorCorrectionEffect
-	        Sky …
-
-	── Consumidor ───────────────────────────────────────────────
-	  Cualquier instancia con atributo `LightingPreset = "<PresetName>"`
-	  (p. ej. Workspace.Cameras.lobby o una carpeta de mapa). `applyFrom(inst)`
-	  lee el atributo; `apply(name)` aplica por nombre directo.
-
-	── Semántica ─────────────────────────────────────────────────
-	  * Escalares (Configuration): se SNAPSHOTEA el valor actual de Lighting ANTES
-	    de sobrescribir, y se repone en restore(). Se itera sobre los atributos
-	    (nada hardcodeado); los que no mapean a una prop asignable se ignoran con
-	    warn. Los atributos soportan Color3/number nativos → sin parseo.
-	  * Effects (PostEffect/Atmosphere/Sky): REEMPLAZO TOTAL. El preset define el set
-	    COMPLETO de effects de la escena. Al aplicar se apartan (Parent=nil) TODOS
-	    los effects existentes bajo Lighting (nada del look anterior sobrevive:
-	    Atmosphere/Bloom/DoF/SunRays/Sky del place o de otro preset) y se CLONAN los
-	    del preset (los de la librería son plantilla). Todo se repone en restore().
-	    Excepción: los effects runtime-managed por otros controllers (el Blur de
-	    paneles del BlurController) se eximen — son UI, no look de escena
-	    (ver isReservedEffect).
-	  * UN SOLO preset activo a la vez (Lighting es global): apply() de otro preset
-	    restaura el anterior primero.
-
-	Singleton cliente (Lighting es visual): el estado vive a nivel de módulo.
+	Escalares: se guarda el valor previo y restore() lo repone. Effects: REEMPLAZO
+	TOTAL — se apartan (Parent=nil) todos los effects de Lighting salvo los de
+	isReservedEffect. Un solo preset activo a la vez (Lighting es global).
 ]]
 
 local Lighting = game:GetService("Lighting")
@@ -48,29 +17,22 @@ local ContentProvider = game:GetService("ContentProvider")
 
 local LIBRARY_NAME = "LightingPresets"
 local ATTRIBUTE_NAME = "LightingPreset"
--- Marca los clones que metemos bajo Lighting para no confundirlos con effects
--- del mapa base al apartar los existentes.
+-- Marca nuestros clones para no apartarlos como si fueran effects del place.
 local CLONE_TAG_ATTRIBUTE = "__ScenePresetClone"
 
--- ── Estado del preset activo (singleton) ─────────────────────
 local activePresetName: string? = nil
--- prop del servicio Lighting → su valor previo (para reponer en restore).
+-- prop de Lighting → valor previo.
 local savedScalars: { [string]: any } = {}
--- Clones de effects que metimos bajo Lighting.
 local addedClones: { Instance } = {}
--- Effects del base que apartamos (Parent=nil) mientras el preset está activo.
 local stashedOriginals: { Instance } = {}
 
--- ¿Es una instancia que va bajo Lighting y que un preset puede aportar/barrer?
 local function isLightingChild(inst: Instance): boolean
 	return inst:IsA("PostEffect") or inst:IsA("Atmosphere") or inst:IsA("Sky")
 end
 
--- Effects runtime-managed por otros controllers que NO deben ser barridos por un
--- preset: viven bajo Lighting pero son UI, no "look de escena". Hoy: el Blur de
--- paneles del BlurController (BlurEffect llamado "Blur"). El DepthOfFieldEffect NO
--- se exime a propósito — si una escena quiere DoF, lo incluye en su preset, y
--- DepthOfFieldController togglea el que exista bajo Lighting (el del preset).
+-- Effects de UI gestionados por otros controllers que un preset no debe barrer:
+-- el Blur de BlurController. DepthOfField NO se exime: si una escena lo quiere, va
+-- en su preset y DepthOfFieldController togglea el que haya bajo Lighting.
 local function isReservedEffect(inst: Instance): boolean
 	return inst:IsA("BlurEffect") and inst.Name == "Blur"
 end
@@ -82,12 +44,10 @@ end
 
 local ScenePresetController = {}
 
--- Aplica el preset `presetName` de la librería. No-op si ya está activo.
 function ScenePresetController.apply(presetName: string)
 	if activePresetName == presetName then
 		return
 	end
-	-- Un solo preset a la vez: restaurar el anterior antes de aplicar el nuevo.
 	if activePresetName ~= nil then
 		ScenePresetController.restore()
 	end
@@ -106,7 +66,6 @@ function ScenePresetController.apply(presetName: string)
 
 	activePresetName = presetName
 
-	-- 1) Escalares del servicio Lighting desde los atributos del Configuration.
 	local config = presetFolder:FindFirstChildOfClass("Configuration")
 	if config then
 		for key, value in config:GetAttributes() do
@@ -121,7 +80,6 @@ function ScenePresetController.apply(presetName: string)
 				(Lighting :: any)[key] = value
 			end)
 			if okWrite then
-				-- Snapshot solo de lo que de verdad sobrescribimos (clave única).
 				savedScalars[key] = current
 			else
 				warn(("[ScenePresetController] '%s' (preset '%s') no es una prop asignable de Lighting."):format(key, presetName))
@@ -129,11 +87,6 @@ function ScenePresetController.apply(presetName: string)
 		end
 	end
 
-	-- 2a) REEMPLAZO TOTAL: apartar TODOS los effects existentes bajo Lighting (no
-	--     nuestros clones), salvo los runtime-managed exentos (ver isReservedEffect).
-	--     El preset define el set COMPLETO de effects de la escena — nada del look
-	--     anterior (Atmosphere/Bloom/DoF/SunRays/Sky del place o de otro preset)
-	--     sobrevive. Se reponen en restore().
 	for _, existing in Lighting:GetChildren() do
 		if isLightingChild(existing)
 			and not existing:GetAttribute(CLONE_TAG_ATTRIBUTE)
@@ -143,7 +96,6 @@ function ScenePresetController.apply(presetName: string)
 		end
 	end
 
-	-- 2b) Clonar los effects del preset a Lighting.
 	for _, child in presetFolder:GetChildren() do
 		if isLightingChild(child) then
 			local clone = child:Clone()
@@ -154,8 +106,7 @@ function ScenePresetController.apply(presetName: string)
 	end
 end
 
--- Lee el atributo `LightingPreset` de `instance` y aplica ese preset. Devuelve
--- true si el atributo existía (y por tanto se intentó aplicar), false si no.
+-- Devuelve true si `instance` tenía el atributo (y se intentó aplicar).
 function ScenePresetController.applyFrom(instance: Instance): boolean
 	local presetName = instance:GetAttribute(ATTRIBUTE_NAME)
 	if type(presetName) ~= "string" or presetName == "" then
@@ -165,14 +116,12 @@ function ScenePresetController.applyFrom(instance: Instance): boolean
 	return true
 end
 
--- Restaura Lighting al estado previo al preset activo. No-op si no hay ninguno.
 function ScenePresetController.restore()
 	if activePresetName == nil then
 		return
 	end
 	activePresetName = nil
 
-	-- 1) Reponer los escalares snapshoteados.
 	for key, value in savedScalars do
 		pcall(function()
 			(Lighting :: any)[key] = value
@@ -180,7 +129,6 @@ function ScenePresetController.restore()
 	end
 	table.clear(savedScalars)
 
-	-- 2) Destruir los clones y devolver los originales apartados.
 	for _, clone in addedClones do
 		clone:Destroy()
 	end
@@ -193,12 +141,8 @@ function ScenePresetController.restore()
 	table.clear(stashedOriginals)
 end
 
--- Vuelta al look del lobby: aplica el preset autorado en Workspace.Cameras.lobby
--- y, si ese nodo no existe o no lleva atributo, restaura el lighting base —
--- quedarse con el preset del panel activo en el menú es peor que perder el look
--- del lobby. Compartido por todos los paneles con cámara propia (Locker,
--- BattlePass): la política de "cómo se vuelve al lobby" vive aquí, no copiada en
--- cada feature. `warnPrefix` etiqueta el aviso con el panel que cierra.
+-- Para paneles con cámara propia al cerrar. Sin preset de lobby se restaura el
+-- lighting base: quedarse con el del panel es peor que perder el look del lobby.
 function ScenePresetController.applyLobbyOrRestore(warnPrefix: string?)
 	local cameras = game:GetService("Workspace"):FindFirstChild("Cameras")
 	local lobbyNode = if cameras then cameras:FindFirstChild("lobby") else nil
@@ -211,16 +155,8 @@ function ScenePresetController.applyLobbyOrRestore(warnPrefix: string?)
 	ScenePresetController.restore()
 end
 
--- Preset activo (o nil). Útil para debugging / tests.
-function ScenePresetController.getActive(): string?
-	return activePresetName
-end
-
--- Precarga los assets de todos los presets (skyboxes, texturas de Sky/Decal, etc.)
--- para que la PRIMERA aplicación no sufra el streaming del CDN — el retraso más
--- visible al cambiar de escena. No bloqueante: espera la replicación de la librería
--- y precarga en su propia corrutina. Llamar una vez al arrancar. (No elimina el
--- micro-hitch de reparentar effects, solo el de carga de assets.)
+-- No bloqueante; llamar una vez al arrancar. Quita el streaming de assets en la
+-- primera aplicación, no el micro-hitch de reparentar effects.
 function ScenePresetController.preload()
 	task.spawn(function()
 		local library = ReplicatedStorage:WaitForChild(LIBRARY_NAME, 30)

@@ -23,16 +23,13 @@ local _started = false
 
 local COOLDOWN = 0.3
 
--- Mapeo "código en input" → clave de ActionRewards. Para añadir un código nuevo:
---   1. Añadir entry en ActionRewards.Amounts (server/shared single source of truth).
---   2. Añadir entry aquí mapeando el string que el jugador escribe a esa clave.
+-- Código (en mayúsculas) → clave de ActionRewards; un código nuevo necesita entrada en ambos.
 local CODE_TO_ACTION: { [string]: string } = {
 	WELCOME = "CodeWelcome",
 	REWARDS = "CodeRewards",
 }
 
--- Sanity cap: ningún código puede recompensar más que esto, sin importar la
--- entrada en ActionRewards. Defensa contra typos / valores inflados accidentales.
+-- Tope contra un valor inflado por error en ActionRewards.
 local MAX_CODE_REWARD = 10000
 
 local _cooldowns: { [number]: { [string]: number } } = {}
@@ -87,25 +84,8 @@ local function _send(player: Player, success: boolean, message: string, claimTyp
 	}, player)
 end
 
---[[
-	Like&Join: source of truth = `Rewards.GroupClaimed` (boolean persistente).
-
-	Flujo simplificado (C4):
-	  1. Cooldown.
-	  2. Profile cargado.
-	  3. Ya reclamado (GroupClaimed=true) → reject.
-	  4. _isPlayerInGameGroup → false: mensaje instructivo, sin grabar nada.
-	  5. _isPlayerInGameGroup → true: BatchUpdate atómico + GroupClaimed=true.
-
-	Por qué se eliminó la state machine LikeState/LikePendingSessionToken:
-	  - Bypassable por reconnects (sessionTokens rotaban en cada Start).
-	  - Roblox no expone Like-state vía API → no podíamos verificar el "Like";
-	    la state machine era teatro (delay-tactic, no enforcement).
-	  - Idempotencia + validación de grupo son suficientes anti-exploit.
-
-	Los fields legacy LikeState/LikePendingSessionToken siguen en DataTemplate
-	por compat de profiles antiguos pero ya no se leen ni escriben aquí.
-]]
+-- Roblox no expone si el jugador dio Like: solo se verifica el grupo. Los campos
+-- LikeState/LikePendingSessionToken de DataTemplate son legacy y no se usan.
 local function _onClaimLikeJoin(_: {}, player: Player): ()
 	if not _checkCooldown(player, "likeJoin") then
 		_send(player, false, "Too many requests. Slow down.", "LikeJoin", 0)
@@ -168,8 +148,7 @@ local function _onClaimNotifications(_: {}, player: Player): ()
 end
 
 local function _onRedeemCode(data: { code: string }, player: Player): ()
-	-- Cap longitud antes de gsub/upper para evitar DoS asimétrico (cliente
-	-- podría mandar un code de cientos de KB que el server procesaría O(n)).
+	-- Validar longitud antes de gsub/upper: un code enorme costaría O(n) al server.
 	if not NetGuards.validate(data, { code = M.Code }) then
 		_send(player, false, "That code isn't valid.", "Code", 0)
 		return
@@ -198,7 +177,6 @@ local function _onRedeemCode(data: { code: string }, player: Player): ()
 		return
 	end
 
-	-- Sanity cap por si la entry en ActionRewards tiene un valor inflado.
 	local cashFromCatalog = ActionRewards.GetCash(actionKey)
 	if cashFromCatalog > MAX_CODE_REWARD then
 		warn(("[RewardsService] Code %s (%s) excede MAX_CODE_REWARD (%d > %d) — bloqueando claim"):format(

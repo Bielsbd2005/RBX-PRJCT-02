@@ -9,9 +9,6 @@ local Janitor = require(Packages.janitor) :: any
 
 local UITheme = require(script.Parent.UITheme)
 
--- Constantes locales delegan a UITheme — single source of truth para colores
--- de stroke y la curva de hover. Antes este archivo tenía duplicación con
--- UITheme.NavTweenInfo (mismo 0.15 Quad Out).
 local STROKE_DEFAULT = UITheme.StrokeDefault
 local STROKE_HOVER   = UITheme.StrokeHover
 local TWEEN_INFO     = UITheme.NavTweenInfo
@@ -51,7 +48,7 @@ function MenuHover.bindButton(btn: GuiButton, janitor: any): () -> ()
 	local function noop()
 	end
 
-	if not stroke or not stroke:IsA("UIStroke") then
+	if not stroke then
 		return noop
 	end
 
@@ -81,7 +78,6 @@ function MenuHover.bindButton(btn: GuiButton, janitor: any): () -> ()
 
 	local function showStroke()
 		buttonState.isHovered = true
-		stroke.Enabled = true
 		tweenStroke(buttonState, stroke, STROKE_HOVER, 0, true)
 	end
 

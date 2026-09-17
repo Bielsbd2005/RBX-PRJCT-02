@@ -1,8 +1,7 @@
 --!strict
--- Bootstrap único del cliente. Centraliza el arranque de controladores core
--- y de los features para evitar autoejecución repartida por carpetas.
 
 local StarterGui = game:GetService("StarterGui")
+-- Evita recreacion de ScreenGuis en respawn (rompe bindings de botones si cambia la instancia).
 StarterGui.ResetPlayerGuiOnSpawn = false
 
 

@@ -1,10 +1,6 @@
 --!strict
 --[[
-	Retween.luau
-	Helper para el patrón "cancelar tween anterior, ejecutar nuevo tween, limpiar
-	el slot cuando termina". Sustituye boilerplate repetido en CameraFovEffect,
-	InteractiveScaleTween y LockerGrid.
-
+	Patrón "cancelar tween anterior, ejecutar nuevo, limpiar el slot al terminar".
 	Uso:
 		local slot = { current = nil :: Tween? }
 		Retween.run(slot, instance, tweenInfo, { Prop = value })
@@ -15,11 +11,10 @@
 		dict[target] = dict[target] or { current = nil }
 		Retween.run(dict[target], instance, info, goal)
 
-	Identity-check en Completed evita race con tweens posteriores: si otro
-	Retween.run reemplazó el slot mientras el viejo tween se completaba, no
-	nilificamos el slot del nuevo.
+	El identity-check en Completed evita que un tween viejo nilifique el slot de uno
+	posterior que lo reemplazó.
 
-	NO maneja el patrón "transacción multi-tween coordinada" (ver
+	No sirve para transacciones multi-tween coordinadas (ver
 	LockerCameraController:_cancelActiveTweens).
 ]]
 
@@ -29,11 +24,6 @@ export type Slot = { current: Tween? }
 
 local Retween = {}
 
---[[
-	Reemplaza el tween activo en `slot` con uno nuevo que aplica `goal` a
-	`instance` con `tweenInfo`. El tween anterior (si existe) se cancela. El
-	nuevo se inicia con :Play() y se devuelve.
-]]
 function Retween.run(
 	slot: Slot,
 	instance: Instance,
@@ -58,7 +48,6 @@ function Retween.run(
 	return tween
 end
 
--- Cancela el tween activo en `slot` si existe. Idempotente.
 function Retween.cancel(slot: Slot)
 	if slot.current then
 		slot.current:Cancel()

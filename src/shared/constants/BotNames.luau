@@ -1,13 +1,10 @@
 --!strict
--- BotNames: pool of fake identities assigned to bots each round.
 
 export type BotIdentity = {
 	name: string,
 	image: string,
-	-- UserId real del que sale el headshot. Se deriva de `image` al construir la
-	-- tabla y sirve para detectar cuando ese usuario entra de verdad al servidor:
-	-- en ese caso la identidad no puede asignarse a un bot (compartirían nombre
-	-- y foto de perfil con un jugador real).
+	-- UserId real del headshot (derivado de `image`): si ese usuario está en el
+	-- servidor, la identidad no puede asignarse a un bot.
 	userId: number,
 }
 
@@ -245,8 +242,6 @@ for _, entry in RawBotNames do
 	table.insert(BotNames, {
 		name = entry.name,
 		image = entry.image,
-		-- El formato lo produce `headshot` justo arriba, así que el match nunca
-		-- falla; el `or 0` solo cubre una edición manual malformada.
 		userId = tonumber(entry.image:match("id=(%d+)")) or 0,
 	})
 end

@@ -1,4 +1,3 @@
--- SpringService.lua
 -- Binds properties to spring simulations
 -- @author Parker Stebbins <pstebbins@roblox.com>
 
@@ -34,15 +33,8 @@ local LinearSpring = {} do
 		self.g = goal
 	end
 
-	-- Sprint 3 (Sleep implementation):
-	-- Antes devolvía siempre `false` → el RenderStepped global iteraba TODOS
-	-- los springs aunque ya hubieran alcanzado el goal. UIs con muchos
-	-- elementos animados pagaban update perpetuo (post-anim).
-	--
-	-- Ahora: spring duerme cuando ‖p - g‖² + ‖v‖² < SLEEP_THRESHOLD².
-	-- El loop sale del state, evitando trabajo redundante en el resto del frame.
-	-- Threshold pequeño (1e-4) elige seguridad sobre eagerness — un nuevo
-	-- :Target() despierta el spring inmediatamente al re-insertarse en springStates.
+	-- Duerme (sale de springStates) cuando ‖p - g‖² + ‖v‖² < umbral²; un nuevo
+	-- :Target() lo vuelve a insertar.
 	local SLEEP_THRESHOLD_SQ = 1e-4 * 1e-4
 
 	function LinearSpring:canSleep(p)
@@ -241,11 +233,8 @@ local springMetadata = {
 	},
 }
 
--- Claves débiles: las claves son Instances (camera/humanoid) que pueden
--- destruirse en un respawn antes de que su spring duerma. Con claves fuertes la
--- entrada las pinneaba (leak) y el loop de RenderStepped seguía leyendo/escribiendo
--- sobre la Instance muerta hasta que canSleep la eliminara. __mode='k' deja que el
--- GC recoja la Instance y su entrada en cuanto nadie más la referencie.
+-- Claves débiles: las Instances pueden destruirse (respawn) antes de que su
+-- spring duerma, y una clave fuerte las retendría.
 local springStates = setmetatable({}, { __mode = "k" }) -- {[object] = {[property] = Spring}
 
 local steppedEvent = RunService:IsClient() and RunService.RenderStepped or RunService.Heartbeat
@@ -258,9 +247,6 @@ steppedEvent:Connect(function(dt)
 			local oldIntermediate = meta.toIntermediate(oldValue)
 			local newIntermediate = spring:step(dt, oldIntermediate)
 
-			-- Sprint 3: pasar `newIntermediate` (posición canónica post-step) a
-			-- canSleep. Sin esta posición el spring no podía evaluar si la
-			-- distancia al goal era suficientemente pequeña para dormir.
 			if spring:canSleep(newIntermediate) then
 				state[name] = nil
 			end

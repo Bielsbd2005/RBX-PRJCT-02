@@ -1,7 +1,4 @@
 --!strict
--- WeaponsNetwork: capa fina sobre los RemoteEvents del sistema de armas.
--- Permite que las armas no conozcan los nombres de los packets ni la API
--- subyacente — y abre la puerta a swap de transporte sin tocar cada arma.
 
 local Players = game:GetService("Players")
 
@@ -19,8 +16,6 @@ function WeaponsNetwork.bind(weaponsSystem: any)
 	_system = weaponsSystem
 end
 
--- ── Client → Server ───────────────────────────────────────────
-
 function WeaponsNetwork.fireWeaponFired(weaponInst: Instance, fireInfo: any)
 	getEvent("WeaponFired"):FireServer(weaponInst, fireInfo)
 end
@@ -37,13 +32,10 @@ function WeaponsNetwork.fireReloadCanceled(weaponInst: Instance)
 	getEvent("WeaponReloadCanceled"):FireServer(weaponInst)
 end
 
--- ── Server → All Clients ──────────────────────────────────────
-
 function WeaponsNetwork.broadcastWeaponFired(player: Player?, weaponInst: Instance, fireInfo: any)
 	-- Culling con la posición server-side del tirador, no con fireInfo.origin
-	-- (dato del cliente: permitía manipular qué clientes reciben el broadcast).
-	-- Fallback a fireInfo.origin solo para armas sin Player (montadas/NPC),
-	-- donde el payload lo generó el propio server.
+	-- (dato del cliente, manipulable). fireInfo.origin solo vale para armas sin
+	-- Player (montadas/NPC), donde el payload lo generó el server.
 	local origin = nil
 	local shooterChar = player and player.Character
 	local shooterRoot = shooterChar and shooterChar:FindFirstChild("HumanoidRootPart")

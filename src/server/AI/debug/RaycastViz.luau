@@ -1,26 +1,8 @@
 --!strict
 --[[
-	RaycastViz — visualización debug de los raycasts de detección de los bots.
-
-	Toggle desde Command Bar de Studio:
-	  workspace:SetAttribute("DebugBotRaycasts", true)   -- enable
-	  workspace:SetAttribute("DebugBotRaycasts", false)  -- disable
-	  workspace:SetAttribute("DebugBotRaycasts", nil)    -- equivalente a false
-
-	Mientras está enabled, cada llamada a BotAI:_canSeeTarget renderiza una
-	línea fina entre el origen del rayo y el destino con color según resultado:
-	  • verde:  LOS confirmada (el rayo llegó al target)
-	  • rojo:   LOS bloqueada (rayo chocó con obstáculo antes del target)
-	  • amarillo: rayo no impactó nada (caso raro, p.ej. target sin
-	              HumanoidRootPart o dirección fuera de rango efectivo)
-
-	Las Parts viven 0.15s y se destruyen vía Debris — visible como un stream
-	continuo de líneas mientras los bots evalúan targets.
-
-	Coste: cada raycast renderiza 1 Part. A 10Hz × 16 bots × hasta 3
-	raycasts/eval (multi-point) = ~480 Parts/sec máx en peor caso. Con
-	Debris a 0.15s, ~72 Parts vivas en cualquier momento. Aceptable para
-	sesión de debug; NO dejar enabled en producción.
+	Debug de los raycasts de LoS de los bots (BotAI:_canSeeTarget). Toggle desde la Command Bar:
+	  workspace:SetAttribute("DebugBotRaycasts", true)
+	Crea una Part por raycast: no dejarlo activo en producción.
 ]]
 
 local Debris = game:GetService("Debris")
@@ -42,16 +24,14 @@ local function _ensureFolder(): Folder
 	return folder
 end
 
-local COLOR_HIT = Color3.fromRGB(80, 255, 80)    -- verde — LOS al target
-local COLOR_BLOCKED = Color3.fromRGB(255, 80, 80) -- rojo — bloqueado
-local COLOR_VOID = Color3.fromRGB(255, 220, 80)   -- amarillo — no hit
+local COLOR_HIT = Color3.fromRGB(80, 255, 80)
+local COLOR_BLOCKED = Color3.fromRGB(255, 80, 80)
+local COLOR_VOID = Color3.fromRGB(255, 220, 80)
 
 export type RayResult = "hit" | "blocked" | "void"
 
--- Bool cacheado tras GetAttributeChangedSignal (mismo patrón que
--- DetectRangeViz con _IS_STUDIO): isEnabled() se consulta por cada raycast
--- de LoS (10Hz × N bots), y leer el attribute del Workspace cada vez era el
--- único coste de producción de este módulo de debug.
+-- Bool cacheado: isEnabled() se consulta en cada raycast de LoS de cada bot y
+-- leer el attribute del Workspace cada vez sería coste en producción.
 local _enabled = Workspace:GetAttribute("DebugBotRaycasts") == true
 Workspace:GetAttributeChangedSignal("DebugBotRaycasts"):Connect(function()
 	_enabled = Workspace:GetAttribute("DebugBotRaycasts") == true
@@ -91,8 +71,6 @@ function RaycastViz.draw(origin: Vector3, endPos: Vector3, result: RayResult)
 		part.Color = COLOR_VOID
 	end
 
-	-- CFrame.lookAt orienta la Part a lo largo del vector. El centro queda
-	-- en el midpoint y la longitud Z = len.
 	part.CFrame = CFrame.lookAt(origin + diff * 0.5, endPos)
 	part.Parent = _ensureFolder()
 	Debris:AddItem(part, 0.15)

@@ -1,9 +1,5 @@
 --!strict
---[[
-	MatchMenu.luau
-	Gestión del menú principal y del label de fase en el botón Play.
-	Instancia por feature (no singleton) — usar MatchMenu.new(...).
-]]
+-- Menú principal y label de fase del botón Play. Instancia por feature (no singleton).
 
 local UserInputService = game:GetService("UserInputService")
 
@@ -22,11 +18,8 @@ export type MatchMenu = {
 	forceShow: (self: MatchMenu) -> (),
 	setPhaseLabel: (self: MatchMenu, phase: string) -> (),
 	applyPhaseLabelToNewGui: (self: MatchMenu, gui: ScreenGui) -> (),
-	hasOpenLobbyPanel: (self: MatchMenu) -> boolean,
 	getPlayButton: (self: MatchMenu) -> GuiButton?,
 }
-
--- ── Helpers de resolución ──────────────────────────────────────
 
 local function _findPlayButton(menuGui: ScreenGui): GuiButton?
 	local container = menuGui:FindFirstChild("Container")
@@ -70,8 +63,6 @@ local function _applyPlatformVisibilityToButton(button: GuiButton?)
 		pcNode.Visible = _isDesktopPlatform()
 	end
 end
-
--- ── API ────────────────────────────────────────────────────────
 
 function MatchMenu.new(
 	menuController: any,
@@ -157,13 +148,6 @@ function MatchMenu:applyPhaseLabelToNewGui(gui: ScreenGui)
 	local playButton = _findPlayButton(gui)
 	self:_applyPhaseLabelToButton(playButton)
 	_applyPlatformVisibilityToButton(playButton)
-end
-
-function MatchMenu:hasOpenLobbyPanel(): boolean
-	if self._menuController and self._menuController.hasOpenPanel then
-		return self._menuController:hasOpenPanel()
-	end
-	return false
 end
 
 function MatchMenu:getPlayButton(): GuiButton?
