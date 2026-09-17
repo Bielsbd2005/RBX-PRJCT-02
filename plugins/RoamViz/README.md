@@ -77,7 +77,7 @@ tampoco los usa (fácil de añadir en `Scanner.readPoints` si algún día pesan)
 
 ## Instalar
 
-Necesitás Rojo (ya está en tu `rokit.toml`, v7.6.1).
+Necesitás Rojo (ya está en tu `rokit.toml`, v7.7.0).
 
 ```bash
 cd plugins/RoamViz
