@@ -25,6 +25,7 @@ local ItemsConfig = require(Shared.constants.ItemsConfig)
 local WeaponCategory = require(Shared.constants.WeaponCategory)
 local ItemDefaults = require(Shared.constants.ItemDefaults)
 local InventoryRepository = require(Shared.data.InventoryRepository)
+local ClientBootStage = require(Shared.constants.ClientBootStage)
 local DailyTasksService = require(script.Parent.Parent.dailyTasks.DailyTasksService)
 
 local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
@@ -88,7 +89,11 @@ type PlayerSession = {
 	lobbyRespawnAt: number,
 	matchSyncCooldownAt: number,
 	returnToMenuCooldownAt: number,
-	-- C2: acciones de persistencia diferidas hasta que el profile cargue.
+	-- Handshake de join (informativo, no gatea el spawn): true cuando llegó el
+	-- primer ClientReady. joinedAt (time()) mide cuánto tardó el cliente.
+	clientReady: boolean,
+	joinedAt: number,
+	-- Acciones de persistencia diferidas hasta que el profile cargue.
 	pendingProfileActions: { () -> () },
 	-- Connections del jugador. deathConn/charDescendantConn siguen al character
 	-- vivo actual (se re-registran en cada CharacterAdded).
@@ -110,6 +115,8 @@ local function _newSession(): PlayerSession
 		lobbyRespawnAt = 0,
 		matchSyncCooldownAt = 0,
 		returnToMenuCooldownAt = 0,
+		clientReady = false,
+		joinedAt = time(),
 		pendingProfileActions = {},
 		deathConn = nil,
 		characterConn = nil,
@@ -1644,6 +1651,27 @@ local function _onRequestMatchSync(_: {}, player: Player)
 	_sendBotRosterToPlayer(player)
 end
 
+-- Handshake de join: el cliente avisa de que fijó la cámara de lobby y construyó
+-- el menú. NO gatea el spawn (con CharacterAutoLoads=false el primer spawn es
+-- lo que copia StarterGui a PlayerGui, así que el menú no puede preceder al
+-- cuerpo). Idempotente: el cliente reintenta hasta ver el ACK, que es el
+-- atributo replicado Player.JoinState = "Ready". Sin sesión (jugador ya fuera)
+-- se ignora.
+local function _onClientReady(_: {}, player: Player)
+	local session = _sessions[player.UserId]
+	if not session or session.clientReady then
+		return
+	end
+	session.clientReady = true
+	player:SetAttribute(ClientBootStage.JOIN_STATE_ATTRIBUTE, ClientBootStage.JOIN_READY)
+	-- Cuánto tardó el cliente en estar usable desde PlayerAdded: es la métrica
+	-- que dice si el flujo de carga aguanta las conexiones reales.
+	TelemetryService.Enqueue("CLIENT_READY", {
+		userId = player.UserId,
+		bootMs = math.floor((time() - session.joinedAt) * 1000),
+	})
+end
+
 local function _onCharacterAdded(player: Player, character: Model)
 	-- Grupo CHARACTERS para no colisionar con cadáveres (RAGDOLL). DescendantAdded por
 	-- si accesorios/tools cargan tarde; la connection vive en la sesión porque el
@@ -1689,6 +1717,8 @@ end
 -- sesiones.
 local function _initJoinedPlayerState(player: Player)
 	_sessions[player.UserId] = _newSession()
+	-- Estado de join visible al cliente (replica); ClientReady lo pasa a Ready.
+	player:SetAttribute(ClientBootStage.JOIN_STATE_ATTRIBUTE, ClientBootStage.JOIN_LOADING)
 	KillAttributionService:SendStreakBroadcast(player.UserId)
 	_bindCharacterTracking(player)
 end
@@ -2014,6 +2044,7 @@ function MatchService:Start(dataService: DataService): ()
 	end)
 
 	Network.Match.RequestMatchSync.Listen(_onRequestMatchSync)
+	Network.Match.ClientReady.Listen(_onClientReady)
 	Network.Match.RequestJoinMatch.Listen(_onRequestJoinMatch)
 	Network.Match.RequestRespawn.Listen(_onRequestRespawn)
 	Network.Match.RequestReturnToMenu.Listen(_onRequestReturnToMenu)

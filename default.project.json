@@ -29,7 +29,8 @@
     },
 
     "ReplicatedFirst": {
-      "$path": "src/replicatedFirst"
+      "$path": "src/replicatedFirst",
+      "$ignoreUnknownInstances": true
     },
 
     "StarterPlayer": {

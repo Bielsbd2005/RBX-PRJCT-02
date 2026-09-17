@@ -6,8 +6,10 @@ local Workspace = game:GetService("Workspace")
 local Players = game:GetService("Players")
 
 local Packages = ReplicatedStorage:WaitForChild("Packages")
+local Shared = ReplicatedStorage:WaitForChild("Shared")
 
 local Janitor = require(Packages.janitor) :: any
+local ClientBootStage = require(Shared:WaitForChild("constants"):WaitForChild("ClientBootStage"))
 
 local ClientBootstrap = {}
 
@@ -15,6 +17,53 @@ local _started = false
 local _janitor: any = nil
 local CORE_GUI_DISABLE_RETRY_COUNT = 8
 local CORE_GUI_DISABLE_RETRY_DELAY = 0.25
+
+-- Handshake de join (informativo, no gatea el spawn): el cliente manda
+-- ClientReady hasta ver el ACK del servidor (Player.JoinState == "Ready").
+local CLIENT_READY_MAX_ATTEMPTS = 8
+local CLIENT_READY_RETRY_SECONDS = 2
+local NETWORK_WAIT_SECONDS = 5
+
+-- TODA la resolución de la ruta va dentro del pcall: indexar fuera mataría el hilo
+-- si la carpeta no ha replicado, y el require de Network puede fallar si el
+-- StringValue del namespace de ByteNet aún no ha llegado. El bucle de envío reintenta.
+local _network: any = nil
+local function tryGetNetwork(): any
+	if _network then
+		return _network
+	end
+	local ok, result = pcall(function()
+		local networking = Shared:WaitForChild("networking", NETWORK_WAIT_SECONDS)
+		local module = networking and networking:WaitForChild("Network", NETWORK_WAIT_SECONDS)
+		return require(module :: any)
+	end)
+	if ok then
+		_network = result
+	end
+	return _network
+end
+
+local function sendClientReadyWithRetry(): ()
+	local player = Players.LocalPlayer
+	local function acked(): boolean
+		return player:GetAttribute(ClientBootStage.JOIN_STATE_ATTRIBUTE) == ClientBootStage.JOIN_READY
+	end
+	for _ = 1, CLIENT_READY_MAX_ATTEMPTS do
+		if acked() then
+			return
+		end
+		local Network = tryGetNetwork()
+		if Network then
+			pcall(function()
+				Network.Match.ClientReady.Send({})
+			end)
+		end
+		task.wait(CLIENT_READY_RETRY_SECONDS)
+	end
+	if not acked() then
+		warn("[ClientBootstrap] ClientReady sin ACK tras", CLIENT_READY_MAX_ATTEMPTS, "intentos")
+	end
+end
 
 type DeferredFeatureEntry = {
 	label: string,
@@ -59,16 +108,7 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 	_started = true
 	_janitor = Janitor.new()
 
-	-- Evita recreacion de ScreenGuis en respawn (rompe bindings de botones si cambia la instancia).
-	StarterGui.ResetPlayerGuiOnSpawn = false
 	disableDefaultCoreGui()
-
-	-- Forzar orientación horizontal en móvil. LandscapeSensor bloquea el juego a
-	-- horizontal pero permite girar el teléfono a izquierda o derecha. En PC/consola
-	-- la propiedad se ignora. Se aplica sobre el PlayerGui vivo (StarterGui solo
-	-- siembra el valor al unirse, así que esto es lo que manda en runtime).
-	local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui")
-	playerGui.ScreenOrientation = Enum.ScreenOrientation.LandscapeSensor
 
 	local DataController = require(clientRoot.core.data.DataController)
 	local ScenePresetController = require(clientRoot.core.lighting.ScenePresetController)
@@ -88,7 +128,20 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 	local LobbyFeature = require(clientRoot.features.lobby)
 	local LobbyMusicFeature = require(clientRoot.features.music)
 	local MatchFeature = require(clientRoot.features.match)
+	local MatchState = require(clientRoot.features.match.MatchState)
+	local MatchCamera = require(clientRoot.features.match.MatchCamera)
 	local GiftingFeature = require(clientRoot.features.gifting)
+
+	-- El motor re-engancha la cámara al Humanoid en cada spawn y el personaje puede
+	-- llegar antes o después del bootstrap: se re-afirma ahora y en cada CharacterAdded.
+	local function applyLobbyCameraIfInMenu(): ()
+		if MatchState.getPhase() ~= "Lobby" then
+			return
+		end
+		MatchCamera.forceLobbyWithRetries(function()
+			return MatchState.getPhase() == "Lobby"
+		end)
+	end
 
 	DataController:Start()
 	WeaponWrapAnimator.start()
@@ -107,25 +160,29 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 		XpOrbsVisuals.stop()
 	end, true)
 
-	-- Audit mobile: timeout en WaitForChild para que la replicación lenta
-	-- del workspace (común en móvil flaky) no bloquee el bootstrap entero.
-	-- Si Cameras/lobby no llegan en 10s, dejamos la cámara con su CFrame
-	-- por defecto (default camera type) — UX degradada pero no hang.
+	-- Timeout para que una replicación lenta (móvil) no cuelgue el bootstrap.
 	local camera = Workspace.CurrentCamera
 	local camerasFolder = Workspace:WaitForChild("Cameras", 10)
 	local lobbyPart = camerasFolder and camerasFolder:WaitForChild("lobby", 10)
 	if camera and lobbyPart and lobbyPart:IsA("BasePart") then
 		camera.CameraType = Enum.CameraType.Scriptable
 		camera.CFrame = lobbyPart.CFrame
-		camera.FieldOfView = 33
+		camera.FieldOfView = 40
 	end
+	applyLobbyCameraIfInMenu()
 
-	_janitor:Add(game:GetService("Players").LocalPlayer.CharacterAdded:Connect(function()
+	_janitor:Add(Players.LocalPlayer.CharacterAdded:Connect(function()
 		disableDefaultCoreGui()
+		applyLobbyCameraIfInMenu()
 	end), "Disconnect")
 
 	local menuController = MenuController.new()
 	_janitor:Add(menuController, "Destroy")
+
+	-- Cámara fijada y menú construido: la pantalla de carga (ReplicatedFirst)
+	-- lee este atributo local para abrirse, y el servidor recibe ClientReady.
+	Players.LocalPlayer:SetAttribute(ClientBootStage.BOOT_STAGE_ATTRIBUTE, ClientBootStage.MENU_READY)
+	task.spawn(sendClientReadyWithRetry)
 
 	_janitor:Add(UISoundsController.start(), "Destroy")
 
@@ -195,17 +252,13 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 		end
 	end
 
-	-- El locker arranca con el juego, cerrado. Su start() es quien coloca las armas
-	-- equipadas en Workspace.Locker (TableSpawn/WallSpawn) y quien apaga el
-	-- BillboardGui de stats (Locker.Stats.Part.BillboardGui). Booteándolo sólo al
-	-- primer clic, hasta entonces la mesa salía vacía y el billboard se veía tal
-	-- cual viene del place. Diferido para no competir con el resto del arranque.
+	-- Arranca con el juego (cerrado), no al primer clic: su start() coloca las armas
+	-- en Workspace.Locker y apaga el BillboardGui de stats del place.
 	task.defer(function()
 		bootLockerFeature(false)
 	end)
 
-	-- El clic sigue conectado como red de seguridad: cubre la ventana en la que el
-	-- locker aún está booteando y el reintento si ese arranque falló.
+	-- Red de seguridad: clic durante el boot, o reintento si el arranque falló.
 	local lockerButton = findLockerButton(menuController:getGui())
 	if lockerButton then
 		lockerLazyConnection = lockerButton.MouseButton1Click:Connect(function()

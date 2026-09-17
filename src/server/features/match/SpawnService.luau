@@ -1,22 +1,11 @@
 --!strict
 --[[
-	SpawnService.luau
-	TODOS los caminos de aparición de jugadores en un solo módulo:
+	Todos los caminos de aparición: lobby (SpawnAtLobby), mapa de la ronda
+	(SpawnOnAssignedTeam) y punto de spawn de bots (SelectBotSpawnPoint, inyectado
+	en AIService vía MatchService porque AI no debe requerir módulos de match).
 
-	  • SpawnAtLobby(player)        — lobby: join, muerte fuera de ronda,
-	                                  vuelta al menú y fin de ronda.
-	  • SpawnOnAssignedTeam(player) — spawn/respawn en el mapa de la ronda:
-	                                  selección inteligente de punto, body
-	                                  swap, protección de spawn y loadout.
-	  • SelectBotSpawnPoint(side)   — selección de punto para bots (AIService):
-	                                  mismo scoring y mapa de reservas que los
-	                                  jugadores, inyectado vía MatchService.
-
-	Los workarounds anti-carrera del body-swap (anclar el root mientras se
-	reposiciona, WaitForChild del HumanoidRootPart) viven aquí UNA sola vez.
-	MatchService inyecta vía Start los getters del estado que necesita la
-	selección de spawn (mapa activo, lado del jugador, team instances y
-	muertes recientes por spawn point).
+	Contrato del cuerpo de lobby: anclado para siempre, de pie y sin Team. Nadie lo
+	desancla: todo spawn posterior crea un cuerpo nuevo con LoadCharacter.
 ]]
 
 local Debris = game:GetService("Debris")
@@ -34,13 +23,12 @@ type TeamSide = "A" | "B"
 
 type Deps = {
 	dataService: any,
-	-- Mapa activo de la ronda (nil fuera de Loading/InRound).
+	-- nil fuera de Loading/InRound/Results (en Results sigue montado: es el escenario).
 	getActiveMapModel: () -> Instance?,
 	getActiveMapName: () -> string,
-	-- Lado asignado del jugador (nil si no está en la ronda).
 	getPlayerSide: (player: Player) -> TeamSide?,
 	getTeamInstance: (side: TeamSide) -> Team?,
-	-- Muertes recientes por spawn point de la ronda activa (anti spawn-trap).
+	-- Anti spawn-trap.
 	getRecentDeathBySpawn: () -> { [BasePart]: number },
 }
 
@@ -49,17 +37,13 @@ local SpawnService = {}
 local _deps: Deps = nil :: any
 local _started = false
 
--- Caches por-mapa. Los spawn points y la carpeta de bots no cambian durante
--- un round, así evitamos escanear el mapa (potencialmente miles de instances)
--- en cada respawn. MatchService invalida con InvalidateMapCache() al desmontar.
+-- Caché por mapa; MatchService llama a InvalidateMapCache() al desmontarlo.
 local _cachedSpawnPoints: { BasePart }? = nil
 local _cachedBotsFolder: Instance? = nil
 
--- time() at which each spawn point was last handed out. Shared by players AND
--- bots so a burst (round start) never gives the same point twice within
--- SpawnSelector's reuse window. Stamped at SELECTION time, not landing time:
--- the player body-swap yields, so two selections can run before either body
--- exists in the map. Cleared with the map (keys are map parts).
+-- time() de la última entrega de cada punto, compartido por jugadores y bots.
+-- Se marca al SELECCIONAR, no al aterrizar: el body-swap cede y dos selecciones
+-- pueden correr antes de que exista ningún cuerpo.
 local _spawnUsedAt: { [BasePart]: number } = {}
 
 function SpawnService.Start(deps: Deps)
@@ -75,8 +59,6 @@ function SpawnService.InvalidateMapCache()
 	_cachedBotsFolder = nil
 	table.clear(_spawnUsedAt)
 end
-
--- ── Spawn points del mapa activo ─────────────────────────────
 
 function SpawnService.GetSpawnPoints(): { BasePart }
 	if _cachedSpawnPoints then
@@ -121,8 +103,6 @@ function SpawnService.FindNearestSpawn(position: Vector3): BasePart?
 	return nearest
 end
 
--- ── Helpers privados ─────────────────────────────────────────
-
 local function _getMapDefinitionByName(mapName: string): GameConfig.MapDefinition?
 	for _, mapDef in GameConfig.Maps do
 		if mapDef.Name == mapName then
@@ -147,10 +127,7 @@ local function _extractCharacterRootPart(character: Model): BasePart?
 	return root
 end
 
--- Recolecta posiciones + lookVectors de combatientes vivos por lado
--- (excluyendo al jugador que pide el respawn). Combina jugadores humanos y
--- NPCs en una sola pasada — los bots viven en `mapRoot.Bots` (top-level),
--- nunca se escanea el mapa entero.
+-- Los bots se leen de `mapRoot.Bots`, nunca se escanea el mapa entero.
 local function _collectAllCombatantData(excludePlayer: Player?): (
 	{ A: { Vector3 }, B: { Vector3 } },
 	{ A: { Vector3 }, B: { Vector3 } }
@@ -201,8 +178,7 @@ local function _collectAllCombatantData(excludePlayer: Player?): (
 				continue
 			end
 
-			-- Ignorar NPCs muertos/ragdollados — no son amenaza, no deben influir
-			-- en la elección de spawn point.
+			-- Sin lado = muerto/ragdollado: no cuenta.
 			local npcSide = TeamUtils.getSide(node)
 			if npcSide ~= "A" and npcSide ~= "B" then
 				continue
@@ -219,9 +195,7 @@ local function _collectAllCombatantData(excludePlayer: Player?): (
 	return positionsBySide, lookVectorsBySide
 end
 
--- Single selection path for players and bots: same scoring, same availability
--- rules, same reservation map. `excludePlayer` omits the respawning player
--- from the combatant scan (their soon-to-be-replaced body shouldn't count).
+-- `excludePlayer`: su cuerpo va a ser reemplazado, no cuenta en el escaneo.
 local function _selectSpawnPoint(side: TeamSide, excludePlayer: Player?): BasePart?
 	local spawnPoints = SpawnService.GetSpawnPoints()
 	if #spawnPoints == 0 then
@@ -231,7 +205,6 @@ local function _selectSpawnPoint(side: TeamSide, excludePlayer: Player?): BasePa
 	local mapDefinition = _getMapDefinitionByName(_deps.getActiveMapName())
 	local useIntelligentSpawning = mapDefinition ~= nil and mapDefinition.UseIntelligentSpawning == true
 	local enemySide: TeamSide = if side == "A" then "B" else "A"
-	-- Single-pass sobre Players + bots, devuelve datos de ambos lados.
 	local positionsBySide, lookVectorsBySide = _collectAllCombatantData(excludePlayer)
 	local chosenSpawn = SpawnSelector.select(spawnPoints, {
 		enemyPositions = positionsBySide[enemySide],
@@ -249,16 +222,26 @@ local function _selectSpawnPoint(side: TeamSide, excludePlayer: Player?): BasePa
 	return chosenSpawn
 end
 
--- Carga el cuerpo del jugador y lo reposiciona sobre `spawnPoint`.
---
--- player:LoadCharacter() coloca el cuerpo en el spawn por defecto y NOSOTROS
--- lo reposicionamos. El bug del "vacío": tras un body-swap el rig puede tardar
--- un instante en estar completo, y leer HumanoidRootPart con FindFirstChild
--- demasiado pronto devolvía nil → la reposición se saltaba → el cuerpo caía al
--- vacío. WaitForChild con timeout corto evita esa carrera; si aun así no
--- aparece, el spawn falla limpio. El root se ancla durante el frame de
--- reposición para que la física no lo arrastre.
-local function _teleportCharacterToSpawn(player: Player, spawnPoint: BasePart): Model?
+-- Margen para que el Humanoid no interseque la part de spawn. En R6 HipHeight es 0,
+-- así que la altura de piernas va a mano.
+local LOBBY_STAND_EPSILON = 0.1
+local R6_LEG_HEIGHT = 2
+
+-- Misma convención de rotación que el spawn normal, así SpawnYaw sigue siendo válido.
+local function _standingRootCFrame(spawnPoint: BasePart, character: Model, root: BasePart): CFrame
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local legs = if humanoid and humanoid.RigType == Enum.HumanoidRigType.R15
+		then humanoid.HipHeight
+		else R6_LEG_HEIGHT
+	local offset = spawnPoint.Size.Y / 2 + legs + root.Size.Y / 2 + LOBBY_STAND_EPSILON
+	return spawnPoint.CFrame + Vector3.new(0, offset, 0)
+end
+
+-- LoadCharacter coloca el cuerpo en el spawn por defecto y aquí se reposiciona.
+-- Tras un body-swap el rig puede tardar en completarse: WaitForChild del root o
+-- el cuerpo caería al vacío. El root va anclado durante la reposición.
+-- keepAnchored (lobby): no se desancla nunca (la física del character es del cliente).
+local function _teleportCharacterToSpawn(player: Player, spawnPoint: BasePart, keepAnchored: boolean?): Model?
 	if player.Parent ~= Players then
 		return nil
 	end
@@ -277,25 +260,28 @@ local function _teleportCharacterToSpawn(player: Player, spawnPoint: BasePart): 
 	local root = rootInstance :: BasePart
 
 	root.Anchored = true
-	root.CFrame = spawnPoint.CFrame + Vector3.new(0, 4, 0)
+	if keepAnchored then
+		root.CFrame = _standingRootCFrame(spawnPoint, character, root)
+	else
+		root.CFrame = spawnPoint.CFrame + Vector3.new(0, 4, 0)
+	end
 
-	-- Yaw del spawn para la ShoulderCamera del cliente: que el jugador aparezca
-	-- mirando hacia donde apunta la part de spawn (rotar la part controla la
-	-- orientación de aparición, igual que los bots). Se estampa como atributo para
-	-- que el cliente lo lea sin carrera con la replicación del CFrame del root.
+	-- Atributo y no CFrame del root para que la ShoulderCamera del cliente lo lea sin
+	-- carrera de replicación. Rotar la part de spawn orienta la aparición.
 	local spawnLook = spawnPoint.CFrame.LookVector
 	character:SetAttribute("SpawnYaw", math.atan2(-spawnLook.X, -spawnLook.Z))
 
-	task.defer(function()
-		if root.Parent then
-			root.Anchored = false
-		end
-	end)
+	if not keepAnchored then
+		task.defer(function()
+			if root.Parent then
+				root.Anchored = false
+			end
+		end)
+	end
 
 	return character
 end
 
--- LobbySpawn vive directamente bajo Workspace.
 local function _findLobbySpawn(): BasePart?
 	local direct = Workspace:FindFirstChild("LobbySpawn")
 	if direct and direct:IsA("BasePart") then
@@ -305,15 +291,8 @@ local function _findLobbySpawn(): BasePart?
 	return nil
 end
 
--- ── API pública de spawn ─────────────────────────────────────
-
--- Garantiza un SpawnLocation Neutral+Enabled en el lobby.
---
--- El bug del "vacío al morir": en partida el jugador está en Team A/B. Al
--- morir, el auto-respawn del MOTOR busca un SpawnLocation de SU equipo; los
--- spawns del mapa son Part normales, así que el motor no encuentra punto
--- válido y aparece en el origen (0,0,0) → el vacío. Un SpawnLocation Neutral
--- sirve para CUALQUIER equipo. Invisible y no-colisionable para no estorbar.
+-- El auto-respawn del motor busca un SpawnLocation del equipo del jugador; los
+-- spawns del mapa son Parts, así que sin uno Neutral aparecería en (0,0,0).
 function SpawnService.EnsureLobbySpawnLocation()
 	local lobby = _findLobbySpawn()
 	if not lobby then
@@ -321,7 +300,6 @@ function SpawnService.EnsureLobbySpawnLocation()
 		return
 	end
 
-	-- Si LobbySpawn ya es un SpawnLocation, basta con dejarlo neutral y activo.
 	if lobby:IsA("SpawnLocation") then
 		local sl = lobby :: SpawnLocation
 		sl.Enabled = true
@@ -329,7 +307,6 @@ function SpawnService.EnsureLobbySpawnLocation()
 		return
 	end
 
-	-- Reusar o crear un SpawnLocation invisible colocado sobre LobbySpawn.
 	local existing = Workspace:FindFirstChild("LobbyAutoSpawn")
 	local spawnLocation: SpawnLocation
 	if existing and existing:IsA("SpawnLocation") then
@@ -350,27 +327,24 @@ function SpawnService.EnsureLobbySpawnLocation()
 	spawnLocation.Parent = Workspace
 end
 
--- Coloca al jugador en el lobby de forma controlada: carga su cuerpo y lo
--- teleporta a Workspace.LobbySpawn (sin armas). Con CharacterAutoLoads
--- desactivado, TODO spawn fuera de partida pasa por aquí (join, muerte→lobby,
--- vuelta a menú, fin de ronda); el motor nunca respawnea solo, así que nunca
--- cae al vacío.
+-- Con CharacterAutoLoads desactivado, todo spawn fuera de partida pasa por aquí.
 function SpawnService.SpawnAtLobby(player: Player)
 	if player.Parent ~= Players then
 		return
 	end
-	-- En el lobby el jugador es neutral (sin equipo de combate).
+	-- Team = nil además de Neutral: TeamUtils.getSide mira player.Team primero y
+	-- el cuerpo de lobby seguiría siendo objetivo de los bots.
 	player.Neutral = true
+	player.Team = nil
 	local lobbySpawn = _findLobbySpawn()
 	if lobbySpawn then
-		_teleportCharacterToSpawn(player, lobbySpawn)
+		_teleportCharacterToSpawn(player, lobbySpawn, true)
 	else
 		LoadoutService.loadCharacterWithBody(player, _deps.dataService)
 	end
 end
 
--- Spawn/respawn en el mapa de la ronda, en el lado ya asignado del jugador.
--- Devuelve false si no hay mapa, lado, punto de spawn o el body-swap falla.
+-- false si no hay mapa, lado, punto de spawn o falla el body-swap.
 function SpawnService.SpawnOnAssignedTeam(player: Player): boolean
 	local mapModel = _deps.getActiveMapModel()
 	if not mapModel then
@@ -393,16 +367,13 @@ function SpawnService.SpawnOnAssignedTeam(player: Player): boolean
 		return false
 	end
 
-	local spawnedCharacter = _teleportCharacterToSpawn(player, chosenSpawn)
+	local spawnedCharacter = _teleportCharacterToSpawn(player, chosenSpawn, false)
 	if not spawnedCharacter then
 		return false
 	end
 
-	-- Inmunidad al spawn: ForceField nativo bloquea Humanoid:TakeDamage (la
-	-- ruta que usan WeaponsSystem y BotAI) — no toca el pipeline de daño. El
-	-- shield expira solo por tiempo vía Debris. El attribute
-	-- SpawnProtectedUntil lo lee BotAI en _getBestTarget (más barato que
-	-- FindFirstChildOfClass("ForceField") por candidato).
+	-- ForceField nativo: bloquea Humanoid:TakeDamage sin tocar el pipeline de daño.
+	-- SpawnProtectedUntil lo lee BotAI._getBestTarget.
 	if GameConfig.SpawnProtectionDuration > 0 then
 		local forceField = Instance.new("ForceField")
 		forceField.Visible = true
@@ -419,11 +390,6 @@ function SpawnService.SpawnOnAssignedTeam(player: Player): boolean
 	return true
 end
 
--- Spawn-point selection for bots (AIService). Same SpawnSelector scoring and
--- reservation map as players — bots no longer pick a pure-random point, can't
--- spawn into enemy crossfire, and can't share a point with a player or bot
--- spawning in the same burst. Injected into AIService via MatchService
--- (AI must not require match modules directly).
 function SpawnService.SelectBotSpawnPoint(side: TeamSide): BasePart?
 	return _selectSpawnPoint(side, nil)
 end

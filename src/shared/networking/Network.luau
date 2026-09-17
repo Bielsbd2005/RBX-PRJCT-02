@@ -239,7 +239,15 @@ local MatchNamespace = ByteNet.DefineNamespace("Match", function()
 			ReliabilityType = "Reliable",
 		}),
 
-		-- C → S: Recoger un pickup (Bullet o Health) generado por una kill.
+		-- C → S. Bootstrap del cliente terminado. Informativo, NO gatea el spawn: con
+		-- CharacterAutoLoads=false StarterGui no se copia a PlayerGui hasta el primer spawn.
+		-- Idempotente; ACK = atributo Player.JoinState = "Ready" (ClientBootStage.luau).
+		ClientReady = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- C → S. kind: "Bullet" | "Health".
 		RequestPickup = ByteNet.DefinePacket({
 			Value = ByteNet.Struct({
 				kind = ByteNet.String,
