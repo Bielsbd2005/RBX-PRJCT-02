@@ -1,7 +1,7 @@
 --!strict
 
--- Catalog categories del Locker que NO son armas. Para Main/Special ver WeaponCategory.
--- Coinciden con las keys top-level de ItemsConfig (excluyendo Main/Special).
+-- Categorías del Locker que no son armas (Main/Special: WeaponCategory).
+-- Deben coincidir con las keys top-level de ItemsConfig.
 
 local LockerCategory = {}
 
@@ -10,6 +10,7 @@ LockerCategory.KILL_EFFECTS = "KillEffects"
 LockerCategory.FACES = "Faces"
 LockerCategory.HATS = "Hats"
 LockerCategory.OUTFITS = "Outfits"
+LockerCategory.BANNERS = "Banners"
 
 LockerCategory.ALL = {
 	LockerCategory.WEAPON_WRAPS,
@@ -17,6 +18,7 @@ LockerCategory.ALL = {
 	LockerCategory.FACES,
 	LockerCategory.HATS,
 	LockerCategory.OUTFITS,
+	LockerCategory.BANNERS,
 }
 
 export type LockerCategory =
@@ -25,6 +27,7 @@ export type LockerCategory =
 	| "Faces"
 	| "Hats"
 	| "Outfits"
+	| "Banners"
 
 function LockerCategory.isValid(value: any): boolean
 	for _, c in LockerCategory.ALL do

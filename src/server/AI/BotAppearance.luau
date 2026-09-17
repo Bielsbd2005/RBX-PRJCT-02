@@ -1,27 +1,15 @@
 --!strict
 --[[
-	BotAppearance.luau
-	Genera y aplica apariencia (hat + face + weapon + weapon wrap) a un bot.
+	Apariencia de un bot (outfit + hat + face + weapon + wrap) y el banner de su
+	tarjeta de muerte (no se aplica al rig).
 
-	Diseño:
-	- `roll()` se llama una vez por identidad (en _assignIdentity de AIService).
-	  El resultado se cachea en la BotIdentity, así una misma identidad
-	  recuperada del recycle pool (= mismo bot tras morir) mantiene la misma
-	  apariencia durante todo el match.
-	- `apply()` se llama tras clonar el rig en _spawnOneBot. Idempotente sobre
-	  el character (no acumula accesorios entre vidas porque los rigs vienen
-	  frescos del pool).
-	- Filtros de catálogo se computan una sola vez al load:
-	    * Hats: intersección de ItemsConfig.Hats con los .rbxm reales presentes
-	      en Shared.Locker.Hats. Evita warns de templates ausentes.
-	    * Faces: todas las entradas de ItemsConfig.Faces (decals, sin templates).
-	    * Wraps: todas las entradas de ItemsConfig.WeaponWraps.
-	    * Weapons: intersección de ItemsConfig.Main con las Tools reales en
-	      ServerStorage.WeaponTools (las MISMAS que clonan los jugadores —
-	      visuales/sonidos/wraps por arma llegan gratis vía WeaponsSystem).
-	- Coste: una clonación de Accessory + un set de Decal.Texture + un set de
-	  Texture sobre WeaponModel.PrimaryPart por spawn. Aplicado una vez, nunca
-	  per-frame.
+	- `roll()` se llama una vez por identidad (_assignIdentity de AIService) y se
+	  cachea en la BotIdentity: el mismo bot mantiene su apariencia todo el match.
+	- `apply()` se llama tras clonar el rig en _spawnOneBot; no limpia accesorios
+	  porque los rigs vienen frescos del pool.
+	- Los pools se filtran al load contra los assets reales (hats en Shared.Locker.Hats,
+	  bodies en Shared.Bodies, Tools en ServerStorage.WeaponTools, las MISMAS que clonan
+	  los jugadores) para no warnar por templates ausentes.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -29,6 +17,7 @@ local ServerStorage = game:GetService("ServerStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ItemsConfig = require(Shared.constants.ItemsConfig)
+local ItemDefaults = require(Shared.constants.ItemDefaults)
 local CosmeticsTemplates = require(Shared.Locker.CosmeticsTemplates)
 local BotPersonality = require(script.Parent:WaitForChild("BotPersonality"))
 
@@ -40,16 +29,16 @@ export type BotAppearance = {
 	faceId: string?,
 	wrapId: string?,
 	weaponId: string?,
+	-- Id en ItemsConfig.Banners. Siempre definido: Default si no hay ninguno de
+	-- las rarezas de su personalidad.
+	bannerId: string,
 }
 
 local BODIES_ROOT_NAME = "Bodies"
 
 local BOT_APPEARANCE_HAT_ATTRIBUTE = "BotAppearanceHat"
 
--- ── Pools de sampling ────────────────────────────────────────────
--- Construidos al load del módulo. AIService corre en el servidor y este
--- módulo se requirea sólo desde allí, así que Shared.Locker.Hats está
--- garantizado disponible al required-time (ReplicatedStorage replica primero).
+-- Pools construidos al load: solo se requirea desde el servidor, donde Shared ya está replicado.
 
 local function _buildHatPool(): { string }
 	local pool: { string } = {}
@@ -57,9 +46,7 @@ local function _buildHatPool(): { string }
 	if type(hatsConfig) ~= "table" then
 		return pool
 	end
-	-- Vía findHatTemplate: los assets se nombran por el `Name` del catálogo, no por
-	-- el id, así que un FindFirstChild(hatId) a pelo dejaba el pool vacío y los bots
-	-- nunca llevaban hat.
+	-- Vía findHatTemplate: los assets se nombran por el `Name` del catálogo, no por el id.
 	for hatId in hatsConfig do
 		if CosmeticsTemplates.findHatTemplate(hatId) ~= nil then
 			table.insert(pool, hatId)
@@ -110,8 +97,7 @@ local function _buildOutfitPool(): { string }
 	if type(outfitsConfig) ~= "table" then
 		return pool
 	end
-	-- Intersect ItemsConfig.Outfits con los Models reales en Shared.Bodies
-	-- para no warnar cuando un outfit existe en config pero falta .rbxm.
+	-- Solo outfits con Model real en Shared.Bodies, para no warnar si falta el .rbxm.
 	for outfitId in outfitsConfig do
 		local node = bodiesRoot:FindFirstChild(outfitId)
 		if node and node:IsA("Model") then
@@ -169,19 +155,31 @@ local function _pickRandom(pool: { string }): string?
 	return pool[math.random(1, n)]
 end
 
+-- Banner según el poder adquisitivo de la personalidad: casi todos llevan el
+-- Default y solo `bannerProbability` saca uno de `bannerRarities`.
+local function _rollBannerId(personality: BotPersonality.Personality): string
+	if math.random() >= personality.bannerProbability then
+		return ItemDefaults.ITEM_ID
+	end
+	local pool: { string } = {}
+	for bannerId, definition in ItemsConfig.Banners do
+		if bannerId ~= ItemDefaults.ITEM_ID and personality.bannerRarities[definition.Rarity] then
+			table.insert(pool, bannerId)
+		end
+	end
+	return _pickRandom(pool) or ItemDefaults.ITEM_ID
+end
+
 -- ── API ───────────────────────────────────────────────────────────
 
 function BotAppearance.roll(personality: BotPersonality.Personality): BotAppearance
-	-- Filtra cada pool por las rarities permitidas por la personality.
-	-- Si tras el filtro un pool queda vacío, _pickRandom devuelve nil y el
-	-- código aguas abajo lo trata como "sin override" (face stays template
-	-- default, wrap stays el del template, hat se omite).
+	-- Si un pool queda vacío tras filtrar, _pickRandom devuelve nil y aguas abajo se
+	-- trata como "sin override" (face/wrap del template, sin hat).
 	local hatPool    = BotPersonality.filterByRarity(_hatPool,    "Hats",        personality)
 	local facePool   = BotPersonality.filterByRarity(_facePool,   "Faces",       personality)
 	local wrapPool   = BotPersonality.filterByRarity(_wrapPool,   "WeaponWraps", personality)
 	local outfitPool = BotPersonality.filterByRarity(_outfitPool, "Outfits",     personality)
-	-- Armas filtradas por rareza igual que el resto de cosméticos: un Noob
-	-- (Common) carga el AK de inicio; tiers altos sacan el catálogo entero.
+	-- Un Noob (Common) carga el arma de inicio; tiers altos sacan el catálogo entero.
 	local weaponPool = BotPersonality.filterByRarity(_weaponPool, "Main", personality)
 
 	local hatId: string? = nil
@@ -195,6 +193,7 @@ function BotAppearance.roll(personality: BotPersonality.Personality): BotAppeara
 		faceId = _pickRandom(facePool),
 		wrapId = _pickRandom(wrapPool),
 		weaponId = _pickRandom(weaponPool),
+		bannerId = _rollBannerId(personality),
 	}
 end
 
@@ -207,8 +206,7 @@ function BotAppearance.findWeaponTemplate(weaponId: string?): Tool?
 	return _findWeaponToolTemplate(weaponId)
 end
 
---- Devuelve el Model del body por outfitId, o nil si no existe.
---- Usado por AIService para clonar el rig del bot.
+--- Model del body por outfitId; AIService clona el rig del bot desde aquí.
 function BotAppearance.findBodyTemplate(outfitId: string?): Model?
 	if not outfitId or outfitId == "" then
 		return nil
@@ -227,7 +225,6 @@ end
 --- Devuelve la lista de outfitIds con body presente. Usado por AIService
 --- para pre-calentar el pool de rigs (uno por outfit disponible).
 function BotAppearance.getAvailableOutfitIds(): { string }
-	-- Devolvemos una copia para que el caller no muerda la lista interna.
 	local copy = table.create(#_outfitPool)
 	for _, id in _outfitPool do
 		table.insert(copy, id)

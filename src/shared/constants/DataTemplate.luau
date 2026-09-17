@@ -1,39 +1,20 @@
 --!strict
 --[[
-	DataTemplate.luau
-	Fuente única de verdad para el esquema de datos del jugador.
-	Define tipos exportables y los valores por defecto (DEFAULT).
+	Esquema y valores por defecto del perfil del jugador (ProfileStore).
 
-	Restricciones de ProfileStore:
-	  - No tablas numéricas con huecos
-	  - No tablas mixtas (índices número + string)
-	  - No referencias a Instancias ni userdata
-
-	Convenciones de schema:
-	  - Cada sección top-level es una tabla con keys string.
-	  - Counters/timestamps son `number`. Booleans para flags binarios.
-	  - Strings vacíos `""` como sentinel para "no asignado" en campos requeridos.
-	  - Para opcionales reales, usar `string?` y omitir del default.
-	  - Mapas `{ [string]: T }` para colecciones indexadas (inventarios, flags).
-	  - Las migraciones se manejan en `server/core/data/DataMigrations.luau`.
+	Restricciones de ProfileStore: sin tablas numéricas con huecos, sin tablas
+	mixtas número+string, sin Instances ni userdata.
+	`""` es el sentinel de "no asignado"; los opcionales reales (`T?`) se omiten del default.
+	Migraciones destructivas: server/core/data/DataMigrations.luau.
 ]]
 
 local LevelingConfig = require(script.Parent.LevelingConfig)
 
--- ────────────────────────────────────────────────────────────
--- TIPOS EXPORTADOS
--- ────────────────────────────────────────────────────────────
-
 --[[
-	Stats: progresión y combate. Counters lifetime; los counters por-modo o
-	por-sesión se llevan separados o en memoria.
-
-	Convenciones:
-	  • Headshots/Longshots/MeleeKills son SUBSETS de Kills (no se duplica).
-	  • KillStreakBest es la mejor racha lifetime; la racha actual vive en
-	    memoria (MatchService) y se resetea al morir.
-	  • TimePlayedSeconds acumulado por DataService vía Increment atómico al
-	    PlayerRemoving (la sesión se contabiliza al cierre, no en runtime).
+	Counters lifetime.
+	  • Headshots/Longshots/MeleeKills son SUBSETS de Kills.
+	  • La racha actual vive en memoria (MatchService); aquí solo la mejor.
+	  • TimePlayedSeconds se suma al PlayerRemoving, no en runtime.
 ]]
 export type Stats = {
 	Level: number,
@@ -57,24 +38,19 @@ export type Stats = {
 	TimePlayedSeconds: number,
 	Cash: number,
 	TotalCashEarned: number,
-	-- Parte de TotalCashEarned que NO salió de jugar: packs comprados con
-	-- Robux y regalos recibidos (que el remitente compró). TotalCashEarned lo
-	-- suma TODO, así que solo no distingue el grind del gasto — y la telemetría
-	-- necesita esa resta para que "Coin por hora jugada" mida juego, no ventas.
-	-- Los perfiles anteriores a este campo arrancan en 0: su histórico comprado
-	-- queda dentro de TotalCashEarned y no se puede separar retroactivamente.
+	-- Parte de TotalCashEarned que NO salió de jugar (packs con Robux y regalos
+	-- recibidos). La telemetría lo resta para medir Cash por hora jugada.
+	-- Perfiles antiguos lo tienen a 0 aunque hubieran comprado.
 	TotalCashPurchased: number,
-	-- Gems: moneda premium. NO se gana jugando — solo con recompensas del
-	-- Battle Pass o comprando packs con Robux. Por eso no hay ningún faucet
-	-- de Gems en ActionRewards: si algún día aparece uno, es un bug de diseño.
+	-- Moneda premium: solo Battle Pass o packs con Robux. Un faucet de Gems en
+	-- ActionRewards sería un bug de diseño.
 	Gems: number,
 	TotalGemsEarned: number,
 	TotalRobuxSpent: number,
 	FriendsInvited: number,
 }
 
--- Cada categoría es un mapa string → bool (true = desbloqueado).
--- Para metadata por-item (timestamp/source de adquisición) ver InventoryMeta.
+-- Mapas itemId → true (desbloqueado). Metadata por ítem en InventoryMeta.
 export type Inventory = {
 	Main: { [string]: boolean },
 	Special: { [string]: boolean },
@@ -86,14 +62,11 @@ export type Inventory = {
 	Faces: { [string]: boolean },
 	Hats: { [string]: boolean },
 	Outfits: { [string]: boolean },
+	Banners: { [string]: boolean },
 }
 
 --[[
-	InventoryMeta: metadata por-ítem. NO duplicamos ownership (eso vive en
-	Inventory); solo añadimos info opcional para UX/analytics/refunds.
-
-	Estructura: category → itemId → { AcquiredAt, Source }
-	  AcquiredAt: os.time() de adquisición.
+	category → itemId → meta. No es fuente de ownership (eso es Inventory).
 	  Source: "Shop" | "Reward" | "Default" | "Gift" | "Code" | etc.
 ]]
 export type InventoryItemMeta = {
@@ -109,42 +82,37 @@ export type Loadout = {
 	SpecialWeaponWraps: { [string]: string },
 	KillEffect: string,
 	Face: string,
-	Hat: string?, -- Opcional: el jugador puede no llevar sombrero
+	Hat: string?,
 	Outfit: string,
+	-- Banner de la tarjeta de muerte: lo ve quien muere a manos de este jugador.
+	Banner: string,
 }
 
--- Kills acumuladas por arma. Usado por la maestría de wraps en el Locker.
+-- Kills por arma, para la maestría de wraps.
 export type WeaponKills = {
 	Main: { [string]: number },
 	Special: { [string]: number },
 }
 
 --[[
-	Settings: preferencias del cliente persistidas server-side para que sean
-	consistentes entre sesiones. Whitelist de claves vive en SettingsService.
-
-	Cambios de tipo aquí requieren actualizar el handler correspondiente
-	(UpdateSlider/UpdateToggle/UpdateChoice).
+	Whitelist de claves en SettingsService: un cambio de tipo aquí requiere tocar
+	su handler (UpdateSlider/UpdateToggle/UpdateChoice).
 ]]
 export type Settings = {
-	-- Audio (sliders 0..1)
+	-- Sliders 0..1
 	MasterVolume: number,
 	MusicVolume: number,
 	SFXVolume: number,
-	-- Cámara/aim (sliders 0..1 normalizados)
 	CameraSensitivity: number,
-	FOV: number,            -- 0..1 mapped a [70..110]° en cliente
-	-- HUD
-	HUDScale: number,       -- 0..1 mapped a [0.75..1.5] en cliente
-	-- Toggles
+	FOV: number, -- 0..1 mapeado a [70..110]° en cliente
+	HUDScale: number, -- 0..1 mapeado a [0.75..1.5] en cliente
 	Vibration: boolean,
 	AutoShoot: boolean,
 	ShowDamageNumbers: boolean,
-	GiftsEnabled: boolean,  -- acepta recibir regalos de otros jugadores
-	-- Choices (string enums whitelisted en SettingsService)
+	GiftsEnabled: boolean, -- acepta recibir regalos
 	ColorblindMode: string, -- "None" | "Protanopia" | "Deuteranopia" | "Tritanopia"
-	Language: string,       -- ISO 639-1 ("en", "es", ...)
-	-- Visual ajustable. RGB 0..1.
+	Language: string, -- ISO 639-1
+	-- RGB 0..1.
 	CrosshairColor: { R: number, G: number, B: number },
 }
 
@@ -157,53 +125,35 @@ export type Rewards = {
 	FirstPurchaseClaimed: boolean,
 }
 
---[[
-	LoginStreak: racha de logins diarios consecutivos. DataService la actualiza
-	en _loadPlayer comparando LastLoginDateKey con el día UTC actual.
-
-	Semántica:
-	  • Mismo día que LastLogin → no-op.
-	  • Día siguiente exacto → Current += 1.
-	  • Gap > 1 día → Current = 1 (reset).
-	  • Best = max(Best, Current).
-]]
+-- DataService la actualiza al cargar comparando LastLoginDateKey con el día UTC.
 export type LoginStreak = {
 	Current: number,
 	Best: number,
 	LastLoginDateKey: string, -- "YYYY-MM-DD" UTC
 }
 
---[[
-	NewItemFlags: marcadores "NEW!" para UX del Locker. El cliente los pinta y
-	llama a `Locker.MarkItemSeen(category, itemId)` cuando el jugador los abre.
-	Server los setea al granteear el ítem.
-
-	Estructura: category → itemId → true (presencia = no visto).
-]]
+-- Marcadores "NEW!" del Locker: category → itemId → true (presencia = no visto).
+-- El server los pone al conceder; el cliente los limpia con Locker.MarkItemSeen.
 export type NewItemFlags = { [string]: { [string]: boolean } }
 
 export type Metadata = {
-	CreatedAt: number,           -- os.time() de la primera sesión
-	LastSeen: number,            -- os.time() de la última sesión
-	Version: number,             -- Versión del schema (gestionada por DataMigrations)
-	JoinCount: number,           -- Sesiones lifetime
-	FirstSessionVersion: string, -- Versión del juego en la primera sesión
-	LastClientVersion: string,   -- Versión del juego en la sesión más reciente
-	Country: string,             -- ISO 3166-1 alpha-2 (best-effort, vacío si no se conoce)
+	CreatedAt: number,
+	LastSeen: number,
+	Version: number, -- versión del schema (DataMigrations)
+	JoinCount: number,
+	FirstSessionVersion: string,
+	LastClientVersion: string,
+	Country: string, -- ISO 3166-1 alpha-2, best-effort ("" si no se conoce)
 }
 
--- ProcessedReceipts: PurchaseId → os.time() de cuando se procesó.
--- Usado para idempotencia de MarketplaceService.ProcessReceipt: si Roblox
--- reintenta el receipt (p. ej. crash entre Increment y PurchaseGranted),
--- detectamos el duplicado y devolvemos PurchaseGranted sin re-otorgar.
+-- PurchaseId → os.time(). Idempotencia de ProcessReceipt: Roblox reintenta el
+-- receipt y un duplicado devuelve PurchaseGranted sin re-otorgar.
 export type ProcessedReceipts = { [string]: number }
 
 --[[
-	PendingGifts: regalos RECIBIDOS pendientes de reclamar. Key = PurchaseId del
-	receipt del comprador — idempotencia natural: una re-entrega (receipt
-	reintentado o message duplicado) sobrescribe la misma key en vez de duplicar.
-	El GiftAlert del cliente los muestra de uno en uno; ClaimGift (GiftingService)
-	concede el CashAmount y borra la entrada.
+	Regalos RECIBIDOS sin reclamar. Key = PurchaseId del comprador: una re-entrega
+	sobrescribe la misma key en vez de duplicar. ClaimGift (GiftingService) concede
+	y borra la entrada.
 ]]
 export type PendingGift = {
 	SenderUserId: number,
@@ -215,24 +165,17 @@ export type PendingGift = {
 export type PendingGifts = { [string]: PendingGift }
 
 --[[
-	ClaimedGifts: ledger de regalos YA reclamados (giftId/PurchaseId → os.time()
-	del claim). Barrera anti doble-claim: un receipt o message re-entregado
-	(crash entre la entrega al receptor y la persistencia del comprador) no
-	debe volver a crear un PendingGift reclamable del mismo PurchaseId.
-	DataService lo poda por edad (30 días) al cargar el perfil.
+	PurchaseId → os.time() del claim. Evita que un receipt/message re-entregado
+	vuelva a crear un PendingGift ya reclamado. DataService lo poda por edad al cargar.
 ]]
 export type ClaimedGifts = { [string]: number }
 
 --[[
-	GiftIntent: intención de regalo del COMPRADOR. GiftingService la escribe al
-	validar SendGift (antes del prompt de compra) y la consume ProcessReceipt
-	para redirigir el grant del developer product al receptor en vez de al
-	comprador. Vive en el perfil (no en memoria) para sobrevivir reintentos del
-	receipt, incluso si llegan en otro servidor tras un crash.
-
-	ReceiverUserId = 0 ⇒ sin intención activa (ProfileStore no persiste nils).
-	Expira por CreatedAt (INTENT_TTL en GiftingService); un prompt cancelado la
-	limpia vía PromptProductPurchaseFinished.
+	Intención de regalo del COMPRADOR: la escribe SendGift antes del prompt y la
+	consume ProcessReceipt para dar el producto al receptor. En el perfil y no en
+	memoria para sobrevivir reintentos del receipt en otro servidor.
+	ReceiverUserId = 0 ⇒ sin intención (ProfileStore no persiste nils). Expira por
+	CreatedAt (INTENT_TTL en GiftingService).
 ]]
 export type GiftIntent = {
 	ReceiverUserId: number,
@@ -240,20 +183,12 @@ export type GiftIntent = {
 	CreatedAt: number,
 }
 
--- DailyTasks: progreso diario por jugador. La definición de las tareas vive
--- en `shared/constants/DailyTasks.luau`. Aquí solo se almacena el estado.
---   DateKey: "YYYY-MM-DD" (UTC) — cuándo fue el último reset.
---   Progress: contador acumulado por Kind del día actual.
---   Claimed: marca por slot UI (Task1/Task2/Task3). Una vez que progress alcanza
---            el objetivo, se otorga el cash y se setea Claimed[SlotId] = true para
---            no pagar dos veces aunque el contador siga subiendo. Qué tarea ocupa
---            cada slot lo decide la rotación del día (DailyTasks.GetRotation); el
---            cash lo pone la tarea (DailyTasks.RewardKey → ActionRewards).
+-- Definición de tareas en shared/constants/DailyTasks.luau.
+--   DateKey: "YYYY-MM-DD" UTC del último reset.
+--   Claimed: por slot; evita pagar dos veces aunque el contador siga subiendo.
 export type DailyTasksState = {
 	DateKey: string,
-	-- Contador por Kind del pool de `shared/constants/DailyTasks.luau` (mapa, no
-	-- registro fijo: la rotación diaria puede traer cualquiera de ellos y el reset
-	-- del día los pone todos a 0).
+	-- Kind → contador del día. Mapa y no registro fijo: la rotación puede traer cualquier Kind.
 	Progress: { [string]: number },
 	Claimed: {
 		Task1: boolean,
@@ -263,27 +198,13 @@ export type DailyTasksState = {
 }
 
 --[[
-	BattlePass: progresión por temporada. La config (tiers, rewards, productId
-	de Robux) vive en `shared/constants/BattlePassConfig.luau`.
-
-	Semántica:
-	  • CurrentTier = N significa "tiers 1..N-1 completados; estoy progresando
-	    hacia el N". Cuando se supera el último tier, CurrentTier = MaxTier+1
-	    (sentinel "completado") y XP queda en 0.
-	  • XP es el progreso DENTRO del tier actual. No se acumula entre tiers
-	    (la cascada en BattlePassService:AddXP descuenta XPRequired y sube CurrentTier).
-	  • TotalXPEarned es el contador acumulativo de XP ganada en la season
-	    (nunca se decrementa al subir de tier). Sirve como fuente de verdad
-	    independiente para validar CurrentTier en cada claim: si CurrentTier
-	    se corrompe a un valor mayor al derivable de TotalXPEarned, el claim
-	    se rechaza (defense-in-depth).
-	  • PremiumOwned se setea al procesar el receipt de Robux. Se RESETEA al
-	    cambiar de season (cada season requiere su propia compra).
-	  • Claimed usa `tostring(level)` como key porque ProfileStore prohíbe
-	    tablas numéricas con huecos. Cada nivel tiene una sola recompensa
-	    (FREE o PASS); reclamar un nivel PASS requiere PremiumOwned.
-	  • SeasonId se compara contra BattlePassConfig.GetActiveSeason().Id en
-	    el load del perfil; mismatch dispara reset.
+	Config en shared/constants/BattlePassConfig.luau.
+	  • CurrentTier = N: tiers 1..N-1 completados. MaxTier+1 = pase completado (XP = 0).
+	  • XP es el progreso DENTRO del tier actual.
+	  • TotalXPEarned no baja al subir de tier; cada claim valida CurrentTier contra él.
+	  • PremiumOwned se resetea al cambiar de season.
+	  • Claimed usa tostring(level) como key (ProfileStore prohíbe huecos numéricos).
+	  • SeasonId distinto de la season activa al cargar ⇒ reset.
 ]]
 export type BattlePassState = {
 	SeasonId: string,
@@ -291,7 +212,6 @@ export type BattlePassState = {
 	XP: number,
 	TotalXPEarned: number,
 	PremiumOwned: boolean,
-	-- Cada nivel tiene UNA sola recompensa (free o pass). Claimed[tostring(level)] = true.
 	Claimed: { [string]: boolean },
 	GrantedSkips: { [string]: boolean }, -- PurchaseId → true (idempotencia del Skip)
 }
@@ -315,11 +235,7 @@ export type PlayerProfile = {
 	GiftIntent: GiftIntent,
 }
 
--- ────────────────────────────────────────────────────────────
--- VALORES POR DEFECTO
--- Reconcile() de ProfileStore llenará claves faltantes con estos valores,
--- garantizando compatibilidad hacia adelante al agregar nuevos campos.
--- ────────────────────────────────────────────────────────────
+-- Reconcile() rellena claves faltantes en perfiles existentes, pero no borra las que sobran.
 
 local DEFAULT: PlayerProfile = {
 	Stats = {
@@ -342,23 +258,11 @@ local DEFAULT: PlayerProfile = {
 		Losses = 0,
 		MatchesPlayed = 0,
 		TimePlayedSeconds = 0,
-		-- 80 desde el 2026-09-11 (100 unas horas antes, 150 desde el 2026-09-04,
-		-- 500 antes). A propósito NO llega al peldaño más barato del catálogo:
-		-- Wrap_White (Arctic) a 100 y nivel 0, y detrás la Groza a 150 (UZI,
-		-- Face8 y Hat10 a 300 desde el 2026-09-12).
-		-- Con 100 el Arctic se compraba antes del primer disparo, sin esfuerzo
-		-- detrás, y un regalo en el minuto 0 enseña que la moneda se regala. Con
-		-- 80 el Arctic queda a 2 kills y la Groza a 7, y una partida (~210 Cash
-		-- de combate a 90 kills/h) deja al jugador en ~290: "primera partida,
-		-- primera arma", ganada.
-		-- No se toca el Arctic en su lugar: a 125 no se distingue del Blue (150,
-		-- un 20 %, bajo el umbral de Weber) y con nivel 1 la escalera lo devuelve
-		-- a 0, porque su peldaño más barato no pide nivel. Mantener esto POR
-		-- DEBAJO del peldaño más barato y a menos de una partida de él.
+		-- Mantener POR DEBAJO del ítem más barato del catálogo y a menos de una
+		-- partida de él: la primera compra se gana jugando, no se regala.
 		Cash = 80,
 		TotalCashEarned = 0,
 		TotalCashPurchased = 0,
-		-- Arranca a 0: los Gems son premium, no se regalan de salida.
 		Gems = 0,
 		TotalGemsEarned = 0,
 		TotalRobuxSpent = 0,
@@ -374,10 +278,6 @@ local DEFAULT: PlayerProfile = {
 					Default = true,
 				},
 			},
-			-- Sólo el wrap Default. Hasta el 2026-09-11 la secundaria traía también
-			-- Wrap_Red (Crimson Flow, Epic, 1.500 Cash en la tienda): un resto de
-			-- pruebas que regalaba un Epic en el minuto 0. Reconcile rellena claves
-			-- pero no las borra, así que los perfiles ya creados lo conservan.
 			Special = {
 				Default = {
 					Default = true,
@@ -388,6 +288,7 @@ local DEFAULT: PlayerProfile = {
 		Faces = { Default = true },
 		Hats = {},
 		Outfits = { Default = true },
+		Banners = { Default = true },
 	},
 
 	InventoryMeta = {},
@@ -403,10 +304,9 @@ local DEFAULT: PlayerProfile = {
 		},
 		KillEffect = "Default",
 		Face = "Default",
-		-- Hat es opcional (Loadout.Hat: string?). No se incluye literal aquí
-		-- porque `nil` en una tabla es lo mismo que ausencia de clave; añadirlo
-		-- solo confunde y `Reconcile` no lo rellenaría tampoco.
+		-- Hat omitido a propósito: es opcional.
 		Outfit = "Default",
+		Banner = "Default",
 	},
 
 	WeaponKills = {
@@ -449,8 +349,6 @@ local DEFAULT: PlayerProfile = {
 
 	DailyTasks = {
 		DateKey = "",
-		-- El primer reset diario (DailyTasksService) los pone a 0 igualmente; esto
-		-- es solo la forma inicial de un perfil nuevo.
 		Progress = {
 			Eliminations = 0,
 			WinMatches = 0,
@@ -478,10 +376,8 @@ local DEFAULT: PlayerProfile = {
 	Metadata = {
 		CreatedAt = 0,
 		LastSeen = 0,
-		-- Schema version. Manejada por DataMigrations: bumpear CURRENT_VERSION
-		-- ahí cuando añadas una migración destructiva (renames, splits, etc.).
-		-- Para campos nuevos basta con añadirlos al template — Reconcile los
-		-- rellena en perfiles existentes con su default.
+		-- Bumpear CURRENT_VERSION en DataMigrations solo para migraciones destructivas;
+		-- los campos nuevos los rellena Reconcile.
 		Version = 2,
 		JoinCount = 0,
 		FirstSessionVersion = "",
@@ -502,6 +398,5 @@ local DEFAULT: PlayerProfile = {
 	},
 }
 
--- Congelado para prevenir mutaciones accidentales del template.
--- ProfileStore hace una deep-copy al crear un nuevo perfil.
+-- ProfileStore hace deep-copy al crear un perfil.
 return table.freeze(DEFAULT)

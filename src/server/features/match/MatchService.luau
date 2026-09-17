@@ -24,6 +24,7 @@ local CollisionGroups = require(Shared.CollisionGroups)
 local ItemsConfig = require(Shared.constants.ItemsConfig)
 local WeaponCategory = require(Shared.constants.WeaponCategory)
 local ItemDefaults = require(Shared.constants.ItemDefaults)
+local InventoryRepository = require(Shared.data.InventoryRepository)
 local DailyTasksService = require(script.Parent.Parent.dailyTasks.DailyTasksService)
 
 local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
@@ -896,6 +897,26 @@ local function _getKillEffectIdForAttacker(attackerUserId: number?): string
 	return ItemDefaults.ITEM_ID
 end
 
+-- Banner que pinta la tarjeta de muerte de quien cae a manos de este perfil. Se
+-- revalida catálogo y posesión: un Loadout.Banner que ya no existe (ítem retirado)
+-- o que no se posee cae al Default en vez de mandar un id que el cliente no sabe
+-- pintar.
+local function _resolveEquippedBanner(profileData: any): string
+	local loadout = if type(profileData) == "table" then profileData.Loadout else nil
+	local bannerId = if type(loadout) == "table" then loadout.Banner else nil
+	if type(bannerId) ~= "string" or bannerId == "" or bannerId == ItemDefaults.ITEM_ID then
+		return ItemDefaults.ITEM_ID
+	end
+	local banners = ItemsConfig.Banners
+	if type(banners) ~= "table" or banners[bannerId] == nil then
+		return ItemDefaults.ITEM_ID
+	end
+	if not InventoryRepository.ownsItem(profileData, "Banners", bannerId) then
+		return ItemDefaults.ITEM_ID
+	end
+	return bannerId
+end
+
 local function _applyKillEffect(attackerUserId: number?, character: Model)
 	local effectId = _getKillEffectIdForAttacker(attackerUserId)
 	local ok, err = pcall(KillEffectsRegistry.apply, effectId, character)
@@ -1000,16 +1021,18 @@ local function _registerDeathListener(player: Player, character: Model)
 		end
 
 		if player.Parent == Players then
-			local killerStats = if attackerUserId then round.statsByUserId[attackerUserId] else nil
-			local killerKills = if killerStats then killerStats.kills else 0
+			-- La tarjeta de muerte enseña quién mató, su nivel y su banner equipado.
 			local killerLevel = 0
+			local killerBanner = ItemDefaults.ITEM_ID
 			if attackerPlayer and _dataService and _dataService.GetProfile then
 				local killerProfile = _dataService:GetProfile(attackerPlayer)
-				if killerProfile and killerProfile.Data and killerProfile.Data.Stats then
-					local lvl = killerProfile.Data.Stats.Level
+				if killerProfile and killerProfile.Data then
+					local stats = killerProfile.Data.Stats
+					local lvl = if stats then stats.Level else nil
 					if type(lvl) == "number" then
 						killerLevel = math.floor(lvl)
 					end
+					killerBanner = _resolveEquippedBanner(killerProfile.Data)
 				end
 			end
 
@@ -1018,7 +1041,9 @@ local function _registerDeathListener(player: Player, character: Model)
 				local botIdentity = _AIService:GetBotIdentity(attackerUserId)
 				if botIdentity then
 					killerLevel = botIdentity.level
-					killerKills = botIdentity.historicalKills
+					if botIdentity.appearance then
+						killerBanner = botIdentity.appearance.bannerId
+					end
 				end
 			end
 
@@ -1026,8 +1051,8 @@ local function _registerDeathListener(player: Player, character: Model)
 				respawnCooldown = GameConfig.RespawnCooldown,
 				killerUserId = if attackerUserId then tostring(attackerUserId) else "",
 				killerName = killerName,
-				killerKills = killerKills,
 				killerLevel = killerLevel,
+				killerBanner = killerBanner,
 				weaponId = attackerWeaponId,
 			}, player)
 		end

@@ -841,7 +841,6 @@ function MatchFeature.start(menuController: any): any
 					team = entry.team or "",
 					image = entry.image or "",
 					level = if type(entry.level) == "number" then entry.level else 1,
-					historicalKills = if type(entry.historicalKills) == "number" then entry.historicalKills else 0,
 					outfitId = if type(entry.outfitId) == "string" then entry.outfitId else "",
 					faceId = if type(entry.faceId) == "string" then entry.faceId else "",
 					hatId = if type(entry.hatId) == "string" then entry.hatId else "",
@@ -891,8 +890,8 @@ function MatchFeature.start(menuController: any): any
 		respawnCooldown: number,
 		killerUserId: string,
 		killerName: string,
-		killerKills: number,
 		killerLevel: number,
+		killerBanner: string,
 		weaponId: string,
 	})
 		hud:incrementLocalDeaths()
@@ -919,8 +918,8 @@ function MatchFeature.start(menuController: any): any
 		local killer = if data.killerName ~= ""
 			then {
 				name = data.killerName,
-				kills = data.killerKills,
 				level = data.killerLevel,
+				bannerId = data.killerBanner,
 				character = _resolveKillerCharacter(data.killerUserId),
 			}
 			else nil

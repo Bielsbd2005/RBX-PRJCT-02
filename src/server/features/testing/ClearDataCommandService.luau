@@ -7,6 +7,7 @@ local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService
 type DataService = DataServiceMod.DataServiceModule
 
 local TelemetryService = require(script.Parent.Parent.Parent.core.TelemetryService)
+local ItemsConfig = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared").constants.ItemsConfig)
 
 local ClearDataCommandService = {}
 ClearDataCommandService.__index = ClearDataCommandService
@@ -16,12 +17,11 @@ local _started = false
 
 local ENABLE_CLEAR_COMMAND = RunService:IsStudio()
 local COMMAND = "/resetdata"
+-- Concede todos los banners de ItemsConfig.
+local GRANT_BANNERS_COMMAND = "/banners"
 
--- Si OPEN_TO_ALL_IN_STUDIO=true, cualquier player en Studio (team test, team
--- create) puede ejecutar /clear sobre su propio profile. Útil en dev local.
--- En cualquier otro caso, solo userIds en ALLOWED_USER_IDS pueden hacerlo.
--- IMPORTANTE: la semántica es opt-in (no "vacío = todos") — evita el footgun
--- de que un copy-paste de este servicio a un endpoint no-Studio quede abierto.
+-- Opt-in explícito (una lista vacía no abre a todos), para que copiar este servicio
+-- fuera de Studio no lo deje abierto.
 local OPEN_TO_ALL_IN_STUDIO = true
 local ALLOWED_USER_IDS: { [number]: boolean } = {
 	[286176976] = true,
@@ -39,8 +39,7 @@ local function _normalizeMessage(message: string): string
 	return string.lower((message:gsub("^%s*(.-)%s*$", "%1")))
 end
 
--- Saldo destruido por el borrado, como sink con etiqueta propia para que se
--- pueda excluir del balance de una sola consulta.
+-- Sink con etiqueta propia para poder excluirlo del balance en telemetría.
 local function _recordReset(player: Player)
 	local profile = _dataService and _dataService:GetProfile(player)
 	local data = profile and profile.Data
@@ -64,7 +63,8 @@ local function _onPlayerChatted(player: Player, message: string): ()
 		return
 	end
 
-	if _normalizeMessage(message) ~= COMMAND then
+	local normalized = _normalizeMessage(message)
+	if normalized ~= COMMAND and normalized ~= GRANT_BANNERS_COMMAND then
 		return
 	end
 
@@ -72,18 +72,15 @@ local function _onPlayerChatted(player: Player, message: string): ()
 		return
 	end
 
-	--[[
-		El borrado es un movimiento de moneda como cualquier otro y hasta ahora
-		no dejaba rastro: destruía el saldo entero del jugador y reinyectaba el
-		Cash de plantilla sin un solo evento. En el dashboard eso era un salto
-		en la masa monetaria sin causa visible — y con `/resetdata` usado a
-		diario en pruebas, ruido suficiente para desmentir cualquier cuadre.
+	if normalized == GRANT_BANNERS_COMMAND then
+		for bannerId in ItemsConfig.Banners do
+			_dataService:GrantItem(player, "Banners", bannerId, "AdminCommand")
+		end
+		return
+	end
 
-		Se registra ANTES del reset, que es cuando el saldo todavía existe. El
-		grant de bienvenida que llega después lo registra TelemetryService al
-		siguiente login (el reset pone JoinCount a cero, así que la próxima
-		sesión vuelve a ser la primera).
-	]]
+	-- Antes del reset, mientras el saldo existe. El grant de bienvenida posterior lo
+	-- registra TelemetryService al siguiente login (el reset pone JoinCount a cero).
 	_recordReset(player)
 
 	local success = _dataService:ResetProfile(player)

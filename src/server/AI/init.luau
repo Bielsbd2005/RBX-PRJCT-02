@@ -30,7 +30,6 @@ type BotIdentity = {
 	image: string,
 	personalityId: string,
 	level: number,
-	historicalKills: number,
 	appearance: BotAppearance.BotAppearance,
 }
 
@@ -265,7 +264,7 @@ local function _assignIdentity(): (BotIdentity, number)
 	end
 
 	local personalityId, personality = BotPersonality.rollPersonality()
-	local level, historicalKills = BotPersonality.rollStats(personality)
+	local level = BotPersonality.rollLevel(personality)
 
 	-- Personalidad y apariencia viven en la identity: al reciclarse tras morir, el
 	-- bot mantiene su look toda la ronda; se re-rolean al limpiar en OnRoundEnd.
@@ -274,7 +273,6 @@ local function _assignIdentity(): (BotIdentity, number)
 		image = image,
 		personalityId = personalityId,
 		level = level,
-		historicalKills = historicalKills,
 		appearance = BotAppearance.roll(personality),
 	}
 	return identity, fakeUserId
@@ -1031,7 +1029,7 @@ function AIService:OnRoundEnd()
 	table.clear(_teamByFakeUserId)
 end
 
-function AIService:GetBotRoster(): { { fakeUserId: number, displayName: string, team: string, image: string, level: number, historicalKills: number, outfitId: string, faceId: string, hatId: string } }
+function AIService:GetBotRoster(): { { fakeUserId: number, displayName: string, team: string, image: string, level: number, outfitId: string, faceId: string, hatId: string } }
 	local roster = {}
 	for fakeUserId, identity in _identityByFakeUserId do
 		local team = _teamByFakeUserId[fakeUserId]
@@ -1044,7 +1042,6 @@ function AIService:GetBotRoster(): { { fakeUserId: number, displayName: string, 
 				team = team,
 				image = identity.image,
 				level = identity.level,
-				historicalKills = identity.historicalKills,
 				outfitId = if appearance and appearance.outfitId then appearance.outfitId else "",
 				faceId = if appearance and appearance.faceId then appearance.faceId else "",
 				hatId = if appearance and appearance.hatId then appearance.hatId else "",

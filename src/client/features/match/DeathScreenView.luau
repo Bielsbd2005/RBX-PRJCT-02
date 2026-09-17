@@ -5,6 +5,7 @@ local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 
 local AssetIds = require(ReplicatedStorage:WaitForChild("Shared").constants.AssetIds)
+local BannerCard = require(script.Parent.Parent.Parent.core.ui.BannerCard)
 
 local DeathScreenView = {}
 DeathScreenView.__index = DeathScreenView
@@ -24,16 +25,16 @@ type Refs = {
 	menuPcLabel: TextLabel?,
 	respawnPcLabel: TextLabel?,
 	barFill: GuiObject?,
-	cardName: TextLabel?,
-	cardKills: TextLabel?,
-	cardLevel: TextLabel?,
+	-- Tarjeta del asesino (ImageLabel con el banner + Name + Level).
+	card: BannerCard.Refs?,
 	viewportFrame: ViewportFrame?,
 }
 
 export type KillerInfo = {
 	name: string,
-	kills: number,
 	level: number,
+	-- Id en ItemsConfig.Banners; nil/"Default" → banner por defecto.
+	bannerId: string?,
 	character: Model?,
 }
 
@@ -67,17 +68,6 @@ local function _resolveBarFill(respawnNode: Instance?): GuiObject?
 	return nil
 end
 
-local function _resolveCardLabel(cardNode: Instance?, name: string): TextLabel?
-	if not cardNode then
-		return nil
-	end
-	local node = cardNode:FindFirstChild(name)
-	if node and node:IsA("TextLabel") then
-		return node
-	end
-	return nil
-end
-
 local function _resolveRefs(gui: GuiObject): Refs?
 	-- Backdrop (para el fade): wrapper `Container` si existe, si no el propio gui.
 	local containerNode = gui:FindFirstChild("Container")
@@ -92,8 +82,6 @@ local function _resolveRefs(gui: GuiObject): Refs?
 	local cardNode = gui:FindFirstChild("Card", true)
 	local viewportNode = gui:FindFirstChild("ViewportFrame", true)
 
-	-- Sin ningún botón no es una pantalla de muerte funcional (GUI incompleta o
-	-- nodo equivocado): devolvemos nil para no crear una view rota.
 	if not menuNode and not respawnNode then
 		return nil
 	end
@@ -106,9 +94,7 @@ local function _resolveRefs(gui: GuiObject): Refs?
 		menuPcLabel = _resolvePcLabel(menuNode),
 		respawnPcLabel = _resolvePcLabel(respawnNode),
 		barFill = _resolveBarFill(respawnNode),
-		cardName = _resolveCardLabel(cardNode, "Name"),
-		cardKills = _resolveCardLabel(cardNode, "Kills"),
-		cardLevel = _resolveCardLabel(cardNode, "Level"),
+		card = if cardNode then BannerCard.resolve(cardNode) else nil,
 		viewportFrame = if viewportNode and viewportNode:IsA("ViewportFrame") then viewportNode else nil,
 	}
 end
@@ -131,40 +117,22 @@ local function _setButtonEnabled(button: GuiButton?, enabled: boolean)
 	button.AutoButtonColor = enabled
 end
 
--- ────────────────────────────────────────────────────────────────
--- Killer card
--- ────────────────────────────────────────────────────────────────
-
-local function _setCardLabel(label: TextLabel?, text: string)
-	if label then
-		label.Text = text
-	end
-end
-
 local function _populateCard(refs: Refs, killer: KillerInfo?)
+	if not refs.card then
+		return
+	end
 	if killer then
-		_setCardLabel(refs.cardName, "Eliminated by " .. killer.name)
-		_setCardLabel(refs.cardKills, tostring(killer.kills) .. " Kills")
-		_setCardLabel(refs.cardLevel, tostring(killer.level) .. " Lvl")
+		BannerCard.populate(refs.card, killer.name, killer.level, killer.bannerId)
 	else
-		_setCardLabel(refs.cardName, "")
-		_setCardLabel(refs.cardKills, "0 Kills")
-		_setCardLabel(refs.cardLevel, "0 Lvl")
+		BannerCard.populate(refs.card, "", 0, nil)
 	end
 end
-
--- ────────────────────────────────────────────────────────────────
--- Killer viewport
--- ────────────────────────────────────────────────────────────────
 
 local function _stripUnsafeDescendants(model: Model)
 	for _, desc in model:GetDescendants() do
-		-- Estos no aportan nada en un ViewportFrame y pueden errar / pintarse mal:
-		-- scripts (no corren), Highlights (replican el rojo enemigo), BillboardGuis
-		-- (nombre/HP del personaje original).
-		if desc:IsA("Script") or desc:IsA("LocalScript") then
-			desc:Destroy()
-		elseif desc:IsA("BillboardGui") or desc:IsA("Highlight") then
+		-- Inútiles o dañinos en un ViewportFrame: scripts, Highlights (replican el
+		-- rojo enemigo) y BillboardGuis (nombre/HP del personaje original).
+		if desc:IsA("Script") or desc:IsA("LocalScript") or desc:IsA("BillboardGui") or desc:IsA("Highlight") then
 			desc:Destroy()
 		end
 	end
@@ -231,10 +199,6 @@ local function _renderKillerInViewport(viewportFrame: ViewportFrame, characterMo
 	return nil
 end
 
--- ────────────────────────────────────────────────────────────────
--- DeathScreenView
--- ────────────────────────────────────────────────────────────────
-
 function DeathScreenView.new(gui: GuiObject): any
 	local refs = _resolveRefs(gui)
 	if not refs then
@@ -251,13 +215,9 @@ function DeathScreenView.new(gui: GuiObject): any
 	self._respawnReady = false
 	self._destroyed = false
 	self._viewportTrack = nil :: AnimationTrack?
-	-- Tween nativo de la barra de respawn (sustituye el while task.wait(0.03)
-	-- que allocaba UDim2.new ~33×/s justo cuando el cliente carga killcam +
-	-- viewport). Lo cancelamos en show/hide/Destroy.
 	self._countdownTween = nil :: Tween?
 
 	refs.root.Visible = false
-	refs.container.BackgroundTransparency = self._baseTransparency
 	_setPcHintsVisible(refs)
 
 	return self
@@ -313,28 +273,22 @@ function DeathScreenView:show(respawnCooldown: number, killer: KillerInfo?)
 	local token = self._countdownToken
 	_setPcHintsVisible(self._refs)
 	self._refs.root.Visible = true
-	-- L12: arrancamos totalmente transparente y hacemos fade hasta la base, en
-	-- lugar de tweenear a la transparencia actual (que era un no-op y cortaba duro).
+	-- Arrancar desde 1: tweenear a la transparencia actual sería un no-op.
 	self._refs.container.BackgroundTransparency = 1
 	TweenService:Create(self._refs.container, STYLE.showTween, {
 		BackgroundTransparency = self._baseTransparency,
 	}):Play()
 
-	-- Menu siempre disponible. Respawn arranca DESHABILITADO y se habilita
-	-- cuando la barra llega al 100%.
 	_setButtonEnabled(self._refs.menuButton, true)
 	_setButtonEnabled(self._refs.respawnButton, false)
 	self._respawnReady = false
 
-	-- Reset barra
 	if self._refs.barFill then
 		self._refs.barFill.Size = UDim2.new(0, 0, 1, 0)
 	end
 
-	-- Card del killer
 	_populateCard(self._refs, killer)
 
-	-- Viewport con clon del killer + animación
 	if self._viewportTrack then
 		pcall(function()
 			(self._viewportTrack :: AnimationTrack):Stop()
@@ -348,9 +302,8 @@ function DeathScreenView:show(respawnCooldown: number, killer: KillerInfo?)
 		)
 	end
 
-	-- Animación nativa: un solo Tween lineal de la barra + un task.delay para
-	-- habilitar el botón cuando llegue al 100%. El token sirve como cancel:
-	-- show()/hide()/Destroy() lo bumpean y la task.delay tardía no hace nada.
+	-- El token cancela: show()/hide()/Destroy() lo incrementan y el task.delay
+	-- tardío no hace nada.
 	if self._countdownTween then
 		self._countdownTween:Cancel()
 		self._countdownTween = nil
@@ -410,7 +363,6 @@ function DeathScreenView:hide()
 		_clearViewport(self._refs.viewportFrame)
 	end
 
-	-- L12: fade out real hasta transparente (antes tweeneaba a la base = no-op).
 	local tween = TweenService:Create(self._refs.container, STYLE.hideTween, {
 		BackgroundTransparency = 1,
 	})

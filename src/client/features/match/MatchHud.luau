@@ -1,22 +1,16 @@
 --!strict
 --[[
-	MatchHud.luau
-	Gestión del HUD de partida: timer, barras de equipo, indicador del equipo que
-	va ganando, fichas de jugadores, cash/level, y tracking de kills/deaths/bots.
-
-	Estructura esperada, toda bajo el frame `MatchHud.Container`:
+	Estructura esperada bajo `MatchHud.Container`:
 		GlobalKillFeedContainer.Template
-		(Cash.Value y Level.{Value, Bar.Fill} son opcionales: ya no están en el
-		 asset, el cash in-match se ve en el popup Stats)
+		Cash.Value, Level.{Value, Bar.Fill}, Version   (opcionales)
 		MainFrame.Timer
 		MainFrame.{ATeamBar, BTeamBar}.{Fill, Value}
 		MainFrame.{ATeamIndicator, BTeamIndicator}   (spritesheet 2x2)
 		MainFrame.{ATeamPlayers, BTeamPlayers}.Template.Value
-	Los popups (LevelUp, Maestry) los resuelve MatchNotificationsQueue, también
-	bajo MainFrame. El de ganancias (Stats.{CoinsFrame.Value, CoinsSpawn}), que
-	entra y sale por la izquierda en cada kill, lo lleva StatsCoinsPopup y vive en
-	un ScreenGui aparte (`StarterGui.MatchStats.Stats`): MatchHud.new lo recibe
-	como segundo argumento y setEnabled lo enciende/apaga junto al HUD.
+		Missions.{1, 2, 3}   (las pinta features/dailyTasks)
+	Los popups de MainFrame los resuelve MatchNotificationsQueue. El de ganancias vive
+	en otro ScreenGui (StarterGui.MatchStats.Stats, StatsCoinsPopup): llega como
+	segundo argumento de new y setEnabled lo enciende/apaga junto al HUD.
 ]]
 
 local Players = game:GetService("Players")
@@ -33,14 +27,10 @@ local MatchNotificationsQueue = require(script.Parent.MatchNotificationsQueue)
 local StatsCoinsPopup = require(script.Parent.StatsCoinsPopup)
 local GlobalKillFeed = require(script.Parent.GlobalKillFeed)
 
--- ── Colores ──────────────────────────────────────────────────
--- Las kills del jugador local se resaltan en dorado; el resto del roster va en
--- blanco para que se localice de un vistazo cuál de las fichas es la suya.
 local LOCAL_PLAYER_KILLS_COLOR = Color3.fromRGB(255, 194, 0)
 local OTHER_PLAYER_KILLS_COLOR = Color3.fromRGB(255, 255, 255)
 
--- ── Indicador de equipo ganador ──────────────────────────────
--- ATeamIndicator/BTeamIndicator son spritesheets 2x2 de 512x512 (4 frames).
+-- ATeamIndicator/BTeamIndicator: spritesheets 2x2 de 512x512.
 local TEAM_INDICATOR_SHEET_SIZE = Vector2.new(512, 512)
 local TEAM_INDICATOR_COLUMNS = 2
 local TEAM_INDICATOR_ROWS = 2
@@ -51,9 +41,8 @@ local TEAM_INDICATOR_TILE_SIZE = Vector2.new(
 )
 local TEAM_INDICATOR_FRAME_TIME = 1 / 13
 
--- ── Timer efectos ────────────────────────────────────────────
-local TIMER_ALERT_THRESHOLD = 20         -- ≤ este valor: naranja + escala grande
-local TIMER_CRITICAL_THRESHOLD = 10      -- ≤ este valor: rojo + blink + pulso
+local TIMER_ALERT_THRESHOLD = 20         -- segundos: naranja + escala grande
+local TIMER_CRITICAL_THRESHOLD = 10      -- segundos: rojo + blink + pulso
 local TIMER_NORMAL_COLOR = Color3.fromRGB(255, 255, 255)
 local TIMER_ALERT_COLOR = Color3.fromRGB(255, 140, 0)
 local TIMER_CRITICAL_COLOR = Color3.fromRGB(255, 50, 50)
@@ -61,20 +50,16 @@ local TIMER_BLINK_TWEEN_INFO = TweenInfo.new(
 	0.35,
 	Enum.EasingStyle.Sine,
 	Enum.EasingDirection.InOut,
-	-1,    -- repeat infinitely
-	true   -- reverse
+	-1,
+	true
 )
 local TIMER_PULSE_TWEEN_INFO = TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local TIMER_BASE_SCALE_TWEEN_INFO = TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local TIMER_BASE_SCALE = 1
 local TIMER_LARGE_SCALE = 1.4
-local TIMER_PULSE_FACTOR = 1.2  -- multiplicador sobre la escala base
+local TIMER_PULSE_FACTOR = 1.2  -- multiplica la escala base
 local TIMER_BLINK_FLASH_COLOR = Color3.fromRGB(255, 255, 255)
 
--- ── Tipos ────────────────────────────────────────────────────
-
--- Una ficha de jugador clonada de `Template`: la raíz es la ImageLabel con la
--- foto de perfil y `Value` el TextLabel con sus kills.
 type HudPlayerRowRefs = {
 	root: GuiObject,
 	profile: ImageLabel?,
@@ -104,7 +89,6 @@ export type BotRosterEntry = {
 	team: string,
 	image: string,
 	level: number,
-	historicalKills: number,
 	outfitId: string,
 	faceId: string,
 	hatId: string,
@@ -125,14 +109,12 @@ export type EndResultsPlayerEntry = {
 	assists: number,
 	level: number,
 	isBot: boolean,
-	-- Apariencia para la réplica de Resultados. Para bots viene del roster; para
-	-- jugadores reales queda vacía (la réplica usa el loadout local si es el local).
+	-- Para bots vienen del roster; para reales, del packet TeamCosmetics; "" para el
+	-- local (ResultsView usa su loadout).
 	outfitId: string,
 	faceId: string,
 	hatId: string,
 }
-
--- ── Helpers de llenado de barras ─────────────────────────────
 
 local function _setHorizontalFill(fillNode: GuiObject?, ratio: number)
 	if not fillNode then
@@ -156,7 +138,6 @@ local function _setHorizontalFill(fillNode: GuiObject?, ratio: number)
 	fillNode.Size = UDim2.new(nextScale, baseOffset, currentSize.Y.Scale, currentSize.Y.Offset)
 end
 
--- "XX:XX" para el label del timer, más los segundos totales para los efectos.
 local function _formatMatchTime(timeLeft: number): (string, number)
 	local totalSeconds = math.max(0, math.floor(timeLeft))
 	local minutes = math.floor(totalSeconds / 60)
@@ -164,7 +145,6 @@ local function _formatMatchTime(timeLeft: number): (string, number)
 	return string.format("%02d:%02d", minutes, seconds), totalSeconds
 end
 
--- Value de ATeamBar/BTeamBar: puntos actuales sobre el objetivo de la partida.
 local function _setTeamBarValue(valueLabel: TextLabel?, score: number, objective: number)
 	if not valueLabel then
 		return
@@ -173,7 +153,6 @@ local function _setTeamBarValue(valueLabel: TextLabel?, score: number, objective
 	valueLabel.Text = UIUtils.formatProgressValue(score, objective)
 end
 
--- Devuelve (color, isCritical) según el segundo restante.
 local function _resolveTimerColor(totalSeconds: number): (Color3, boolean)
 	if totalSeconds <= TIMER_CRITICAL_THRESHOLD then
 		return TIMER_CRITICAL_COLOR, true
@@ -183,8 +162,6 @@ local function _resolveTimerColor(totalSeconds: number): (Color3, boolean)
 	return TIMER_NORMAL_COLOR, false
 end
 
--- Deja el ImageLabel del indicador recortado al primer tile del spritesheet y
--- oculto; el bucle de animación solo mueve el ImageRectOffset.
 local function _initTeamIndicator(indicator: ImageLabel?)
 	if not indicator then
 		return
@@ -194,7 +171,6 @@ local function _initTeamIndicator(indicator: ImageLabel?)
 	indicator.Visible = false
 end
 
--- Devuelve un UIScale hijo del label (creándolo si no existe).
 local function _ensureTimerScale(label: TextLabel): UIScale
 	local scaleNode = label:FindFirstChildOfClass("UIScale")
 	if scaleNode then
@@ -207,49 +183,27 @@ local function _ensureTimerScale(label: TextLabel): UIScale
 	return created
 end
 
--- ── Resolución de filas de jugadores ─────────────────────────
-
--- Cada contenedor de equipo trae un único `Template` (la ficha) que clonamos por
--- jugador. Lo ocultamos al resolverlo: el UIListLayout del contenedor ignora los
--- hijos invisibles, así que la plantilla no ocupa hueco en la fila.
-local function _resolveRowTemplate(playersFrame: GuiObject?): GuiObject?
-	if not playersFrame then
-		return nil
-	end
+-- Oculto, el UIListLayout ignora el Template y no ocupa hueco en la fila.
+local function _resolveRowTemplate(playersFrame: GuiObject): GuiObject
 	local template = playersFrame:WaitForChild("Template") :: GuiObject
 	template.Visible = false
 	return template
 end
 
--- El UIListLayout ordena por Name, así que el nombre del clon codifica el puesto.
--- En el equipo A el mejor va a la derecha (nombre más alto) y en el B a la
--- izquierda (nombre más bajo); `rank` llega 1 = mejor.
+-- El UIListLayout ordena por Name: el nombre codifica el puesto. El mejor (rank 1)
+-- va a la derecha en el equipo A y a la izquierda en el B.
 local function _rowSortName(side: string, rank: number, total: number): string
 	local position = if side == "A" then (total - rank + 1) else rank
 	return string.format("%02d", position)
 end
 
--- ── Resolución de HUD refs ───────────────────────────────────
-
 local function _resolveHudRefs(matchHudGui: ScreenGui?): HudRefs
 	if not matchHudGui then
-		return {
-			timer = nil,
-			teamABarFill = nil, teamBBarFill = nil,
-			teamABarValue = nil, teamBBarValue = nil,
-			teamAIndicator = nil, teamBIndicator = nil,
-			cashValue = nil, levelValue = nil, levelBarFill = nil,
-			version = nil,
-			teamAPlayersFrame = nil, teamBPlayersFrame = nil,
-			teamATemplate = nil, teamBTemplate = nil,
-		}
+		return {}
 	end
 
 	local container = matchHudGui:WaitForChild("Container") :: Frame
 	local mainFrame = container:WaitForChild("MainFrame") :: Frame
-	-- Cash y Level ya no están en el HUD de partida (el cash in-match se ve en el
-	-- popup Stats). Se resuelven opcionalmente: si el asset los trae, se siguen
-	-- pintando; si no, updateCashLevel salta esos campos.
 	local cash = container:FindFirstChild("Cash")
 	local level = container:FindFirstChild("Level")
 	local levelBar = if level then level:FindFirstChild("Bar") else nil
@@ -284,8 +238,6 @@ local function _resolveHudRefs(matchHudGui: ScreenGui?): HudRefs
 	}
 end
 
--- ── Módulo MatchHud (OOP) ────────────────────────────────────
-
 local MatchHud = {}
 MatchHud.__index = MatchHud
 
@@ -297,37 +249,25 @@ function MatchHud.new(matchHudGui: ScreenGui?, matchStatsGui: ScreenGui?): any
 	self._localUserId = Players.LocalPlayer.UserId
 	self._destroyed = false
 	self._janitor = Janitor.new()
-	-- Indicador del equipo que va ganando: un único bucle de spritesheet vivo
-	-- mientras hay indicador visible, invalidado por token en cada cambio.
 	_initTeamIndicator(self._hudRefs.teamAIndicator)
 	_initTeamIndicator(self._hudRefs.teamBIndicator)
 	self._indicatorSide = nil :: string?
 	self._indicatorToken = 0
-	-- Queue de animaciones in-match (level up / BP level up / challenge done).
-	-- Extraído a su propio módulo para que MatchHud no orqueste tweens y
-	-- confetti; los callers siguen usando `hud:playXxxAnimation(...)`.
 	self._notificationsQueue = MatchNotificationsQueue.new(matchHudGui)
-	-- Mientras hay una notificación in-match en pantalla, ocultamos las filas de
-	-- jugadores (ATeamPlayers/BTeamPlayers); reaparecen al vaciarse la cola.
+	-- Las filas de jugadores se ocultan mientras hay notificación para no solaparse.
 	self._notificationsQueue:setOnNotifyingChanged(function(notifying)
 		self:_setTeamPlayersHidden(notifying)
 	end)
-	-- Popup de ganancias (MatchStats.Stats, ScreenGui propio): lo dispara
-	-- updateCashLevel cuando el cash sube durante la partida (kill / headshot /
-	-- asistencia).
 	self._statsCoinsPopup = StatsCoinsPopup.new(matchStatsGui)
-	-- Último cash visto en DataController; nil hasta la primera lectura para no
-	-- animar el total inicial como si fuera una ganancia.
+	-- nil hasta la primera lectura para no animar el total inicial como ganancia.
 	self._lastCashSeen = nil :: number?
-	-- Total que el popup tiene pintado ahora mismo = cash real − lo reservado por
-	-- desafíos aún sin entregar (ver reserveChallengeCash).
+	-- Lo que pinta el popup = cash real − reservado por desafíos sin entregar.
 	self._lastVisibleCash = nil :: number?
 	self._reservedChallengeCash = 0
 	self._pendingCash = 0
 	self._cashFlushQueued = false
 	self._hudEnabled = false
-	-- El popup del desafío completado suelta sus monedas hacia Stats; devolvemos
-	-- lo que tarda el vuelo para que no se retire antes de que aterricen.
+	-- Devuelve la duración del vuelo de monedas para que el popup no se retire antes.
 	self._notificationsQueue:setOnChallengeReward(function(spawnNode: ImageLabel, amount: number): number?
 		return self:_deliverChallengeCash(spawnNode, amount)
 	end)
@@ -337,13 +277,7 @@ function MatchHud.new(matchHudGui: ScreenGui?, matchStatsGui: ScreenGui?): any
 		self._janitor:Add(self._globalKillFeed, "Destroy")
 	end
 
-	-- Stats overlay: "vX | Yms[ | Zfps]" en Container.Version cada 1s.
-	-- En producción NO conectamos RenderStepped (cada conexión tiene overhead
-	-- fijo y este FPS counter solo es útil en dev). En Studio sí contamos
-	-- frames para mostrar el campo "Zfps". Trackeamos la RenderStepped + el
-	-- loop de versión en el janitor para que un destroy() no apile listeners
-	-- ni deje task.spawn infinitos escribiendo en un label cuyo padre fue
-	-- destruido.
+	-- FPS solo en Studio: en producción no se paga la conexión a RenderStepped.
 	if self._hudRefs.version then
 		local versionLabel = self._hudRefs.version
 		local placePrefix = "v" .. tostring(game.PlaceVersion)
@@ -377,31 +311,24 @@ function MatchHud.new(matchHudGui: ScreenGui?, matchStatsGui: ScreenGui?): any
 		end)
 	end
 
-	-- Tracking de partida
 	self._killsByUserId = {} :: { [number]: number }
 	self._deathsByUserId = {} :: { [number]: number }
 	self._assistsByUserId = {} :: { [number]: number }
 	self._botRoster = {} :: { [number]: BotRosterEntry }
-	-- Último equipo ("A"/"B") conocido del jugador local, cacheado durante la
-	-- partida. Al acabar la ronda su Character puede desaparecer/quedar sin Team,
-	-- así que esto es el fallback fiable para los Resultados.
+	-- Al acabar la ronda el Character puede quedar sin Team: fallback para Resultados.
 	self._lastKnownLocalSide = nil :: string?
-	-- Cosméticos de compañeros reales (outfit/face/hat) para sus réplicas en
-	-- Resultados. Lo llena el packet TeamCosmetics.
+	-- Lo llena el packet TeamCosmetics.
 	self._playerCosmeticsByUserId = {} :: { [number]: PlayerCosmetics }
 
-	-- Thumbnails
 	self._thumbnailByUserId = {} :: { [number]: string }
 	self._thumbnailRequestInFlight = {} :: { [number]: boolean }
 
-	-- Filas del HUD: pool de clones de `Template` por equipo, creados bajo demanda
-	-- y reutilizados entre updates (el rowKey "A1"/"B2" indexa este pool, no el
-	-- orden visual, que lo decide el Name del clon).
+	-- Pool de clones de `Template` por equipo. El rowKey "A1"/"B2" indexa el pool,
+	-- no el orden visual (que lo decide el Name del clon).
 	self._playerRows = { A = {} :: { HudPlayerRowRefs }, B = {} :: { HudPlayerRowRefs } }
 	self._rowUserIdByKey = {} :: { [string]: number? }
 	self._updateQueued = false
 
-	-- Timer effects state
 	self._timerLastSecond = -1
 	self._timerBlinkTween = nil :: Tween?
 	self._timerPulseTween = nil :: Tween?
@@ -421,26 +348,19 @@ function MatchHud.new(matchHudGui: ScreenGui?, matchStatsGui: ScreenGui?): any
 	return self
 end
 
--- ── API pública ──────────────────────────────────────────────
-
 function MatchHud:setEnabled(enabled: boolean)
 	self._hudEnabled = enabled
 	if self._gui then
 		self._gui.Enabled = enabled
 	end
-	-- El popup de ganancias vive en su propio ScreenGui (MatchStats), así que
-	-- acompaña al HUD en cada encendido/apagado.
 	if self._statsGui then
 		self._statsGui.Enabled = enabled
 	end
 	if not enabled then
 		self:_clearTimerEffects()
-		-- Corta el bucle del spritesheet mientras el HUD no está en pantalla.
 		self:_setWinningTeam(nil)
-		-- Sin partida no hay ganancias que enseñar: corta monedas en vuelo y deja
-		-- el frame fuera de pantalla para la siguiente. Las reservas de premios que
-		-- se hayan quedado sin entregar (popup cortado a medias) se liberan aquí
-		-- para que el label vuelva a cuadrar con el cash real.
+		-- Libera reservas sin entregar (popup cortado a medias) para que el label cuadre
+		-- con el cash real.
 		self._reservedChallengeCash = 0
 		if self._statsCoinsPopup then
 			self._statsCoinsPopup:hideImmediate()
@@ -453,9 +373,7 @@ function MatchHud:setEnabled(enabled: boolean)
 	end
 end
 
--- Muestra el indicador del equipo que va ganando ("A"/"B"), o ninguno si empatan.
--- Anima el spritesheet 2x2 a 13fps con un único bucle: cada cambio invalida el
--- anterior vía token, así que nunca hay dos corriendo a la vez.
+-- nil = empate. Cada cambio invalida el bucle anterior vía token.
 function MatchHud:_setWinningTeam(side: string?)
 	if side == self._indicatorSide then
 		return
@@ -494,7 +412,6 @@ function MatchHud:_setWinningTeam(side: string?)
 	end)
 end
 
--- Cancela los tweens del timer y resetea visuals (color blanco, escala 1, sin transparencia).
 function MatchHud:_clearTimerEffects()
 	if self._timerBlinkTween then
 		self._timerBlinkTween:Cancel()
@@ -520,12 +437,10 @@ function MatchHud:_clearTimerEffects()
 	self._timerCurrentBaseScale = TIMER_BASE_SCALE
 end
 
--- Aplica color, blink, formato y pulso al label del timer según los segundos restantes.
--- El pulso se dispara solo cuando cambia el segundo (no cada frame), reduciendo coste en móvil.
+-- El pulso solo se dispara al cambiar el segundo, no cada frame.
 function MatchHud:_updateTimerEffects(timerLabel: TextLabel, totalSeconds: number)
 	local color, isCritical = _resolveTimerColor(totalSeconds)
 
-	-- Blink: alterna entre rojo y blanco. Solo activo en estado crítico.
 	if isCritical then
 		if not self._timerBlinkTween then
 			timerLabel.TextTransparency = 0
@@ -545,7 +460,6 @@ function MatchHud:_updateTimerEffects(timerLabel: TextLabel, totalSeconds: numbe
 		timerLabel.TextColor3 = color
 	end
 
-	-- Escala base: > 20s = 1.0; ≤ 20s = más grande.
 	local targetBaseScale = if totalSeconds <= TIMER_ALERT_THRESHOLD then TIMER_LARGE_SCALE else TIMER_BASE_SCALE
 	local scaleNode = self._timerScale
 	if not scaleNode then
@@ -558,7 +472,7 @@ function MatchHud:_updateTimerEffects(timerLabel: TextLabel, totalSeconds: numbe
 		if self._timerBaseScaleTween then
 			self._timerBaseScaleTween:Cancel()
 		end
-		-- Solo animamos la transición si NO estamos en crítico (en crítico el pulso se encarga).
+		-- En crítico la transición la hace el pulso.
 		if not isCritical then
 			if self._timerPulseTween then
 				self._timerPulseTween:Cancel()
@@ -570,7 +484,6 @@ function MatchHud:_updateTimerEffects(timerLabel: TextLabel, totalSeconds: numbe
 		end
 	end
 
-	-- Pulso: solo en crítico y al cambiar el segundo. Pulse_factor multiplica la escala base.
 	if isCritical and totalSeconds ~= self._timerLastSecond then
 		if self._timerPulseTween then
 			self._timerPulseTween:Cancel()
@@ -584,7 +497,6 @@ function MatchHud:_updateTimerEffects(timerLabel: TextLabel, totalSeconds: numbe
 		self._timerPulseTween = tween
 		tween:Play()
 	elseif not isCritical and self._timerPulseTween then
-		-- Saliendo de crítico (pero sigue en alerta o normal): cancelar pulso.
 		self._timerPulseTween:Cancel()
 		self._timerPulseTween = nil
 	end
@@ -598,8 +510,6 @@ function MatchHud:setScores(scoreA: number, scoreB: number, timeLeft: number)
 	local clampedA = math.max(0, scoreA)
 	local clampedB = math.max(0, scoreB)
 
-	-- Barras por equipo: el Fill avanza con el score respecto al objetivo de la
-	-- partida (WinScoreLimit) y el Value muestra "score/objetivo".
 	local objectiveScore = math.max(1, GameConfig.WinScoreLimit or 1)
 	_setHorizontalFill(refs.teamABarFill, clampedA / objectiveScore)
 	_setHorizontalFill(refs.teamBBarFill, clampedB / objectiveScore)
@@ -619,14 +529,8 @@ function MatchHud:setScores(scoreA: number, scoreB: number, timeLeft: number)
 	end
 end
 
--- Tipos públicos exportados desde MatchNotificationsQueue. Se re-exportan
--- aquí para mantener la API estable de MatchHud (callers usan estos tipos).
 export type MasteryProgress = MatchNotificationsQueue.MasteryProgress
 export type DailyTaskProgress = MatchNotificationsQueue.DailyTaskProgress
-
--- Las animaciones de notificación (LevelUp / BPLevelUp / Maestry + confetti
--- + slide context) viven en MatchNotificationsQueue. Mantenemos delegadores
--- en MatchHud para no romper callers existentes.
 
 function MatchHud:playLevelUpAnimation(newLevel: number)
 	if self._notificationsQueue then
@@ -652,10 +556,8 @@ function MatchHud:playDailyTaskAnimation(progress: DailyTaskProgress)
 	end
 end
 
---- Aparta `amount` de la próxima subida de cash: ese dinero NO lo anima el popup
---- de Stats por su cuenta, lo entrega el popup del desafío volando sus monedas
---- (ver _deliverChallengeCash). Se llama al detectar el desafío completado, en la
---- misma tanda de datos en la que llega el cash.
+--- Aparta `amount` de la próxima subida de cash: no lo anima Stats, lo entrega el
+--- popup del desafío con sus monedas (_deliverChallengeCash).
 function MatchHud:reserveChallengeCash(amount: number)
 	local reserved = math.max(0, math.floor(if type(amount) == "number" then amount else 0))
 	if reserved <= 0 then
@@ -664,9 +566,7 @@ function MatchHud:reserveChallengeCash(amount: number)
 	self._reservedChallengeCash += reserved
 end
 
---- Entrega un premio reservado: las monedas salen de `spawnNode` (el CoinsSpawn
---- del popup del desafío) y al aterrizar suben el total de Stats. Devuelve la
---- duración del vuelo.
+--- Devuelve la duración del vuelo.
 function MatchHud:_deliverChallengeCash(spawnNode: ImageLabel, amount: number): number
 	local popup = self._statsCoinsPopup
 	if not popup then
@@ -679,8 +579,7 @@ function MatchHud:_deliverChallengeCash(spawnNode: ImageLabel, amount: number): 
 	local visibleCash = math.max(0, cash - self._reservedChallengeCash)
 	local previousVisible = self._lastVisibleCash or visibleCash
 	self._lastVisibleCash = visibleCash
-	-- Si el cash del premio todavía no llegó (o nunca se reservó), volamos igual
-	-- las monedas del importe: el popup satura en su total y no se pasa de largo.
+	-- Si el cash aún no llegó, se vuela el importe igual: el popup satura en su total.
 	local delta = if visibleCash > previousVisible then visibleCash - previousVisible else claimed
 	return popup:addCashFrom(delta, visibleCash, spawnNode)
 end
@@ -693,9 +592,6 @@ function MatchHud:updateCashLevel(stats: any)
 		refs.cashValue.Text = UIUtils.formatCashAmount(cash)
 	end
 
-	-- Ganancias in-match: cualquier subida de cash con el HUD en pantalla entra
-	-- por el popup Stats. El disparo se difiere (ver _flushCash) porque el premio
-	-- de un desafío llega en la misma tanda que su reserva.
 	self._pendingCash = cash
 	self:_scheduleCashFlush()
 
@@ -712,11 +608,8 @@ function MatchHud:updateCashLevel(stats: any)
 	end
 end
 
--- El cash y el estado de los desafíos llegan en el MISMO BatchUpdate del server, y
--- no está definido cuál de los dos listeners corre antes. Por eso no animamos en el
--- acto: diferimos al final del ciclo, cuando las reservas de premios de esta misma
--- tanda ya están registradas y sabemos qué parte de la subida entrega el popup del
--- desafío y qué parte anima Stats por su cuenta.
+-- Cash y estado de desafíos llegan en el MISMO BatchUpdate sin orden definido entre
+-- listeners: se difiere para que las reservas de esa tanda ya estén registradas.
 function MatchHud:_scheduleCashFlush()
 	if self._cashFlushQueued or self._destroyed then
 		return
@@ -738,9 +631,7 @@ function MatchHud:_flushCash()
 
 	local cash = self._pendingCash
 	self._lastCashSeen = cash
-	-- Lo reservado aún sin entregar no cuenta como visible; y el total visible
-	-- nunca baja por una reserva (si el premio se reserva antes de que llegue su
-	-- cash, el label se queda quieto en vez de descontar).
+	-- El total visible nunca baja por una reserva hecha antes de que llegue su cash.
 	local previousVisible = self._lastVisibleCash
 	local visibleCash = math.max(0, cash - self._reservedChallengeCash)
 	if previousVisible and visibleCash < previousVisible and cash >= previousVisible then
@@ -760,10 +651,8 @@ function MatchHud:resetMatchState()
 	table.clear(self._deathsByUserId)
 	table.clear(self._assistsByUserId)
 	table.clear(self._playerCosmeticsByUserId)
-	-- NOTE: _botRoster no se limpia aquí porque el servidor lo envía
-	-- de forma asíncrona vía Network.Match.BotRoster y puede llegar
-	-- antes de JoinMatchSpawned. Se reemplaza completamente cada vez
-	-- que llega un BotRoster nuevo desde el servidor.
+	-- _botRoster no se limpia: Network.Match.BotRoster puede llegar antes de
+	-- JoinMatchSpawned, y cada envío lo reemplaza entero.
 	self._killsByUserId[self._localUserId] = 0
 	self._deathsByUserId[self._localUserId] = 0
 	self._assistsByUserId[self._localUserId] = 0
@@ -771,30 +660,19 @@ function MatchHud:resetMatchState()
 	self:queuePlayerRowsUpdate()
 end
 
-function MatchHud:applyPlayerState(userId: number, kills: number, deaths: number?, assists: number?)
+function MatchHud:applyPlayerState(userId: number, kills: number, deaths: number, assists: number)
 	local oldKills = self._killsByUserId[userId] or 0
 	local newKills = math.max(0, kills)
 	self._killsByUserId[userId] = newKills
-	if deaths ~= nil then
-		-- El servidor envía deaths para TODOS los userIds. Antes la guarda
-		-- `userId < 0` solo guardaba bots, así que los demás jugadores reales
-		-- aparecían con 0 deaths en el marcador/Resultados. Guardamos a todos
-		-- EXCEPTO el jugador local, cuyas deaths las lleva incrementLocalDeaths
-		-- (inmediato en DeathScreenShow) — evita doble conteo y latencia.
-		if userId ~= self._localUserId then
-			self._deathsByUserId[userId] = math.max(0, deaths)
-		end
+	-- Las deaths del local las lleva incrementLocalDeaths (inmediato en DeathScreenShow):
+	-- evita doble conteo y latencia.
+	if userId ~= self._localUserId then
+		self._deathsByUserId[userId] = math.max(0, deaths)
 	end
-	if assists ~= nil then
-		self._assistsByUserId[userId] = math.max(0, assists)
-	end
+	self._assistsByUserId[userId] = math.max(0, assists)
 
-	-- Fast paths para evitar reconstruir + ordenar las 12 filas en cada kill:
-	-- 1) Si los kills no cambiaron, no hay nada que refrescar en la fila (el
-	--    row sólo muestra totalKills; deaths no aparecen ahí).
-	-- 2) Si los kills cambiaron pero el cambio no cruza el kill-count de ningún
-	--    teammate (no hay reorder), actualizamos solo la fila del userId
-	--    afectado y evitamos el rebuild + sort completo.
+	-- Fast paths para no reordenar todas las filas en cada kill: la fila solo muestra
+	-- kills, y si no hay reorder basta con actualizar esa fila.
 	if oldKills == newKills then
 		return
 	end
@@ -822,13 +700,10 @@ function MatchHud:onPlayerRemoved(userId: number)
 	self:queuePlayerRowsUpdate()
 end
 
---- Captura datos (kills/assists/deaths/level/equipo) para la pantalla de
---- Resultados antes de resetear el roster.
+--- Llamar antes de resetear el roster.
 function MatchHud:captureEndResultsData(): (string, { EndResultsPlayerEntry })
-	-- Resolución robusta del equipo: al acabar la ronda el Character del jugador
-	-- local puede haber desaparecido o quedado sin Team, dejando localTeam="" (→
-	-- Resultados filtraba a un equipo vacío: ni frames ni réplicas). Caemos a
-	-- Player.Team, al atributo TeamName, y por último al equipo cacheado en partida.
+	-- Al acabar la ronda el Character puede no existir o no tener Team: se cae a
+	-- Player.Team, al atributo TeamName y por último al equipo cacheado en partida.
 	local function resolveSide(player: Player): string?
 		local side = TeamUtils.getSide(player.Character)
 		if not side and player.Team then
@@ -864,8 +739,6 @@ function MatchHud:captureEndResultsData(): (string, { EndResultsPlayerEntry })
 			end
 		end
 
-		-- Cosméticos de compañeros reales (del packet TeamCosmetics). El jugador
-		-- local queda vacío: su réplica usa el loadout local en ResultsView.
 		local cos = self._playerCosmeticsByUserId[player.UserId]
 
 		table.insert(entries, {
@@ -902,11 +775,7 @@ function MatchHud:captureEndResultsData(): (string, { EndResultsPlayerEntry })
 	return localTeam, entries
 end
 
--- ── Player rows internos ─────────────────────────────────────
-
--- Devuelve la ficha `index` del equipo, clonando `Template` la primera vez. El
--- clon nace invisible y con nombre neutro: el puesto real (que decide el orden
--- del UIListLayout) lo escribe _updatePlayerRows.
+-- El clon nace invisible y con nombre neutro: el Name de puesto lo escribe _updatePlayerRows.
 function MatchHud:_acquireRow(side: string, index: number): HudPlayerRowRefs?
 	local pool = self._playerRows[side]
 	local existing = pool[index]
@@ -927,8 +796,7 @@ function MatchHud:_acquireRow(side: string, index: number): HudPlayerRowRefs?
 	clone.Parent = parent
 	self._janitor:Add(clone, "Destroy")
 
-	-- La ficha es la propia ImageLabel (la foto de perfil); toleramos que el
-	-- asset la anide por si el Template pasa a ser un Frame contenedor.
+	-- El Template es la ImageLabel de perfil, o un Frame que la contiene.
 	local profileNode: Instance? = if clone:IsA("ImageLabel")
 		then clone
 		else clone:FindFirstChildWhichIsA("ImageLabel", true)
@@ -943,8 +811,7 @@ function MatchHud:_acquireRow(side: string, index: number): HudPlayerRowRefs?
 	return row
 end
 
--- `isLocalPlayer` nil = no tocar el color (lo usa el fast path incremental, que
--- solo refresca el número).
+-- `isLocalPlayer` nil = no tocar el color.
 function MatchHud:_setRowStats(rowRef: HudPlayerRowRefs, totalKills: number, isLocalPlayer: boolean?)
 	local label = rowRef.killsValue
 	if not label then
@@ -978,23 +845,16 @@ function MatchHud:_applyCachedOrFetchThumbnail(rowKey: string, userId: number, p
 	end
 
 	self._thumbnailRequestInFlight[userId] = true
-	-- Safety timeout: si GetUserThumbnailAsync se cuelga, liberamos el flag tras
-	-- 30s para que un siguiente intento pueda volver a pedir.
+	-- Si GetUserThumbnailAsync se cuelga, libera el flag para permitir reintentos.
 	task.delay(30, function()
 		if self._destroyed then
 			return
 		end
-		if self._thumbnailRequestInFlight[userId] then
-			self._thumbnailRequestInFlight[userId] = nil
-		end
+		self._thumbnailRequestInFlight[userId] = nil
 	end)
 	task.spawn(function()
-		-- Audit mobile: jitter inicial 0-0.4s para desfasar el batch de
-		-- 6+ thumbnails que se piden en el mismo frame al entrar al match.
-		-- GetUserThumbnailAsync hace yield real (request al backend Roblox);
-		-- en conexiones flaky de móvil, 6 fires simultáneos pueden bloquear
-		-- task scheduler slots en cascada. Los thumbnails son cosméticos —
-		-- 0-400ms de retraso es invisible.
+		-- Jitter para no lanzar todas las peticiones del roster en el mismo frame
+		-- (en móvil con mala conexión se encadenan bloqueos).
 		task.wait(math.random() * 0.4)
 		if self._destroyed then
 			self._thumbnailRequestInFlight[userId] = nil
@@ -1011,8 +871,6 @@ function MatchHud:_applyCachedOrFetchThumbnail(rowKey: string, userId: number, p
 			return
 		end
 		self._thumbnailByUserId[userId] = content
-		-- Guard: si el row ya muestra otro userId o el ImageLabel perdió parent
-		-- (HUD destruido en cascada), no escribimos en una referencia muerta.
 		if self._rowUserIdByKey[rowKey] ~= userId or not profileRef.Parent then
 			return
 		end
@@ -1023,14 +881,9 @@ end
 function MatchHud:_applyRowEntry(
 	rowRef: HudPlayerRowRefs,
 	rowKey: string,
-	entry: { userId: number, image: string?, isBot: boolean, team: string? }?
+	entry: { userId: number, image: string?, isBot: boolean, team: string? }
 )
-	rowRef.root.Visible = entry ~= nil
-	if not entry then
-		self:_clearRow(rowRef, rowKey)
-		return
-	end
-
+	rowRef.root.Visible = true
 	self._rowUserIdByKey[rowKey] = entry.userId
 	if rowRef.profile then
 		if entry.isBot then
@@ -1042,27 +895,18 @@ function MatchHud:_applyRowEntry(
 	self:_setRowStats(rowRef, self._killsByUserId[entry.userId] or 0, entry.userId == self._localUserId)
 end
 
--- Devuelve el team ("A"/"B") del userId si está visible en alguna fila, leyendo
--- el rowKey ya cacheado en `_rowUserIdByKey`. Más barato que resolver el team
--- por Players.GetPlayerByUserId + TeamUtils en el hot path de cada kill.
 function MatchHud:_findRowForUserId(userId: number): (HudPlayerRowRefs?, string?)
 	for rowKey, rowUserId in pairs(self._rowUserIdByKey) do
 		if rowUserId == userId then
 			local team = string.sub(rowKey, 1, 1)
-			local idx = tonumber(string.sub(rowKey, 2))
-			if not idx then
-				return nil, nil
-			end
-			local pool = self._playerRows[team]
-			return if pool then pool[idx] else nil, team
+			local idx = tonumber(string.sub(rowKey, 2)) :: number
+			return self._playerRows[team][idx], team
 		end
 	end
 	return nil, nil
 end
 
--- Si el cambio de kills no altera el orden relativo del team, actualizamos solo
--- la fila del userId afectado. Devuelve true si se hizo el fast path; false si
--- el caller debe caer al full rebuild via queuePlayerRowsUpdate().
+-- false → el caller debe hacer el rebuild completo (queuePlayerRowsUpdate).
 function MatchHud:_tryIncrementalKillUpdate(userId: number, oldKills: number, newKills: number): boolean
 	if self._updateQueued then
 		return false
@@ -1088,9 +932,6 @@ function MatchHud:_tryIncrementalKillUpdate(userId: number, oldKills: number, ne
 	return true
 end
 
--- Oculta/muestra los contenedores de filas de jugadores (no toca las filas
--- individuales, así conservan su estado al reaparecer). Lo dispara la cola de
--- notificaciones para que un popup no se solape con el roster.
 function MatchHud:_setTeamPlayersHidden(hidden: boolean)
 	local refs = self._hudRefs
 	if refs.teamAPlayersFrame then
@@ -1115,7 +956,6 @@ function MatchHud:_updatePlayerRows()
 		end
 		if side == "A" or side == "B" then
 			if p == Players.LocalPlayer then
-				-- Cache para Resultados (ver captureEndResultsData).
 				self._lastKnownLocalSide = side
 			end
 			table.insert(entriesByTeam[side], { userId = p.UserId, name = p.Name, image = nil, isBot = false, team = side })
@@ -1145,8 +985,6 @@ function MatchHud:_updatePlayerRows()
 	sortEntries(entriesByTeam.A)
 	sortEntries(entriesByTeam.B)
 
-	-- `entries` viene mejor-primero; el puesto visual lo pone el Name del clon
-	-- (_rowSortName), así que aquí solo emparejamos ficha ↔ jugador por ranking.
 	for _, side in { "A", "B" } do
 		local entries = entriesByTeam[side]
 		local total = #entries
@@ -1159,7 +997,6 @@ function MatchHud:_updatePlayerRows()
 			self:_applyRowEntry(rowRef, string.format("%s%d", side, rank), entry)
 		end
 
-		-- Fichas sobrantes del pool: ocultas y libres para el siguiente update.
 		local pool = self._playerRows[side]
 		for index = total + 1, #pool do
 			self:_clearRow(pool[index], string.format("%s%d", side, index))
@@ -1184,8 +1021,6 @@ function MatchHud:destroy()
 	end
 	self._destroyed = true
 	self:_clearTimerEffects()
-	-- Invalida el bucle del spritesheet del indicador (el janitor destruye las
-	-- fichas clonadas, pero el task.spawn se corta por token).
 	self._indicatorToken += 1
 	if self._notificationsQueue then
 		self._notificationsQueue:destroy()

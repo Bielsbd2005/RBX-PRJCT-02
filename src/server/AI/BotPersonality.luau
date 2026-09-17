@@ -1,15 +1,7 @@
 --!strict
 --[[
-	BotPersonality.luau
-	Helpers de sampling de personalidades de bots.
-
-	- rollPersonality(): pick weighted del módulo de config.
-	- rollStats(p): nivel + kills históricas uniformes en el rango del tier.
-	- filterByRarity(ids, category, p): intersecta una lista de ids con
-	  los que tienen Rarity ∈ p.allowedRarities.
-
-	El módulo es server-only (lo llama AIService al asignar identidad). La
-	config (BotPersonalities) está en shared para futuro consumo de UI.
+	Server-only (lo usa AIService al asignar identidad). La config
+	BotPersonalities vive en shared para poder consumirla desde UI.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -21,11 +13,6 @@ local ItemsConfig = require(Shared.constants.ItemsConfig)
 export type Personality = BotPersonalities.Personality
 
 local BotPersonality = {}
-
--- ── Tabla de pesos cumulativa (calculada al load) ───────────────
--- Estructura: { { id = "...", cumulative = number }, ... }; total al final.
--- Pick: math.random(1, total) → binary scan no necesario con ≤4 entries,
--- iteramos lineal.
 
 local _weightedList: { { id: string, cumulative: number, personality: Personality } } = {}
 local _totalWeight = 0
@@ -44,18 +31,13 @@ end
 
 _buildWeightedList()
 
--- ── API ─────────────────────────────────────────────────────────
-
 function BotPersonality.rollPersonality(): (string, Personality)
-	-- Defensiva: si la config está vacía (no debería), devolvemos un
-	-- tier neutro. Sin allowedRarities, los filtros más abajo dejarían
-	-- pools intactos.
+	-- Config vacía: tier neutro; con allowedRarities vacío los filtros no recortan pools.
 	if _totalWeight <= 0 or #_weightedList == 0 then
 		local fallback: Personality = {
 			id = "Default",
 			weight = 1,
 			levelRange = { min = 1, max = 1 },
-			historicalKillsRange = { min = 0, max = 0 },
 			allowedRarities = {},
 			hatProbability = 0,
 		}
@@ -67,28 +49,23 @@ function BotPersonality.rollPersonality(): (string, Personality)
 			return entry.id, entry.personality
 		end
 	end
-	-- Fallback teórico (no debería alcanzarse con _totalWeight bien sumado).
 	local last = _weightedList[#_weightedList]
 	return last.id, last.personality
 end
 
--- Lookup directo por id (D1: AIService lo usa para recuperar el bloque
--- `combat` de la personality de una identity al spawnear su BotAI).
+-- AIService lo usa para recuperar el bloque `combat` al spawnear el BotAI.
 function BotPersonality.getById(id: string): Personality?
 	return BotPersonalities[id]
 end
 
-function BotPersonality.rollStats(personality: Personality): (number, number)
+-- Nivel fingido del bot: la única estadística inventada que se le enseña al
+-- jugador (en la tarjeta de la pantalla de muerte).
+function BotPersonality.rollLevel(personality: Personality): number
 	local lvl = personality.levelRange
-	local kills = personality.historicalKillsRange
-	local level = math.random(math.max(1, lvl.min), math.max(lvl.min, lvl.max))
-	local historicalKills = math.random(math.max(0, kills.min), math.max(kills.min, kills.max))
-	return level, historicalKills
+	return math.random(math.max(1, lvl.min), math.max(lvl.min, lvl.max))
 end
 
---- Filtra una lista de ids dejando sólo los cuyo Rarity está en
---- personality.allowedRarities. Si allowedRarities está vacío,
---- devuelve la lista original (= sin filtro).
+--- allowedRarities vacío = sin filtro (devuelve la lista original).
 function BotPersonality.filterByRarity(ids: { string }, category: string, personality: Personality): { string }
 	local allowed = personality.allowedRarities
 	local hasAnyAllowed = next(allowed) ~= nil
