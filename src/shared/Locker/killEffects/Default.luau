@@ -2,22 +2,19 @@
 
 local RagdollModule = {}
 
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-
 local Utils = require(script.Parent.Utils)
-local CollisionGroups = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("CollisionGroups"))
 
 local CONFIG = {
-	JOINT_MAX_ANGLE = 55,
-	THROW_FORCE = 50,
-	THROW_FORCE_UP_MULT = 1.5,
-	RAGDOLL_HEAD_AS_JOINT = false,
+	-- studs/s. Horizontal: magnitud en rango y ángulo aleatorio (no azar por eje) para
+	-- que todas las muertes se vean parecidas.
+	THROW_SPEED_XZ_MIN = 24,
+	THROW_SPEED_XZ_MAX = 30,
+	THROW_SPEED_UP_MIN = 7,
+	THROW_SPEED_UP_MAX = 10,
+	RAGDOLL_HEAD_AS_JOINT = true,
 }
 
 local rng = Random.new()
-
--- R15_JOINTS / R15_WELDS / buildPartLookup / buildRagdoll were copy-pasted between
--- Default.luau and Gravity.luau; hoisted into Utils.luau to prevent drift.
 
 function RagdollModule.apply(char: Model): boolean
 	local hum = char:FindFirstChildWhichIsA("Humanoid", true)
@@ -32,7 +29,7 @@ function RagdollModule.apply(char: Model): boolean
 		if desc:IsA("BasePart") then
 			desc.Anchored = true
 			table.insert(allBaseParts, desc)
-		elseif desc:IsA("Motor6D") then
+		elseif Utils.isRigJoint(desc) then
 			desc:Destroy()
 		end
 	end
@@ -41,27 +38,24 @@ function RagdollModule.apply(char: Model): boolean
 
 	local root = parts.HumanoidRootPart
 	if root then
-		-- Destroy only joint instances on the root (Motor6D RootJoint, Welds,
-		-- Constraints) — NOT ClearAllChildren, which also wipes death Sounds and
-		-- the root rig Attachments that other systems rely on.
+		-- Solo joints, NO ClearAllChildren: borraría los Sounds de muerte y los
+		-- Attachments del rig de los que dependen otros sistemas.
 		Utils.destroyJoints(root)
 		root.CanCollide = false
 		root.Massless = true
 	end
 
-	hum:ChangeState(Enum.HumanoidStateType.Dead)
-	hum:SetStateEnabled(Enum.HumanoidStateType.GettingUp, false)
+	Utils.releaseHumanoid(hum)
 
-	Utils.buildRagdoll(parts, CONFIG.JOINT_MAX_ANGLE, CONFIG.RAGDOLL_HEAD_AS_JOINT)
+	Utils.buildRagdoll(parts, CONFIG.RAGDOLL_HEAD_AS_JOINT, allBaseParts)
 
-	CollisionGroups.setGroupForParts(char, allBaseParts, CollisionGroups.RAGDOLL)
+	Utils.makeCorpseInert(char)
 
 	for _, part in allBaseParts do
 		part.Anchored = false
 	end
 
-	-- Servidor simula el ragdoll (evita el congelamiento por network-ownership;
-	-- ver Utils.setServerOwnership). No-op en el preview del Locker (cliente).
+	-- Evita el congelamiento por network ownership. No-op en el preview del Locker (cliente).
 	Utils.setServerOwnership(allBaseParts)
 
 	for _, part in parts do
@@ -70,18 +64,15 @@ function RagdollModule.apply(char: Model): boolean
 		end
 	end
 
-	-- Roblox forces CanCollide=false on dead humanoid parts every frame.
-	-- Re-enforce each Stepped so the ragdoll doesn't clip through the floor.
-	Utils.enforceCanCollide(allBaseParts, char)
-
 	local impulsePart = parts.LowerTorso or parts.Torso or parts.HumanoidRootPart
 	if impulsePart then
-		local vx = rng:NextInteger(-CONFIG.THROW_FORCE, CONFIG.THROW_FORCE)
-		local vy = rng:NextInteger(0, CONFIG.THROW_FORCE) * CONFIG.THROW_FORCE_UP_MULT
-		local vz = rng:NextInteger(-CONFIG.THROW_FORCE, CONFIG.THROW_FORCE)
+		local angle = rng:NextNumber(0, 2 * math.pi)
+		local speedXZ = rng:NextNumber(CONFIG.THROW_SPEED_XZ_MIN, CONFIG.THROW_SPEED_XZ_MAX)
+		local vy = rng:NextNumber(CONFIG.THROW_SPEED_UP_MIN, CONFIG.THROW_SPEED_UP_MAX)
 
-		Utils.applyImpulse(impulsePart, Vector3.new(vx, vy, vz))
+		Utils.launchBody(parts, Vector3.new(math.cos(angle) * speedXZ, vy, math.sin(angle) * speedXZ))
 	end
+	Utils.calmRagdoll(parts, char)
 
 	return true
 end

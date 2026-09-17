@@ -1634,8 +1634,9 @@ local function _onCharacterAdded(player: Player, character: Model)
 	session.charDescendantConn = character.DescendantAdded:Connect(function(descendant)
 		if descendant:IsA("BasePart") then
 			-- Si el char ya ragdollizó cuando llega una part nueva (VFX del
-			-- kill effect, p.ej.), tomar el grupo coherente con su estado.
-			descendant.CollisionGroup = CollisionGroups.groupForNewPart(character)
+			-- kill effect, p.ej.), nace con el grupo coherente con su estado y,
+			-- si es cadáver, sin query ni touch (no para balas).
+			CollisionGroups.applyToNewPart(character, descendant)
 		end
 	end)
 	_registerDeathListener(player, character)

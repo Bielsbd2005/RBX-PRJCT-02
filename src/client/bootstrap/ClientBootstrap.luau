@@ -76,6 +76,10 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 	local UISoundsController = require(clientRoot.core.ui.UISoundsController)
 	local ShadeController = require(clientRoot.core.ui.ShadeController)
 	local WeaponWrapAnimator = require(clientRoot.core.visuals.WeaponWrapAnimator)
+	local BalloonPopVisuals = require(clientRoot.core.visuals.BalloonPopVisuals)
+	local BurningVisuals = require(clientRoot.core.visuals.BurningVisuals)
+	local AbductionVisuals = require(clientRoot.core.visuals.AbductionVisuals)
+	local XpOrbsVisuals = require(clientRoot.core.visuals.XpOrbsVisuals)
 	local StoreFeature = require(clientRoot.features.store)
 	local SettingsFeature = require(clientRoot.features.settings)
 	local RewardsFeature = require(clientRoot.features.rewards)
@@ -88,11 +92,19 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 
 	DataController:Start()
 	WeaponWrapAnimator.start()
-	-- Precarga (no bloqueante) los assets de los presets de lighting para que el
-	-- primer cambio de escena no sufra el streaming de skyboxes/texturas.
+	-- Antes que el lobby: el preview del kill effect en el Locker también lo usa.
+	BalloonPopVisuals.start()
+	BurningVisuals.start()
+	AbductionVisuals.start()
+	XpOrbsVisuals.start()
+	-- No bloqueante: evita el streaming de skyboxes en el primer cambio de escena.
 	ScenePresetController.preload()
 	_janitor:Add(function()
 		WeaponWrapAnimator.stop()
+		BalloonPopVisuals.stop()
+		BurningVisuals.stop()
+		AbductionVisuals.stop()
+		XpOrbsVisuals.stop()
 	end, true)
 
 	-- Audit mobile: timeout en WaitForChild para que la replicación lenta

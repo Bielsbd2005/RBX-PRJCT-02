@@ -676,7 +676,7 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 	-- Se desconecta al morir, antes de que el kill effect añada sus parts.
 	local descendantConn = botModel.DescendantAdded:Connect(function(descendant)
 		if descendant:IsA("BasePart") then
-			descendant.CollisionGroup = CollisionGroups.groupForNewPart(botModel)
+			CollisionGroups.applyToNewPart(botModel, descendant)
 		end
 	end)
 

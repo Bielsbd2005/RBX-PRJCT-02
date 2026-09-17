@@ -2,33 +2,23 @@
 
 local RagdollModule = {}
 
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-
 local Utils = require(script.Parent.Utils)
-local CollisionGroups = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("CollisionGroups"))
 
 local CONFIG = {
-	JOINT_MAX_ANGLE = 55,
 	THROW_FORCE_XZ = 20,
 	THROW_FORCE_Y = 35,
-	RAGDOLL_HEAD_AS_JOINT = false,
+	RAGDOLL_HEAD_AS_JOINT = true,
 	BOUNCE_ELASTICITY = 0.85,
 }
 
 local rng = Random.new()
-
--- R15_JOINTS / R15_WELDS / buildPartLookup / buildRagdoll were copy-pasted between
--- Default.luau and Gravity.luau; hoisted into Utils.luau to prevent drift.
 
 local function getImpulsePart(parts: { [string]: BasePart }): BasePart?
 	return parts.LowerTorso or parts.Torso or parts.HumanoidRootPart
 end
 
 local function applyRagdoll(char: Model, hum: Humanoid)
-	-- Only rebuild ragdoll joints for R15 rigs. Previously this destroyed ALL
-	-- Motor6Ds unconditionally, so a non-R15 rig lost every joint with no
-	-- replacement (drifted from Default, which early-returns for non-R15). Only
-	-- strip Motor6Ds when we're going to rebuild, so non-R15 rigs stay intact.
+	-- Solo se quitan joints si se van a reconstruir (R15); un rig no-R15 debe quedar conectado.
 	local isR15 = hum.RigType == Enum.HumanoidRigType.R15
 
 	local allBaseParts: { BasePart } = {}
@@ -36,7 +26,7 @@ local function applyRagdoll(char: Model, hum: Humanoid)
 		if desc:IsA("BasePart") then
 			desc.Anchored = true
 			table.insert(allBaseParts, desc)
-		elseif isR15 and desc:IsA("Motor6D") then
+		elseif isR15 and Utils.isRigJoint(desc) then
 			desc:Destroy()
 		end
 	end
@@ -45,10 +35,8 @@ local function applyRagdoll(char: Model, hum: Humanoid)
 
 	local root = parts.HumanoidRootPart
 	if root then
-		-- Destroy only joint instances on the root (Motor6D RootJoint, Welds,
-		-- Constraints) — NOT ClearAllChildren, which also wipes death Sounds and
-		-- the root rig Attachments that other systems rely on. Skip on non-R15
-		-- rigs, where we don't rebuild joints and must keep the rig connected.
+		-- No usar ClearAllChildren: borraría los Sounds de muerte y los Attachments
+		-- del root de los que dependen otros sistemas.
 		if isR15 then
 			Utils.destroyJoints(root)
 		end
@@ -56,14 +44,13 @@ local function applyRagdoll(char: Model, hum: Humanoid)
 		root.Massless = true
 	end
 
-	hum:ChangeState(Enum.HumanoidStateType.Dead)
-	hum:SetStateEnabled(Enum.HumanoidStateType.GettingUp, false)
+	Utils.releaseHumanoid(hum)
 
 	if isR15 then
-		Utils.buildRagdoll(parts, CONFIG.JOINT_MAX_ANGLE, CONFIG.RAGDOLL_HEAD_AS_JOINT)
+		Utils.buildRagdoll(parts, CONFIG.RAGDOLL_HEAD_AS_JOINT, allBaseParts)
 	end
 
-	CollisionGroups.setGroupForParts(char, allBaseParts, CollisionGroups.RAGDOLL)
+	Utils.makeCorpseInert(char)
 
 	local currentGravity = workspace.Gravity
 	for _, part in parts do
@@ -104,18 +91,15 @@ local function applyRagdoll(char: Model, hum: Humanoid)
 		end
 	end
 
-	-- Roblox forces CanCollide=false on dead humanoid parts every frame.
-	-- Re-enforce each Stepped so the ragdoll doesn't clip through the floor.
-	Utils.enforceCanCollide(allBaseParts, char)
-
 	local impulsePart = getImpulsePart(parts)
 	if impulsePart then
 		local vx = rng:NextInteger(-CONFIG.THROW_FORCE_XZ, CONFIG.THROW_FORCE_XZ)
 		local vy = CONFIG.THROW_FORCE_Y
 		local vz = rng:NextInteger(-CONFIG.THROW_FORCE_XZ, CONFIG.THROW_FORCE_XZ)
 
-		Utils.applyImpulse(impulsePart, Vector3.new(vx, vy, vz))
+		Utils.launchBody(parts, Vector3.new(vx, vy, vz))
 	end
+	Utils.calmRagdoll(parts, char)
 end
 
 function RagdollModule.apply(char: Model): boolean
