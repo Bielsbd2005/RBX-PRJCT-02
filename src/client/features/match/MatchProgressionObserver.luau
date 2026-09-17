@@ -1,19 +1,8 @@
 --!strict
 --[[
-	MatchProgressionObserver.luau
-	Observers de DataController para disparar las animaciones in-match de level up,
-	BattlePass tier-up, y maestría de armas (completar un tier + hitos 25/50/75%
-	de progreso). Extraído de `features/match/init.luau` para no acumular
-	orquestación de progresión ahí.
-
-	API:
-		MatchProgressionObserver.attach({
-			hud, matchHudGui, fusionScope, janitor
-		})
-
-	Internamente espera DataController:WhenReady() y wirea los observers (Stats,
-	BattlePass, Inventory→maestría completada, WeaponKills→hitos).
-	Cada uno usa el janitor pasado para registrar su cleanup.
+	Observers de DataController que disparan las animaciones in-match de level up,
+	tier-up del BattlePass, maestría de armas y desafíos diarios.
+	Todos siembran el estado inicial sin notificar.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -23,19 +12,18 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 
 local Fusion = require(Packages.fusion)
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
-local LockerCategory = require(Shared.constants.LockerCategory)
 local DailyTasks = require(Shared.constants.DailyTasks)
 local ActionRewards = require(Shared.constants.ActionRewards)
 
 local DataController = require(script.Parent.Parent.Parent.core.data.DataController)
 
--- Solo se muestran hitos intermedios (25/50/75%) para tiers con objetivo grande;
--- los tiers pequeños (p. ej. Bronze=4) solo notifican al completarse, sin spamear.
+-- Hitos intermedios (25/50/75%) solo para tiers con objetivo >= esto; los pequeños
+-- solo notifican al completarse.
 local MASTERY_MILESTONE_MIN_TARGET = 50
 
 local MatchProgressionObserver = {}
 
--- Tiers de maestría = wraps con KillChallenge, ordenadas por kills ascendente.
+-- Tiers de maestría = wraps con KillChallenge.
 local function _buildMasteryTiers(): { { kills: number, wrapKey: string, def: any } }
 	local tiers = {}
 	local weaponWraps = ItemsConfig.WeaponWraps
@@ -55,7 +43,6 @@ local function _buildMasteryTiers(): { { kills: number, wrapKey: string, def: an
 	return tiers
 end
 
--- Para `n` kills, el siguiente tier (el menor con kills > n) o nil si ya superó el máximo.
 local function _nextMasteryTier(tiers: { { kills: number, wrapKey: string, def: any } }, n: number)
 	for _, tier in tiers do
 		if tier.kills > n then
@@ -65,7 +52,7 @@ local function _nextMasteryTier(tiers: { { kills: number, wrapKey: string, def: 
 	return nil
 end
 
--- Cuarto alcanzado (0..3) del ratio n/target; el 100% no cuenta (eso es completar).
+-- 0..3; el 100% no cuenta (eso es completar).
 local function _milestoneQuarter(n: number, target: number): number
 	if target <= 0 then
 		return 0
@@ -89,14 +76,9 @@ local function _eachWeaponKill(weaponKills: any, fn: (category: string, weaponId
 	end
 end
 
--- Campos de preview/maestría para playMasteryAnimation desde un wrap def.
-local function _masteryRewardFields(category: string, weaponId: string, wrapKey: string, def: any): any
+local function _masteryRewardFields(wrapKey: string, def: any): any
 	return {
 		name = if type(def.Name) == "string" and def.Name ~= "" then def.Name else wrapKey,
-		previewWeaponCategory = category,
-		previewWeaponId = weaponId,
-		itemId = wrapKey,
-		category = LockerCategory.WEAPON_WRAPS,
 		textureID = if type(def.TextureID) == "string" then def.TextureID else nil,
 		baseColor = if typeof(def.BaseColor) == "Color3" then def.BaseColor else nil,
 		material = if typeof(def.Material) == "EnumItem" and def.Material.EnumType == Enum.Material then def.Material else nil,
@@ -161,7 +143,6 @@ function MatchProgressionObserver.attach(deps: AttachDeps)
 	local janitor = deps.janitor
 
 	DataController:WhenReady():andThen(function()
-		-- ── Level up de character ───────────────────────────────
 		local lastSeenLevel: number? = nil
 		local function updateCashAndLevel()
 			local stats = Fusion.peek(DataController.Stats) :: any
@@ -177,12 +158,8 @@ function MatchProgressionObserver.attach(deps: AttachDeps)
 		janitor:Add(statsObserver:onBind(updateCashAndLevel), true)
 		updateCashAndLevel()
 
-		-- ── BattlePass tier-up ──────────────────────────────────
-		-- Convención: el jugador percibe "Lvl. N" como el último tier completado,
-		-- así que mostramos `currentTier - 1` (CurrentTier internamente es "el
-		-- tier hacia el que progreso"). Si ocurre cascading tier-up (subir 3
-		-- niveles en una sola kill), disparamos un único toast con el tier final,
-		-- igual que hace el level up de character.
+		-- CurrentTier es el tier hacia el que se progresa; el jugador ve el último
+		-- completado (currentTier - 1). Varios tiers de golpe → un solo toast.
 		local lastSeenBPTier: number? = nil
 		local function checkBattlePassLevelUp()
 			local bp = Fusion.peek(DataController.BattlePass) :: any
@@ -198,8 +175,6 @@ function MatchProgressionObserver.attach(deps: AttachDeps)
 		janitor:Add(bpObserver:onBind(checkBattlePassLevelUp), true)
 		checkBattlePassLevelUp()
 
-		-- ── Wrap challenge unlock ───────────────────────────────
-		-- Snapshot inicial de wraps owned por arma para detectar desbloqueos.
 		local previousByWeapon: { [string]: { [string]: { [string]: boolean } } } = {}
 		local wrapsSeeded = false
 
@@ -216,9 +191,8 @@ function MatchProgressionObserver.attach(deps: AttachDeps)
 							if not prevWraps[wrapKey] then
 								local isChallenge, def = _isKillChallengeWrap(wrapKey)
 								if isChallenge then
-									-- Wrap de maestría recién ganado = tier completado (100%).
 									local threshold = math.max(1, tonumber(def.KillChallenge.Kills) or 0)
-									local fields = _masteryRewardFields(category, weaponId, wrapKey, def)
+									local fields = _masteryRewardFields(wrapKey, def)
 									fields.current = threshold
 									fields.target = threshold
 									fields.isComplete = true
@@ -237,13 +211,8 @@ function MatchProgressionObserver.attach(deps: AttachDeps)
 		local inventoryObserver = fusionScope:Observer(DataController.Inventory)
 		janitor:Add(inventoryObserver:onBind(updateWrapsAndDetectUnlocks), true)
 
-		-- ── Maestría: hitos de progreso 25/50/75% ───────────────
-		-- El kill-count por arma vive en DataController.WeaponKills (replicado, con
-		-- ListenToChange). En cada incremento calculamos el % hacia el siguiente tier
-		-- y, al cruzar un cuarto nuevo, mostramos el popup de Maestry. El 100%
-		-- (completar) lo dispara la detección de wrap de arriba. Al entrar en una
-		-- banda nueva sembramos el cuarto actual sin notificar (no spamear progreso
-		-- ya hecho), y solo notificamos con el HUD de partida activo.
+		-- Hitos 25/50/75% hacia el siguiente tier; el 100% lo dispara la detección de
+		-- wrap de arriba. Al entrar en una banda nueva se siembra sin notificar.
 		local masteryTiers = _buildMasteryTiers()
 		local lastMilestoneByWeapon: { [string]: { target: number, quarter: number } } = {}
 		local milestoneSeeded = false
@@ -258,7 +227,6 @@ function MatchProgressionObserver.attach(deps: AttachDeps)
 				end
 				local quarter = _milestoneQuarter(kills, tier.kills)
 				local prev = lastMilestoneByWeapon[key]
-				-- Banda nueva (o primer seed): registrar sin disparar.
 				if not prev or prev.target ~= tier.kills then
 					lastMilestoneByWeapon[key] = { target = tier.kills, quarter = quarter }
 					return
@@ -269,7 +237,7 @@ function MatchProgressionObserver.attach(deps: AttachDeps)
 					and tier.kills >= MASTERY_MILESTONE_MIN_TARGET
 					and matchHudGui and matchHudGui.Enabled
 				then
-					local fields = _masteryRewardFields(category, weaponId, tier.wrapKey, tier.def)
+					local fields = _masteryRewardFields(tier.wrapKey, tier.def)
 					fields.current = kills
 					fields.target = tier.kills
 					fields.isComplete = false
@@ -283,26 +251,17 @@ function MatchProgressionObserver.attach(deps: AttachDeps)
 		janitor:Add(weaponKillsObserver:onBind(onWeaponKillsChanged), true)
 		onWeaponKillsChanged()
 
-		-- ── Desafíos diarios ────────────────────────────────────
-		-- DataController.DailyTasks trae el progreso (Progress, por Kind) y el cobro
-		-- (Claimed, por slot). Qué tarea ocupa hoy cada slot lo da la rotación diaria
-		-- sembrada con el DateKey del propio estado — el mismo con el que paga el
-		-- server, así que cliente y server nunca hablan de tareas distintas. Notificamos cada avance del contador y, cuando
-		-- se marca Claimed, el completado: ese popup llena la barra, la pone verde y
-		-- manda el premio en monedas hasta Stats. Por eso reservamos antes su cash
-		-- (hud:reserveChallengeCash): el server manda cash y estado en la MISMA tanda,
-		-- y sin la reserva el popup de ganancias animaría esa subida por su cuenta.
-		-- Igual que la maestría: sembramos sin notificar y solo hablamos con el HUD
-		-- de partida en pantalla.
+		-- La rotación se siembra con el DateKey del estado, el mismo con el que paga el
+		-- server. Se reserva el cash (hud:reserveChallengeCash) porque el server manda
+		-- cash y estado en la MISMA tanda: sin la reserva, el popup de ganancias
+		-- animaría esa subida por su cuenta además de la tarjeta.
 		local dailySeeded = false
-		local lastDailyProgress: { [string]: number } = {}
 		local lastDailyClaimed: { [string]: boolean } = {}
 		local function onDailyTasksChanged()
 			local state = Fusion.peek(DataController.DailyTasks) :: any
 			if type(state) ~= "table" then
 				return
 			end
-			local progressByKind = if type(state.Progress) == "table" then state.Progress else {}
 			local claimedById = if type(state.Claimed) == "table" then state.Claimed else {}
 			local canNotify = dailySeeded and matchHudGui ~= nil and matchHudGui.Enabled
 
@@ -311,36 +270,21 @@ function MatchProgressionObserver.attach(deps: AttachDeps)
 				local def = active.Definition
 				local slotId = active.SlotId
 				local objective = math.max(1, math.floor(def.Objective))
-				local current = tonumber((progressByKind :: any)[def.Kind]) or 0
-				local previous = lastDailyProgress[def.Kind] or 0
 				local claimed = (claimedById :: any)[slotId] == true
 				local wasClaimed = lastDailyClaimed[slotId] == true
-				-- El cash lo pone la TAREA (DailyTasks.RewardKey en ActionRewards):
-				-- la misma fuente que usa el server al pagarlo.
 				local rewardCash = ActionRewards.GetCash(DailyTasks.RewardKey(def))
 
-				if canNotify then
-					if claimed and not wasClaimed then
-						hud:reserveChallengeCash(rewardCash)
-						hud:playDailyTaskAnimation({
-							current = objective,
-							target = objective,
-							name = def.Title,
-							isComplete = true,
-							rewardCash = rewardCash,
-						})
-					elseif current > previous and not claimed then
-						hud:playDailyTaskAnimation({
-							current = current,
-							target = objective,
-							name = def.Title,
-							isComplete = false,
-							rewardCash = rewardCash,
-						})
-					end
+				if canNotify and claimed and not wasClaimed then
+					hud:reserveChallengeCash(rewardCash)
+					hud:playDailyTaskAnimation({
+						current = objective,
+						target = objective,
+						name = def.Title,
+						isComplete = true,
+						rewardCash = rewardCash,
+					})
 				end
 
-				lastDailyProgress[def.Kind] = current
 				lastDailyClaimed[slotId] = claimed
 			end
 			dailySeeded = true

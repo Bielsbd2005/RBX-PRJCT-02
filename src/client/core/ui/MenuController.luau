@@ -240,7 +240,10 @@ local function updateMissionsHud(slots: { MissionSlot }, dailyTasksState: any): 
 		local ratio = current / objective
 
 		setText(slot.titleLabel, def.Title)
-		setText(slot.valueLabel, string.format("%d/%d", current, objective))
+		if slot.valueLabel then
+			slot.valueLabel.RichText = true
+		end
+		setText(slot.valueLabel, UIUtils.formatProgressValue(current, objective))
 		setText(slot.rewardLabel, UIUtils.formatCashAmount(ActionRewards.GetCash(DailyTasks.RewardKey(def))))
 
 		if slot.barFill then

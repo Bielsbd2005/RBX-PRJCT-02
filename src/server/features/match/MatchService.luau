@@ -1792,11 +1792,6 @@ local function _onRequestJoinMatch(_: {}, player: Player)
 		session.deathAt = 0
 		Network.Match.DeathScreenHide.SendTo({}, player)
 
-		-- Daily task: PlayMatches (cuenta una vez por entrada al match).
-		pcall(function()
-			DailyTasksService:OnMatchPlayed(player)
-		end)
-
 		if player.Parent == Players then
 			Network.Match.JoinMatchSpawned.SendTo({}, player)
 

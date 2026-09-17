@@ -1,25 +1,18 @@
 --!strict
 --[[
-	DailyTasksFeature  (Client)
-	Pinta los slots Task1/Task2/Task3 en el HUD de partida:
-	  MatchHud.LeftContainer.TaskFrame.Task<N>
-	Reactivo a cambios en DataController.DailyTasks (replicado desde server).
+	Slots de misiones del HUD de partida (MatchHud.Container.Missions.<N>, N = índice
+	en DailyTasks.SlotIds). Los del menú los pinta MenuController.
+	La tarea de cada slot sale de la rotación sembrada con el DateKey del propio
+	estado, el mismo con el que paga el server.
 
-	Qué tarea toca hoy en cada slot lo decide la rotación diaria
-	(DailyTasks.GetForSlot, sembrada con el DateKey del propio estado, que es el
-	mismo con el que el server paga). El cash es de la TAREA, no del slot
-	(DailyTasks.RewardKey → ActionRewards).
-
-	Per-slot UI esperada:
-	  Task<N>.Title          — TextLabel
-	  Task<N>.Value          — TextLabel ("p/o")
-	  Task<N>.Bar.Fill       — Frame  (Size.X.Scale = p/o)
-	  Task<N>.Reward.Value   — TextLabel (cash)
-	  Task<N>.Icon           — ImageLabel
+	Nodos por slot (todos opcionales):
+	  <N>.Title / <N>.Value (RichText) / <N>.Bar.Fill / <N>.Icon
+	  <N>.Reward         — TextLabel con el cash, o frame con Reward.Value
 ]]
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
 
 local Client = script.Parent.Parent
 local Shared = ReplicatedStorage:WaitForChild("Shared")
@@ -34,6 +27,11 @@ local DataController = require(Client.core.data.DataController)
 local UIUtils = require(Client.core.ui.UIUtils)
 
 local COMPLETED_COLOR = Color3.fromRGB(60, 200, 90)
+local BAR_TWEEN_INFO = TweenInfo.new(0.6, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+local DISMISS_DELAY_SECONDS = 0.5
+local DISMISS_TWEEN_INFO = TweenInfo.new(0.45, Enum.EasingStyle.Quart, Enum.EasingDirection.In)
+local DISMISS_MARGIN = 40
+local DISMISS_COLLAPSE_INFO = TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
 type Slot = {
 	id: string,
@@ -43,38 +41,175 @@ type Slot = {
 	rewardNode: GuiObject?,
 	rewardLabel: TextLabel?,
 	icon: ImageLabel?,
-	-- Colores originales cacheados al primer paint (para restaurar al resetear).
+	-- Cacheados al primer paint para restaurarlos en el reinicio diario.
 	originalFillColor: Color3?,
 	originalIconColor: Color3?,
+	painted: boolean,
+	fillTween: Tween?,
+	node: GuiObject,
+	originalParent: Instance,
+	originalPosition: UDim2,
+	originalSize: UDim2,
+	originalAnchor: Vector2,
+	holder: Frame?,
+	dismiss: "shown" | "leaving" | "gone",
+	dismissTween: Tween?,
 }
 
-local function _findChild(parent: Instance?, name: string): Instance?
-	if not parent then return nil end
-	return parent:FindFirstChild(name)
-end
+local function _resolveSlot(missionsNode: Instance, nodeName: string, id: string): Slot?
+	local node = missionsNode:FindFirstChild(nodeName)
+	if not (node and node:IsA("GuiObject")) then return nil end
 
--- Resuelve los nodos UI de un slot Task<N>. Tolera nodos faltantes —
--- la UI puede tener otra forma; solo se pintan los nodos presentes.
-local function _resolveSlot(taskFrame: Instance, id: string): Slot?
-	local node = taskFrame:FindFirstChild(id)
-	if not node then return nil end
-
-	local bar = _findChild(node, "Bar")
-	local reward = _findChild(node, "Reward")
+	local bar = node:FindFirstChild("Bar")
+	local reward = node:FindFirstChild("Reward")
+	local rewardLabel: TextLabel? = if reward and reward:IsA("TextLabel")
+		then reward
+		elseif reward then reward:FindFirstChild("Value") :: TextLabel?
+		else nil
 
 	return {
 		id = id,
-		titleLabel = _findChild(node, "Title") :: TextLabel?,
-		valueLabel = _findChild(node, "Value") :: TextLabel?,
-		barFill = if bar then _findChild(bar, "Fill") :: GuiObject? else nil,
+		titleLabel = node:FindFirstChild("Title") :: TextLabel?,
+		valueLabel = node:FindFirstChild("Value") :: TextLabel?,
+		barFill = if bar then bar:FindFirstChild("Fill") :: GuiObject? else nil,
 		rewardNode = if reward and reward:IsA("GuiObject") then reward :: GuiObject else nil,
-		rewardLabel = if reward then _findChild(reward, "Value") :: TextLabel? else nil,
-		icon = _findChild(node, "Icon") :: ImageLabel?,
+		rewardLabel = rewardLabel,
+		icon = node:FindFirstChild("Icon") :: ImageLabel?,
+		painted = false,
+		fillTween = nil,
+		node = node,
+		originalParent = missionsNode,
+		originalPosition = node.Position,
+		originalSize = node.Size,
+		originalAnchor = node.AnchorPoint,
+		holder = nil,
+		dismiss = "shown",
+		dismissTween = nil,
 	}
 end
 
 local function _setText(label: TextLabel?, text: string)
 	if label then label.Text = text end
+end
+
+-- El UIListLayout de Missions manda sobre la Position de sus hijos: para animar la
+-- salida, el slot se mete en un marco que ocupa su hueco y se mueve dentro de él.
+local function _wrapInHolder(slot: Slot): Frame
+	local node = slot.node
+	local holder = Instance.new("Frame")
+	holder.Name = node.Name
+	holder.LayoutOrder = node.LayoutOrder
+	holder.Size = node.Size
+	holder.Position = node.Position
+	holder.AnchorPoint = node.AnchorPoint
+	holder.ZIndex = node.ZIndex
+	holder.BackgroundTransparency = 1
+	holder.BorderSizePixel = 0
+	for _, child in node:GetChildren() do
+		if child:IsA("UIAspectRatioConstraint") or child:IsA("UISizeConstraint") then
+			child:Clone().Parent = holder
+		end
+	end
+	holder.Parent = slot.originalParent
+
+	node.AnchorPoint = Vector2.zero
+	node.Position = UDim2.new()
+	node.Size = UDim2.fromScale(1, 1)
+	node.Parent = holder
+	return holder
+end
+
+local function _unwrapFromHolder(slot: Slot)
+	local holder = slot.holder
+	if not holder then
+		return
+	end
+	local node = slot.node
+	node.Parent = slot.originalParent
+	node.AnchorPoint = slot.originalAnchor
+	node.Position = slot.originalPosition
+	node.Size = slot.originalSize
+	holder:Destroy()
+	slot.holder = nil
+end
+
+local function _collapsedSize(holder: Frame, listParent: Instance): UDim2
+	local size = holder.Size
+	local layout = listParent:FindFirstChildWhichIsA("UIListLayout")
+	if layout and layout.FillDirection == Enum.FillDirection.Horizontal then
+		return UDim2.new(0, 0, size.Y.Scale, size.Y.Offset)
+	end
+	return UDim2.new(size.X.Scale, size.X.Offset, 0, 0)
+end
+
+-- Claimed → sale a la izquierda y cierra el hueco (sin animación en el primer pintado).
+-- Solo vuelve si Claimed pasa a false (reinicio diario).
+local function _updateDismiss(slot: Slot, claimed: boolean)
+	local node = slot.node
+	if not claimed then
+		if slot.dismiss ~= "shown" then
+			if slot.dismissTween then
+				slot.dismissTween:Cancel()
+				slot.dismissTween = nil
+			end
+			_unwrapFromHolder(slot)
+			node.Visible = true
+			slot.dismiss = "shown"
+		end
+		return
+	end
+
+	if slot.dismiss ~= "shown" then
+		return
+	end
+	if not slot.painted then
+		node.Visible = false
+		slot.dismiss = "gone"
+		return
+	end
+
+	slot.dismiss = "leaving"
+	task.delay(BAR_TWEEN_INFO.Time + DISMISS_DELAY_SECONDS, function()
+		if slot.dismiss ~= "leaving" then
+			return
+		end
+		-- Medir antes de envolver: tras reparentar, AbsolutePosition no se actualiza
+		-- hasta el siguiente pase de layout.
+		local travel = math.ceil(node.AbsolutePosition.X + node.AbsoluteSize.X) + DISMISS_MARGIN
+		local holder = _wrapInHolder(slot)
+		slot.holder = holder
+
+		local slide = TweenService:Create(node, DISMISS_TWEEN_INFO, { Position = UDim2.fromOffset(-travel, 0) })
+		slot.dismissTween = slide
+		slide.Completed:Once(function(slideState: Enum.PlaybackState)
+			if slideState ~= Enum.PlaybackState.Completed or slot.dismiss ~= "leaving" then
+				return
+			end
+			node.Visible = false
+			-- Las restricciones clonadas impedirían encoger el hueco.
+			for _, child in holder:GetChildren() do
+				if child:IsA("UIConstraint") then
+					child:Destroy()
+				end
+			end
+
+			local collapse = TweenService:Create(holder, DISMISS_COLLAPSE_INFO, {
+				Size = _collapsedSize(holder, slot.originalParent),
+			})
+			slot.dismissTween = collapse
+			collapse.Completed:Once(function(collapseState: Enum.PlaybackState)
+				if collapseState ~= Enum.PlaybackState.Completed or slot.dismiss ~= "leaving" then
+					return
+				end
+				-- Oculto también el hueco para que no cuente el Padding de la lista.
+				holder.Visible = false
+				slot.dismiss = "gone"
+				slot.dismissTween = nil
+			end)
+			collapse:Play()
+		end)
+		slide:Play()
+	end)
 end
 
 local function _paintSlot(slot: Slot, def: any, progress: number, claimed: boolean)
@@ -83,21 +218,31 @@ local function _paintSlot(slot: Slot, def: any, progress: number, claimed: boole
 	local ratio = clampedProgress / objective
 
 	_setText(slot.titleLabel, def.Title)
-	_setText(slot.valueLabel, string.format("%d/%d", clampedProgress, objective))
-	-- Cash de la tarea vive en ActionRewards (clave DailyTasks.RewardKey(def)) —
-	-- fuente única compartida con RewardService en el server.
+	if slot.valueLabel then
+		slot.valueLabel.RichText = true
+		slot.valueLabel.Text = UIUtils.formatProgressValue(clampedProgress, objective)
+	end
+	-- El cash es de la TAREA, no del slot: misma fuente que usa el server al pagar.
 	_setText(slot.rewardLabel, UIUtils.formatCashAmount(ActionRewards.GetCash(DailyTasks.RewardKey(def))))
 
 	if slot.barFill then
-		-- Solo escalar el eje X; conservar Y. X.Offset = 0 para evitar que el
-		-- fill se salga del Bar (un offset > 0 en el template empujaba el
-		-- borde derecho fuera del padre cuando ratio < 1).
+		-- X.Offset = 0: un offset del template sacaría el fill fuera del Bar.
 		local fillRatio = if claimed then 1 else ratio
 		local size = slot.barFill.Size
-		slot.barFill.Size = UDim2.new(fillRatio, 0, size.Y.Scale, size.Y.Offset)
+		local targetSize = UDim2.new(fillRatio, 0, size.Y.Scale, size.Y.Offset)
+		if slot.fillTween then
+			slot.fillTween:Cancel()
+			slot.fillTween = nil
+		end
+		-- El primer pintado va directo: animar desde el tamaño del template no es progreso.
+		if slot.painted then
+			local tween = TweenService:Create(slot.barFill, BAR_TWEEN_INFO, { Size = targetSize })
+			slot.fillTween = tween
+			tween:Play()
+		else
+			slot.barFill.Size = targetSize
+		end
 
-		-- Cachear color original la primera vez para poder restaurarlo en el
-		-- reset diario (cuando claimed vuelve a false).
 		if slot.originalFillColor == nil then
 			slot.originalFillColor = slot.barFill.BackgroundColor3
 		end
@@ -114,35 +259,35 @@ local function _paintSlot(slot: Slot, def: any, progress: number, claimed: boole
 		slot.icon.ImageColor3 = if claimed then COMPLETED_COLOR else slot.originalIconColor :: Color3
 	end
 
-	-- Ocultar el frame Reward una vez completada la tarea (el reward ya fue
-	-- otorgado; visualmente queda solo el icono+barra en verde).
 	if slot.rewardNode then
 		slot.rewardNode.Visible = not claimed
 	end
+
+	_updateDismiss(slot, claimed)
+	slot.painted = true
 end
 
--- Resuelve los 3 slots dentro de un nodo que contiene Task1/Task2/Task3.
-local function _resolveSlotsFromTaskFrame(taskFrame: Instance?, label: string): { Slot }
+local function _resolveMissionSlots(missionsNode: Instance?, label: string): { Slot }
 	local result: { Slot } = {}
-	if not taskFrame then return result end
+	if not missionsNode then return result end
 
-	for _, slotId in DailyTasks.SlotIds do
-		local slot = _resolveSlot(taskFrame, slotId)
+	for index, slotId in DailyTasks.SlotIds do
+		local slot = _resolveSlot(missionsNode, tostring(index), slotId)
 		if slot then
 			table.insert(result, slot)
 		else
-			warn(string.format("[DailyTasks] Slot %s no encontrado en %s", slotId, label))
+			warn(string.format("[DailyTasks] Slot %d no encontrado en %s", index, label))
 		end
 	end
 	return result
 end
 
-local function _resolveMatchHudTaskFrame(): Instance?
+local function _resolveMatchHudMissions(): Instance?
 	local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui")
 	local matchHudGui = playerGui:WaitForChild("MatchHud", 30)
 	if not matchHudGui then return nil end
-	local leftContainer = matchHudGui:WaitForChild("LeftContainer", 30)
-	return leftContainer and leftContainer:WaitForChild("TaskFrame", 30)
+	local container = matchHudGui:WaitForChild("Container", 30)
+	return container and container:WaitForChild("Missions", 30)
 end
 
 local DailyTasksFeature = {}
@@ -151,11 +296,13 @@ function DailyTasksFeature.start(_menuController: any): any
 	local janitor = Janitor.new()
 
 	DataController:WhenReady():andThen(function()
-		local hudSlots = _resolveSlotsFromTaskFrame(
-			_resolveMatchHudTaskFrame(),
-			"MatchHud.LeftContainer.TaskFrame"
-		)
+		local missionsNode = _resolveMatchHudMissions()
+		if not missionsNode then
+			warn("[DailyTasks] No se encontró MatchHud.Container.Missions — las misiones no se pintarán en partida")
+			return
+		end
 
+		local hudSlots = _resolveMissionSlots(missionsNode, "MatchHud.Container.Missions")
 		if #hudSlots == 0 then
 			return
 		end
@@ -180,7 +327,6 @@ function DailyTasksFeature.start(_menuController: any): any
 		end
 
 		_render()
-		-- Fusion 0.3 Observer: re-render cuando cambia el Value.
 		local scope = Fusion.scoped(Fusion)
 		janitor:Add(function()
 			Fusion.doCleanup(scope)

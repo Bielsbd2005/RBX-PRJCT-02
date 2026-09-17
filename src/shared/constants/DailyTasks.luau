@@ -1,26 +1,23 @@
 --!strict
 --[[
-	DailyTasks.luau
 	Catálogo de tareas diarias. Hay un POOL de tareas y cada día se sortean tres
 	para los tres slots de UI; el progreso por jugador se refresca cada día.
 
 	Slots (fijos, son la identidad de cara a datos y UI):
-	  MatchHud.LeftContainer.TaskFrame.Task1/Task2/Task3
+	  MatchHud.Container.Missions.1/2/3
 	  Menu.Container.Missions.1/2/3
 	Cada slot consume:
 		.Title         — TextLabel
-		.Value         — TextLabel "<progress>/<objective>"
+		.Value         — TextLabel RichText (UIUtils.formatProgressValue)
 		.Bar.Fill      — Frame (escalado X = progress/objective)
 		.Reward.Value  — TextLabel (Cash, resuelto vía ActionRewards.GetCash(DailyTasks.RewardKey(def)))
 		.Icon          — ImageLabel (rbxassetid)
 
 	Qué tarea toca en cada slot lo decide `GetRotation(dateKey)`: un baraje
 	determinista sembrado con la fecha, así que server y cliente sacan la MISMA
-	rotación sin replicar nada. El cash es de la TAREA, no del slot: cada
-	entrada del pool tiene su clave `"Daily" .. Key` en `ActionRewards.luau`
-	(la construye `RewardKey`), que es la fuente única para cualquier sistema
-	que conceda XP o Cash vía `server/core/RewardService`. Así el premio escala
-	con el esfuerzo de la tarea y no con el slot que le tocó en el baraje.
+	rotación sin replicar nada. El cash es de la TAREA, no del slot: cada entrada
+	del pool tiene su clave `"Daily" .. Key` en `ActionRewards.luau` (la construye
+	`RewardKey`), fuente única para lo que conceda XP o Cash vía RewardService.
 
 	El progreso se guarda por Kind (`DailyTasks.Progress[Kind]`) y el cobro por
 	slot (`DailyTasks.Claimed[SlotId]`).
@@ -33,7 +30,6 @@
 export type TaskKind =
 	"Eliminations"
 	| "WinMatches"
-	| "PlayMatches"
 	| "Headshots"
 	| "KillStreak"
 	| "Assists"
@@ -64,6 +60,10 @@ local DailyTasks = {}
 -- Slots de UI = claves de Claimed = claves de cash en ActionRewards.
 DailyTasks.SlotIds = { "Task1", "Task2", "Task3" } :: { string }
 
+-- Objetivos: cada tarea de combate pide unas tres partidas, y como kills, headshots
+-- y racha avanzan a la vez las tres del día se cierran en una sesión. Racha de 5 y
+-- no más: con K/D 1 una más larga es rara y la diaria dejaría de ser diaria. Sin
+-- "Play Matches": pagaría por aparecer, no por jugar.
 DailyTasks.Pool = {
 	{
 		Key = "Eliminations",
@@ -71,7 +71,7 @@ DailyTasks.Pool = {
 		Mode = "counter",
 		Title = "Eliminations",
 		Icon = "rbxassetid://87933886143928",
-		Objective = 3,
+		Objective = 25,
 	},
 	{
 		Key = "WinMatches",
@@ -79,14 +79,6 @@ DailyTasks.Pool = {
 		Mode = "counter",
 		Title = "Win Matches",
 		Icon = "rbxassetid://112053349618869",
-		Objective = 2,
-	},
-	{
-		Key = "PlayMatches",
-		Kind = "PlayMatches",
-		Mode = "counter",
-		Title = "Play Matches",
-		Icon = "rbxassetid://133869836581697",
 		Objective = 3,
 	},
 	{
@@ -95,7 +87,7 @@ DailyTasks.Pool = {
 		Mode = "counter",
 		Title = "Headshots",
 		Icon = "",
-		Objective = 4,
+		Objective = 10,
 	},
 	{
 		Key = "KillStreak",
@@ -103,7 +95,7 @@ DailyTasks.Pool = {
 		Mode = "best",
 		Title = "Kill Streak",
 		Icon = "",
-		Objective = 3,
+		Objective = 5,
 	},
 	{
 		Key = "Assists",
@@ -111,7 +103,7 @@ DailyTasks.Pool = {
 		Mode = "counter",
 		Title = "Assists",
 		Icon = "",
-		Objective = 3,
+		Objective = 10,
 	},
 } :: { TaskDefinition }
 
@@ -132,8 +124,8 @@ function DailyTasks.TodayKey(): string
 	return os.date("!%Y-%m-%d") :: string
 end
 
--- Semilla numérica de una fecha "YYYY-MM-DD" → 20260903. Sin fecha válida (datos
--- todavía sin sembrar) cae en la de hoy.
+-- Semilla numérica de "YYYY-MM-DD" → 20260903. Sin fecha válida (datos todavía sin
+-- sembrar) cae en la de hoy.
 local function _seedFromDateKey(dateKey: string?): number
 	local digits = if type(dateKey) == "string" then (string.gsub(dateKey, "%D", "")) else ""
 	local seed = tonumber(digits)
