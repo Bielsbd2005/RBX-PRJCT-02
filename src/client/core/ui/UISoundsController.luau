@@ -1,78 +1,39 @@
 --!strict
 --[[
-	UISoundsController
-	Wirea click sounds sobre todos los GuiButton en PlayerGui.
-	Escanea descendientes una vez y se suscribe a DescendantAdded para cubrir
-	botones creados en runtime (slots de battlepass, cards del store, etc.).
-
-	Convención de assets — Roblox Studio:
-	  SoundService
-	  └── UI (Folder)
-	      ├── Click (Sound)   — click de cualquier botón
-	      └── Close (Sound)   — click de botones con Name == "CloseBtn"
-
-	Los Sound se resuelven en cada evento (no se cachean), así que el author
-	puede editar SoundId en Studio sin reiniciar. Si el Sound no existe o tiene
-	SoundId vacío, el evento es no-op.
+	Pone `Click` + háptico a todos los GuiButton de PlayerGui (incluidos los creados
+	en runtime). Opt-outs: atributo `NoClickSound`, y los botones llamados "CloseBtn"
+	(el panel que cierran ya reproduce `Close`; ambos suenan a doble click).
 ]]
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local SoundService = game:GetService("SoundService")
 
 local Packages = ReplicatedStorage:WaitForChild("Packages")
 local Janitor = require(Packages.janitor) :: any
 
-local SOUND_FOLDER_NAME = "UI"
-local CLICK_SOUND_NAME = "Click"
-local CLOSE_SOUND_NAME = "Close"
--- Convención del proyecto: cualquier botón cuyo `Name` empiece por "CloseBtn"
--- es un botón de cerrar panel (store/locker/battlepass usan exactamente este
--- nombre). Para esos usamos el sonido `Close` en lugar de `Click`.
+local GameSounds = require(script.Parent.GameSounds)
+local Haptics = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("utils"):WaitForChild("Haptics"))
+
 local CLOSE_BUTTON_NAME = "CloseBtn"
 
 local UISoundsController = {}
 
-local function resolveSound(name: string): Sound?
-	local folder = SoundService:FindFirstChild(SOUND_FOLDER_NAME)
-	if not folder then return nil end
-	local sound = folder:FindFirstChild(name)
-	if sound and sound:IsA("Sound") then
-		return sound
-	end
-	return nil
-end
-
-local function playSound(name: string)
-	local sound = resolveSound(name)
-	if not sound then return end
-	if sound.SoundId == "" then return end
-	-- PlayLocalSound permite overlap (clicks rápidos no se cortan entre sí)
-	-- y no requiere que el Sound esté parentado a un BasePart/PlayerGui.
-	SoundService:PlayLocalSound(sound)
-end
-
 local function bindButton(boundSet: { [GuiButton]: boolean }, button: GuiButton)
-	-- Idempotencia via tabla en memoria. No usamos attribute porque los
-	-- attributes se copian con Instance:Clone(), y eso rompe el flow del
-	-- locker grid: el `Template` del grid existe en PlayerGui desde el
-	-- arranque → se bindea → sus clones heredan el attribute → DescendantAdded
-	-- los ve como "ya bindeados" y no les pone sonido.
+	-- Idempotencia con tabla y no con attribute: los attributes se copian en Clone(),
+	-- y los clones de un Template ya bindeado se saltarían.
 	if boundSet[button] then return end
 	boundSet[button] = true
 
-	-- Audit P6: cada botón se autolimpia en su propio Destroying en lugar de
-	-- acumular su conexión en el janitor del módulo (que crecía sin tope toda la
-	-- sesión a medida que el locker/store reconstruían botones). boundSet es de
-	-- claves débiles, así que los botones destruidos sí pueden recolectarse.
+	-- Cada botón se limpia en su Destroying; en el janitor del módulo las conexiones
+	-- crecerían sin tope al reconstruir grids.
 	local activatedConn = button.Activated:Connect(function()
 		if not button.Active then return end
-		-- Opt-out por botón. Lo usan los controles móviles (Fire/Aim/Reload/Jump)
-		-- porque Activated puede dispararse al deslizar el dedo desde fuera y
-		-- soltar encima, lo que provocaba un click sound espurio al girar la cámara.
+		-- Los controles móviles lo usan: Activated salta al soltar un dedo que entró
+		-- deslizando (p. ej. girando la cámara).
 		if button:GetAttribute("NoClickSound") then return end
-		local soundName = if button.Name == CLOSE_BUTTON_NAME then CLOSE_SOUND_NAME else CLICK_SOUND_NAME
-		playSound(soundName)
+		if button.Name == CLOSE_BUTTON_NAME then return end
+		GameSounds.play(GameSounds.Click)
+		Haptics.play("UITap")
 	end)
 
 	local destroyingConn: RBXScriptConnection
@@ -88,8 +49,6 @@ function UISoundsController.start(): any
 	local player = Players.LocalPlayer
 	local playerGui = player:WaitForChild("PlayerGui")
 
-	-- Claves débiles: un GuiButton destruido no queda pinneado en boundSet, así
-	-- que puede recolectarse (cada botón ya se desconecta solo en su Destroying).
 	local boundSet: { [GuiButton]: boolean } = setmetatable({}, { __mode = "k" }) :: any
 	janitor:Add(function()
 		table.clear(boundSet)

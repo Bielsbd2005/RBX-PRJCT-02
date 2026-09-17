@@ -1,8 +1,6 @@
--- DamageBillboardHandler.module.lua (Client)
--- High-RPM optimized floating damage + hit FX (single desktop profile: no mobile distinctions).
--- UIStroke always enabled with desktop-grade settings.
+-- Números de daño flotantes y sonido de impacto (solo cliente). Perfil único, sin
+-- distinción de móvil.
 
---// Services (cached)
 local TweenService      = game:GetService("TweenService")
 local RunService        = game:GetService("RunService")
 local Players           = game:GetService("Players")
@@ -10,32 +8,25 @@ local SoundService      = game:GetService("SoundService")
 local Workspace         = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
--- Abort on server
 if RunService:IsServer() then
 	return {}
 end
 
---// Config (cached references)
 local cfgRoot             = script.Parent.Parent.Configuration
 local HeadshotMultiplier  = cfgRoot:WaitForChild("HeadshotMultiplier")  -- NumberValue
 
---// LocalPlayer safe fetch
 local localPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
 
---// Cached PlayerGui (avoids WaitForChild on every new billboard)
 local playerGui = localPlayer:WaitForChild("PlayerGui")
 
---// Cached camera (avoids property lookup on every hit)
 local currentCamera = Workspace.CurrentCamera
 Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
 	currentCamera = Workspace.CurrentCamera
 end)
 
---// Team resolution via shared TeamUtils
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local TeamUtils = require(Shared.utils.TeamUtils)
 
---// Cached attacker side (avoids recomputing on every hit)
 local attackerSide: string? = TeamUtils.getSide(localPlayer.Character)
 local function refreshAttackerTeam()
 	attackerSide = TeamUtils.getSide(localPlayer.Character)
@@ -50,7 +41,6 @@ localPlayer.AttributeChanged:Connect(function(attr)
 	end
 end)
 
---// isCoreModel cache (avoids repeated string ops per model)
 local coreModelCache = setmetatable({}, { __mode = "k" }) -- model -> bool
 
 local function isCoreModel(model: Model?): boolean
@@ -95,7 +85,6 @@ local function shouldSkipFriendlyTargetFx(adornee: Instance?): boolean
 		return false
 	end
 
-	-- Fast-path: if attacker has no team, never skip
 	if not attackerSide then
 		return false
 	end
@@ -124,26 +113,21 @@ local function shouldSkipFriendlyTargetFx(adornee: Instance?): boolean
 	return attackerSide == targetSide
 end
 
---// Cached folders
-local UIFolder = SoundService:WaitForChild("Audio"):WaitForChild("Gameplay")
---// Constants
+-- Árbol autorado en Studio (ver docs/AUDIO.md). Los clones del pool van a
+-- SoundService.Runtime, no aquí, para no ensuciar la carpeta autorada.
+local GameplayAudio = SoundService:WaitForChild("Audio"):WaitForChild("Gameplay")
+local AudioRuntime = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("utils"):WaitForChild("AudioRuntime"))
 local V3_BILLBOARD_OFFSET = Vector3.new(0, 5, 0)
 
--- Colors
-local COLOR_NORMAL_TEXT   = Color3.fromRGB(255, 255, 255)  -- normal hits text
-local COLOR_NORMAL_STROKE = Color3.fromRGB(0, 0, 0)        -- normal hits stroke
-local COLOR_HEADSHOT_TEXT = Color3.fromRGB(255, 210, 70)   -- headshot text (dorado)
-local COLOR_HEADSHOT_STROKE = Color3.fromRGB(92, 56, 12)   -- headshot stroke (marrón oscuro)
+local COLOR_NORMAL_TEXT   = Color3.fromRGB(255, 255, 255)
+local COLOR_NORMAL_STROKE = Color3.fromRGB(0, 0, 0)
+local COLOR_HEADSHOT_TEXT = Color3.fromRGB(255, 210, 70)
+local COLOR_HEADSHOT_STROKE = Color3.fromRGB(92, 56, 12)
 
--- TweenInfos
 local TI_NUM_APPEAR   = TweenInfo.new(0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
--- Geometría de la flotación (en scale del billboard).
---
--- Cada número randomiza deriva, altura y duración de forma independiente. Antes
--- todos compartían la misma duración y altura y la deriva se sorteaba en un
--- rango centrado en cero, así que la mayoría salía casi recta y las ráfagas
--- subían en bloque, superpuestas.
+-- Geometría de la flotación (en scale del billboard). Deriva, altura y duración se
+-- sortean por separado para que las ráfagas se abran en vez de subir en bloque.
 local FLOAT_RISE_MIN  = 0.85  -- cuánto sube en total
 local FLOAT_RISE_MAX  = 1.45
 -- La deriva se sortea con signo aparte y magnitud MÍNIMA distinta de cero: es lo
@@ -159,20 +143,15 @@ local FLOAT_ROT_MAX   = 18
 -- empezar a desvanecerse, para que el pico de lectura sea el arranque.
 local FADE_HOLD_RATIO = 0.35
 
--- Desktop-only profile (no mobile distinctions)
 local MAX_UI_DISTANCE     = 200
 local MAX_ACTIVE_LABELS   = 10
--- MERGE_WINDOW removed: each hit renders its own number immediately.
--- MAX_ACTIVE_LABELS caps simultaneous labels per target to stay readable.
+-- Cada impacto pinta su propio número; MAX_ACTIVE_LABELS es el tope por objetivo.
 
--- Rendering knobs (desktop)
 local NORMAL_STROKE_THICK = 2
 local HEAD_STROKE_THICK   = 3
 
--- RNG
 local RNG = Random.new()
 
---// Progressive pitch
 local SoundProgression = {
 	hitCount = 0,
 	lastHitTime = 0,
@@ -192,18 +171,15 @@ local function getCurrentPitch()
 	return (pitch < SoundProgression.maxPitch) and pitch or SoundProgression.maxPitch
 end
 
---// Audio pooling
 local soundPools = {}  -- name -> { items = {Sound,...}, idx = 1 }
 local function getPooledSound(name: string)
 	local pool = soundPools[name]
 	if not pool then
 		pool = { items = {}, idx = 1 }
-		local template = UIFolder:FindFirstChild(name)
+		local template = AudioRuntime.findSound(GameplayAudio, name)
 		if template then
 			for i = 1, 5 do
-				local s = template:Clone()
-				s.Parent = UIFolder
-				pool.items[i] = s
+				pool.items[i] = AudioRuntime.clone(template)
 			end
 		end
 		soundPools[name] = pool
@@ -232,7 +208,6 @@ local function playUIAudio(name: string, pitch: number)
 	inst:Play()
 end
 
---// Billboard pools per adornee
 local adorneeToBillboardGui = setmetatable({}, { __mode = "k" })
 local billboardLabelPool    = setmetatable({}, { __mode = "k" }) -- billboard -> {labels}
 local billboardActiveCount  = setmetatable({}, { __mode = "k" }) -- billboard -> int
@@ -241,7 +216,6 @@ local UDim2_CENTER       = UDim2.fromScale(0.5, 0.5)
 local UDim2_APPEAR_START = UDim2.fromScale(0.48, 0.48)
 local UDim2_APPEAR_END   = UDim2.fromScale(0.66, 0.66)
 
---// UIStroke cache per label (avoids FindFirstChildOfClass on every render)
 local labelStrokes = setmetatable({}, { __mode = "k" }) -- label -> UIStroke
 
 local function ensureStroke(label: TextLabel): UIStroke
@@ -269,10 +243,8 @@ local function resetLabelVisual(label: TextLabel, isHeadshot: boolean?)
 	label.Position = UDim2_CENTER
 	label.Rotation = 0
 
-	-- Number color
 	label.TextColor3 = isHeadshot and COLOR_HEADSHOT_TEXT or COLOR_NORMAL_TEXT
 
-	-- UIStroke (outline thickness) — use cache
 	local stroke = ensureStroke(label)
 	stroke.Color = isHeadshot and COLOR_HEADSHOT_STROKE or COLOR_NORMAL_STROKE
 	stroke.Thickness = isHeadshot and HEAD_STROKE_THICK or NORMAL_STROKE_THICK
@@ -294,7 +266,6 @@ local function getBillboardLabel(billboard: BillboardGui, isHeadshot: boolean): 
 		return lbl
 	end
 
-	-- Create new label (configured once)
 	local damageNumber = Instance.new("TextLabel")
 	damageNumber.Name = "DamageNumber"
 	damageNumber.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -308,7 +279,6 @@ local function getBillboardLabel(billboard: BillboardGui, isHeadshot: boolean): 
 	damageNumber.TextYAlignment = Enum.TextYAlignment.Center
 	damageNumber.Parent = billboard
 
-	-- Attach UIStroke & reset visuals (ensureStroke populates cache)
 	ensureStroke(damageNumber)
 	resetLabelVisual(damageNumber, isHeadshot)
 
@@ -330,7 +300,6 @@ local function releaseBillboardLabel(billboard: BillboardGui, label: TextLabel)
 	pool[#pool + 1] = label
 end
 
---// Utils
 local function getHeadFromAdornee(adornee: Instance?): BasePart?
 	if not adornee then return nil end
 	if adornee:IsA("BasePart") and adornee.Name == "Head" then
@@ -357,7 +326,6 @@ local function getWorldPos(adornee: Instance?): Vector3?
 	return nil
 end
 
--- Create Billboard
 local function createBillboard(adornee: Instance): BillboardGui
 	local billboard = Instance.new("BillboardGui")
 	billboard.Name = "DamageBillboardGui"
@@ -369,7 +337,7 @@ local function createBillboard(adornee: Instance): BillboardGui
 	billboard.ResetOnSpawn = false
 	billboard.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 	billboard.MaxDistance = MAX_UI_DISTANCE
-	billboard.Parent = playerGui  -- cached; no WaitForChild overhead
+	billboard.Parent = playerGui
 	return billboard
 end
 
@@ -382,7 +350,6 @@ function DamageBillboardHandler:CreateBillboardForAdornee(adornee: Instance): Bi
 	billboard = createBillboard(adornee)
 	adorneeToBillboardGui[adornee] = billboard
 
-	-- Auto-cleanup on adornee removal
 	local ancestorCon
 	ancestorCon = adornee.AncestryChanged:Connect(function(_, parent)
 		if parent == nil then
@@ -400,21 +367,17 @@ function DamageBillboardHandler:CreateBillboardForAdornee(adornee: Instance): Bi
 	return billboard
 end
 
--- Render a single number: sale disparado en abanico hacia un lado y se desvanece
--- en la parte final del recorrido. Cada número randomiza lado, deriva, altura y
--- duración, de modo que una ráfaga se abre en lugar de subir en bloque.
+-- Cada número sale en abanico hacia un lado y se desvanece al final del recorrido.
 local function renderNumber(billboard: BillboardGui, value: number, isHeadshot: boolean)
 	local label = getBillboardLabel(billboard, isHeadshot)
 	if not label then return end
 
 	label.Text = tostring(value)
 
-	-- Jitter de spawn alrededor del centro
 	local startX = 0.5 + RNG:NextNumber(-SPAWN_JITTER, SPAWN_JITTER)
 	local startY = 0.5 + RNG:NextNumber(-SPAWN_JITTER, SPAWN_JITTER)
 	label.Position = UDim2.fromScale(startX, startY)
 
-	-- Use cached stroke (already guaranteed to exist via ensureStroke)
 	local stroke = labelStrokes[label]
 	if stroke then
 		stroke.Color = isHeadshot and COLOR_HEADSHOT_STROKE or COLOR_NORMAL_STROKE
@@ -422,14 +385,13 @@ local function renderNumber(billboard: BillboardGui, value: number, isHeadshot: 
 		stroke.Transparency = isHeadshot and 0 or 0.8
 	end
 
-	-- Lado y magnitud por separado: sortear en un rango centrado en cero deja la
-	-- mayoría de tiradas cerca de 0, que es justo lo que hacía que salieran rectos.
+	-- Lado y magnitud por separado: un rango centrado en cero deja la mayoría de
+	-- tiradas cerca de 0 y los números saldrían rectos.
 	local driftSign = if RNG:NextNumber() < 0.5 then -1 else 1
 	local endX = startX + driftSign * RNG:NextNumber(FLOAT_DRIFT_MIN, FLOAT_DRIFT_MAX)
 	local endY = startY - RNG:NextNumber(FLOAT_RISE_MIN, FLOAT_RISE_MAX)
 	local duration = RNG:NextNumber(FLOAT_TIME_MIN, FLOAT_TIME_MAX)
 
-	-- Pop de aparición (tamaño), en paralelo a la flotación.
 	local appearTween = TweenService:Create(label, TI_NUM_APPEAR, {
 		Size = UDim2_APPEAR_END,
 	})
@@ -466,13 +428,9 @@ local function renderNumber(billboard: BillboardGui, value: number, isHeadshot: 
 		strokeFadeTween:Play()
 	end
 
-	-- Cleanup al terminar. Audit mobile: :Once auto-disconnect (Completed dispara
-	-- una vez, tanto en finalización como en cancel).
 	floatTween.Completed:Once(function()
-		-- Los fades terminan a la vez que floatTween, pero el orden entre tweens
-		-- que acaban en el mismo frame no está garantizado: cancelarlos evita que
-		-- uno rezagado pise el TextTransparency = 0 que resetLabelVisual pone al
-		-- reutilizar este label para el siguiente impacto.
+		-- El orden entre tweens que acaban en el mismo frame no está garantizado:
+		-- cancelar los fades evita que pisen el reset del label al reutilizarlo.
 		fadeTween:Cancel()
 		if strokeFadeTween then
 			strokeFadeTween:Cancel()
@@ -487,7 +445,6 @@ local function renderNumber(billboard: BillboardGui, value: number, isHeadshot: 
 	floatTween:Play()
 end
 
---// Public API
 function DamageBillboardHandler:ShowDamageBillboard(damageAmount: number, adornee: Instance, isHeadshot: boolean?)
 	if shouldSkipFriendlyTargetFx(adornee) then
 		return
@@ -500,7 +457,7 @@ function DamageBillboardHandler:ShowDamageBillboard(damageAmount: number, adorne
 		local cam = currentCamera
 		if cam and (pos - cam.CFrame.Position).Magnitude > MAX_UI_DISTANCE then
 			local progressivePitch_far = getCurrentPitch()
-			playUIAudio(headshot and "Headshot" or "HitSound", progressivePitch_far)
+			playUIAudio(headshot and "Headshot" or "Hit", progressivePitch_far)
 			return
 		end
 	end
@@ -509,14 +466,12 @@ function DamageBillboardHandler:ShowDamageBillboard(damageAmount: number, adorne
 	local shownDamage = headshot and math.ceil(damageAmount * mult) or math.ceil(damageAmount)
 
 	local progressivePitch = getCurrentPitch()
-	playUIAudio(headshot and "Headshot" or "HitSound", progressivePitch)
+	playUIAudio(headshot and "Headshot" or "Hit", progressivePitch)
 
 	local billboard = self:CreateBillboardForAdornee(adornee)
 
-	-- Las partículas de headshot/body las gestiona ahora HitVFX (plantillas en
-	-- ReplicatedStorage.HitVFX, disparadas desde BulletWeapon). Aquí sólo quedan
-	-- el sonido (SoundService.Audio.Gameplay, arriba) y los números de daño, para
-	-- no gestionar el mismo efecto en dos sitios.
+	-- Las partículas de impacto son de HitVFX (ReplicatedStorage.Templates.HitVFX,
+	-- disparadas desde BulletWeapon); aquí solo sonido y números de daño.
 	renderNumber(billboard, shownDamage, headshot)
 end
 

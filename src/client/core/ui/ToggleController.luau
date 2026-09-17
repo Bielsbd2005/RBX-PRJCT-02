@@ -1,11 +1,6 @@
 --!strict
 --[[
-	ToggleController.luau (Client UI Library)
-	Toggle (interruptor) reutilizable. `ToggleContainer` es la pista cuyo color
-	cambia según el estado; `Knob` es la bola que se desliza izquierda/derecha
-	(posicionada por escala); `HitArea` es el botón transparente que recibe el tap.
-
-	Estructura GUI esperada (relativa a `root`):
+	Toggle reutilizable. Estructura GUI esperada (relativa a `root`; Knob posicionado por escala):
 		root
 		  ToggleContainer   ← pista (cambia de color)
 		    Knob            ← bola que se desliza
@@ -13,7 +8,7 @@
 		  Title             ← etiqueta del ajuste (ignorada por la lógica)
 
 	Callbacks (mismo contrato que SliderController):
-		onChange(state)  — en cada cambio de estado, incluido :set() no silencioso.
+		onChange(state)  — en cada cambio de estado, incluido :set().
 		                   Aquí se aplica el efecto inmediato (atributo, etc.).
 		onCommit(state)  — solo en interacción del usuario. Aquí se persiste (red).
 ]]
@@ -23,15 +18,15 @@ local TweenService = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Packages = ReplicatedStorage:WaitForChild("Packages")
 local Janitor = require(Packages.janitor) :: any
+local GameSounds = require(script.Parent.GameSounds)
 
--- Tween y estados visuales (knob por escala, color en el container).
 local TWEEN_INFO = TweenInfo.new(0.25, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
 local KNOB_ON_POS = UDim2.new(0.55, 0, 0.5, 0)
 local KNOB_OFF_POS = UDim2.new(0.05, 0, 0.5, 0)
 local TRACK_ON = Color3.fromRGB(0, 140, 255)
 local TRACK_OFF = Color3.fromRGB(80, 80, 80)
--- Debounce contra el doble-evento por tap en móvil (toque + click emulado), que
--- alternaba el estado dos veces y dejaba el toggle "al revés" respecto al tap.
+-- Debounce contra el doble evento por tap en móvil (toque + click emulado), que
+-- alternaba el estado dos veces.
 local TOGGLE_DEBOUNCE = 0.1
 
 export type ToggleConfig = {
@@ -79,11 +74,13 @@ function ToggleController.new(config: ToggleConfig)
 		self:_cancelTweens()
 	end, true)
 
-	-- HitArea (TextButton transparente) recibe el tap. `Activated` cubre ratón,
-	-- táctil y selección por mando de forma unificada (y deduplica touch + click
-	-- emulado). Si faltara, caemos a InputBegan sobre la pista.
+	-- `Activated` unifica ratón, táctil y mando (y deduplica touch + click emulado).
+	-- Si falta HitArea, se cae a InputBegan sobre la pista.
 	local hitArea = track:FindFirstChild("HitArea")
 	if hitArea and hitArea:IsA("GuiButton") then
+		-- El toggle tiene sonido propio: sin esto UISoundsController añadiría su click
+		-- genérico y cada toque sonaría dos veces.
+		hitArea:SetAttribute("NoClickSound", true)
 		self._janitor:Add((hitArea :: GuiButton).Activated:Connect(function()
 			self:_toggle()
 		end), "Disconnect")
@@ -107,7 +104,7 @@ function ToggleController:_cancelTweens()
 	table.clear(self._activeTweens)
 end
 
-function ToggleController:_apply(state: boolean, animate: boolean, fireChange: boolean)
+function ToggleController:_apply(state: boolean, animate: boolean)
 	self._state = state
 
 	local targetPos = if state then KNOB_ON_POS else KNOB_OFF_POS
@@ -129,36 +126,35 @@ function ToggleController:_apply(state: boolean, animate: boolean, fireChange: b
 		self._track.BackgroundColor3 = trackColor
 	end
 
-	if fireChange and self._onChange then
+	if self._onChange then
 		self._onChange(state)
 	end
 end
 
 function ToggleController:_toggle()
-	-- Debounce contra el doble-evento por tap en móvil.
 	local now = os.clock()
 	if now - self._lastToggleAt < TOGGLE_DEBOUNCE then
 		return
 	end
 	self._lastToggleAt = now
 
-	self:_apply(not self._state, true, true)
+	-- Solo aquí, no en `set()`: ese lo llama la carga de settings y no debe
+	-- sonar (si no, abrir Settings dispararía un toggle por cada opción).
+	GameSounds.play(GameSounds.Toggle)
+
+	self:_apply(not self._state, true)
 	if self._onCommit then
 		self._onCommit(self._state)
 	end
 end
 
--- Fija el estado por código (carga de settings). Dispara onChange salvo
--- `silent`; nunca dispara onCommit.
-function ToggleController:set(state: boolean, silent: boolean?)
+-- Fija el estado por código (carga de settings). Dispara onChange; nunca
+-- dispara onCommit.
+function ToggleController:set(state: boolean)
 	if self._inert then
 		return
 	end
-	self:_apply(state, false, not silent)
-end
-
-function ToggleController:get(): boolean
-	return self._state
+	self:_apply(state, false)
 end
 
 function ToggleController:Destroy()

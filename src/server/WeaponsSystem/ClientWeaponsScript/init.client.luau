@@ -56,27 +56,7 @@ else
 
 	weaponsSystemFolder = ReplicatedStorage:FindFirstChild("WeaponsSystem")
 
-	-- Add WeaponData Listener for EliminatedPlayer
-	if weaponsSystemFolder then
-		local WeaponData = weaponsSystemFolder:WaitForChild("WeaponData", 5)
-		if WeaponData and WeaponData:IsA("RemoteEvent") then
-			WeaponData.OnClientEvent:Connect(function(action, ...)
-				if action == "EliminatedPlayer" then
-					local soundService = game:GetService("SoundService")
-					local gameplayFolder = soundService:FindFirstChild("Audio") and soundService.Audio:FindFirstChild("Gameplay")
-					if gameplayFolder then
-						local elimSound = gameplayFolder:FindFirstChild("EliminatedPlayer")
-						if elimSound and elimSound:IsA("Sound") then
-							local soundClone = elimSound:Clone()
-							soundClone.Parent = soundService
-							soundClone:Play()
-							game:GetService("Debris"):AddItem(soundClone, soundClone.TimeLength + 1)
-						end
-					end
-				end
-			end)
-		end
-	end
+	-- El sonido de kill tiene un único dueño: NetworkingCallbacks.PlayerEliminated.
 
 	if weaponsSystemFolder ~= nil then
 		setupWeaponsSystem()

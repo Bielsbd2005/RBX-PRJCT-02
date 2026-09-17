@@ -1,8 +1,5 @@
 --!strict
 --[[
-	settings/init.luau (Client Feature)
-	Panel de ajustes (UserInterface.Settings):
-
 		Settings
 		  Container
 		    Header
@@ -18,7 +15,6 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local SoundService = game:GetService("SoundService")
 
 local Client = script.Parent.Parent
 local Shared = ReplicatedStorage:WaitForChild("Shared")
@@ -33,6 +29,7 @@ local BlurController = require(Client.core.ui.BlurController)
 local SliderController = require(Client.core.ui.SliderController)
 local ToggleController = require(Client.core.ui.ToggleController)
 local MenuHover = require(Client.core.ui.MenuHover)
+local GameSounds = require(Client.core.ui.GameSounds)
 
 local BLUR_KEY = "Settings"
 local CREDITS_BLUR_KEY = "Credits"
@@ -70,7 +67,6 @@ function SettingsFeature.start(menuController: any): any
 	local player = Players.LocalPlayer
 	local playerGui = player:WaitForChild("PlayerGui")
 
-	-- Botón de apertura en Menu.Container.TopFrame.RightContainer.Settings
 	local menuGui = menuController:getGui()
 	local container = menuGui:WaitForChild("Container")
 	local topFrame = container:WaitForChild("TopFrame")
@@ -95,8 +91,7 @@ function SettingsFeature.start(menuController: any): any
 	})
 	janitor:Add(panel, "Destroy")
 
-	-- Credits: panel hermano abierto desde Settings.Container.Content.CreditsBtn.
-	-- Abrirlo cierra Settings; cerrar Credits (Credits.Container.CloseBtn) regresa a Settings.
+	-- Credits es panel hermano: abrirlo cierra Settings y cerrarlo vuelve a Settings.
 	local creditsBtnInstance = content:FindFirstChild("CreditsBtn")
 	if creditsBtnInstance and creditsBtnInstance:IsA("GuiButton") then
 		local creditsFrame = uiGui:WaitForChild("Credits") :: Frame
@@ -115,30 +110,28 @@ function SettingsFeature.start(menuController: any): any
 		})
 		janitor:Add(creditsPanel, "Destroy")
 
+		-- Settings va en silencio (true): en la transición solo suena Credits.
 		janitor:Add(creditsBtnInstance.MouseButton1Click:Connect(function()
-			panel:close()
+			panel:close(true)
 			creditsPanel:open()
 		end), "Disconnect")
 
 		janitor:Add(creditsCloseBtn.MouseButton1Click:Connect(function()
 			resetCreditsClose()
 			creditsPanel:close()
-			panel:open()
+			panel:open(true)
 		end), "Disconnect")
 	end
 
-	-- Efectos inmediatos (onChange) ------------------------------------------
-	-- L11: resolvemos LobbyMusic perezosamente en cada apply. Settings arranca
-	-- antes que el feature de música, así que cachear el Sound al inicio dejaba
-	-- el slider sin efecto si la música aún no se había creado.
+	-- LobbyMusic se resuelve en cada apply: Settings arranca antes que el feature de
+	-- música y el Sound puede no existir aún.
 	local function applyMusicVolume(value: number)
-		local lobbyMusic = SoundService:FindFirstChild("LobbyMusic")
-		if lobbyMusic and lobbyMusic:IsA("Sound") then
+		local lobbyMusic = GameSounds.resolve(GameSounds.LobbyMusic)
+		if lobbyMusic then
 			lobbyMusic:SetAttribute("VolumeMultiplier", value)
 		end
 	end
 
-	-- Slider de música: aplica volumen al vuelo, persiste al soltar.
 	local musicSlider = SliderController.new({
 		root = content:WaitForChild("MusicVolume"),
 		onChange = applyMusicVolume,
@@ -189,7 +182,6 @@ function SettingsFeature.start(menuController: any): any
 	})
 	janitor:Add(giftsToggle, "Destroy")
 
-	-- Carga inicial: aplica los valores guardados (onChange) sin re-persistir.
 	DataController:WhenReady():andThen(function()
 		local saved = Fusion.peek(DataController.Settings)
 
@@ -208,7 +200,6 @@ function SettingsFeature.start(menuController: any): any
 		autoShootToggle:set(bool("AutoShoot"))
 		giftsToggle:set(bool("GiftsEnabled"))
 
-		-- El valor de SFX se aplica como atributo para sistemas de sonido.
 		player:SetAttribute("SFXVolume", num("SFXVolume"))
 	end)
 

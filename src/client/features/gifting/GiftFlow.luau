@@ -1,7 +1,5 @@
 --!strict
 --[[
-	GiftFlow.luau  (Client Feature Library — Gifting)
-
 	Flujo de envío de regalos (UserInterface.Gifting). Es agnóstico de quién lo
 	abre: el llamante decide desde qué GUI se lanza y le pasa el pack de Robux a
 	regalar con `openForProduct(product)`.
@@ -9,7 +7,7 @@
 	No toca ninguna GUI que no sea la suya. Si el panel que lo abre debe
 	ocultarse mientras la lista está en pantalla, ese panel lo hace en su
 	callback: `onOpened` al presentar la lista y `onClosed` cuando el flujo se
-	retira (botón de cerrar, regalo entregado o `reset()`).
+	retira (botón de cerrar o regalo entregado; `reset()` no lo dispara).
 
 	Lista los jugadores del servidor. Cuando hay pocos jugadores reales la lista
 	se rellena con NPCs (identidades de `BotNames`) para que nunca se vea vacía;
@@ -32,8 +30,7 @@
 	  SendGift → SendResponse (validación server-side; success ⇒ el server lanza
 	  el prompt de compra) → [compra Robux] → GiftDelivered (regalo entregado).
 	  Validación fallida o prompt cancelado dejan el frame abierto para
-	  reintentar; GiftDelivered notifica éxito, cierra el flujo y avisa al
-	  feature (onDelivered).
+	  reintentar; GiftDelivered notifica éxito y cierra el flujo.
 ]]
 
 local Players = game:GetService("Players")
@@ -51,6 +48,7 @@ local StoreProducts = require(Shared.constants.StoreProducts)
 local BotNames = require(Shared.constants.BotNames)
 local GameConfig = require(Shared.GameConfig)
 local AssetIds = require(Shared.constants.AssetIds)
+local GameSounds = require(Client.core.ui.GameSounds)
 local Notify = require(Client.core.ui.NotificationController)
 local StaggerReveal = require(Client.core.ui.animators.StaggerReveal)
 
@@ -60,8 +58,6 @@ local AVATAR_THUMB_FORMAT = "rbxthumb://type=AvatarHeadShot&id=%d&w=48&h=48"
 local RESPONSE_TIMEOUT = 5
 local DELIVERY_TIMEOUT = 15
 
--- Estados del botón Gift de cada fila. Los NPCs comparten la fila pero se
--- pintan en gris con otro icono: no son un destino válido de regalo.
 local REAL_BUTTON_COLOR = Color3.fromRGB(64, 169, 74)
 local REAL_SHADOW_COLOR = Color3.fromRGB(81, 255, 0)
 local REAL_ICON = AssetIds.Images.GiftRealPlayer
@@ -72,10 +68,9 @@ local NPC_ICON = AssetIds.Images.GiftNpc
 -- Los NPCs no muestran su nombre: la fila anuncia que no es un destino válido.
 local NPC_LABEL_TEXT = "Not Eligible"
 
--- La lista representa los huecos de una partida: los que no cubren jugadores
--- reales se rellenan con NPCs, igual que hace MatchService al rebalancear
--- (TeamSizeTarget por equipo, dos equipos). No se usa TotalParticipantsTarget
--- porque hoy nadie lo lee en el server y puede desincronizarse.
+-- La lista representa los huecos de una partida, rellenos con NPCs igual que
+-- MatchService al rebalancear. TotalParticipantsTarget no se usa porque el server
+-- no lo lee y puede desincronizarse.
 local LIST_TARGET_ROWS = GameConfig.TeamSizeTarget * 2
 
 local ROW_REVEAL_STAGGER = 0.03
@@ -85,11 +80,8 @@ local ROW_PRESS_FROM = 0.9
 
 export type GiftFlowConfig = {
 	menuController: any,
-	-- Se invocan al presentar y al retirar la lista, para que el panel que abre
-	-- el flujo gestione su propia visibilidad sin que GiftFlow la conozca.
 	onOpened: (() -> ())?,
 	onClosed: (() -> ())?,
-	onDelivered: (() -> ())?,
 }
 
 type UserEntry = {
@@ -126,9 +118,8 @@ local function popScale(node: GuiObject, info: TweenInfo, from: number): Tween
 	return tween
 end
 
--- `UIShadow` puede ser un ImageLabel, un Frame, o un modificador de UI
--- (UIStroke / UIDropShadowEffect); cada uno expone el color en otra propiedad.
--- Los modificadores usan `Color`, así que ese es el último recurso.
+-- `UIShadow` puede ser ImageLabel, Frame o modificador (UIStroke / UIDropShadowEffect),
+-- y cada uno expone el color en otra propiedad.
 local function applyTint(inst: Instance?, color: Color3): ()
 	if not inst then
 		return
@@ -163,7 +154,6 @@ local function isIdentityTakenByRealPlayer(source: BotNames.BotIdentity): boolea
 	return false
 end
 
--- Jugadores reales del servidor, sin el local player, ordenados por nombre.
 local function collectServerPlayers(): { UserEntry }
 	local entries: { UserEntry } = {}
 	local localPlayer = Players.LocalPlayer
@@ -188,14 +178,12 @@ end
 
 function GiftFlow.new(config: GiftFlowConfig, janitor: any)
 	local self = setmetatable({}, GiftFlow)
-	self._janitor = janitor
 	self._onOpened = config.onOpened
 	self._onClosed = config.onClosed
-	self._onDelivered = config.onDelivered
 
 	self._receiver = nil :: UserEntry?
 	self._product = nil :: StoreProductDefinition?
-	self._rows = {} :: { { row: GuiObject, entry: UserEntry, janitor: any } }
+	self._rows = {} :: { { row: GuiObject, janitor: any } }
 	self._sendPending = false
 	self._awaitingPurchase = false
 	self._pendingToken = 0
@@ -225,8 +213,7 @@ function GiftFlow.new(config: GiftFlowConfig, janitor: any)
 	self._scrolling = scrolling
 	self._template = template
 
-	-- El ScrollingFrame se configura en Studio (AutomaticCanvasSize/CanvasSize);
-	-- aquí solo se ocultan la plantilla y se parentean las filas.
+	-- El canvas del ScrollingFrame se configura en Studio (AutomaticCanvasSize/CanvasSize).
 	template.Visible = false
 
 	frame.Visible = false
@@ -240,9 +227,7 @@ function GiftFlow.new(config: GiftFlowConfig, janitor: any)
 		self:_clearRows()
 	end, true)
 
-	-- ── Wiring ───────────────────────────────────────────────
-	-- El template no trae CloseBtn propio; si la GUI lo añade en el futuro se
-	-- cablea solo.
+	-- CloseBtn es opcional en la GUI: si existe se cablea.
 	local closeBtn = container:FindFirstChild("CloseBtn", true)
 	if closeBtn and closeBtn:IsA("GuiButton") then
 		janitor:Add(closeBtn.Activated:Connect(function()
@@ -250,7 +235,6 @@ function GiftFlow.new(config: GiftFlowConfig, janitor: any)
 		end), "Disconnect")
 	end
 
-	-- La lista refleja quién está en el servidor: repintar al entrar/salir.
 	local function onRosterChanged()
 		if self._frame.Visible then
 			self:_refreshList(false)
@@ -259,7 +243,6 @@ function GiftFlow.new(config: GiftFlowConfig, janitor: any)
 	janitor:Add(Players.PlayerAdded:Connect(onRosterChanged), "Disconnect")
 	janitor:Add(Players.PlayerRemoving:Connect(onRosterChanged), "Disconnect")
 
-	-- ── Red ──────────────────────────────────────────────────
 	janitor:Add(Network.Gifting.SendResponse.Listen(function(data: any)
 		if not self._sendPending then
 			return
@@ -287,9 +270,6 @@ function GiftFlow.new(config: GiftFlowConfig, janitor: any)
 		if frame.Visible then
 			self:close()
 		end
-		if self._onDelivered then
-			self._onDelivered()
-		end
 	end), true)
 
 	janitor:Add(MarketplaceService.PromptProductPurchaseFinished:Connect(function(userId: number, productId: number, purchased: boolean)
@@ -316,10 +296,6 @@ function GiftFlow.new(config: GiftFlowConfig, janitor: any)
 	return self
 end
 
--- ────────────────────────────────────────────────────────────
--- LISTA DE JUGADORES
--- ────────────────────────────────────────────────────────────
-
 function GiftFlow:_clearRows()
 	for _, record in self._rows do
 		record.janitor:Destroy()
@@ -328,16 +304,13 @@ function GiftFlow:_clearRows()
 	table.clear(self._rows)
 end
 
--- Rellena la lista con NPCs hasta LIST_TARGET_ROWS, empezando en el offset fijo
--- de la sesión y dando la vuelta al pool.
+-- Rellena con NPCs hasta LIST_TARGET_ROWS desde el offset fijo de la sesión, dando
+-- la vuelta al pool y saltando identidades de jugadores presentes en el servidor.
 function GiftFlow:_buildEntries(): { UserEntry }
 	local entries = collectServerPlayers()
 
 	local poolSize = #BotNames
 	local missing = LIST_TARGET_ROWS - #entries
-	-- Recorre el pool desde el offset de la sesión saltando las identidades que
-	-- pertenezcan a alguien presente en el servidor, hasta cubrir los huecos o
-	-- agotar el pool.
 	for i = 0, poolSize - 1 do
 		if missing <= 0 then
 			break
@@ -402,7 +375,7 @@ function GiftFlow:_populate(entries: { UserEntry }, animate: boolean?)
 
 		row.Visible = true
 		row.Parent = self._scrolling
-		table.insert(self._rows, { row = row, entry = entry, janitor = rowJanitor })
+		table.insert(self._rows, { row = row, janitor = rowJanitor })
 	end
 
 	local visibleRows: { GuiObject } = {}
@@ -418,10 +391,6 @@ end
 function GiftFlow:_refreshList(animate: boolean?)
 	self:_populate(self:_buildEntries(), animate)
 end
-
--- ────────────────────────────────────────────────────────────
--- ENVÍO
--- ────────────────────────────────────────────────────────────
 
 function GiftFlow:_onGiftPressed(entry: UserEntry, button: GuiObject)
 	popScale(button, ROW_PRESS_TWEEN, ROW_PRESS_FROM)
@@ -442,11 +411,8 @@ function GiftFlow:_onSend()
 	if self._sendPending or self._awaitingPurchase then
 		return
 	end
-	local receiver = self._receiver
-	if not receiver then
-		Notify.warning("Select a player to send the gift to.")
-		return
-	end
+	-- Solo se llega desde _onGiftPressed, que acaba de fijar el receptor.
+	local receiver = self._receiver :: UserEntry
 
 	self._sendPending = true
 	self._pendingToken += 1
@@ -464,10 +430,6 @@ function GiftFlow:_onSend()
 	})
 end
 
--- ────────────────────────────────────────────────────────────
--- APERTURA / CIERRE
--- ────────────────────────────────────────────────────────────
-
 function GiftFlow:openForProduct(product: StoreProductDefinition)
 	self._product = product
 	self._receiver = nil
@@ -477,6 +439,7 @@ function GiftFlow:openForProduct(product: StoreProductDefinition)
 
 	self:_refreshList(true)
 
+	GameSounds.play(GameSounds.Open)
 	self._frame.Visible = true
 	if self._onOpened then
 		self._onOpened()
@@ -484,15 +447,17 @@ function GiftFlow:openForProduct(product: StoreProductDefinition)
 end
 
 function GiftFlow:close()
+	if self._frame.Visible then
+		GameSounds.play(GameSounds.Close)
+	end
 	self._frame.Visible = false
 	if self._onClosed then
 		self._onClosed()
 	end
 end
 
--- Descarte silencioso: lo llama el panel que abre el flujo cuando él mismo se
--- está cerrando. No dispara `onClosed` a propósito — ese callback existe para
--- devolverle el protagonismo al panel, y aquí el panel se va con nosotros.
+-- Descarte silencioso para cuando el panel que abrió el flujo se cierra él mismo:
+-- no dispara `onClosed` a propósito (ese callback le devuelve el protagonismo al panel).
 function GiftFlow:reset()
 	self._frame.Visible = false
 	self._sendPending = false

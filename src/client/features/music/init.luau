@@ -1,56 +1,46 @@
 --!strict
 --[[
-	LobbyMusicFeature  (Client)
-	Reproduce SoundService.LobbyMusic con tres estados:
+	Música del lobby (SoundService.Audio.Music.Lobby) con tres estados:
 	  PLAY     — volumen normal, EQ plano                  (lobby sin paneles)
 	  MUFFLED  — volumen bajo + low-pass agresivo (EQ)     (panel abierto sobre lobby)
 	  STOP     — volumen 0 (sigue sonando en background)   (durante el match)
 
-	El efecto MUFFLED es "tras una pared": solo EqualizerSoundEffect con cut
-	fuerte en HighGain y medio en MidGain. Sin reverb — la canción no se colorea
-	espacialmente, solo se "tapa".
+	MUFFLED es solo EqualizerSoundEffect (cut fuerte en HighGain, medio en MidGain),
+	sin reverb: la canción se "tapa" sin colorearse espacialmente.
 
 	El estado se deriva de MenuController. OJO con el orden de los checks:
-	abrir un panel también llama a menuController:hide() para esconder los
-	containers del menú detrás, así que isHidden=true por sí solo NO implica
-	"en match". El panel se chequea primero.
+	abrir un panel también llama a menuController:hide(), así que isHidden=true
+	por sí solo NO implica "en match". El panel se chequea primero.
 	  hasOpenPanel() == true             → MUFFLED  (panel abierto en lobby)
 	  isHidden() && !hasOpenPanel        → STOP     (en match)
 	  resto                              → PLAY     (lobby idle)
 
-	Si el Sound no existe en SoundService se crea vacío (SoundId=""). Configura
-	el AssetId desde Studio.
+	El Sound lo monta tools/audio/SetupSoundService.luau; si falta se crea vacío
+	(SoundId="") y el AssetId se configura desde Studio.
 ]]
 
-local SoundService = game:GetService("SoundService")
 local TweenService = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Packages = ReplicatedStorage:WaitForChild("Packages")
 local Janitor = require(Packages.janitor) :: any
 
-local SOUND_NAME = "LobbyMusic"
-local BASE_VOLUME = 0.5
-local MUFFLE_VOLUME = 0.3
+local GameSounds = require(script.Parent.Parent.core.ui.GameSounds)
+
+-- El nivel base lo manda la tabla de mezcla (LAYOUT en tools/audio/SetupSoundService.luau);
+-- aquí solo se decide la proporción entre estados.
+local MUFFLE_RATIO = 0.6
+-- Suelo por si la tabla no se ha aplicado nunca en este place (sin él, un Sound
+-- recién creado a Volume 0 dejaría la música muda para siempre).
+local FALLBACK_VOLUME = 0.1
 local FADE_TWEEN_INFO = TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local STATE_TWEEN_INFO = TweenInfo.new(1.0, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
--- "Tras una pera": cut fuerte en agudos, cut medio en mids, graves intactos.
--- La canción pierde brillo y queda como sonando detrás de algo sólido.
 local MUFFLE_HIGH_GAIN = -20
 local MUFFLE_MID_GAIN = -6
 
 local function ensureSound(): Sound
-	local existing = SoundService:FindFirstChild(SOUND_NAME)
-	if existing and existing:IsA("Sound") then
-		return existing
-	end
-	local sound = Instance.new("Sound")
-	sound.Name = SOUND_NAME
-	sound.Looped = true
-	sound.Volume = 0
-	sound.Parent = SoundService
-	return sound
+	return GameSounds.ensure(GameSounds.LobbyMusic)
 end
 
 local function ensureEqualizer(sound: Sound): EqualizerSoundEffect
@@ -65,9 +55,8 @@ local function ensureEqualizer(sound: Sound): EqualizerSoundEffect
 	return eq
 end
 
--- Limpia el ReverbSoundEffect "CaveReverb" que añadía la versión anterior
--- (efecto cueva). Solo se elimina si tiene ese Name exacto, así no tocamos
--- una reverb que el dev haya añadido a mano en Studio.
+-- Borra la reverb "CaveReverb" que añadía una versión anterior. Solo por Name exacto,
+-- para no tocar una reverb añadida a mano en Studio.
 local function removeLegacyCaveReverb(sound: Sound)
 	for _, child in sound:GetChildren() do
 		if child:IsA("ReverbSoundEffect") and child.Name == "CaveReverb" then
@@ -95,11 +84,15 @@ function LobbyMusicFeature.start(menuController: any): any
 
 	local activeTweens: { Tween } = {}
 
-	local function tweenTo(volume: number, highGain: number, midGain: number, info: TweenInfo)
+	local function cancelActiveTweens()
 		for _, tween in activeTweens do
 			tween:Cancel()
 		end
 		table.clear(activeTweens)
+	end
+
+	local function tweenTo(volume: number, highGain: number, midGain: number, info: TweenInfo)
+		cancelActiveTweens()
 
 		local volumeTween = TweenService:Create(sound, info, { Volume = volume })
 		local highTween = TweenService:Create(equalizer, info, { HighGain = highGain })
@@ -114,11 +107,18 @@ function LobbyMusicFeature.start(menuController: any): any
 		midTween:Play()
 	end
 
+	janitor:Add(cancelActiveTweens, true)
+
+	-- Se lee UNA vez al arrancar: a partir de aquí `sound.Volume` es un valor
+	-- vivo que tweeneamos nosotros, así que releerlo daría el estado actual en
+	-- vez del nivel de referencia.
+	local baseVolume = GameSounds.baseVolume(GameSounds.LobbyMusic, FALLBACK_VOLUME)
+	local muffleVolume = baseVolume * MUFFLE_RATIO
+
+	-- Al soltar el feature, devolver el Sound a su nivel autorado: si se queda
+	-- donde lo dejó el último tween, un hot-reload en partida lo capturaría a 0.
 	janitor:Add(function()
-		for _, tween in activeTweens do
-			tween:Cancel()
-		end
-		table.clear(activeTweens)
+		sound.Volume = baseVolume
 	end, true)
 
 	local function getVolumeMultiplier(): number
@@ -131,11 +131,11 @@ function LobbyMusicFeature.start(menuController: any): any
 		local mult = getVolumeMultiplier()
 
 		if hasPanel then
-			tweenTo(MUFFLE_VOLUME * mult, MUFFLE_HIGH_GAIN, MUFFLE_MID_GAIN, STATE_TWEEN_INFO)
+			tweenTo(muffleVolume * mult, MUFFLE_HIGH_GAIN, MUFFLE_MID_GAIN, STATE_TWEEN_INFO)
 		elseif isHidden then
 			tweenTo(0, 0, 0, FADE_TWEEN_INFO)
 		else
-			tweenTo(BASE_VOLUME * mult, 0, 0, STATE_TWEEN_INFO)
+			tweenTo(baseVolume * mult, 0, 0, STATE_TWEEN_INFO)
 		end
 	end
 
@@ -145,14 +145,10 @@ function LobbyMusicFeature.start(menuController: any): any
 		local hasPanel = menuController:hasOpenPanel()
 		local isHidden = menuController:isHidden()
 		if isHidden and not hasPanel then return end
-		-- Cancelar cualquier tween de volumen en vuelo (p. ej. STATE_TWEEN_INFO de
-		-- 1s tras abrir Settings) antes de fijar el valor: si no, el tween seguía
-		-- sobrescribiendo frame a frame y el slider parecía no responder.
-		for _, tween in activeTweens do
-			tween:Cancel()
-		end
-		table.clear(activeTweens)
-		sound.Volume = (if hasPanel then MUFFLE_VOLUME else BASE_VOLUME) * mult
+		-- Cancelar tweens en vuelo antes de fijar el valor: si no, siguen sobrescribiéndolo
+		-- frame a frame y el slider parece no responder.
+		cancelActiveTweens()
+		sound.Volume = (if hasPanel then muffleVolume else baseVolume) * mult
 	end), "Disconnect")
 	applyState()
 

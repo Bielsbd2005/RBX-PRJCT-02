@@ -1,11 +1,6 @@
 --!strict
--- PanelController: patrón reutilizable para abrir/cerrar cualquier panel GUI.
--- El menú compartido queda bajo ownership de MenuController; este controlador
--- solo se suscribe a sus botones y limpia sus conexiones al destruirse.
---
--- Hooks opcionales `onOpen`/`onClose` permiten que cada feature reaccione al
--- ciclo (p. ej. activar blur, sonidos, telemetría) sin acoplar el controlador
--- genérico a esas dependencias.
+-- Abrir/cerrar un panel GUI. El menú compartido es de MenuController; este
+-- controlador solo se suscribe a sus botones y limpia sus conexiones al destruirse.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -14,12 +9,16 @@ local Packages = ReplicatedStorage:WaitForChild("Packages")
 local Janitor = require(Packages.janitor) :: any
 
 local GuiAnimator = require(script.Parent.animators.GuiAnimator)
+local GameSounds  = require(script.Parent.GameSounds)
 local MenuHover    = require(script.Parent.MenuHover)
 
 export type PanelControllerOptions = {
 	onOpen: (() -> ())?,
 	onClose: (() -> ())?,
 	animationMode: GuiAnimator.AnimatorMode?,
+	-- Claves de GameSounds; por defecto `Open` / `Close`.
+	openSound: string?,
+	closeSound: string?,
 }
 
 export type PanelController = {
@@ -27,18 +26,14 @@ export type PanelController = {
 	_animator: any,
 	_menuController: any,
 	_isOpen: boolean,
-	open:  (self: PanelController) -> (),
-	close: (self: PanelController) -> (),
+	open:  (self: PanelController, silent: boolean?) -> (),
+	close: (self: PanelController, silent: boolean?) -> (),
 	Destroy: (self: PanelController) -> (),
 }
 
 local PanelController = {}
 PanelController.__index = PanelController
 
--- `menuBtn` y `closeBtn` son opcionales: durante la migración de la GUI el Menu
--- puede estar vacío y un panel puede aún no tener su botón de cerrar. En ambos
--- casos el panel se configura igual —carga datos, anima— y solo se omite el
--- binding ausente.
 function PanelController.new(
 	menuController: any,
 	container: GuiObject,
@@ -49,14 +44,15 @@ function PanelController.new(
 	local self = setmetatable({}, PanelController) :: any
 
 	self._janitor = Janitor.new()
-	self._animator = GuiAnimator.new(nil, container, {
+	self._animator = GuiAnimator.new(container, {
 		mode = if options then options.animationMode else nil,
 	})
 	self._menuController = menuController
-	self._container = container
 	self._isOpen = container.Visible
 	self._onOpen = options and options.onOpen
 	self._onClose = options and options.onClose
+	self._openSound = (options and options.openSound) or GameSounds.Open
+	self._closeSound = (options and options.closeSound) or GameSounds.Close
 
 	menuController:registerPanel(container)
 	self._janitor:Add(function()
@@ -72,9 +68,8 @@ function PanelController.new(
 	end
 
 	if closeBtn then
-		local resetClose = MenuHover.bindButton(closeBtn, self._janitor)
+		MenuHover.bindButton(closeBtn, self._janitor)
 		self._janitor:Add(closeBtn.MouseButton1Click:Connect(function()
-			resetClose()
 			self:close()
 		end), "Disconnect")
 	end
@@ -82,12 +77,17 @@ function PanelController.new(
 	return self
 end
 
-function PanelController:open()
+-- `silent`: sin sonido. Para transiciones entre paneles hermanos (Settings ⇄ Credits)
+-- y aperturas programáticas, donde el usuario no ha abierto nada.
+function PanelController:open(silent: boolean?)
 	if self._isOpen then
 		return
 	end
 
 	self._isOpen = true
+	if not silent then
+		GameSounds.play(self._openSound)
+	end
 	self._animator:open()
 	self._menuController:hide()
 
@@ -96,16 +96,18 @@ function PanelController:open()
 	end
 end
 
-function PanelController:close()
+function PanelController:close(silent: boolean?)
 	if not self._isOpen then
 		return
 	end
 
 	self._isOpen = false
+	if not silent then
+		GameSounds.play(self._closeSound)
+	end
 
-	-- El menú reaparece al terminar la animación de cierre (no de golpe, que
-	-- taparía el tween). Y solo si no se abrió otro panel en medio — así el salto
-	-- de un panel a otro (Settings → Credits) no hace parpadear el menú.
+	-- El menú reaparece solo si no se abrió otro panel en medio, para que el salto
+	-- entre paneles (Settings → Credits) no haga parpadear el menú.
 	self._animator:close(function()
 		if not self._menuController:hasOpenPanel() then
 			self._menuController:show()
@@ -118,9 +120,8 @@ function PanelController:close()
 end
 
 function PanelController:Destroy()
-	-- Si el panel queda abierto al destruir, dispara onClose para liberar
-	-- recursos externos (blur, sonidos, telemetría) — sin esto, el blur
-	-- queda activo si el feature se hot-reloadea con el panel abierto.
+	-- Si se destruye abierto (hot reload), dispara onClose para liberar recursos
+	-- externos como el blur.
 	if self._isOpen and self._onClose then
 		pcall(self._onClose)
 	end

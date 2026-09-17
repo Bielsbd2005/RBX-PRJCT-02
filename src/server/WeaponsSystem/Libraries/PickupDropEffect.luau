@@ -1,15 +1,12 @@
 --!nonstrict
 --[[
-	PickupDropEffect.luau (cliente)
 	Spawnea un orbe de Health desde el suelo bajo la victima cada vez que el
 	jugador local mata a alguien. El orbe orbita en su sitio durante unos
 	segundos; si el jugador se acerca se imanta hacia el. Si nadie lo recoge
 	se desvanece con un tween de tamano.
 
-	W4-style: bucle único compartido (Heartbeat) para TODOS los pickups
-	activos. Antes cada pickup creaba su propio RunService.RenderStepped:Connect
-	+ closure pesada; en una kill streak coexistían N conexiones simultáneas
-	hasta que cada pickup expirara (5s+). Mismo patrón que BonusEffect.
+	Un único bucle Heartbeat compartido por todos los pickups activos (mismo
+	patrón que BonusEffect).
 ]]
 
 local RunService = game:GetService("RunService")
@@ -19,33 +16,61 @@ local Debris = game:GetService("Debris")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Templates = ReplicatedStorage:WaitForChild("Templates")
 local Network = require(Shared:WaitForChild("networking"):WaitForChild("Network"))
 local AssetIds = require(Shared:WaitForChild("constants"):WaitForChild("AssetIds"))
+local AudioRuntime = require(Shared:WaitForChild("utils"):WaitForChild("AudioRuntime"))
 
 local SoundService = game:GetService("SoundService")
 
 local PickupDropEffect = {}
 
-local PICKUP_SOUND_ID = AssetIds.Sounds.Pickup
+-- Sonido de recogida: SoundService.Audio.Gameplay.Health (autorado en Studio,
+-- ver docs/AUDIO.md); si falta, AssetIds.Sounds.Pickup. Los clones del pool van a
+-- SoundService.Runtime, nunca al árbol autorado.
+local PICKUP_SOUND_NAME = "Health"
+local PICKUP_SOUND_FALLBACK_ID = AssetIds.Sounds.Pickup
+local _warnedMissingPickupSound = false
 
 local _pickupSoundPool: { Sound } = {}
 local _PICKUP_SOUND_POOL_SIZE = 2
 
+local function _resolvePickupSoundTemplate(): Sound?
+	local audio = SoundService:FindFirstChild("Audio")
+	local gameplay = audio and audio:FindFirstChild("Gameplay")
+	local sound = AudioRuntime.findSound(gameplay, PICKUP_SOUND_NAME)
+	if sound and sound.SoundId ~= "" then
+		return sound
+	end
+	return nil
+end
+
+local function _newPickupSound(): Sound
+	local template = _resolvePickupSoundTemplate()
+	if template then
+		return AudioRuntime.clone(template)
+	end
+	if not _warnedMissingPickupSound then
+		_warnedMissingPickupSound = true
+		warn(`PickupDropEffect: falta SoundService.Audio.Gameplay.{PICKUP_SOUND_NAME}; usando AssetIds.Sounds.Pickup`)
+	end
+	local s = Instance.new("Sound")
+	s.SoundId = PICKUP_SOUND_FALLBACK_ID
+	s.Volume = 0.25
+	s.Parent = AudioRuntime.folder()
+	return s
+end
+
 local function _playPickupSound()
 	for _, s in _pickupSoundPool do
 		if not s.IsPlaying then
-			s.PlaybackSpeed = math.random(95, 135) / 100
 			s:Play()
 			return
 		end
 	end
 
 	if #_pickupSoundPool < _PICKUP_SOUND_POOL_SIZE then
-		local s = Instance.new("Sound")
-		s.SoundId = PICKUP_SOUND_ID
-		s.Volume = 0.25
-		s.PlaybackSpeed = math.random(95, 135) / 100
-		s.Parent = SoundService
+		local s = _newPickupSound()
 		table.insert(_pickupSoundPool, s)
 		s:Play()
 	end
@@ -94,9 +119,9 @@ local activePickups: { PickupEntry } = {}
 local pickupLoopConn: RBXScriptConnection? = nil
 
 local function _resolveTemplate(): Instance?
-	local template = ReplicatedStorage:FindFirstChild(TEMPLATE_NAME)
+	local template = Templates:FindFirstChild(TEMPLATE_NAME)
 	if not template then
-		warn("PickupDropEffect: template missing in ReplicatedStorage: " .. TEMPLATE_NAME)
+		warn("PickupDropEffect: template missing in ReplicatedStorage.Templates: " .. TEMPLATE_NAME)
 	end
 	return template
 end
@@ -198,10 +223,8 @@ local function _settleAndStartFloat(entry: PickupEntry)
 	_setAnchored(entry.item, true, false)
 	local landedPivot = _getPivotPosition(entry.item) or entry.restingPos
 
-	-- restingPos = posicion fisica al aterrizar (sirve de inicio del rise).
-	-- floatAnchorPos = centro de la orbita, elevado lo suficiente para que la
-	-- oscilacion mas baja quede claramente sobre el suelo. El rise interpola
-	-- de uno a otro suavemente, sin saltos.
+	-- restingPos = posicion al aterrizar (inicio del rise). floatAnchorPos = centro de
+	-- la orbita, elevado para que la oscilacion mas baja quede sobre el suelo.
 	local lift = FLOAT_GROUND_OFFSET + 1.4
 	entry.restingPos = landedPivot
 	entry.floatAnchorPos = landedPivot + Vector3.new(0, lift + FLOAT_AMPLITUDE, 0)
@@ -330,8 +353,7 @@ local function _pickupLoopTick(dt: number)
 			i += 1
 		end
 	end
-	-- Autodesconexión en idle (mismo patrón que el bucle global de proyectiles
-	-- de BulletWeapon): _ensurePickupLoop reconecta en el próximo spawn.
+	-- Autodesconexión en idle; _ensurePickupLoop reconecta en el próximo spawn.
 	if #activePickups == 0 and pickupLoopConn then
 		pickupLoopConn:Disconnect()
 		pickupLoopConn = nil
@@ -366,8 +388,6 @@ local function _spawnHealth(victimPos: Vector3, folder: Folder, character: Model
 	local baseScale = if item:IsA("Model") then item:GetScale() else 1
 	local primary = _resolvePrimary(item)
 
-	-- Lanzar con velocidad horizontal aleatoria + impulso vertical para que
-	-- aterrice unos studs alejado del cuerpo en vez de caer en el sitio.
 	if primary then
 		local angle = math.random() * math.pi * 2
 		primary.AssemblyLinearVelocity = Vector3.new(
@@ -414,9 +434,6 @@ function PickupDropEffect.Cleanup()
 			end
 		end
 	end
-	-- El loop se queda conectado (idle si activePickups está vacío) — el
-	-- coste de un Heartbeat:Connect ocioso es negligible y evita el churn
-	-- de connect/disconnect entre kills. Mismo trade-off que BonusEffect.
 end
 
 function PickupDropEffect.Play(victimPos: Vector3?)

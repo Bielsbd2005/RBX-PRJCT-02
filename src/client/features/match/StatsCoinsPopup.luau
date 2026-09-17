@@ -1,69 +1,38 @@
 --!strict
 --[[
-	StatsCoinsPopup.luau
-	Popup de ganancias in-match. Cada vez que el jugador gana cash (kill,
-	headshot, asistencia) el frame `MatchStats.Stats` entra deslizando
-	desde la izquierda, escupe monedas desde `Stats.CoinsSpawn` hacia
-	`Stats.CoinsFrame.Value` y va sumando la ganancia al total conforme cada
-	moneda aterriza. Tras un beat sin ganancias nuevas se va por la izquierda.
+	Popup de ganancias de cash en partida: `MatchStats.Stats` entra por la
+	izquierda, lanza monedas desde `Stats.CoinsSpawn` hacia `Stats.CoinsFrame.Value`
+	y suma al total según aterrizan; sale tras HOLD_SECONDS sin ganancias.
 
-	Vive en su PROPIO ScreenGui (`StarterGui.MatchStats`), no en el del HUD: lo
-	enciende y apaga MatchHud:setEnabled junto al resto de la partida. Estructura
-	esperada (Stats cuelga de la raíz del ScreenGui; se sigue aceptando dentro de
-	un Container por si el asset viejo lo trae así):
-		Stats.CoinsFrame.Value   TextLabel con el cash total
-		Stats.CoinsSpawn         ImageLabel: punto de salida Y sprite de las
-		                         monedas (se clona por moneda). Se oculta al
-		                         resolverlo, igual que los `Template` de las
-		                         fichas de jugador: solo es plantilla + origen.
-
-	El frame arranca OCULTO y solo se ve mientras hay ganancias: entra al ganar
-	cash y vuelve a esconderse tras el hold. Las monedas se clonan bajo el PADRE
-	de Stats (no dentro), así el ClipsDescendants del frame no las recorta y
-	quedan por encima vía ZIndex.
-
-	API:
-		StatsCoinsPopup.new(matchStatsGui: ScreenGui?)
-		:setCash(total: number)             -- sincroniza el label sin animar
-		:addCash(delta: number, total: number)
-		:addCashFrom(delta, total, spawnNode) -- monedas desde OTRO nodo (p. ej.
-		                                      -- Maestry.CoinsSpawn al completar un
-		                                      -- desafío); devuelve la duración
-		:hideImmediate()
-		:destroy()
+	Requisito de Studio: StarterGui.MatchStats (ScreenGui propio, lo enciende
+	MatchHud:setEnabled) > Stats (también vale dentro de un Container) >
+	CoinsFrame.Value (TextLabel) y CoinsSpawn (ImageLabel, origen y sprite; se oculta).
+	Las monedas se clonan en el padre de Stats para que ClipsDescendants no las recorte.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 
 local UIUtils = require(script.Parent.Parent.Parent.core.ui.UIUtils)
+local GameSounds = require(script.Parent.Parent.Parent.core.ui.GameSounds)
+local Haptics = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("utils"):WaitForChild("Haptics"))
 local Janitor = require(ReplicatedStorage:WaitForChild("Packages").janitor) :: any
 
--- ── Slide del frame ──────────────────────────────────────────
 local SLIDE_IN_TWEEN_INFO = TweenInfo.new(0.32, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 local SLIDE_OUT_TWEEN_INFO = TweenInfo.new(0.28, Enum.EasingStyle.Quart, Enum.EasingDirection.In)
--- Beat que aguanta en pantalla tras la ÚLTIMA ganancia: en un multi-kill las
--- ganancias encadenan y el frame se queda sin re-entrar (ver _hideAt).
+-- Contado desde la última ganancia: en un multi-kill el frame no re-entra.
 local HOLD_SECONDS = 2.2
 local OFFSCREEN_MARGIN_PX = 12
--- El HUD se construye antes de que Stats haya replicado del todo, así que
--- reintentamos resolverlo un rato: hasta que no se resuelve no podemos ocultarlo,
--- y sin kills el frame no debe verse.
+-- Stats puede no haber replicado al construir el HUD, y hasta resolverlo no se
+-- puede ocultar.
 local PRIME_RETRY_SECONDS = 0.25
 local PRIME_TIMEOUT_SECONDS = 10
 
--- ── Monedas ──────────────────────────────────────────────────
--- Una moneda por cada CASH_PER_COIN de la ganancia (kill = 10, headshot = +5,
--- asistencia = 5 → entre 2 y 3 monedas en el caso típico), acotado para que un
--- premio gordo no llene la pantalla de clones.
 local CASH_PER_COIN = 5
 local COIN_COUNT_MIN = 2
 local COIN_COUNT_MAX = 10
 local COIN_STAGGER_SECONDS = 0.05
 local COIN_ZINDEX_OFFSET = 10
--- Coreografía de cada moneda: sale con un "pop" hacia un punto aleatorio
--- alrededor del spawn (creciendo de COIN_SPAWN_SCALE a su tamaño real) y desde
--- ahí acelera hacia el Value, encogiendo al entrar.
 local COIN_BURST_TWEEN_INFO = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local COIN_FLY_TWEEN_INFO = TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 local COIN_BURST_RADIUS_MIN = 0.6 -- × lado de la moneda
@@ -72,13 +41,11 @@ local COIN_SPAWN_SCALE = 0.35
 local COIN_LAND_SCALE = 0.55
 local COIN_SPIN_MAX = 50 -- grados
 
--- Punch del label al absorber cada moneda (reverses = ida y vuelta).
 local VALUE_POP_TWEEN_INFO = TweenInfo.new(0.09, Enum.EasingStyle.Quad, Enum.EasingDirection.Out, 0, true)
 local VALUE_POP_SCALE = 1.16
 
--- `layer` es el padre de Stats: el propio ScreenGui MatchStats en el layout
--- actual, o un Frame si el asset lo trae dentro de un Container. Ahí es donde se
--- clonan las monedas, así que la geometría tiene que funcionar con los dos casos.
+-- `layer` (padre de Stats, donde se clonan las monedas) puede ser el ScreenGui o
+-- un Frame Container: la geometría debe funcionar en ambos casos.
 type PopupRefs = {
 	frame: GuiObject,
 	layer: Instance,
@@ -86,12 +53,10 @@ type PopupRefs = {
 	spawn: ImageLabel,
 }
 
--- Centro absoluto de un nodo, en píxeles de pantalla.
 local function _absoluteCenter(node: GuiObject): Vector2
 	return node.AbsolutePosition + (node.AbsoluteSize / 2)
 end
 
--- Tamaño del espacio de coordenadas de `layer` (GuiObject o ScreenGui).
 local function _layerSize(layer: Instance): Vector2
 	if layer:IsA("GuiObject") then
 		return (layer :: GuiObject).AbsoluteSize
@@ -102,9 +67,8 @@ local function _layerSize(layer: Instance): Vector2
 	return Vector2.zero
 end
 
--- Origen absoluto (esquina superior izquierda) de `layer`. Un ScreenGui no expone
--- AbsolutePosition y además puede estar desplazado por el inset de la topbar, así
--- que lo deducimos de un hijo conocido: absoluta del hijo − su posición local.
+-- Un ScreenGui no expone AbsolutePosition y puede estar desplazado por el inset
+-- de la topbar: se deduce de un hijo conocido.
 local function _layerOrigin(layer: Instance, child: GuiObject): Vector2
 	if layer:IsA("GuiObject") then
 		return (layer :: GuiObject).AbsolutePosition
@@ -116,34 +80,26 @@ local function _layerOrigin(layer: Instance, child: GuiObject): Vector2
 	return child.AbsolutePosition - Vector2.new(localX, localY)
 end
 
--- Posición (en offsets) que deja el centro de un hijo del layer sobre `center`.
 -- Asume AnchorPoint 0.5,0.5 en el hijo.
 local function _localOffset(origin: Vector2, center: Vector2): UDim2
 	return UDim2.fromOffset(math.round(center.X - origin.X), math.round(center.Y - origin.Y))
 end
 
--- Posición del frame justo fuera de la pantalla por un lado u otro, respetando el
--- AnchorPoint y el offset originales: el borde que mira a la pantalla queda a
--- OFFSCREEN_MARGIN_PX del borde. Entra y sale por la izquierda.
-local function _offscreenPosition(frame: GuiObject, original: UDim2, side: "right" | "left"): UDim2
+local function _offscreenPosition(frame: GuiObject, original: UDim2): UDim2
 	local parent = frame.Parent
 	local parentWidth = if parent then _layerSize(parent).X else 0
 	if parentWidth <= 0 then
-		local fallbackScale = if side == "right" then 1.6 else -0.6
-		return UDim2.new(fallbackScale, original.X.Offset, original.Y.Scale, original.Y.Offset)
+		return UDim2.new(-0.6, original.X.Offset, original.Y.Scale, original.Y.Offset)
 	end
 
 	local width = frame.AbsoluteSize.X
 	local anchorX = frame.AnchorPoint.X
-	local scale = if side == "right"
-		then (parentWidth + OFFSCREEN_MARGIN_PX + (width * anchorX) - original.X.Offset) / parentWidth
-		else (-OFFSCREEN_MARGIN_PX - (width * (1 - anchorX)) - original.X.Offset) / parentWidth
+	local scale = (-OFFSCREEN_MARGIN_PX - (width * (1 - anchorX)) - original.X.Offset) / parentWidth
 	return UDim2.new(scale, original.X.Offset, original.Y.Scale, original.Y.Offset)
 end
 
--- ZIndex del ancestro de `node` que cuelga directo de `layer` (o el del propio
--- nodo si no lo encuentra). Las monedas se clonan en el layer, así que necesitan
--- superar al frame desde el que salen, no solo al de Stats.
+-- Las monedas se clonan en el layer y deben superar al frame del que salen, no
+-- solo a Stats.
 local function _topLevelZIndex(layer: Instance, node: GuiObject): number
 	local current: Instance? = node
 	while current do
@@ -156,7 +112,6 @@ local function _topLevelZIndex(layer: Instance, node: GuiObject): number
 	return node.ZIndex
 end
 
--- Devuelve un UIScale hijo del label (creándolo si no existe).
 local function _ensureValueScale(label: TextLabel): UIScale
 	local scaleNode = label:FindFirstChildOfClass("UIScale")
 	if scaleNode then
@@ -168,8 +123,6 @@ local function _ensureValueScale(label: TextLabel): UIScale
 	created.Parent = label
 	return created
 end
-
--- ── Módulo ───────────────────────────────────────────────────
 
 local StatsCoinsPopup = {}
 StatsCoinsPopup.__index = StatsCoinsPopup
@@ -184,8 +137,7 @@ function StatsCoinsPopup.new(matchStatsGui: ScreenGui?): any
 	-- "hidden" | "sliding-in" | "shown" | "sliding-out"
 	self._state = "hidden"
 	self._slideTween = nil :: Tween?
-	-- Cash: `_displayed` es lo que pone el label ahora mismo y `_target` el
-	-- total al que llegará cuando aterricen las monedas en vuelo.
+	-- `_displayedCash`: lo que muestra el label; `_targetCash`: al aterrizar todo.
 	self._displayedCash = 0
 	self._targetCash = 0
 	self._pendingCoins = 0
@@ -195,9 +147,7 @@ function StatsCoinsPopup.new(matchStatsGui: ScreenGui?): any
 	return self
 end
 
--- Resolución perezosa: el frame Stats puede no haber replicado todavía cuando se
--- construye el HUD, y si falta (place antiguo) el popup se degrada a no-op en vez
--- de bloquear el arranque con un WaitForChild.
+-- Perezoso y sin WaitForChild: si Stats falta, el popup es no-op sin bloquear el arranque.
 function StatsCoinsPopup:_resolveRefs(): PopupRefs?
 	if self._refs then
 		return self._refs
@@ -228,7 +178,6 @@ function StatsCoinsPopup:_resolveRefs(): PopupRefs?
 		return nil
 	end
 
-	-- CoinsSpawn solo marca el origen y presta su sprite a los clones.
 	;(spawnNode :: ImageLabel).Visible = false
 
 	local refs: PopupRefs = {
@@ -239,15 +188,12 @@ function StatsCoinsPopup:_resolveRefs(): PopupRefs?
 	}
 	self._refs = refs
 	self._originalPosition = frame.Position
-	-- Sin ganancias no hay popup: nace oculto y esperando fuera por la izquierda.
 	frame.Visible = false
-	frame.Position = _offscreenPosition(frame, self._originalPosition, "left")
+	frame.Position = _offscreenPosition(frame, self._originalPosition)
 	self:_renderValue()
 	return refs
 end
 
--- Resuelve cuanto antes (reintentando mientras Stats replica) para dejar el frame
--- oculto sin esperar a la primera lectura de cash.
 function StatsCoinsPopup:_primeHidden()
 	if self:_resolveRefs() then
 		return
@@ -270,9 +216,6 @@ function StatsCoinsPopup:_renderValue()
 	end
 end
 
--- ── API pública ──────────────────────────────────────────────
-
---- Sincroniza el total sin animar (arranque de partida, o bajadas de cash).
 --- Con monedas en vuelo solo mueve el objetivo: el label lo alcanzan ellas.
 function StatsCoinsPopup:setCash(total: number)
 	local cash = math.max(0, math.floor(if type(total) == "number" then total else 0))
@@ -285,21 +228,16 @@ function StatsCoinsPopup:setCash(total: number)
 	self:_renderValue()
 end
 
---- Ganancia de `delta` que deja el total en `total`: entra el frame (si no está),
---- salen las monedas desde `Stats.CoinsSpawn` y el label sube según aterrizan.
 function StatsCoinsPopup:addCash(delta: number, total: number): number
 	return self:_deliver(delta, total, nil)
 end
 
---- Igual que addCash pero las monedas salen de OTRO nodo de la interfaz (su
---- imagen es la que se clona), p. ej. `Maestry.CoinsSpawn` cuando se completa un
---- desafío diario. Devuelve cuánto dura la animación, para que el caller pueda
---- esperar antes de retirar su propio popup.
+--- Las monedas salen de (y clonan) otro nodo. Devuelve la duración de la animación
+--- para que el caller espere antes de retirar su propio popup.
 function StatsCoinsPopup:addCashFrom(delta: number, total: number, spawnNode: ImageLabel?): number
 	return self:_deliver(delta, total, spawnNode)
 end
 
--- Duración aproximada de una tanda de monedas (para el valor devuelto arriba).
 local function _flightDuration(count: number, needsSlideIn: boolean): number
 	local slide = if needsSlideIn then SLIDE_IN_TWEEN_INFO.Time else 0
 	return slide
@@ -326,8 +264,7 @@ function StatsCoinsPopup:_deliver(delta: number, total: number, spawnNode: Image
 	local needsSlideIn = self._state ~= "shown"
 	self._hideAt = os.clock() + HOLD_SECONDS
 	local count = math.clamp(math.floor(gained / CASH_PER_COIN + 0.5), COIN_COUNT_MIN, COIN_COUNT_MAX)
-	-- Las monedas cuentan como pendientes desde YA (no cuando se lanzan): así el
-	-- watch de salida no puede cerrar el frame mientras esperamos el slide-in.
+	-- Pendientes desde ya, no al lanzarse: si no, el watch cerraría el frame durante el slide-in.
 	self._pendingCoins += count
 	self:_startHideWatch()
 
@@ -342,8 +279,6 @@ function StatsCoinsPopup:_deliver(delta: number, total: number, spawnNode: Image
 	return _flightDuration(count, needsSlideIn)
 end
 
---- Corta cualquier animación y deja el frame fuera de pantalla (fin de partida,
---- HUD deshabilitado). El total queda sincronizado en el label.
 function StatsCoinsPopup:hideImmediate()
 	self._janitor:Cleanup()
 	self._pendingCoins = 0
@@ -379,11 +314,7 @@ function StatsCoinsPopup:destroy()
 	self._refs = nil
 end
 
--- ── Slide del frame ──────────────────────────────────────────
-
--- Bloquea hasta que el frame está dentro (entra por la IZQUIERDA). Si ya hay un
--- slide-in en curso (dos ganancias seguidas) espera a ese en vez de reiniciarlo;
--- si estaba saliendo, cancela la salida y vuelve a entrar desde donde esté.
+-- Bloquea hasta que el frame está dentro.
 function StatsCoinsPopup:_slideIn()
 	local refs = self._refs
 	local original = self._originalPosition
@@ -407,7 +338,7 @@ function StatsCoinsPopup:_slideIn()
 			outTween:Cancel()
 		end
 	elseif self._state == "hidden" then
-		refs.frame.Position = _offscreenPosition(refs.frame, original, "left")
+		refs.frame.Position = _offscreenPosition(refs.frame, original)
 	end
 
 	self._state = "sliding-in"
@@ -432,14 +363,13 @@ function StatsCoinsPopup:_slideOut()
 
 	self._state = "sliding-out"
 	local tween = TweenService:Create(refs.frame, SLIDE_OUT_TWEEN_INFO, {
-		Position = _offscreenPosition(refs.frame, original, "left"),
+		Position = _offscreenPosition(refs.frame, original),
 	})
 	self._slideTween = tween
 	tween:Play()
 	tween.Completed:Wait()
 
 	if self._state ~= "sliding-out" then
-		-- Entró una ganancia nueva y _slideIn se apropió del frame.
 		return
 	end
 	self._state = "hidden"
@@ -448,8 +378,6 @@ function StatsCoinsPopup:_slideOut()
 	refs.frame.Position = original
 end
 
--- Un único bucle vivo mientras el frame está en pantalla: sale por la izquierda
--- cuando pasa el hold desde la última ganancia y no queda ninguna moneda en vuelo.
 function StatsCoinsPopup:_startHideWatch()
 	if self._hideWatchActive or self._destroyed then
 		return
@@ -471,22 +399,23 @@ function StatsCoinsPopup:_startHideWatch()
 	end)
 end
 
--- ── Monedas ──────────────────────────────────────────────────
-
--- Reparto entero exacto de `total` entre `count` monedas (las diferencias por
--- redondeo se absorben moneda a moneda, no al final).
+-- Reparto entero exacto: el redondeo se absorbe moneda a moneda, no al final.
 local function _coinShare(total: number, count: number, index: number): number
 	local upTo = math.floor((total * index / count) + 0.5)
 	local upToPrevious = math.floor((total * (index - 1) / count) + 0.5)
 	return upTo - upToPrevious
 end
 
-function StatsCoinsPopup:_onCoinLanded(share: number)
+-- `landed` false = camino de fallback: solo cuadra el contador, sin sonido.
+function StatsCoinsPopup:_onCoinLanded(share: number, landed: boolean?)
+	if landed then
+		GameSounds.play(GameSounds.Coin)
+		Haptics.play("CoinLand")
+	end
 	self._pendingCoins = math.max(0, self._pendingCoins - 1)
 	self._displayedCash = math.min(self._targetCash, self._displayedCash + share)
 	if self._pendingCoins <= 0 then
-		-- Última moneda: cuadra el label con el total real por si el delta y las
-		-- monedas no sumaban exactamente (p. ej. otra fuente de cash a la vez).
+		-- Cuadra con el total real por si otra fuente de cash cambió el total a la vez.
 		self._displayedCash = self._targetCash
 	end
 	self:_renderValue()
@@ -500,15 +429,6 @@ function StatsCoinsPopup:_onCoinLanded(share: number)
 end
 
 function StatsCoinsPopup:_spawnCoins(count: number, gained: number, template: ImageLabel)
-	local refs = self._refs
-	if not refs then
-		-- Sin frame no hay monedas que lanzar: saldamos los pendientes para que el
-		-- watch de salida no se quede esperando a un vuelo que nunca ocurre.
-		self._pendingCoins = math.max(0, self._pendingCoins - count)
-		self._displayedCash = self._targetCash
-		return
-	end
-
 	for index = 1, count do
 		local share = _coinShare(gained, count, index)
 		task.spawn(function()
@@ -523,10 +443,6 @@ function StatsCoinsPopup:_spawnCoins(count: number, gained: number, template: Im
 	end
 end
 
--- Clona el nodo de spawn (el propio CoinsSpawn de Stats, o el que pase el caller),
--- lo lanza en dos tiempos (pop + vuelo al Value) y suma su parte al aterrizar.
--- Cada moneda es un clon suelto trackeado en el janitor, así un destroy() a mitad
--- de vuelo no deja imágenes colgando en el HUD.
 function StatsCoinsPopup:_launchCoin(share: number, template: ImageLabel)
 	local refs = self._refs
 	if not refs or self._destroyed or not template.Parent then
@@ -544,7 +460,6 @@ function StatsCoinsPopup:_launchCoin(share: number, template: ImageLabel)
 	coin.Name = "CoinFx"
 	coin.AnchorPoint = Vector2.new(0.5, 0.5)
 	coin.Rotation = 0
-	-- Por encima tanto del frame de Stats como del popup del que salen.
 	coin.ZIndex = math.max(refs.frame.ZIndex, _topLevelZIndex(layer, template)) + COIN_ZINDEX_OFFSET
 	coin.Size = UDim2.fromOffset(
 		math.round(coinSize.X * COIN_SPAWN_SCALE),
@@ -566,9 +481,8 @@ function StatsCoinsPopup:_launchCoin(share: number, template: ImageLabel)
 		Rotation = ((math.random() * 2) - 1) * COIN_SPIN_MAX,
 	})
 	burst:Play()
-	-- Esperamos por duración y no por `Completed`: un hideImmediate/destroy a
-	-- mitad de vuelo destruye el clon, y ahí la señal del tween ya no es fiable
-	-- (dejaría el hilo colgado para siempre).
+	-- Espera por duración, no por Completed: si el clon se destruye a mitad de
+	-- vuelo la señal no es fiable y el hilo quedaría colgado.
 	task.wait(COIN_BURST_TWEEN_INFO.Time)
 
 	if self._destroyed or coin.Parent == nil then
@@ -593,7 +507,7 @@ function StatsCoinsPopup:_launchCoin(share: number, template: ImageLabel)
 	if coin.Parent ~= nil then
 		self._janitor:Remove(coin)
 	end
-	self:_onCoinLanded(share)
+	self:_onCoinLanded(share, true)
 end
 
 return StatsCoinsPopup
