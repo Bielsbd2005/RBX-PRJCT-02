@@ -1,8 +1,6 @@
 --!strict
 --[[
-	NotificationController.luau (Client UI Library)
-	Notificaciones de transacción apilables. Frames pre-hechos en la GUI usados
-	como plantillas:
+	Notificaciones de transacción apilables. Frames de la GUI usados como plantillas:
 
 		UserInterface.Notifications
 		  Success
@@ -10,34 +8,27 @@
 		  Warning
 		    Message   ← TextLabel
 
-	Llamable desde cualquier módulo cliente sin instanciar nada:
+	Uso sin instanciar nada:
 
 		local Notify = require(Client.core.ui.NotificationController)
 		Notify.success("Code redeemed. +500 Cash")
 		Notify.warning("You already redeemed that code.")
 
-	Comportamiento:
-	  • Cada llamada clona su plantilla → un toast independiente.
-	  • Se apilan hasta MAX_VISIBLE (2) en un contenedor "Stack" con UIListLayout.
-	    Sin cola: si llegan más, el más viejo se retira al instante para dejar sitio.
-	  • Entrada: pop de tamaño con rebote (UIScale 0→1, Back/Out) + fade-in.
-	  • Salida: shrink (Back/In) + fade-out.
-
-	El fade respeta las transparencias originales del frame (no fuerza un fondo
-	opaco), usando GroupTransparency si es CanvasGroup. Las plantillas quedan
-	ocultas y fuera del Stack para no estorbar el layout; el Stack se crea una vez
-	y se reutiliza (reload-safe).
-
-	El Stack lleva además un UIScale "DeviceScale" proporcional al viewport (ver
-	`computeDeviceScale`), para que el toast tenga un tamaño razonable tanto en un
-	teléfono como en un monitor grande. Se recalcula al rotar el dispositivo o
-	redimensionar la ventana.
+	Cada llamada clona su plantilla en un contenedor "Stack" (UIListLayout), hasta
+	MAX_VISIBLE; sin cola: si llegan más, el más viejo se retira al instante.
+	El fade respeta las transparencias originales del frame (GroupTransparency si es
+	CanvasGroup). Las plantillas quedan ocultas y fuera del Stack; el Stack se
+	reutiliza si ya existe (reload-safe).
 ]]
 
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
+
+local GameSounds = require(script.Parent.GameSounds)
+local Haptics = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("utils"):WaitForChild("Haptics"))
 
 local SHOW_SCALE = TweenInfo.new(0.36, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 local SHOW_FADE = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
@@ -47,22 +38,13 @@ local HOLD_TIME = 2.5
 local MAX_VISIBLE = 2
 local STACK_PADDING = 6
 
--- ── Escalado por dispositivo ─────────────────────────────────
--- Las plantillas del asset están medidas en offsets sobre un viewport de diseño
--- de 1920x1080. Tal cual, en un teléfono (viewport ~900x420) el toast se come un
--- tercio de la pantalla, y en un monitor grande queda diminuto. El Stack lleva
--- por eso su propio UIScale, proporcional al viewport.
---
--- Va en el Stack y no en cada toast porque el UIScale del toast ya lo usa la
--- animación de entrada/salida (0 → 1 → 0): Roblox solo aplica un UIScale por
--- objeto, pero el del ancestro y el del descendiente se multiplican, así que
--- ambos conviven sin pisarse. Al colgar del Stack también escala el padding del
--- UIListLayout, y las plantillas (que viven fuera del Stack) se quedan intactas.
+-- Las plantillas están medidas en offsets sobre un viewport de diseño 1920x1080, así que
+-- el Stack lleva un UIScale "DeviceScale" proporcional al viewport. Va en el Stack y no en
+-- cada toast porque el UIScale del toast ya lo usa la animación de entrada/salida (Roblox
+-- aplica un UIScale por objeto, pero los de ancestro y descendiente se multiplican).
 local REFERENCE_VIEWPORT = Vector2.new(1920, 1080)
--- Mezcla entre tamaño fijo en píxeles (0) y totalmente proporcional al viewport
--- (1). Seguir el viewport al 100% deja el texto ilegible en un teléfono, así que
--- solo aplicamos parte de la diferencia. Cuanto más alto, más encogen las
--- pantallas pequeñas (el escritorio a 1080p se queda en 1 sea cual sea el peso).
+-- Mezcla entre tamaño fijo en píxeles (0) y totalmente proporcional al viewport (1).
+-- Al 100% el texto queda ilegible en un teléfono; el escritorio a 1080p queda en 1 igualmente.
 local VIEWPORT_SCALE_WEIGHT = 0.8
 -- En táctil la pantalla se mira desde más lejos y el dedo tapa parte del toast:
 -- un empujón extra sobre lo que dicte el viewport.
@@ -283,7 +265,6 @@ function present(kind: string, text: string)
 		dismissed = false,
 	}
 
-	-- Estado inicial: encogido y transparente, luego anima a visible.
 	entry.scale.Scale = 0
 	setFaded(entry)
 
@@ -327,7 +308,6 @@ local function show(kind: string, text: string)
 		return
 	end
 
-	-- Sin cola: si está lleno, retira el más viejo al instante para hacer hueco.
 	if #_active >= MAX_VISIBLE then
 		dismiss(_active[1])
 	end
@@ -336,10 +316,13 @@ local function show(kind: string, text: string)
 end
 
 function NotificationController.success(message: string)
+	Haptics.play("UISuccess")
 	show("Success", message)
 end
 
 function NotificationController.warning(message: string)
+	GameSounds.play(GameSounds.Error)
+	Haptics.play("UIWarning")
 	show("Warning", message)
 end
 

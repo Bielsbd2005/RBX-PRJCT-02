@@ -1,58 +1,36 @@
 --!strict
 --[[
-	MatchNotificationsQueue.luau
-	Queue + animaciones de notificaciones in-match: level up (de cuenta y de pase
-	de batalla, mismo frame con distinto título) y maestría de armas (hitos +
-	completar). Extraído de MatchHud para que ese módulo no orqueste tanto. Los
-	frames y sus posiciones originales se cachean por instancia.
+	Cola + animaciones de notificaciones in-match (level up de cuenta y de pase,
+	maestría de armas, misiones diarias). Se reproducen de una en una.
 
-	Frames esperados bajo `MatchHud.Container.MainFrame`, junto al resto del HUD:
-		LevelUp.{Title, Level}
-		Maestry.{Title, Value, Bar.Fill, CoinsSpawn, Reward.{ItemViewport, Image}}
-		(Reward.Image es del asset: solo se enseña/esconde, nunca se le cambia el
-		 Image; con desafíos diarios el fondo del Reward se pone transparente)
-
-	El frame Maestry lo comparten dos cosas, que solo se diferencian en el nodo de
-	Reward que se enseña: la maestría de arma (preview 3D del wrap en
-	`Reward.ItemViewport`) y los desafíos diarios (icono plano en `Reward.Image`).
-	Al completar un desafío la barra se llena del todo y `CoinsSpawn` suelta las
-	monedas del premio hacia el popup de Stats (vía el callback de
-	setOnChallengeReward, que lo wirea MatchHud).
-
-	API:
-		MatchNotificationsQueue.new(matchHudGui: ScreenGui?)
-		:playLevelUpAnimation(newLevel: number)
-		:playBattlePassLevelUpAnimation(newLevel: number)
-		:playMasteryAnimation(progress: MasteryProgress)
-		:playDailyTaskAnimation(progress: DailyTaskProgress)
-		:setOnChallengeReward(callback)
-		:destroy()
+	Frames esperados bajo `MatchHud.Container.MainFrame`:
+		LevelUp.{Title, Level, Image}
+		(Image es la flecha que sube por detrás del texto)
+		Progress.{ItemViewport, Title, Value, Bar.Fill}
+		Completed.{Title, Subtitle}
+		CoinsSpawn
+		(dentro de Progress y Completed los nodos se buscan por nombre en
+		 profundidad, así que pueden ir anidados)
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 
 local Confetti = require(script.Parent.Parent.Parent.core.ui.Confetti)
+local GameSounds = require(script.Parent.Parent.Parent.core.ui.GameSounds)
 local Fireworks = require(script.Parent.Parent.Parent.core.ui.Fireworks)
 local UIUtils = require(script.Parent.Parent.Parent.core.ui.UIUtils)
 local WeaponWrapPreviewer = require(script.Parent.Parent.locker.Previewers.WeaponWrapPreviewer)
 local Janitor = require(ReplicatedStorage:WaitForChild("Packages").janitor) :: any
 
--- ── Tipos públicos ───────────────────────────────────────────
-
--- Progreso de maestría de un arma hacia el siguiente tier (o el recién completado).
--- `current`/`target` se muestran como "current/target" y rellenan la barra.
--- `isComplete` = true cuando se acaba de ganar el wrap (100%, con confeti).
+-- `isComplete` = true cuando se acaba de ganar el wrap (100%).
 export type MasteryProgress = {
 	current: number,
 	target: number,
 	name: string,
 	isComplete: boolean?,
-	-- Preview 3D del wrap de maestría (siguiente tier o el recién ganado).
-	previewWeaponCategory: string?,
-	previewWeaponId: string?,
-	itemId: string?,
-	category: string?,
+	-- Wrap del preview 3D: siguiente tier o el recién ganado.
 	textureID: string?,
 	baseColor: Color3?,
 	material: Enum.Material?,
@@ -60,9 +38,7 @@ export type MasteryProgress = {
 	studsPerTile: number?,
 }
 
--- Progreso de un desafío diario hacia su objetivo. `name` es el título del
--- desafío y `rewardCash` el premio que vuela en monedas hacia Stats cuando
--- `isComplete`. La imagen del premio es la que ya trae Reward.Image en el asset.
+-- Solo se notifica con `isComplete`; `rewardCash` vuela en monedas hacia Stats.
 export type DailyTaskProgress = {
 	current: number,
 	target: number,
@@ -71,47 +47,49 @@ export type DailyTaskProgress = {
 	rewardCash: number?,
 }
 
--- ── Constantes ───────────────────────────────────────────────
-
--- Coreografía del popup de level up (t = 0 al empezar la animación):
---   0.00  arranca el slide-in y salen los cohetes de los fuegos artificiales
---   0.45  el frame aterriza justo cuando el confeti llega a su apex
---   0.55  primer estallido; se encadenan hasta ~2.35
---   2.45  cae el último confeti
---   4.05  se apaga la última chispa → un beat de calma antes de irse
---   5.45  empieza el slide-out
--- Si se toca el hold hay que revisar la duración de Fireworks (ver ese módulo).
+-- Entrada de los popups Progress/Completed (el level up no se desliza).
 local LEVEL_UP_TWEEN_IN_INFO = TweenInfo.new(0.45, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
-local LEVEL_UP_TWEEN_OUT_INFO = TweenInfo.new(0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.In)
+local POPUP_SHRINK_OUT_INFO = TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.In)
 local LEVEL_UP_HOLD_SECONDS = 5.0
--- Cap defensivo: si se enchufan muchas notificaciones (drops, level-ups en
--- cadena), tirar las más antiguas todavía sin reproducir antes que dejar
--- crecer la cola indefinidamente.
+
+-- Flecha LevelUp.Image: sube desde RISE_FROM por debajo (Cubic Out), pausa y sale
+-- hasta RISE_PAST por encima (Cubic In). Distancias en altos de la propia imagen.
+local LEVEL_UP_ARROW_RISE_FROM = 0.7
+local LEVEL_UP_ARROW_RISE_PAST = 0.3
+local LEVEL_UP_ARROW_ENTER_SECONDS = 0.95
+local LEVEL_UP_ARROW_PAUSE_SECONDS = 1.2
+local LEVEL_UP_ARROW_EXIT_SECONDS = 0.35
+local LEVEL_UP_FADE_IN_INFO = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local LEVEL_UP_FADE_OUT_INFO =
+	TweenInfo.new(LEVEL_UP_ARROW_EXIT_SECONDS, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+-- Paso máximo por frame: el popup aparece en el mismo frame (largo) en que se
+-- crean confeti y fuegos, y la flecha pegaría un salto.
+local LEVEL_UP_ARROW_MAX_STEP = 1 / 30
+-- Con Rotation 0 la UI se alinea a píxel y los tramos lentos avanzarían a saltitos.
+local LEVEL_UP_ARROW_SUBPIXEL_ROTATION = 0.01
+-- Pop de tamaño (UIScale) relativo al Scale que traiga el asset.
+local LEVEL_UP_POP_FROM = 0.6
+local LEVEL_UP_POP_IN_INFO = TweenInfo.new(0.45, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+local LEVEL_UP_POP_EXIT = 1.1
+-- Al superarlo se descartan las más antiguas sin reproducir.
 local NOTIFICATION_QUEUE_CAP = 20
 
--- El cañón de confeti tiene que sonar a "pop": una volea corta en vez de un
--- goteo largo, disparada al empezar el slide-in para que las piezas estén
--- cayendo por el centro justo cuando el frame aterriza. Las piezas viven lo
--- suficiente para seguir revoloteando hasta que entran los primeros estallidos.
 local CONFETTI_COUNT = 60
 local CONFETTI_SPAWN_DURATION = 0.25
 local CONFETTI_LIFETIME_MIN = 1.4
 local CONFETTI_LIFETIME_MAX = 2.2
 
--- Título del frame LevelUp según de qué progresión venga la subida.
 local LEVEL_UP_TITLE = "LEVEL UP!"
 local BATTLEPASS_LEVEL_UP_TITLE = "FAME PASS!"
 
 local LEVEL_UP_CONFETTI_COLORS = {
-	Color3.fromRGB(40, 130, 255),
-	Color3.fromRGB(80, 170, 255),
-	Color3.fromRGB(120, 200, 255),
-	Color3.fromRGB(20, 90, 200),
-	Color3.fromRGB(170, 220, 255),
+	Color3.fromRGB(30, 110, 255),
+	Color3.fromRGB(0, 85, 230),
+	Color3.fromRGB(60, 150, 255),
+	Color3.fromRGB(15, 60, 190),
+	Color3.fromRGB(90, 175, 255),
 }
 
--- BattlePass usa paleta verde para diferenciar visualmente del level up de
--- character (azul). Mismo frame y timing, distinto título y color.
 local BATTLEPASS_LEVEL_UP_CONFETTI_COLORS = {
 	Color3.fromRGB(60, 200, 100),
 	Color3.fromRGB(40, 220, 80),
@@ -120,8 +98,6 @@ local BATTLEPASS_LEVEL_UP_CONFETTI_COLORS = {
 	Color3.fromRGB(140, 240, 160),
 }
 
--- Maestría de armas usa paleta dorada (logro/achievement). Solo se lanza confeti
--- al completar un tier (100%), no en los hitos intermedios.
 local MASTERY_CONFETTI_COLORS = {
 	Color3.fromRGB(255, 205, 70),
 	Color3.fromRGB(255, 175, 30),
@@ -129,10 +105,8 @@ local MASTERY_CONFETTI_COLORS = {
 	Color3.fromRGB(230, 150, 20),
 	Color3.fromRGB(255, 245, 200),
 }
--- Tween de la barra de progreso de maestría (se rellena tras entrar el frame).
 local MASTERY_BAR_TWEEN_INFO = TweenInfo.new(0.6, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
 
--- Desafíos diarios: paleta verde-dorada (progreso hecho + premio en cash).
 local DAILY_CONFETTI_COLORS = {
 	Color3.fromRGB(60, 200, 90),
 	Color3.fromRGB(120, 230, 140),
@@ -140,16 +114,12 @@ local DAILY_CONFETTI_COLORS = {
 	Color3.fromRGB(255, 235, 150),
 	Color3.fromRGB(30, 160, 70),
 }
--- Los popups de progreso saltan a cada avance del contador (una kill puede mover
--- varias tareas), así que aguantan menos que un level up. El de completado se va
--- enseguida tras aterrizar las monedas: el protagonismo pasa a Stats.
-local DAILY_PROGRESS_HOLD_SECONDS = 2.6
 local DAILY_COMPLETE_HOLD_SECONDS = 1.0
+local CONTRACT_COMPLETED_TITLE = "Contract Completed!"
+local MASTERY_COMPLETED_TITLE = "Mastery Completed!"
+local POPUP_WAIT_SECONDS = 5
 
-
-
--- Calcula el tamaño objetivo de un Fill horizontal para un ratio [0,1], cacheando
--- la escala/offset base del asset (igual criterio que MatchHud._setHorizontalFill).
+-- Cachea la escala/offset base del asset en atributos (igual que MatchHud._setHorizontalFill).
 local function _targetFillSize(fillNode: GuiObject, ratio: number): UDim2
 	local clampedRatio = math.min(1, math.max(0, ratio))
 	local baseScale = fillNode:GetAttribute("BaseFillScale")
@@ -167,32 +137,8 @@ local function _targetFillSize(fillNode: GuiObject, ratio: number): UDim2
 	return UDim2.new(nextScale, baseOffset, currentSize.Y.Scale, currentSize.Y.Offset)
 end
 
--- El nodo Reward del frame Maestry aloja las dos formas de premio: el preview 3D
--- del wrap (ItemViewport) y la imagen del desafío diario (Image). En modo desafío
--- se enseña la Image — la que trae el asset, no se le cambia el Image — y el fondo
--- del propio Reward se va a transparente (el plato gris solo tiene sentido detrás
--- del preview 3D). El BackgroundTransparency de fábrica se cachea en un atributo
--- para restaurarlo al volver al modo maestría.
-local function _setRewardMode(rewardNode: Instance, mode: "viewport" | "image")
-	local image = rewardNode:FindFirstChild("Image")
-	if image and image:IsA("GuiObject") then
-		image.Visible = mode == "image"
-	end
-
-	if not rewardNode:IsA("GuiObject") then
-		return
-	end
-	local reward = rewardNode :: GuiObject
-	local baseTransparency = reward:GetAttribute("BaseBackgroundTransparency")
-	if type(baseTransparency) ~= "number" then
-		baseTransparency = reward.BackgroundTransparency
-		reward:SetAttribute("BaseBackgroundTransparency", baseTransparency)
-	end
-	reward.BackgroundTransparency = if mode == "image" then 1 else baseTransparency :: number
-end
-
--- CoinsSpawn es a la vez origen y sprite de las monedas del premio: se oculta al
--- resolverlo (misma convención que los `Template` del HUD) y se clona por moneda.
+-- CoinsSpawn es a la vez origen y sprite de las monedas: se oculta al resolverlo
+-- y se clona por moneda.
 local function _resolveCoinsSpawn(frame: GuiObject): ImageLabel?
 	local node = frame:FindFirstChild("CoinsSpawn")
 	if node and node:IsA("ImageLabel") then
@@ -202,13 +148,8 @@ local function _resolveCoinsSpawn(frame: GuiObject): ImageLabel?
 	return nil
 end
 
--- Preview 3D de un wrap dentro de un ViewportFrame, con el MISMO encuadre que las
--- cards del locker (ver LockerGrid:_applyWeaponWrapViewportPreview): sin
--- PreviewWeapon* para que caiga al modelo genérico `ReplicatedStorage.Wrap`, y
--- `reframeCentered` después de Render para dejarlo centrado con margen en vez del
--- encuadre cerrado y descentrado de las cards de arma.
--- Solo toca los hijos no-GUI del viewport (WorldModel/Camera): el background y
--- demás estilo son del asset y se dejan intactos.
+-- Sin PreviewWeapon* para que caiga al modelo genérico `ReplicatedStorage.Templates.Wrap`
+-- (como LockerGrid:_applyWeaponWrapViewportPreview). Solo toca hijos no-GUI del viewport.
 local function _renderWrapPreview(itemViewport: ViewportFrame, wrap: any): any
 	for _, child in itemViewport:GetChildren() do
 		if not child:IsA("GuiObject") then
@@ -230,9 +171,7 @@ local function _renderWrapPreview(itemViewport: ViewportFrame, wrap: any): any
 	return previewJanitor
 end
 
--- Escribe el texto en el TextLabel `name` del popup. Recorremos descendientes en
--- vez de indexar la jerarquía porque el asset anida Title/Level a distinta
--- profundidad según el frame (y así tampoco importa si se reordenan).
+-- Por descendientes: el asset anida Title/Level a distinta profundidad según el frame.
 local function _setLabel(frame: GuiObject, name: string, text: string)
 	for _, descendant in frame:GetDescendants() do
 		if descendant:IsA("TextLabel") and descendant.Name == name then
@@ -241,7 +180,142 @@ local function _setLabel(frame: GuiObject, name: string, text: string)
 	end
 end
 
--- ── Módulo ───────────────────────────────────────────────────
+local function _findNamed(root: Instance, name: string, className: string): Instance?
+	for _, descendant in root:GetDescendants() do
+		if descendant.Name == name and descendant:IsA(className) then
+			return descendant
+		end
+	end
+	return nil
+end
+
+type FadeTarget = {
+	object: Instance,
+	property: string,
+	original: number,
+}
+
+-- Guarda las transparencias de Studio para hacer fade sin asumir que todo estaba a 0.
+local function _collectFadeTargets(root: GuiObject): { FadeTarget }
+	local targets: { FadeTarget } = {}
+	local function add(object: Instance, property: string)
+		table.insert(targets, { object = object, property = property, original = (object :: any)[property] })
+	end
+
+	if root:IsA("CanvasGroup") then
+		add(root, "GroupTransparency")
+		return targets
+	end
+
+	add(root, "BackgroundTransparency")
+	for _, descendant in root:GetDescendants() do
+		if descendant:IsA("GuiObject") then
+			add(descendant, "BackgroundTransparency")
+		end
+		if descendant:IsA("TextLabel") or descendant:IsA("TextButton") then
+			add(descendant, "TextTransparency")
+			add(descendant, "TextStrokeTransparency")
+		elseif descendant:IsA("ImageLabel") or descendant:IsA("ImageButton") then
+			add(descendant, "ImageTransparency")
+		elseif descendant:IsA("UIStroke") then
+			add(descendant, "Transparency")
+		end
+	end
+	return targets
+end
+
+local function _setFade(targets: { FadeTarget }, hidden: boolean)
+	for _, target in targets do
+		(target.object :: any)[target.property] = if hidden then 1 else target.original
+	end
+end
+
+local function _tweenFade(targets: { FadeTarget }, info: TweenInfo, hidden: boolean)
+	for _, target in targets do
+		TweenService:Create(target.object, info, {
+			[target.property] = if hidden then 1 else target.original,
+		}):Play()
+	end
+end
+
+-- En altos de imagen, positivo = por debajo.
+local function _arrowOffset(t: number): number
+	if t < LEVEL_UP_ARROW_ENTER_SECONDS then
+		local remaining = 1 - t / LEVEL_UP_ARROW_ENTER_SECONDS
+		return LEVEL_UP_ARROW_RISE_FROM * remaining ^ 3
+	end
+	local exitStart = LEVEL_UP_ARROW_ENTER_SECONDS + LEVEL_UP_ARROW_PAUSE_SECONDS
+	if t < exitStart then
+		return 0
+	end
+	local progress = math.min(1, (t - exitStart) / LEVEL_UP_ARROW_EXIT_SECONDS)
+	return -LEVEL_UP_ARROW_RISE_PAST * progress ^ 3
+end
+
+-- Por frame en Scale y no con tween de Offset: Offset es entero y los tramos lentos
+-- se verían a saltos de píxel.
+local function _playArrowRise(arrow: GuiObject, basePosition: UDim2): () -> ()
+	local elapsed = 0
+	local function apply()
+		local parent = arrow.Parent
+		if not (parent and parent:IsA("GuiBase2d")) then
+			return
+		end
+		local parentHeight = parent.AbsoluteSize.Y
+		if parentHeight <= 0 then
+			return
+		end
+		local offsetScale = _arrowOffset(elapsed) * arrow.AbsoluteSize.Y / parentHeight
+		arrow.Position = UDim2.new(
+			basePosition.X.Scale,
+			basePosition.X.Offset,
+			basePosition.Y.Scale + offsetScale,
+			basePosition.Y.Offset
+		)
+	end
+
+	local designedRotation = arrow.Rotation
+	if designedRotation == 0 then
+		arrow.Rotation = LEVEL_UP_ARROW_SUBPIXEL_ROTATION
+	end
+
+	apply()
+	local connection = RunService.RenderStepped:Connect(function(dt: number)
+		elapsed += math.min(dt, LEVEL_UP_ARROW_MAX_STEP)
+		apply()
+	end)
+	return function()
+		connection:Disconnect()
+		arrow.Position = basePosition
+		arrow.Rotation = designedRotation
+	end
+end
+
+type ScalePop = {
+	node: UIScale,
+	designed: number,
+}
+
+-- Pivote al centro porque UIScale escala desde el AnchorPoint; se recoloca para que
+-- el frame no se mueva en pantalla.
+local function _prepareScalePop(frame: GuiObject): ScalePop
+	local anchor = frame.AnchorPoint
+	if anchor.X ~= 0.5 or anchor.Y ~= 0.5 then
+		local pos = frame.Position
+		local size = frame.Size
+		frame.AnchorPoint = Vector2.new(0.5, 0.5)
+		frame.Position = UDim2.new(
+			pos.X.Scale + size.X.Scale * (0.5 - anchor.X),
+			pos.X.Offset + size.X.Offset * (0.5 - anchor.X),
+			pos.Y.Scale + size.Y.Scale * (0.5 - anchor.Y),
+			pos.Y.Offset + size.Y.Offset * (0.5 - anchor.Y)
+		)
+	end
+
+	local node = frame:FindFirstChildOfClass("UIScale") or Instance.new("UIScale")
+	node.Parent = frame
+	return { node = node, designed = node.Scale }
+end
 
 local MatchNotificationsQueue = {}
 MatchNotificationsQueue.__index = MatchNotificationsQueue
@@ -252,43 +326,48 @@ function MatchNotificationsQueue.new(matchHudGui: ScreenGui?): any
 	self._destroyed = false
 	self._queue = {} :: { (onDone: () -> ()) -> () }
 	self._active = false
-	-- "Notifying" = hay una notificación en pantalla o en cola. Avisamos en cada
-	-- transición (con detección de cambio para no parpadear entre notificaciones
-	-- consecutivas). Lo usa MatchHud para ocultar las filas de jugadores.
+	-- "Notifying" = notificación en pantalla o en cola. MatchHud lo usa para ocultar
+	-- las filas de jugadores.
 	self._notifying = false
 	self._onNotifyingChanged = nil :: ((notifying: boolean) -> ())?
-	-- Cache de posiciones originales de cada frame (se setean en el primer play).
-	-- LevelUp lo comparten el level up de cuenta y el del pase, así que basta una.
-	self._levelUpOriginalPosition = nil :: UDim2?
-	self._maestryOriginalPosition = nil :: UDim2?
-	-- Entrega del premio de un desafío completado: MatchHud lo wirea al popup de
-	-- Stats. Devuelve cuánto tarda el vuelo de las monedas para esperarlo antes de
-	-- retirar el popup.
+	-- Valores de Studio cacheados en el primer play (LevelUp es compartido por cuenta y pase).
+	self._levelUpFadeTargets = nil :: { FadeTarget }?
+	self._levelUpArrowPosition = nil :: UDim2?
+	self._levelUpPop = nil :: ScalePop?
+	self._framePops = {} :: { [GuiObject]: ScalePop }
+	self._progressOriginalPosition = nil :: UDim2?
+	self._completedOriginalPosition = nil :: UDim2?
+	-- Lo conecta MatchHud al popup de Stats. Devuelve cuánto tarda el vuelo de las
+	-- monedas, que se espera antes de retirar el popup.
 	self._onChallengeReward = nil :: ((spawnNode: ImageLabel, amount: number) -> number?)?
+
+	-- CoinsSpawn cuelga de MainFrame, no de un popup: se oculta al arrancar.
+	if matchHudGui then
+		task.spawn(function()
+			local container = self:_resolveContainer()
+			if container then
+				_resolveCoinsSpawn(container)
+			end
+		end)
+	end
 	return self
 end
 
---- Registra quién se lleva las monedas del premio (spawnNode + cash).
 function MatchNotificationsQueue:setOnChallengeReward(
 	callback: ((spawnNode: ImageLabel, amount: number) -> number?)?
 )
 	self._onChallengeReward = callback
 end
 
--- Los popups cuelgan de MatchHud.Container.MainFrame igual que el resto del HUD;
--- se pintan encima sin ocultar nada, así que solo necesitan ese frame. Se acepta
--- MainFrame colgando directo del ScreenGui por si el asset pierde el Container.
 function MatchNotificationsQueue:_resolveContainer(): GuiObject?
 	local gui = self._gui
 	if not gui then
 		return nil
 	end
-	local root: Instance = gui:WaitForChild("Container", 5) or gui
-	return root:WaitForChild("MainFrame") :: GuiObject
+	return gui:WaitForChild("Container"):WaitForChild("MainFrame") :: GuiObject
 end
 
--- Registra un callback que recibe `true` cuando empieza a haber notificaciones y
--- `false` cuando se vacía la cola (sin parpadeo entre notificaciones encadenadas).
+-- Sin parpadeo entre notificaciones encadenadas.
 function MatchNotificationsQueue:setOnNotifyingChanged(callback: ((notifying: boolean) -> ())?)
 	self._onNotifyingChanged = callback
 end
@@ -337,13 +416,18 @@ function MatchNotificationsQueue:_enqueue(runFn: (onDone: () -> ()) -> ())
 	self:_processQueue()
 end
 
--- Patrón común de notificación: cachea la posición original del frame, lo mete
--- fuera de pantalla (arriba), lo muestra, desliza dentro, opcionalmente lanza
--- confeti y corre `afterShown`, mantiene `holdSeconds` (por defecto
--- LEVEL_UP_HOLD_SECONDS), y sale. `cacheKey` es el campo de self donde se cachea
--- la Position original. Bloquea hasta terminar (se llama dentro del runFn de la
--- cola), así que un `afterShown` que bloquee (p. ej. esperando a que aterricen las
--- monedas) retrasa el hold en vez de solaparse con él.
+function MatchNotificationsQueue:_rainConfetti(colors: { Color3 }, spawnDuration: number?)
+	Confetti.Rain(self._gui, {
+		colors = colors,
+		count = CONFETTI_COUNT,
+		minLifetime = CONFETTI_LIFETIME_MIN,
+		maxLifetime = CONFETTI_LIFETIME_MAX,
+		spawnDuration = spawnDuration or CONFETTI_SPAWN_DURATION,
+	})
+end
+
+-- `cacheKey` es el campo de self donde se cachea la Position original. Bloquea
+-- hasta terminar, así que un `afterShown` que bloquee retrasa el hold.
 function MatchNotificationsQueue:_playFrameSlide(
 	frame: GuiObject,
 	cacheKey: string,
@@ -352,7 +436,13 @@ function MatchNotificationsQueue:_playFrameSlide(
 	afterShown: (() -> ())?,
 	holdSeconds: number?
 )
-	local matchHudGui = self._gui
+	-- Antes de cachear la posición: _prepareScalePop recoloca el frame.
+	local pop: ScalePop? = self._framePops[frame]
+	if not pop then
+		pop = _prepareScalePop(frame)
+		self._framePops[frame] = pop
+	end
+
 	local originalPosition = (self :: any)[cacheKey]
 	if not originalPosition then
 		originalPosition = frame.Position
@@ -369,14 +459,8 @@ function MatchNotificationsQueue:_playFrameSlide(
 	frame.Position = aboveScreenPosition
 	frame.Visible = true
 
-	if confettiColors and matchHudGui then
-		Confetti.Rain(matchHudGui, {
-			colors = confettiColors,
-			count = CONFETTI_COUNT,
-			minLifetime = CONFETTI_LIFETIME_MIN,
-			maxLifetime = CONFETTI_LIFETIME_MAX,
-			spawnDuration = spawnDuration or CONFETTI_SPAWN_DURATION,
-		})
+	if confettiColors then
+		self:_rainConfetti(confettiColors, spawnDuration)
 	end
 
 	local tweenIn = TweenService:Create(frame, LEVEL_UP_TWEEN_IN_INFO, { Position = originalPosition })
@@ -389,159 +473,212 @@ function MatchNotificationsQueue:_playFrameSlide(
 
 	task.wait(holdSeconds or LEVEL_UP_HOLD_SECONDS)
 
-	local tweenOut = TweenService:Create(frame, LEVEL_UP_TWEEN_OUT_INFO, { Position = aboveScreenPosition })
+	local popNode = (pop :: ScalePop).node
+	local tweenOut = TweenService:Create(popNode, POPUP_SHRINK_OUT_INFO, { Scale = 0 })
 	tweenOut:Play()
 	tweenOut.Completed:Wait()
 
 	frame.Visible = false
 	frame.Position = originalPosition
+	popNode.Scale = (pop :: ScalePop).designed
 end
 
--- Level up de cuenta y de pase comparten el frame MainFrame.LevelUp: Title dice de
--- cuál se trata y Level el nivel alcanzado. Solo cambian título y paleta (que
--- comparten confeti y fuegos artificiales).
-function MatchNotificationsQueue:_playLevelUpFrame(newLevel: number, title: string, palette: { Color3 })
+-- Level up de cuenta y de pase comparten el frame MainFrame.LevelUp.
+function MatchNotificationsQueue:_playLevelUpFrame(
+	newLevel: number,
+	title: string,
+	palette: { Color3 },
+	soundKey: string
+)
 	self:_enqueue(function(onDone)
 		local container = self:_resolveContainer()
 		if not container then onDone() return end
+		-- Dentro del closure: `_enqueue` puede retrasarlo y el sonido va cuando el frame ENTRA.
+		GameSounds.play(soundKey)
 		local frame = container:WaitForChild("LevelUp") :: GuiObject
 
 		_setLabel(frame, "Title", title)
 		_setLabel(frame, "Level", tostring(math.max(0, math.floor(newLevel))))
 
-		local matchHudGui = self._gui
-		if matchHudGui then
-			Fireworks.Burst(matchHudGui)
+		-- Se cachean en el primer play, antes de que el fade o la subida las toquen.
+		if not self._levelUpFadeTargets then
+			self._levelUpFadeTargets = _collectFadeTargets(frame)
 		end
+		local fadeTargets = self._levelUpFadeTargets
+		local arrowInst = frame:FindFirstChild("Image")
+		local arrow = if arrowInst and arrowInst:IsA("GuiObject") then arrowInst else nil
+		if arrow and not self._levelUpArrowPosition then
+			self._levelUpArrowPosition = arrow.Position
+		end
+		if not self._levelUpPop then
+			self._levelUpPop = _prepareScalePop(frame)
+		end
+		local pop: ScalePop = self._levelUpPop
 
-		self:_playFrameSlide(frame, "_levelUpOriginalPosition", palette)
+		_setFade(fadeTargets, true)
+		pop.node.Scale = pop.designed * LEVEL_UP_POP_FROM
+		frame.Visible = true
+		local stopArrow = if arrow then _playArrowRise(arrow, self._levelUpArrowPosition) else nil
+		_tweenFade(fadeTargets, LEVEL_UP_FADE_IN_INFO, false)
+		TweenService:Create(pop.node, LEVEL_UP_POP_IN_INFO, { Scale = pop.designed }):Play()
+		Fireworks.Burst(self._gui)
+		self:_rainConfetti(palette)
+
+		task.wait(LEVEL_UP_ARROW_ENTER_SECONDS + LEVEL_UP_ARROW_PAUSE_SECONDS)
+		_tweenFade(fadeTargets, LEVEL_UP_FADE_OUT_INFO, true)
+		TweenService:Create(pop.node, LEVEL_UP_FADE_OUT_INFO, { Scale = pop.designed * LEVEL_UP_POP_EXIT }):Play()
+		task.wait(LEVEL_UP_ARROW_EXIT_SECONDS)
+
+		if stopArrow then
+			stopArrow()
+		end
+		frame.Visible = false
+		_setFade(fadeTargets, false)
+		pop.node.Scale = pop.designed
 
 		onDone()
 	end)
 end
 
 function MatchNotificationsQueue:playLevelUpAnimation(newLevel: number)
-	self:_playLevelUpFrame(newLevel, LEVEL_UP_TITLE, LEVEL_UP_CONFETTI_COLORS)
+	self:_playLevelUpFrame(newLevel, LEVEL_UP_TITLE, LEVEL_UP_CONFETTI_COLORS, GameSounds.LevelUp)
 end
 
 function MatchNotificationsQueue:playBattlePassLevelUpAnimation(newLevel: number)
-	self:_playLevelUpFrame(newLevel, BATTLEPASS_LEVEL_UP_TITLE, BATTLEPASS_LEVEL_UP_CONFETTI_COLORS)
+	-- El pase se llama FamePass en la UI.
+	self:_playLevelUpFrame(
+		newLevel,
+		BATTLEPASS_LEVEL_UP_TITLE,
+		BATTLEPASS_LEVEL_UP_CONFETTI_COLORS,
+		GameSounds.FamePassUp
+	)
 end
 
--- Maestría de arma → frame MainFrame.Maestry. Title lleva el nombre del desafío,
--- Value el "actual/objetivo", Bar.Fill se rellena con tween hasta el ratio, y
--- Reward.ItemViewport muestra el preview del wrap (siguiente tier o el recién
--- ganado). Solo lanza confeti al completar un tier (progress.isComplete).
+-- Con timeout: si el asset cambia de forma, se salta la notificación en vez de colgar la cola.
+function MatchNotificationsQueue:_resolvePopup(name: string): GuiObject?
+	local container = self:_resolveContainer()
+	if not container then
+		return nil
+	end
+	local node = container:WaitForChild(name, POPUP_WAIT_SECONDS)
+	if not (node and node:IsA("GuiObject")) then
+		warn(`[MatchNotificationsQueue] No se encontró MainFrame.{name}: se salta la notificación`)
+		return nil
+	end
+	return node
+end
+
+-- Devuelve false si no hay tarjeta, para que el caller entregue igual lo pendiente.
+function MatchNotificationsQueue:_playCompletedCard(
+	title: string,
+	subtitle: string,
+	confettiColors: { Color3 },
+	afterShown: (() -> ())?,
+	holdSeconds: number?
+): boolean
+	local frame = self:_resolvePopup("Completed")
+	if not frame then
+		return false
+	end
+	_setLabel(frame, "Title", title)
+	_setLabel(frame, "Subtitle", subtitle)
+	self:_playFrameSlide(frame, "_completedOriginalPosition", confettiColors, 0.4, afterShown, holdSeconds)
+	return true
+end
+
+-- Hito intermedio → MainFrame.Progress; tier completado → tarjeta Completed.
 function MatchNotificationsQueue:playMasteryAnimation(progress: MasteryProgress)
 	self:_enqueue(function(onDone)
-		local container = self:_resolveContainer()
-		if not container then onDone() return end
-		local frame = container:WaitForChild("Maestry") :: GuiObject
+		GameSounds.play(GameSounds.Notification)
+		if progress.isComplete == true then
+			self:_playCompletedCard(MASTERY_COMPLETED_TITLE, progress.name, MASTERY_CONFETTI_COLORS)
+			onDone()
+			return
+		end
+
+		local frame = self:_resolvePopup("Progress")
+		if not frame then
+			onDone()
+			return
+		end
 
 		local current = math.max(0, math.floor(progress.current))
 		local target = math.max(1, math.floor(progress.target))
 		local ratio = math.min(1, current / target)
-		local isComplete = progress.isComplete == true
 
-		local titleLabel = frame:WaitForChild("Title") :: TextLabel
-		titleLabel.Text = progress.name
+		_setLabel(frame, "Title", progress.name)
+		local valueLabel = _findNamed(frame, "Value", "TextLabel") :: TextLabel?
+		if valueLabel then
+			valueLabel.RichText = true
+			valueLabel.Text = UIUtils.formatProgressValue(current, target)
+		end
 
-		local valueLabel = frame:WaitForChild("Value") :: TextLabel
-		valueLabel.RichText = true
-		valueLabel.Text = UIUtils.formatProgressValue(current, target)
+		local itemViewport = _findNamed(frame, "ItemViewport", "ViewportFrame") :: ViewportFrame?
+		local previewJanitor: any = if itemViewport then _renderWrapPreview(itemViewport, progress) else nil
 
-		local rewardNode = frame:WaitForChild("Reward")
-		-- El frame lo comparte con los desafíos diarios: aquí manda el preview 3D,
-		-- así que se esconde la Image y vuelve el fondo del Reward.
-		_setRewardMode(rewardNode, "viewport")
-		local itemViewport = rewardNode:WaitForChild("ItemViewport") :: ViewportFrame
-		local previewJanitor: any = _renderWrapPreview(itemViewport, progress)
+		local barNode = _findNamed(frame, "Bar", "GuiObject")
+		local fillNode = if barNode then barNode:FindFirstChild("Fill") else nil
+		local barFill = if fillNode and fillNode:IsA("GuiObject") then fillNode else nil
+		if barFill then
+			barFill.Size = _targetFillSize(barFill, 0)
+		end
 
-		local barNode = frame:WaitForChild("Bar")
-		local barFill = barNode:WaitForChild("Fill") :: GuiObject
-		barFill.Size = _targetFillSize(barFill, 0)
-
-		local confettiColors = if isComplete then MASTERY_CONFETTI_COLORS else nil
-		self:_playFrameSlide(frame, "_maestryOriginalPosition", confettiColors, 0.4, function()
-			local tween = TweenService:Create(barFill, MASTERY_BAR_TWEEN_INFO, {
-				Size = _targetFillSize(barFill, ratio),
-			})
-			tween:Play()
+		self:_playFrameSlide(frame, "_progressOriginalPosition", nil, nil, function()
+			if barFill then
+				TweenService:Create(barFill, MASTERY_BAR_TWEEN_INFO, {
+					Size = _targetFillSize(barFill, ratio),
+				}):Play()
+			end
 		end)
 
 		if previewJanitor then
 			previewJanitor:Cleanup()
 		end
-		itemViewport.CurrentCamera = nil
+		if itemViewport then
+			itemViewport.CurrentCamera = nil
+		end
 
 		onDone()
 	end)
 end
 
--- Desafío diario → el mismo frame MainFrame.Maestry: Title lleva el título del
--- desafío, Value el "actual/objetivo", Reward.Image el icono de la tarea y Bar.Fill
--- se rellena con tween hasta el ratio. Al completarlo (isComplete) la barra llega
--- al 100%, salta el confeti y las monedas del premio salen de CoinsSpawn hacia el
--- popup de Stats, que las cuenta al aterrizar.
+-- Sin `isComplete` no se muestra nada: el progreso ya se ve en MatchHud.Container.Missions.
 function MatchNotificationsQueue:playDailyTaskAnimation(progress: DailyTaskProgress)
+	if progress.isComplete ~= true then
+		return
+	end
 	self:_enqueue(function(onDone)
+		GameSounds.play(GameSounds.Notification)
 		local container = self:_resolveContainer()
-		if not container then onDone() return end
-		local frame = container:WaitForChild("Maestry") :: GuiObject
-
-		local target = math.max(1, math.floor(progress.target))
-		local isComplete = progress.isComplete == true
-		local current = math.clamp(math.floor(progress.current), 0, target)
-		if isComplete then
-			current = target
-		end
-		local ratio = current / target
-
-		local titleLabel = frame:WaitForChild("Title") :: TextLabel
-		titleLabel.Text = progress.name
-
-		local valueLabel = frame:WaitForChild("Value") :: TextLabel
-		valueLabel.RichText = true
-		valueLabel.Text = UIUtils.formatProgressValue(current, target)
-
-		-- Desafío diario: se ve la Image del asset (sin tocarla) y el fondo del
-		-- Reward se va a transparente.
-		_setRewardMode(frame:WaitForChild("Reward"), "image")
-
-		local barNode = frame:WaitForChild("Bar")
-		local barFill = barNode:WaitForChild("Fill") :: GuiObject
-		barFill.Size = _targetFillSize(barFill, 0)
-
-		local coinsSpawn = _resolveCoinsSpawn(frame)
+		local coinsSpawn = if container then _resolveCoinsSpawn(container) else nil
 		local rewardCash = math.max(0, math.floor(tonumber(progress.rewardCash) or 0))
-		local confettiColors = if isComplete then DAILY_CONFETTI_COLORS else nil
-		local holdSeconds = if isComplete then DAILY_COMPLETE_HOLD_SECONDS else DAILY_PROGRESS_HOLD_SECONDS
 
-		self:_playFrameSlide(frame, "_maestryOriginalPosition", confettiColors, 0.4, function()
-			local barTween = TweenService:Create(barFill, MASTERY_BAR_TWEEN_INFO, {
-				Size = _targetFillSize(barFill, ratio),
-			})
-			barTween:Play()
-			if not isComplete then
-				return
-			end
-
-			-- Completado: en cuanto la barra acaba de llenarse salen las monedas del
-			-- premio. Bloqueamos hasta que aterrizan para que el hold empiece
-			-- después (ver _playFrameSlide).
-			task.wait(MASTERY_BAR_TWEEN_INFO.Time)
+		-- Bloquea hasta que aterrizan las monedas.
+		local function deliverReward()
 			if self._destroyed then
 				return
 			end
-
-			local deliverReward = self._onChallengeReward
-			if deliverReward and coinsSpawn and rewardCash > 0 and not self._destroyed then
-				local flightSeconds = deliverReward(coinsSpawn, rewardCash)
+			local deliver = self._onChallengeReward
+			if deliver and coinsSpawn and rewardCash > 0 then
+				local flightSeconds = deliver(coinsSpawn, rewardCash)
 				if type(flightSeconds) == "number" and flightSeconds > 0 then
 					task.wait(flightSeconds)
 				end
 			end
-		end, holdSeconds)
+		end
+
+		local shown = self:_playCompletedCard(
+			CONTRACT_COMPLETED_TITLE,
+			progress.name,
+			DAILY_CONFETTI_COLORS,
+			deliverReward,
+			DAILY_COMPLETE_HOLD_SECONDS
+		)
+		-- Sin tarjeta se entrega igual: ese cash está reservado (reserveChallengeCash) y
+		-- Stats no lo enseñaría por su cuenta.
+		if not shown then
+			deliverReward()
+		end
 
 		onDone()
 	end)

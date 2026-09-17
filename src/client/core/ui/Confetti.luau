@@ -1,12 +1,7 @@
 --!strict
 --[[
-	Confetti.luau
-	Cañón fullscreen de partículas rectangulares (Frames): salen disparadas con
-	fuerza desde las dos esquinas inferiores de la pantalla hacia arriba y el
-	centro, arquean por gravedad y se desvanecen al caer.
-
-	Uso:
-		Confetti.Rain(parentScreenGui)
+	Cañón fullscreen de confeti (Frames) desde las dos esquinas inferiores.
+	Uso: Confetti.Rain(parentScreenGui). Se pinta en la ScreenGui que contiene a parentScreenGui.
 ]]
 
 local RunService = game:GetService("RunService")
@@ -21,14 +16,21 @@ local LAUNCH_SPEED_FACTOR_MAX = 2.4
 local GRAVITY_FACTOR = 2.3 -- × alto de pantalla / s²
 local LAUNCH_ANGLE_MIN = 55 -- grados sobre la horizontal (hacia el centro)
 local LAUNCH_ANGLE_MAX = 85
-local CORNER_SPREAD = 48 -- px de dispersión del punto de salida en cada esquina
+local CORNER_SPREAD = 48 -- px de dispersión del punto de salida en cada esquina (a 1080p)
+-- Tamaño de las piezas a 1080p; se escala por alto de pantalla (mín. SIZE_SCALE_MIN
+-- para que en móvil no se queden en motas). Cuadraditos y serpentinas.
+local PIECE_W_MIN, PIECE_W_MAX = 6, 11
+local PIECE_H_MIN, PIECE_H_MAX = 4, 7
+local STREAMER_W_MIN, STREAMER_W_MAX = 13, 20
+local STREAMER_H_MIN, STREAMER_H_MAX = 3, 4
+local SIZE_SCALE_MIN = 0.6
 local HORIZONTAL_DRAG = 0.35 -- amortiguación del componente horizontal (1/s)
 local FADE_START_RATIO = 0.6 -- fracción de vida tras la que empieza el fade out
 local OFFSCREEN_MARGIN = 100 -- px bajo la pantalla a los que se recicla la pieza
+local Z_INDEX = 100
 local SPIN_SPEED = 420 -- grados/s máx de giro 2D
--- Aleteo y volteo: confeti real cabecea y se mece al caer. Se simula con un
--- coseno que estrecha el ancho (volteo 3D) y un seno que mece en horizontal.
--- Son 2 trig por pieza/frame — coste despreciable incluso en móvil.
+-- Aleteo y volteo: un coseno estrecha el ancho (volteo 3D) y un seno mece en
+-- horizontal; 2 trig por pieza/frame, despreciable incluso en móvil.
 local TUMBLE_FREQ_MIN = 6 -- rad/s del volteo (flip del ancho)
 local TUMBLE_FREQ_MAX = 13
 local MIN_FLIP_SCALE = 0.12 -- ancho mínimo al voltear de canto (no desaparece)
@@ -48,23 +50,9 @@ local DEFAULT_COLORS = {
 	Color3.fromRGB(255, 130, 220),
 }
 
--- ────────────────────────────────────────────────────────────────
--- Sprint 3: pool de Frames.
---
--- Antes cada Burst (32) y Rain (80) hacía Instance.new + Destroy. Triggered
--- desde MatchHud (level-up + bp-level-up + challenge-complete = 3×60 frames),
--- Locker on buy, Rewards confetti, etc. — fácilmente cientos de instancias
--- por minuto en momentos de actividad.
---
--- Ahora: pool con Parent=nil para piezas en reposo. Al acquire se reparenta
--- al container; al complete del tween, _releaseFrame las devuelve al pool.
--- POOL_CAP limita la huella en memoria (256 × ~Frame ≈ pocos KB).
--- ────────────────────────────────────────────────────────────────
-
--- Audit mobile: cap reducido de 256 a 80. Una Rain típica usa 80 piezas y
--- las llamadas sucesivas no se solapan (la siguiente Rain empieza después
--- de la anterior). 256 × Frame quietos ocupaban ~400 KB residente; 80
--- son ~125 KB.
+-- Pool de Frames (Parent=nil en reposo): Rain se lanza desde varios sitios (MatchHud,
+-- Locker, Rewards) y crear/destruir cada pieza sumaba cientos de instancias por minuto.
+-- POOL_CAP = una Rain típica; las Rain sucesivas no se solapan.
 local POOL_CAP = 80
 local _pool: { Frame } = {}
 
@@ -82,17 +70,16 @@ local function _acquireFrame(): Frame
 end
 
 local function _releaseFrame(piece: Frame)
-	-- Si el pool está lleno, destroy en lugar de stashear (limita la huella).
 	if #_pool >= POOL_CAP then
 		piece:Destroy()
 		return
 	end
 	piece.Parent = nil
 	piece.BackgroundTransparency = 0
-	piece.Visible = true
 	table.insert(_pool, piece)
 end
 
+-- La ScreenGui del parent: así el confetti queda sobre la UI que lo lanza.
 local function resolveScreenContainer(parent: Instance): Instance
 	if parent:IsA("ScreenGui") then
 		return parent
@@ -112,7 +99,6 @@ export type RainOptions = {
 	minLifetime: number?,
 	maxLifetime: number?,
 	spawnDuration: number?,
-	zIndex: number?,
 }
 
 type Particle = {
@@ -147,7 +133,6 @@ function Confetti.Rain(parent: Instance, options: RainOptions?)
 	-- spawnDuration escalona el disparo; por defecto un burst casi instantáneo
 	-- para que se sienta el "pop" desde las esquinas.
 	local spawnDuration = opts.spawnDuration or 0.18
-	local zIndex = opts.zIndex or 100
 
 	if count <= 0 then
 		return
@@ -166,6 +151,10 @@ function Confetti.Rain(parent: Instance, options: RainOptions?)
 	local screenWidth = math.max(1, viewportSize.X)
 	local screenHeight = math.max(1, viewportSize.Y)
 	local gravity = screenHeight * GRAVITY_FACTOR
+	-- Factor de resolución para todo lo que está en px "de 1080p": tamaño de las
+	-- piezas, dispersión en las esquinas y meceo.
+	local sizeScale = math.max(SIZE_SCALE_MIN, screenHeight / 1080)
+	local cornerSpread = math.floor(CORNER_SPREAD * sizeScale)
 
 	-- Cada partícula sale de una esquina (alternadas) con velocidad hacia arriba y
 	-- el centro. El ángulo se mide sobre la horizontal; el componente horizontal
@@ -176,16 +165,17 @@ function Confetti.Rain(parent: Instance, options: RainOptions?)
 		local speed = screenHeight * (LAUNCH_SPEED_FACTOR_MIN + math.random() * (LAUNCH_SPEED_FACTOR_MAX - LAUNCH_SPEED_FACTOR_MIN))
 		local angle = math.rad(LAUNCH_ANGLE_MIN + math.random() * (LAUNCH_ANGLE_MAX - LAUNCH_ANGLE_MIN))
 		local horizontalDir = if fromLeft then 1 else -1
-		local margin = math.random(0, CORNER_SPREAD)
+		local margin = math.random(0, cornerSpread)
 
-		-- Variedad de formas: la mayoría cuadraditos; algunas serpentinas alargadas.
 		local isStreamer = math.random() < STREAMER_CHANCE
-		local w = if isStreamer then math.random(16, 26) else math.random(8, 14)
-		local h = if isStreamer then math.random(3, 5) else math.random(5, 9)
+		local w = if isStreamer then math.random(STREAMER_W_MIN, STREAMER_W_MAX) else math.random(PIECE_W_MIN, PIECE_W_MAX)
+		local h = if isStreamer then math.random(STREAMER_H_MIN, STREAMER_H_MAX) else math.random(PIECE_H_MIN, PIECE_H_MAX)
+		w = math.max(2, math.round(w * sizeScale))
+		h = math.max(2, math.round(h * sizeScale))
 
 		particles[i] = {
 			x = if fromLeft then margin else screenWidth - margin,
-			y = screenHeight - math.random(0, 24),
+			y = screenHeight - math.random(0, math.floor(24 * sizeScale)),
 			vx = math.cos(angle) * speed * horizontalDir,
 			vy = -math.sin(angle) * speed,
 			rot = math.random(0, 360),
@@ -200,7 +190,7 @@ function Confetti.Rain(parent: Instance, options: RainOptions?)
 			tumbleFreq = TUMBLE_FREQ_MIN + math.random() * (TUMBLE_FREQ_MAX - TUMBLE_FREQ_MIN),
 			flutterPhase = math.random() * math.pi * 2,
 			flutterFreq = FLUTTER_FREQ_MIN + math.random() * (FLUTTER_FREQ_MAX - FLUTTER_FREQ_MIN),
-			flutterAmp = (screenHeight / 1080) * (FLUTTER_AMP_MIN + math.random() * (FLUTTER_AMP_MAX - FLUTTER_AMP_MIN)),
+			flutterAmp = sizeScale * (FLUTTER_AMP_MIN + math.random() * (FLUTTER_AMP_MAX - FLUTTER_AMP_MIN)),
 			piece = nil,
 			spawned = false,
 			done = false,
@@ -247,13 +237,12 @@ function Confetti.Rain(parent: Instance, options: RainOptions?)
 				piece.Size = UDim2.fromOffset(p.w, p.h)
 				piece.Position = UDim2.fromOffset(p.x, p.y)
 				piece.Rotation = p.rot
-				piece.ZIndex = zIndex
+				piece.ZIndex = Z_INDEX
 				piece.Parent = container
 				p.piece = piece
 				p.spawned = true
 			end
 
-			-- Integración: gravedad + leve arrastre horizontal + meceo lateral (sway).
 			p.age += dt
 			p.vy += gravity * dt
 			p.vx -= p.vx * HORIZONTAL_DRAG * dt
