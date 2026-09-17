@@ -19,7 +19,11 @@
 	     instanciará como arma hasta tenerla.
 	  3. Regenera el modelo de display del locker en
 	     Shared.Locker.weapons.<Category>.<Id> a partir del `WeaponModel` de la
-	     Tool. La geometría del arma se autora UNA vez, en la Tool.
+	     Tool. La geometría del arma se autora UNA vez, en la Tool. Al clon se
+	     le quitan scripts, texturas de wrap, sonidos, attachments y efectos
+	     (la Tool no se toca: los necesita para disparar). Sus partes se
+	     anclan: el preview 3D del locker lo mueve con PivotTo y el holster
+	     ya las desancla y suelda al montarlo.
 	  4. Lista cualquier otra Tool con el tag WeaponsSystemWeapon fuera de
 	     WeaponTools (prototipos sueltos) para que decidas si migrarla,
 	     quitarle el tag o borrarla, y los modelos de display que ya no
@@ -122,11 +126,34 @@ if not displayRoot then
 	error("No existe Shared.Locker.weapons: ¿está rojo serve conectado?")
 end
 
+-- Piezas funcionales del arma que el WeaponsSystem busca por nombre en la Tool
+-- (TipAttachment, HandleAttachment, MuzzleFlash*, sonidos Fired/Reload...). En
+-- el display nadie las lee: el locker encuadra por PrimaryPart y el holster
+-- suelda cada BasePart. Sólo pesan —el holster replica el clon a todos los
+-- clientes— y un emisor o luz guardado encendido brillaría en la espalda.
+-- OJO: se quitan del CLON; en la Tool son imprescindibles para disparar.
+local FUNCTIONAL_CLASSES = { "Sound", "Attachment", "ParticleEmitter", "Beam", "Trail", "Light" }
+
+local function isFunctionalOnly(instance)
+	for _, className in FUNCTIONAL_CLASSES do
+		if instance:IsA(className) then
+			return true
+		end
+	end
+	return false
+end
+
 local function stripNonDisplayContent(model)
 	local strippedScripts = 0
 	local strippedTextures = 0
+	local strippedFunctional = 0
 
 	for _, descendant in model:GetDescendants() do
+		-- Destruir un Attachment se lleva a sus hijos (el Beam del muzzle, por
+		-- ejemplo), que siguen en la lista: no contarlos dos veces.
+		if not descendant:IsDescendantOf(model) then
+			continue
+		end
 		if descendant:IsA("LuaSourceContainer") then
 			-- El holster parentea el clon al character: un LocalScript de la
 			-- Tool correría ahí como si el arma estuviera empuñada.
@@ -135,10 +162,13 @@ local function stripNonDisplayContent(model)
 		elseif descendant:IsA("Texture") and string.sub(descendant.Name, 1, #WRAP_TEXTURE_PREFIX) == WRAP_TEXTURE_PREFIX then
 			descendant:Destroy()
 			strippedTextures += 1
+		elseif isFunctionalOnly(descendant) then
+			descendant:Destroy()
+			strippedFunctional += 1
 		end
 	end
 
-	return strippedScripts, strippedTextures
+	return strippedScripts, strippedTextures, strippedFunctional
 end
 
 --[[
@@ -187,7 +217,18 @@ local function generateDisplayModel(tool, category, weaponId)
 	local clone = source:Clone()
 	clone.Name = weaponId
 	clone:SetAttribute(GENERATED_ATTRIBUTE, true)
-	local strippedScripts, strippedTextures = stripNonDisplayContent(clone)
+	local strippedScripts, strippedTextures, strippedFunctional = stripNonDisplayContent(clone)
+	-- La Tool se autora desanclada (BaseWeapon la suelda al Handle), pero el
+	-- display no tiene Handle ni soldaduras fiables: el preview 3D del locker
+	-- lo mueve con PivotTo y, desanclado, cada pieza cae por su cuenta. El
+	-- holster lo desancla y suelda pieza a pieza, así que anclar aquí no le
+	-- afecta.
+	for _, descendant in clone:GetDescendants() do
+		if descendant:IsA("BasePart") then
+			descendant.Anchored = true
+			descendant.CanCollide = false
+		end
+	end
 
 	-- Clone preserva PrimaryPart. Sin él los consumidores caen a buscar una
 	-- BasePart llamada `primaryPart`/`Main`, y el wrap sobre la Tool
@@ -204,10 +245,10 @@ local function generateDisplayModel(tool, category, weaponId)
 	end
 	clone.Parent = categoryFolder
 
-	if strippedScripts > 0 or strippedTextures > 0 then
+	if strippedScripts > 0 or strippedTextures > 0 or strippedFunctional > 0 then
 		print(string.format(
-			"[Migration] display %s/%s: %d script(s) y %d textura(s) de wrap eliminadas del clon.",
-			category, weaponId, strippedScripts, strippedTextures
+			"[Migration] display %s/%s: eliminados del clon %d script(s), %d textura(s) de wrap y %d sonido(s)/attachment(s)/efecto(s).",
+			category, weaponId, strippedScripts, strippedTextures, strippedFunctional
 		))
 	end
 end

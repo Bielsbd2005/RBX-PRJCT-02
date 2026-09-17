@@ -1,23 +1,9 @@
 --!strict
 --[[
-	LobbyCharacterPreview  (Client, singleton)
-
-	Dueño único del preview del personaje del jugador local en
-	Workspace.Lobby.Spawners.P1 (el que se ve en el lobby, "P1"). Antes este
-	preview lo construía LobbyFeature y, por separado, el Locker clonaba su propio
-	maniquí en Workspace.Locker.CharacterSpawn. Ahora ambos comparten ESTE modelo:
-
-	  • LobbyFeature lo sincroniza al loadout equipado (:syncToEquippedIfIdle).
-	  • El Locker lo toma prestado mientras está abierto (:beginPreview) para
-	    previsualizar la selección (:applyOutfit/:applyFaceImage/:applyHatItem) y
-	    lo restaura al cerrar (:endPreview → vuelve a lo equipado).
-
-	El flag de preview evita que el observer de loadout de LobbyFeature pise lo que
-	el Locker está mostrando: mientras el Locker tiene el preview, syncToEquippedIfIdle
-	es no-op.
-
-	Las modificaciones de Workspace desde un LocalScript no replican, así que cada
-	cliente clona su propio preview y cada jugador ve solo el suyo.
+	Singleton dueño del preview del personaje local en Workspace.Lobby.Spawners.P1,
+	compartido por LobbyFeature (lo sincroniza a lo equipado) y el Locker (lo toma
+	entre :beginPreview y :endPreview; mientras tanto syncToEquippedIfIdle es no-op).
+	Es local al cliente: cada jugador ve solo el suyo.
 ]]
 
 local ContentProvider = game:GetService("ContentProvider")
@@ -30,6 +16,7 @@ local Core = script.Parent.Parent
 local ClientRoot = Core.Parent
 local Packages = ReplicatedStorage:WaitForChild("Packages")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Templates = ReplicatedStorage:WaitForChild("Templates")
 
 local Janitor = require(Packages.janitor) :: any
 local Fusion = require(Packages.fusion) :: any
@@ -37,6 +24,7 @@ local Fusion = require(Packages.fusion) :: any
 local FaceApplier = require(ClientRoot.features.locker.Appliers.FaceApplier)
 local HatApplier = require(ClientRoot.features.locker.Appliers.HatApplier)
 local DataController = require(Core.data.DataController)
+local PreviewHighlightPanels = require(Core.ui.PreviewHighlightPanels)
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
 local AssetIds = require(Shared.constants.AssetIds)
 
@@ -45,37 +33,15 @@ local RESOLVE_TIMEOUT = 30
 local HIGHLIGHT_COLOR = Color3.fromRGB(0, 0, 0)
 local HIGHLIGHT_OUTLINE_ALPHA = 0.1
 
--- Body bloqueado por nivel: el contorno pasa a blanco y el relleno se vuelve casi
--- opaco, de modo que la silueta se ve "apagada" y se lee como no disponible.
 local LOCKED_OUTLINE_COLOR = Color3.fromRGB(255, 255, 255)
 local LOCKED_FILL_TRANSPARENCY = 0.1
 
--- Billboard de ReplicatedStorage que se clona en el LowerTorso del preview
--- mientras el body está bloqueado (LevelLock.Status.Level → "Lv. X"). Solo aplica
--- al body: un hat bloqueado se marca con el highlight pero SIN billboard.
+-- ReplicatedStorage.Templates.LevelLock (TextLabel en Status.Level), clonado en el
+-- LowerTorso solo con el body bloqueado; el hat bloqueado no lleva billboard.
 local LEVEL_LOCK_TEMPLATE_NAME = "LevelLock"
 
--- Highlight propio del hat bloqueado, dentro de su Handle (el del modelo cubre
--- todo el rig y marcaría también el body, que puede estar desbloqueado).
+-- Va en el Handle del hat: el Highlight del modelo cubriría también el body.
 local HAT_LOCK_HIGHLIGHT_NAME = "HatLockHighlight"
-
--- Paneles del lobby (hijos directos de PlayerGui.UserInterface) que ocultan el
--- contorno del preview mientras están abiertos: tapan al personaje o se lo
--- llevan fuera de cámara, y el contorno quedaría flotando sobre la GUI.
---
--- El Locker NO está aquí a propósito: es el único panel donde el preview es el
--- protagonista, y el contorno es justo lo que marca la silueta del outfit que
--- se está probando.
-local HIGHLIGHT_HIDING_PANELS = {
-	"Gifting",
-	"Store",
-	"Settings",
-	"Credits",
-	"Rewards",
-	"Voting",
-	"GiftAlert",
-	"BattlePass",
-}
 
 local function getOptionalString(value: any): string?
 	if type(value) == "string" and value ~= "" then
@@ -84,34 +50,53 @@ local function getOptionalString(value: any): string?
 	return nil
 end
 
-local function placeCharacter(model: Model, target: Instance)
-	local humanoid = model:FindFirstChildWhichIsA("Humanoid", true)
-	if humanoid then
-		humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+-- Llamar siempre justo después de colocar el modelo: así `yaw` es absoluto respecto
+-- a la pose de frente y repetirlo cada frame no acumula deriva.
+local function spinAround(model: Model, center: Vector3, yaw: number)
+	if yaw == 0 then
+		return
 	end
+	local axis = CFrame.new(center.X, 0, center.Z)
+	model:PivotTo(axis * CFrame.Angles(0, yaw, 0) * axis:Inverse() * model:GetPivot())
+end
+
+-- Se llama cada frame durante el arrastre del Locker (:setYaw): solo colocar.
+local function positionCharacter(model: Model, target: Instance, yaw: number?)
+	local spin = yaw or 0
 
 	if target:IsA("BasePart") then
 		local rootPart = model:FindFirstChild("HumanoidRootPart", true)
 		if rootPart and rootPart:IsA("BasePart") then
 			local rootOffset = model:GetPivot():ToObjectSpace(rootPart.CFrame)
 			model:PivotTo(target.CFrame * rootOffset:Inverse())
+			spinAround(model, target.Position, spin)
 			return
 		end
-		-- MoveTo NO: desplaza el modelo hacia arriba si choca con algo, y durante el
-		-- swap el preview saliente sigue en el mismo sitio. Pivote directo.
+		-- MoveTo no: sube el modelo si choca, y durante el swap el saliente ocupa el sitio.
 		local pivot = model:GetPivot()
 		model:PivotTo(CFrame.new(target.Position) * (pivot - pivot.Position))
+		spinAround(model, target.Position, spin)
 		return
 	end
 
 	if target:IsA("Model") then
-		model:PivotTo(target:GetPivot())
+		local targetPivot = target:GetPivot()
+		model:PivotTo(targetPivot)
+		spinAround(model, targetPivot.Position, spin)
 	end
 end
 
--- Animación idle COMPARTIDA y precargada: reutilizar la misma Animation (y
--- precargar su asset una sola vez) evita que al cambiar de outfit se vea "cargar"
--- la animación; con el asset listo, LoadAnimation/Play aplican la pose al instante.
+local function placeCharacter(model: Model, target: Instance, yaw: number?)
+	local humanoid = model:FindFirstChildWhichIsA("Humanoid", true)
+	if humanoid then
+		humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+	end
+
+	positionCharacter(model, target, yaw)
+end
+
+-- Animation compartida y precargada para que al cambiar de outfit la pose se aplique
+-- al instante.
 local _idleAnimation: Animation? = nil
 local _idlePreloadStarted = false
 local function getIdleAnimation(): Animation
@@ -133,48 +118,36 @@ local function getIdleAnimation(): Animation
 	return anim
 end
 
--- Mientras el entrante espera su pose convive en el mismo sitio que el saliente.
--- Sin congelarlo los dos rigs se empujan y acaban desplazados unos studs: se le
--- quitan las colisiones y se ancla su root hasta el swap. El resto del rig sigue
--- posándose por Motor6D, que no depende de la física.
-type FrozenPhysics = { collide: { [BasePart]: boolean }, root: BasePart?, rootAnchored: boolean }
-
-local function freezePreviewPhysics(model: Model): FrozenPhysics
-	local collide: { [BasePart]: boolean } = {}
-	for _, descendant in model:GetDescendants() do
-		if descendant:IsA("BasePart") and descendant.CanCollide then
-			collide[descendant] = true
-			descendant.CanCollide = false
-		end
-	end
-
-	local rootNode = model:FindFirstChild("HumanoidRootPart", true)
-	local root = if rootNode and rootNode:IsA("BasePart") then rootNode else nil
-	local rootAnchored = if root then root.Anchored else false
-	if root then
+-- El root va anclado siempre: suelto, el Humanoid, la gravedad o el jugador lo
+-- desplazan. El resto del rig se posa por Motor6D, así que el idle sigue funcionando.
+local function anchorPreviewRoot(model: Model)
+	local root = model:FindFirstChild("HumanoidRootPart", true)
+	if root and root:IsA("BasePart") then
 		root.Anchored = true
-	end
-
-	return { collide = collide, root = root, rootAnchored = rootAnchored }
-end
-
-local function unfreezePreviewPhysics(frozen: FrozenPhysics)
-	for part in frozen.collide do
-		if part.Parent then
-			part.CanCollide = true
-		end
-	end
-
-	local root = frozen.root
-	if root and root.Parent then
-		root.Anchored = frozen.rootAnchored
 		root.AssemblyLinearVelocity = Vector3.zero
 		root.AssemblyAngularVelocity = Vector3.zero
 	end
 end
 
--- Oculta/revela el preview localmente (LocalTransparencyModifier no toca la
--- transparencia base ni replica). Cubre partes, decals y texturas (cara incluida).
+local function disableCollisions(model: Model): { BasePart }
+	local disabled: { BasePart } = {}
+	for _, descendant in model:GetDescendants() do
+		if descendant:IsA("BasePart") and descendant.CanCollide then
+			table.insert(disabled, descendant)
+			descendant.CanCollide = false
+		end
+	end
+	return disabled
+end
+
+local function restoreCollisions(parts: { BasePart })
+	for _, part in parts do
+		if part.Parent then
+			part.CanCollide = true
+		end
+	end
+end
+
 local function setPreviewHidden(model: Model, hidden: boolean)
 	local modifier = if hidden then 1 else 0
 	for _, d in model:GetDescendants() do
@@ -206,9 +179,7 @@ local function playIdleAnimation(model: Model, janitor: any): AnimationTrack?
 	track.Name = "LobbyPreviewIdle"
 	track.Looped = true
 	track.Priority = Enum.AnimationPriority.Idle
-	-- Sin fade: la pose idle (sentado) se fija de inmediato. El modelo se mantiene
-	-- oculto en _rebuild hasta que esta pose se aplica, así que no se ve el frame en
-	-- pie del template antes de "sentarse".
+	-- Sin fade: _rebuild mantiene el modelo oculto hasta que esta pose se aplica.
 	track:Play(0)
 
 	janitor:Add(function()
@@ -242,6 +213,9 @@ export type LobbyCharacterPreview = {
 	applyFaceId: (self: LobbyCharacterPreview, faceId: string?) -> (),
 	applyHatItem: (self: LobbyCharacterPreview, itemData: any) -> (),
 	applyHatId: (self: LobbyCharacterPreview, hatId: string?) -> (),
+	buildLookClone: (self: LobbyCharacterPreview) -> Model?,
+	setHiddenByOwner: (self: LobbyCharacterPreview, hidden: boolean) -> (),
+	setYaw: (self: LobbyCharacterPreview, yaw: number) -> (),
 }
 
 local LobbyCharacterPreview = {}
@@ -251,17 +225,8 @@ local _instance: any = nil
 
 local function _new(): any
 	local self = setmetatable({}, LobbyCharacterPreview)
-	self._janitor = Janitor.new()
 	self._previewJanitor = Janitor.new()
-	-- Janitor del preview SALIENTE mientras el entrante se posa (ver _rebuild).
 	self._outgoingJanitor = nil :: any
-	self._janitor:Add(function()
-		if self._outgoingJanitor then
-			self._outgoingJanitor:Destroy()
-			self._outgoingJanitor = nil
-		end
-		self._previewJanitor:Destroy()
-	end, true)
 	self._p1 = nil :: Instance?
 	self._uiGui = nil :: Instance?
 	self._model = nil :: Model?
@@ -276,10 +241,15 @@ local function _new(): any
 	self._lockedLevel = nil :: number?
 	self._hatLockedLevel = nil :: number?
 	self._previewHidden = false
+	-- Radianes; 0 = de frente.
+	self._yaw = 0
+	self._hiddenByOwner = false
+	self._ownerNoCollide = nil :: { BasePart }?
+	self._lastFace = nil :: { image: string?, id: string? }?
+	self._lastHat = nil :: { itemData: any, id: string? }?
 	return self
 end
 
---- Devuelve el singleton del preview del personaje del lobby.
 function LobbyCharacterPreview.get(): LobbyCharacterPreview
 	if not _instance then
 		_instance = _new()
@@ -287,8 +257,6 @@ function LobbyCharacterPreview.get(): LobbyCharacterPreview
 	return _instance
 end
 
--- Resuelve P1 y el ScreenGui de la UI (para el highlight). Idempotente; tras el
--- primer intento (éxito o timeout) no vuelve a esperar. Devuelve si P1 existe.
 function LobbyCharacterPreview:_ensureResolved(): boolean
 	if self._resolved then
 		return self._p1 ~= nil
@@ -298,10 +266,8 @@ function LobbyCharacterPreview:_ensureResolved(): boolean
 	local spawners = lobby and lobby:WaitForChild("Spawners", RESOLVE_TIMEOUT)
 	local p1 = spawners and spawners:WaitForChild("P1", RESOLVE_TIMEOUT)
 	if not p1 then
-		-- NO marcar _resolved aquí: si la geometría del lobby aún no replicó
-		-- (móvil lento / stall), dejarlo en false permite reintentar en la
-		-- siguiente llamada (son por acción del usuario, no por frame). Marcarlo
-		-- antes del WaitForChild deshabilitaba el preview el resto de la sesión.
+		-- Sin marcar _resolved: si el lobby aún no replicó (móvil lento), la siguiente
+		-- llamada reintenta en vez de dejar el preview deshabilitado toda la sesión.
 		warn("[LobbyCharacterPreview] Workspace.Lobby.Spawners.P1 no encontrado (timeout)")
 		return false
 	end
@@ -311,7 +277,7 @@ function LobbyCharacterPreview:_ensureResolved(): boolean
 	local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui") :: PlayerGui
 	self._uiGui = playerGui:WaitForChild("UserInterface")
 
-	-- Limpiar preview previo (hot reload / re-arranque del feature).
+	-- Restos de un arranque anterior (hot reload).
 	local previous = p1:FindFirstChild("CharacterPreview")
 	if previous then
 		previous:Destroy()
@@ -321,8 +287,6 @@ function LobbyCharacterPreview:_ensureResolved(): boolean
 end
 
 function LobbyCharacterPreview:_bindHighlight(preview: Model)
-	-- El body template puede traer Highlight o no; se crea si falta para que el
-	-- contorno no dependa de cómo esté montado cada asset.
 	local existing = preview:FindFirstChildOfClass("Highlight")
 	local highlight: Highlight
 	if existing then
@@ -338,68 +302,30 @@ function LobbyCharacterPreview:_bindHighlight(preview: Model)
 	self._highlightHidden = false
 	highlight.OutlineTransparency = HIGHLIGHT_OUTLINE_ALPHA
 	highlight.Enabled = true
-	-- Colores/relleno según esté bloqueado o no (ver _applyLockVisuals).
 	self:_applyLockVisuals()
 
-	-- Con cualquier panel de HIGHLIGHT_HIDING_PANELS abierto, fuera el contorno.
-	-- Se resuelve en cada _rebuild (no una sola vez al arrancar) para que un panel
-	-- que replicó tarde entre en la cuenta sin reiniciar el feature; las conexiones
-	-- viven en _previewJanitor, que se limpia justo antes de cada rebind.
-	local panels: { GuiObject } = {}
-	local uiGui = self._uiGui
-	if uiGui then
-		for _, name in HIGHLIGHT_HIDING_PANELS do
-			local node = uiGui:FindFirstChild(name)
-			if node and node:IsA("GuiObject") then
-				table.insert(panels, node :: GuiObject)
-			end
-		end
-	end
-
-	if #panels == 0 then
-		return
-	end
-
-	local function applyVisibility()
-		local anyPanelOpen = false
-		for _, panel in panels do
-			if panel.Visible then
-				anyPanelOpen = true
-				break
-			end
-		end
-		self._highlightHidden = anyPanelOpen
-		highlight.Enabled = not anyPanelOpen
+	local stopObserving = PreviewHighlightPanels.observe(self._uiGui, function(hidden: boolean)
+		self._highlightHidden = hidden
+		highlight.Enabled = not hidden
 		local levelLock = self._levelLock
 		if levelLock and levelLock:IsA("BillboardGui") then
-			levelLock.Enabled = not anyPanelOpen
+			levelLock.Enabled = not hidden
 		end
 		self:_applyHatLock()
-	end
+	end)
 
-	for _, panel in panels do
-		self._previewJanitor:Add(
-			panel:GetPropertyChangedSignal("Visible"):Connect(applyVisibility),
-			"Disconnect"
-		)
-	end
-	applyVisibility()
+	self._previewJanitor:Add(stopObserving, true)
 end
 
--- Aplica el estado de bloqueo al contorno y al billboard de nivel. Se llama tanto
--- tras reconstruir el body como al cambiar solo el estado (mismo outfit).
 function LobbyCharacterPreview:_applyLockVisuals()
 	local highlight = self._highlight
 	if highlight then
 		if self._lockedLevel then
-			-- Bloqueado: relleno casi opaco + contorno blanco.
 			highlight.FillColor = HIGHLIGHT_COLOR
 			highlight.FillTransparency = LOCKED_FILL_TRANSPARENCY
 			highlight.OutlineColor = LOCKED_OUTLINE_COLOR
 		else
-			-- Contorno negro sin relleno: marca la silueta sin tapar el outfit que se
-			-- está previsualizando. Mismo criterio que CharacterHighlightController usa
-			-- para el personaje del local player en partida.
+			-- Mismo criterio que CharacterHighlightController en partida.
 			highlight.FillColor = HIGHLIGHT_COLOR
 			highlight.FillTransparency = 1
 			highlight.OutlineColor = HIGHLIGHT_COLOR
@@ -409,9 +335,7 @@ function LobbyCharacterPreview:_applyLockVisuals()
 	self:_updateLevelLock()
 end
 
--- Marca el hat bloqueado con el mismo contorno de bloqueo que el body, pero
--- dentro de su Handle y sin billboard: el nivel requerido ya lo cuenta el
--- ActionFrame del locker.
+-- Sin billboard para el hat: el nivel requerido ya lo muestra el ActionFrame del locker.
 function LobbyCharacterPreview:_applyHatLock()
 	local model = self._model
 	if not model then
@@ -451,11 +375,10 @@ function LobbyCharacterPreview:_applyHatLock()
 		highlight.FillTransparency = LOCKED_FILL_TRANSPARENCY
 		highlight.OutlineColor = LOCKED_OUTLINE_COLOR
 		highlight.OutlineTransparency = HIGHLIGHT_OUTLINE_ALPHA
-		highlight.Enabled = not self._highlightHidden
+		highlight.Enabled = not self._highlightHidden and not self._hiddenByOwner
 	end
 end
 
--- Clona/actualiza/destruye ReplicatedStorage.LevelLock en el LowerTorso del preview.
 function LobbyCharacterPreview:_updateLevelLock()
 	local level = self._lockedLevel
 	local model = self._model
@@ -471,14 +394,12 @@ function LobbyCharacterPreview:_updateLevelLock()
 
 	local billboard = existing
 	if not billboard or not billboard.Parent then
-		local template = ReplicatedStorage:FindFirstChild(LEVEL_LOCK_TEMPLATE_NAME)
+		local template = Templates:FindFirstChild(LEVEL_LOCK_TEMPLATE_NAME)
 		if not template then
-			warn("[LobbyCharacterPreview] ReplicatedStorage.LevelLock no encontrado")
+			warn("[LobbyCharacterPreview] ReplicatedStorage.Templates.LevelLock no encontrado")
 			return
 		end
 
-		-- El rig es R15; si el asset viniera con otro torso, se cae a lo que haya
-		-- para que el billboard no desaparezca por un nombre distinto.
 		local anchorPart = model:FindFirstChild("LowerTorso", true)
 			or model:FindFirstChild("Torso", true)
 			or model:FindFirstChild("HumanoidRootPart", true)
@@ -492,7 +413,7 @@ function LobbyCharacterPreview:_updateLevelLock()
 	end
 
 	if billboard:IsA("BillboardGui") then
-		billboard.Enabled = not self._highlightHidden
+		billboard.Enabled = not self._highlightHidden and not self._hiddenByOwner
 	end
 
 	local status = billboard:FindFirstChild("Status")
@@ -502,22 +423,14 @@ function LobbyCharacterPreview:_updateLevelLock()
 	end
 end
 
--- Reconstruye el body desde cero (cambio de outfit). Recrea los appliers, así que
--- cualquier cara/hat debe re-aplicarse después.
---
--- Doble buffer para que el cambio de body no parpadee: el modelo entrante se clona
--- OCULTO y el saliente se mantiene en pantalla hasta que el entrante tiene su pose
--- idle; solo entonces se destruye el saliente y se revela el entrante, en el mismo
--- frame. Antes se destruía el saliente al empezar, así que el spawner quedaba vacío
--- los 2+ frames (hasta 1s si el asset de animación tardaba) que tarda el rig en
--- posarse — ese era el parpadeo.
+-- Recrea los appliers: cara/hat deben re-aplicarse después.
+-- Doble buffer contra el parpadeo: el entrante se clona oculto y el saliente sigue
+-- visible hasta que el entrante tiene su pose idle; el swap ocurre en un solo frame.
 function LobbyCharacterPreview:_rebuild(outfitId: string?)
 	if not self:_ensureResolved() then
 		return
 	end
 
-	-- Se resuelve ANTES de tocar nada: si el outfit no tiene template, no merece la
-	-- pena tirar el preview actual.
 	local template = resolveBodyTemplate(outfitId)
 	if not template then
 		self._previewJanitor:Cleanup()
@@ -529,8 +442,7 @@ function LobbyCharacterPreview:_rebuild(outfitId: string?)
 		return
 	end
 
-	-- El saliente pasa a su propio janitor; si ya había uno esperando (cambios muy
-	-- rápidos) se destruye ya: solo el último visible merece quedarse.
+	-- Si ya había un saliente esperando (cambios muy rápidos), se destruye ya.
 	local previousOutgoing = self._outgoingJanitor
 	local outgoing = self._previewJanitor
 	self._outgoingJanitor = outgoing
@@ -547,15 +459,15 @@ function LobbyCharacterPreview:_rebuild(outfitId: string?)
 
 	local preview = template:Clone()
 	preview.Name = "CharacterPreview"
-	-- Oculto ANTES de entrar al Workspace: así nunca se renderiza el frame en pie
-	-- del template ni se solapa con el saliente.
+	-- Oculto antes de entrar al Workspace para no renderizar nunca la pose del template.
 	setPreviewHidden(preview, true)
 	self._previewHidden = true
-	local frozen = freezePreviewPhysics(preview)
+	anchorPreviewRoot(preview)
+	local noCollide = disableCollisions(preview)
 	preview.Parent = self._p1
 	self._previewJanitor:Add(preview, "Destroy")
 
-	placeCharacter(preview, self._p1 :: Instance)
+	placeCharacter(preview, self._p1 :: Instance, self._yaw)
 	local idleTrack = playIdleAnimation(preview, self._previewJanitor)
 
 	self._model = preview
@@ -565,8 +477,7 @@ function LobbyCharacterPreview:_rebuild(outfitId: string?)
 
 	self._lastOutfitId = outfitId
 
-	-- Se revela cuando el asset de animación cargó (Length > 0) + un par de frames
-	-- para que el Animator pose el rig.
+	-- Revelar cuando la animación cargó (Length > 0) + dos frames para que el Animator pose.
 	task.spawn(function()
 		local deadline = os.clock() + 1
 		while idleTrack and idleTrack.Length <= 0 and os.clock() < deadline do
@@ -575,43 +486,41 @@ function LobbyCharacterPreview:_rebuild(outfitId: string?)
 		RunService.RenderStepped:Wait()
 		RunService.RenderStepped:Wait()
 
-		-- Swap atómico: fuera el saliente, dentro el entrante. Si otro _rebuild ya
-		-- se llevó por delante a `outgoing`, aquí no queda nada que destruir.
 		if self._outgoingJanitor == outgoing then
 			self._outgoingJanitor = nil
 			outgoing:Destroy()
 		end
 
 		if self._model == preview and preview.Parent then
-			-- Recolocar justo antes de revelar: deja fuera cualquier deriva de los
-			-- frames en que ambos previews coexistieron.
-			placeCharacter(preview, self._p1 :: Instance)
-			unfreezePreviewPhysics(frozen)
+			placeCharacter(preview, self._p1 :: Instance, self._yaw)
+			anchorPreviewRoot(preview)
 			self._previewHidden = false
-			setPreviewHidden(preview, false)
+			setPreviewHidden(preview, self._hiddenByOwner)
+			if self._hiddenByOwner then
+				-- La colisión se devuelve en setHiddenByOwner.
+				self._ownerNoCollide = noCollide
+			else
+				restoreCollisions(noCollide)
+			end
 		else
-			unfreezePreviewPhysics(frozen)
+			restoreCollisions(noCollide)
 		end
 	end)
 end
 
--- Cara y hat se aplican DESPUÉS de reconstruir el body, mientras el entrante sigue
--- oculto esperando su pose. Sus partes nacen con LocalTransparencyModifier 0, así
--- que sin esto un hat nuevo se vería flotando sobre el personaje saliente.
+-- Las partes de cara/hat nacen con LocalTransparencyModifier 0: sin esto un hat
+-- aplicado durante el swap se vería flotando sobre el saliente.
 function LobbyCharacterPreview:_reapplyHiddenState()
 	local model = self._model
-	if self._previewHidden and model then
+	if (self._previewHidden or self._hiddenByOwner) and model then
 		setPreviewHidden(model, true)
 	end
 end
 
---- Reconstruye el body solo si el outfit cambió respecto al actual.
---- `lockedLevel` es el nivel requerido cuando el body está bloqueado (nil si no
---- lo está): pinta el contorno de bloqueo y muestra el billboard LevelLock.
+--- `lockedLevel`: nivel requerido si el body está bloqueado, nil si no.
 function LobbyCharacterPreview:applyOutfit(outfitId: string?, lockedLevel: number?)
 	self._lockedLevel = lockedLevel
 	if outfitId ~= self._lastOutfitId or not self._faceApplier then
-		-- _rebuild → _bindHighlight → _applyLockVisuals ya deja el estado aplicado.
 		self:_rebuild(outfitId)
 	else
 		self:_applyLockVisuals()
@@ -619,6 +528,7 @@ function LobbyCharacterPreview:applyOutfit(outfitId: string?, lockedLevel: numbe
 end
 
 function LobbyCharacterPreview:applyFaceImage(image: string?)
+	self._lastFace = { image = image }
 	if self._faceApplier then
 		self._faceApplier:ApplyImage(image)
 	end
@@ -626,16 +536,16 @@ function LobbyCharacterPreview:applyFaceImage(image: string?)
 end
 
 function LobbyCharacterPreview:applyFaceId(faceId: string?)
+	self._lastFace = { id = faceId }
 	if self._faceApplier then
 		self._faceApplier:ApplyItemId(faceId)
 	end
 	self:_reapplyHiddenState()
 end
 
---- `lockedLevel` no-nil marca el hat como bloqueado (contorno de bloqueo en su
---- Handle; el billboard LevelLock es solo del body).
 function LobbyCharacterPreview:applyHatItem(itemData: any, lockedLevel: number?)
 	self._hatLockedLevel = lockedLevel
+	self._lastHat = { itemData = itemData }
 	if self._hatApplier then
 		self._hatApplier:Apply(itemData)
 	end
@@ -645,6 +555,7 @@ end
 
 function LobbyCharacterPreview:applyHatId(hatId: string?, lockedLevel: number?)
 	self._hatLockedLevel = lockedLevel
+	self._lastHat = { id = hatId }
 	if self._hatApplier then
 		self._hatApplier:ApplyItemId(hatId)
 	end
@@ -652,7 +563,6 @@ function LobbyCharacterPreview:applyHatId(hatId: string?, lockedLevel: number?)
 	self:_reapplyHiddenState()
 end
 
---- Sincroniza el preview con el loadout equipado (outfit/cara/hat).
 function LobbyCharacterPreview:syncToEquipped()
 	local loadout = Fusion.peek(DataController.Loadout) :: { [string]: any }
 	if type(loadout) ~= "table" then
@@ -663,8 +573,6 @@ function LobbyCharacterPreview:syncToEquipped()
 	self:applyHatId(getOptionalString(loadout.Hat))
 end
 
---- Igual que syncToEquipped, pero respeta al Locker: si tiene el preview tomado,
---- no hace nada (el Locker está mostrando una selección sin equipar).
 function LobbyCharacterPreview:syncToEquippedIfIdle()
 	if self._previewActive then
 		return
@@ -672,15 +580,131 @@ function LobbyCharacterPreview:syncToEquippedIfIdle()
 	self:syncToEquipped()
 end
 
---- El Locker toma el preview: a partir de aquí los syncs de loadout del lobby se
---- ignoran y el Locker controla qué se muestra.
 function LobbyCharacterPreview:beginPreview()
 	self._previewActive = true
+	self:setYaw(0)
 end
 
---- El Locker suelta el preview y se restaura lo equipado.
+--- Radianes, absoluto respecto a la pose de frente; se conserva al reconstruir el body.
+function LobbyCharacterPreview:setYaw(yaw: number)
+	if self._yaw == yaw then
+		return
+	end
+	self._yaw = yaw
+
+	local model = self._model
+	local p1 = self._p1
+	if model and model.Parent and p1 then
+		positionCharacter(model, p1, yaw)
+		-- PivotTo deja velocidades residuales; se limpian por si algo desancla el root.
+		anchorPreviewRoot(model)
+	end
+end
+
+local function relativePath(instance: Instance, root: Instance): string
+	local names = {}
+	local current: Instance? = instance
+	while current and current ~= root do
+		table.insert(names, 1, current.Name)
+		current = current.Parent
+	end
+	return table.concat(names, "/")
+end
+
+--- Doble para recibir un kill effect: el look actual construido limpio desde las
+--- plantillas (clonar el preview vivo arrastra animación, anclaje y contornos que
+--- estropean el efecto) pero con la misma pose por parte. Sin Parent; del caller.
+function LobbyCharacterPreview:buildLookClone(): Model?
+	local template = resolveBodyTemplate(self._lastOutfitId)
+	if not template then
+		return nil
+	end
+
+	local clone = template:Clone()
+	clone.Name = "KillEffectPreview"
+	for _, descendant in clone:GetDescendants() do
+		if descendant:IsA("Highlight") or descendant:IsA("BillboardGui") then
+			descendant:Destroy()
+		end
+	end
+
+	local face = self._lastFace
+	local faceApplier = FaceApplier.new(clone, ItemsConfig)
+	if face and face.image ~= nil then
+		faceApplier:ApplyImage(face.image)
+	else
+		faceApplier:ApplyItemId(if face then face.id else nil)
+	end
+
+	local hat = self._lastHat
+	local hatApplier = HatApplier.new(clone, ItemsConfig)
+	if hat and hat.itemData ~= nil then
+		hatApplier:Apply(hat.itemData)
+	else
+		hatApplier:ApplyItemId(if hat then hat.id else nil)
+	end
+
+	-- Copiar la pose antes de tener Parent: fuera del Workspace los Motor6D/welds no
+	-- arrastran al resto del rig al fijar cada CFrame.
+	local model = self._model
+	if model and model.Parent then
+		local liveByPath: { [string]: BasePart } = {}
+		for _, descendant in model:GetDescendants() do
+			if descendant:IsA("BasePart") then
+				liveByPath[relativePath(descendant, model)] = descendant
+			end
+		end
+		for _, descendant in clone:GetDescendants() do
+			if descendant:IsA("BasePart") then
+				local live = liveByPath[relativePath(descendant, clone)]
+				if live then
+					descendant.CFrame = live.CFrame
+				end
+			end
+		end
+	end
+
+	return clone
+end
+
+--- Independiente del ocultado interno del swap: un rebuild que termine mientras
+--- tanto no lo revela antes de tiempo.
+function LobbyCharacterPreview:setHiddenByOwner(hidden: boolean)
+	if self._hiddenByOwner == hidden then
+		return
+	end
+	self._hiddenByOwner = hidden
+
+	local model = self._model
+	if model and model.Parent and not self._previewHidden then
+		setPreviewHidden(model, hidden)
+	end
+	-- Invisible no basta: con colisión, el doble ragdoll se apoya en el cuerpo fantasma.
+	if hidden then
+		if model and model.Parent then
+			self._ownerNoCollide = disableCollisions(model)
+		end
+	else
+		local noCollide = self._ownerNoCollide
+		self._ownerNoCollide = nil
+		if noCollide then
+			restoreCollisions(noCollide)
+		end
+	end
+	local highlight = self._highlight
+	if highlight then
+		highlight.Enabled = not self._highlightHidden and not hidden
+	end
+	local levelLock = self._levelLock
+	if levelLock and levelLock:IsA("BillboardGui") then
+		levelLock.Enabled = not self._highlightHidden and not hidden
+	end
+	self:_applyHatLock()
+end
+
 function LobbyCharacterPreview:endPreview()
 	self._previewActive = false
+	self:setYaw(0)
 	self:syncToEquipped()
 end
 

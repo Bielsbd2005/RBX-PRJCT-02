@@ -19,9 +19,12 @@ local ScenePresetController = require(Client.core.lighting.ScenePresetController
 local LobbyCharacterPreview = require(Client.core.character.LobbyCharacterPreview)
 local LockerCatalog = require(script:WaitForChild("LockerCatalog"))
 local LockerGrid = require(script:WaitForChild("LockerGrid"))
+local LockerBanners = require(script:WaitForChild("LockerBanners"))
+local BannerPreviewer = require(script:WaitForChild("Previewers"):WaitForChild("BannerPreviewer"))
 local LockerUtils = require(script:WaitForChild("LockerUtils"))
 local WeaponPreviewController = require(script:WaitForChild("WeaponPreviewController"))
 local WeaponStatsPanel = require(script:WaitForChild("WeaponStatsPanel"))
+local CharacterRotateController = require(script:WaitForChild("CharacterRotateController"))
 local MenuHover = require(Client.core.ui.MenuHover)
 local NavStaggerController = require(Client.core.ui.NavStaggerController)
 local UIUtils = require(Client.core.ui.UIUtils)
@@ -41,6 +44,8 @@ local StoreProducts = require(Shared.constants.StoreProducts)
 local UITheme = require(Client.core.ui.UITheme)
 local NavTabController = require(Client.core.ui.NavTabController)
 local Confetti = require(Client.core.ui.Confetti)
+local ScreenFade = require(Client.core.ui.ScreenFade)
+local GameSounds = require(Client.core.ui.GameSounds)
 local Notify = require(Client.core.ui.NotificationController)
 
 local LockerFeature = {}
@@ -56,12 +61,11 @@ local DEFAULT_NAV_THUMBNAIL = "rbxasset://textures/ui/GuiImagePlaceholder.png"
 local ACTION_FRAME_TWEEN_INFO = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local ACTION_ICON_LOCKED = AssetIds.Images.LockerLocked
 local ACTION_ICON_PURCHASE = AssetIds.Images.LockerPurchase
--- Mismo icono de gema que pinta el grid (LockerGrid.STATUS_ICON_GEMS): el panel
--- de acción tiene que anunciar la moneda antes de que el jugador pulse comprar.
+-- Mismo icono de gema que el grid (LockerGrid.STATUS_ICON_GEMS): el panel de acción
+-- anuncia la moneda antes de pulsar comprar.
 local ACTION_ICON_PURCHASE_GEMS = AssetIds.Images.LockerStatusGems
 local ACTION_BTN_COLOR_PURCHASE = Color3.fromRGB(255, 0, 127)
 local ACTION_BTN_COLOR_LOCKED = Color3.fromRGB(161, 161, 161)
-local LOCKER_PREVIEW_IDLE_ANIMATION_ID = AssetIds.Animations.PreviewIdle
 local SHOP_REQUEST_TIMEOUT = 5
 
 type LockerCategoryKey = LockerMainCategory.LockerMainCategory
@@ -125,13 +129,16 @@ local ITEMS_CONFIG_BY_NAV = LockerConfig.ItemsConfigByNav :: { [LockerCategoryKe
 local CATEGORY_TO_LOADOUT_SLOT = LockerConfig.CategoryToLoadoutSlot :: { [string]: string }
 local RARITY_RANK = LockerConfig.RarityRank :: { [string]: number }
 
+local WEAPONS_CAMERA_TARGET = "weapons"
 local CAMERA_TARGET_BY_MAIN_CATEGORY = {
-	-- Character (Style) usa su propia cámara Workspace.Cameras.character.
 	Style = "character",
-	Arsenal = "weapons",
+	Arsenal = WEAPONS_CAMERA_TARGET,
 	Effects = "killEffects",
 } :: { [LockerCategoryKey]: string }
 local MAIN_CATEGORY_SWITCH_COOLDOWN = 0.2
+-- Margen para que replique un nodo de la GUI. Solo se consume si el nodo NO está
+-- ya (búsqueda inmediata primero).
+local GUI_NODE_TIMEOUT = 5
 
 function LockerFeature.start(menuController: any, options: { autoOpen: boolean? }?): any
 	local janitor = Janitor.new()
@@ -147,22 +154,17 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local bodiesFolder = Shared:WaitForChild("Bodies") :: Folder
 	local killEffectDummyTemplate = bodiesFolder:WaitForChild("KillEffectDummy") :: Model
 
-	-- El preview del personaje (outfit/cara/hat) ya no usa un maniquí propio en
-	-- Workspace.Locker.CharacterSpawn: se previsualiza sobre el personaje del lobby
-	-- (Workspace.Lobby.Spawners.P1) vía este singleton compartido con LobbyFeature.
+	-- El preview de outfit/cara/hat se hace sobre el personaje del lobby
+	-- (Workspace.Lobby.Spawners.P1), singleton compartido con LobbyFeature.
 	local lobbyCharacter = LobbyCharacterPreview.get()
 
 	local lockerFolder = Workspace:WaitForChild("Locker")
 
-	-- Lighting por atributo: el look del Locker lo lleva Workspace.Locker
-	-- (LightingPreset="Locker") y la vuelta al lobby es la política compartida de
-	-- ScenePresetController.applyLobbyOrRestore (misma que usa el BattlePass).
+	-- Lighting por atributo: el look lo lleva Workspace.Locker (LightingPreset="Locker")
+	-- y la vuelta usa ScenePresetController.applyLobbyOrRestore (como el BattlePass).
 	local dummySpawn = lockerFolder:WaitForChild("DummySpawn")
-	-- Anclas del preview de armas por ROL, no por arma: el arma de la categoría
-	-- activa se va a la mesa y la otra a la pared (WeaponPreviewController las
-	-- intercambia al cambiar de nav). Fallback a los nombres antiguos mientras el
-	-- place no tenga los nuevos: el intercambio funciona igual, entre las posiciones
-	-- de siempre.
+	-- Anclas del preview de armas por ROL (mesa/pared, ver WeaponPreviewController).
+	-- MainSpawn/SpecialSpawn son los nombres antiguos, aceptados como fallback.
 	local function resolveWeaponAnchor(preferredName: string, legacyName: string): Instance?
 		local preferred = lockerFolder:FindFirstChild(preferredName)
 		if preferred then
@@ -176,14 +178,16 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 	local tableWeaponSpawn = resolveWeaponAnchor("TableSpawn", "MainSpawn")
 	local wallWeaponSpawn = resolveWeaponAnchor("WallSpawn", "SpecialSpawn")
-	-- Los stats del arma ya no viven en la GUI del locker, sino en un BillboardGui
-	-- del mundo bajo Workspace.Locker.Stats (ver WeaponStatsPanel).
+	-- Stats del arma: BillboardGui del mundo bajo Workspace.Locker.Stats.
 	local weaponStatsAnchor = lockerFolder:WaitForChild("Stats", 10)
+	-- Tarjeta de banner en el mundo (Workspace.Locker.Banner.Part.Card): solo se
+	-- enciende en Effects → Banners.
+	local bannerPreview = BannerPreviewer.new(lockerFolder:WaitForChild("Banner", 10))
+	janitor:Add(bannerPreview, "Destroy")
 	if not weaponStatsAnchor then
 		warn("[Locker] Ancla del billboard de stats no encontrada: Workspace.Locker.Stats")
 	end
 
-	-- Botón de apertura en Menu.Container.Locker
 	local container = menuGui:FindFirstChild("Container")
 	local lockerBtnInstance = container and container:FindFirstChild("Locker")
 	local lockerBtn: GuiButton? = if lockerBtnInstance and lockerBtnInstance:IsA("GuiButton")
@@ -192,33 +196,78 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local uiGui = playerGui:WaitForChild("UserInterface") :: ScreenGui
 	local lockerFrame = uiGui:WaitForChild("Locker") :: Frame
 
-	-- Registrar el Locker como panel del MenuController para que hasOpenPanel()
-	-- lo cuente — afecta a MapVote (auto-hide cuando hay panel encima) y al
-	-- estado MUFFLED de la música del lobby. El Locker oculta el menú via
-	-- :hide()/:show() pero antes no se registraba: la música caía en STOP
-	-- creyendo que estábamos en match.
+	-- Registrado como panel para que hasOpenPanel() lo cuente: MapVote (auto-hide) y
+	-- el estado MUFFLED de la música del lobby dependen de ello.
 	menuController:registerPanel(lockerFrame)
 	janitor:Add(function()
 		menuController:unregisterPanel(lockerFrame)
 	end, true)
-	local nav = lockerFrame:WaitForChild("Nav2")
-	local navTemplate = nav:WaitForChild("Template") :: GuiButton
+	-- La GUI del locker se reagrupa a menudo en Studio, así que cada pieza se busca
+	-- por NOMBRE a cualquier profundidad, no por ruta fija. Lo que falte se reporta
+	-- junto y el locker no se monta (en vez de un WaitForChild infinito).
+	local missingNodes: { string } = {}
+	local function expectNode(root: Instance?, name: string): Instance?
+		if not root then
+			return nil
+		end
+		-- Hijo directo primero: la búsqueda recursiva podría devolver antes un nodo
+		-- anidado del mismo nombre (Template, Title, Icon…).
+		local found = root:FindFirstChild(name)
+			or root:FindFirstChild(name, true)
+			or root:WaitForChild(name, GUI_NODE_TIMEOUT)
+		if not found then
+			table.insert(missingNodes, `{root.Name}.{name}`)
+		end
+		return found
+	end
+
+	local function hasMissingNodes(): boolean
+		if #missingNodes == 0 then
+			return false
+		end
+		warn(`[Locker] Nodos no encontrados bajo UserInterface.Locker: {table.concat(missingNodes, ", ")} — el locker no se monta.`)
+		return true
+	end
+
+	local navNode = expectNode(lockerFrame, "Nav2")
+	local navTemplateNode = expectNode(navNode, "Template")
+	local nav1Node = expectNode(lockerFrame, "Nav1")
+	local closeBtnNode = expectNode(nav1Node, "CloseBtn")
+	-- Los tabs de Nav1 se clonan de Nav1.Template según el modo: normal
+	-- Character/Effects/Weapons (Style/Effects/Arsenal) o wraps Maestry/Owned. El Name
+	-- de cada botón clonado ES la key (nav1TabController y nav1Stagger indexan por Name).
+	local nav1TemplateNode = expectNode(nav1Node, "Template")
+	local itemGridNode = expectNode(lockerFrame, "ScrollingFrame")
+	-- Única plantilla del grid, también en la vista de wraps (trae ViewportFrame para
+	-- el preview 3D; el progreso de desafío va como texto en Status.Value).
+	local itemGridTemplateNode = expectNode(itemGridNode, "ItemTemplate")
+	-- Vista de banners (Effects → Banners): ScrollingFrame hermano de la grid
+	-- (Locker.Content.Banners) que la sustituye mientras esa nav está activa.
+	local bannersNode = expectNode(if itemGridNode then itemGridNode.Parent else nil, "Banners")
+	local bannersTemplateNode = expectNode(bannersNode, "Template")
+	local actionFrameNode = expectNode(lockerFrame, "ActionFrame")
+	-- Botón separado del ActionFrame para personalizar los wraps del arma poseída.
+	local wrapsButtonNode = expectNode(lockerFrame, "Wraps")
+	-- Indicator: nº de wraps poseídos para el arma seleccionada (sin contar Default).
+	local wrapsIndicatorNode = expectNode(wrapsButtonNode, "Indicator")
+
+	if hasMissingNodes() then
+		return janitor
+	end
+
+	local nav = navNode :: Instance
+	local navTemplate = navTemplateNode :: GuiButton
 	local defaultNavItemSize = navTemplate.Size
-	local nav1 = lockerFrame:WaitForChild("Nav1")
-	local closeBtn = nav1:WaitForChild("CloseBtn") :: GuiButton
-	-- Nav1 pasó a ser template-driven: sus tabs se clonan de Nav1.Template según el
-	-- modo. En el locker normal son Character/Effects/Weapons (categorías internas
-	-- Style/Effects/Arsenal); en modo wraps son Maestry/Owned. El Name de
-	-- cada botón clonado ES la key (nav1TabController y nav1Stagger indexan por Name).
-	local nav1Template = nav1:WaitForChild("Template") :: GuiButton
+	local nav1 = nav1Node :: Instance
+	local closeBtn = closeBtnNode :: GuiButton
+	local nav1Template = nav1TemplateNode :: GuiButton
 	local defaultNav1ItemSize = nav1Template.Size
-	local itemGrid = lockerFrame:WaitForChild("ScrollingFrame")
-	-- ItemTemplate es ahora la única plantilla del grid: la vista de wraps la
-	-- reutiliza (incluye ViewportFrame para el preview 3D; el progreso de los
-	-- wraps de desafío se muestra como texto en Status.Value).
-	local itemGridTemplate = itemGrid:WaitForChild("ItemTemplate") :: GuiObject
-	-- El texto del ActionBtn puede vivir en el propio botón (TextButton) o en un hijo
-	-- (Title/Label/Text). Resolvemos el destino una vez por botón.
+	local itemGrid = itemGridNode :: ScrollingFrame
+	local itemGridTemplate = itemGridTemplateNode :: GuiObject
+	local bannersFrame = bannersNode :: ScrollingFrame
+	local bannersTemplate = bannersTemplateNode :: ImageButton
+	local wrapsButton = wrapsButtonNode :: GuiButton
+	local wrapsIndicator = wrapsIndicatorNode :: TextLabel
 	local function resolveActionButtonTextTarget(button: GuiButton): Instance?
 		for _, name in { "Title", "Label", "Text", "Price", "Value" } do
 			local child = button:FindFirstChild(name)
@@ -232,8 +281,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		return button:FindFirstChildWhichIsA("TextLabel", true)
 	end
 
-	-- Panel de acción (compra / bloqueo). Un único frame, ActionFrame, para todos
-	-- los ítems (armas incluidas).
+	-- Panel de acción (compra / bloqueo), único para todos los ítems:
 	--   <Frame>.Title.Text.Title / .Subtitle  → título y subtítulo
 	--   <Frame>.Title.Icon                     → icono (candado / compra)
 	--   <Frame>**.ActionBtn                    → botón de acción (búsqueda recursiva)
@@ -250,34 +298,31 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	}
 
 	local function makeActionPanel(frame: GuiObject): ActionPanel
-		local title = frame:WaitForChild("Title")
-		local textContainer = title:WaitForChild("Text")
-		local button = frame:FindFirstChild("ActionBtn", true) :: GuiButton
+		local title = expectNode(frame, "Title")
+		local textContainer = expectNode(title, "Text")
+		local button = expectNode(frame, "ActionBtn") :: GuiButton
+		-- El deslizamiento de ocultar es relativo al PADRE del ActionFrame: si en
+		-- Studio se mueve dentro de otro contenedor, `1.15` deja de ser "bajo el
+		-- borde de la pantalla" y pasa a ser "bajo el borde del contenedor".
 		local visiblePosition = frame.Position
 		return {
 			frame = frame,
-			titleLabel = textContainer:WaitForChild("Title") :: TextLabel,
-			subtitleLabel = textContainer:WaitForChild("Subtitle") :: TextLabel,
-			icon = title:WaitForChild("Icon") :: ImageLabel,
+			titleLabel = expectNode(textContainer, "Title") :: TextLabel,
+			subtitleLabel = expectNode(textContainer, "Subtitle") :: TextLabel,
+			icon = expectNode(title, "Icon") :: ImageLabel,
 			button = button,
-			buttonTextTarget = resolveActionButtonTextTarget(button),
+			buttonTextTarget = if button then resolveActionButtonTextTarget(button) else nil,
 			visiblePosition = visiblePosition,
-			-- Oculto: deslizado bajo el borde inferior (mismo X, Y fuera de pantalla).
 			hiddenPosition = UDim2.new(visiblePosition.X.Scale, visiblePosition.X.Offset, 1.15, visiblePosition.Y.Offset),
 			activeTween = nil,
 		}
 	end
 
-	local actionPanel = makeActionPanel(lockerFrame:WaitForChild("ActionFrame") :: GuiObject)
-	-- ¿Está el ActionFrame desplegado ahora mismo?
+	local actionPanel = makeActionPanel(actionFrameNode :: GuiObject)
+	if hasMissingNodes() then
+		return janitor
+	end
 	local isActionFrameVisible = false
-	-- Botón separado (fuera del ActionFrame) para personalizar los wraps de un arma poseída.
-	-- El nav de armas (Locker.WeaponNav) agrupa las acciones específicas del arma y
-	-- se muestra al seleccionar un arma poseída. El botón de wraps vive dentro; su
-	-- visibilidad la controla la del contenedor.
-	local wrapsButton = lockerFrame:WaitForChild("Wraps") :: GuiButton
-	-- Indicator: nº de wraps poseídos para el arma seleccionada (sin contar Default).
-	local wrapsIndicator = wrapsButton:WaitForChild("Indicator") :: TextLabel
 
 	local function setPanelButtonText(panel: ActionPanel, text: string)
 		if panel.buttonTextTarget then
@@ -285,16 +330,35 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end
 	end
 
-	-- El HUD de monedas ya no lo monta el Locker: Menu y Locker comparten el
-	-- ScreenGui LobbyStats, que pinta y muestra MenuController.
-	local cameraController = LockerCameraController.new("weapons")
+	local cameraController = LockerCameraController.new(WEAPONS_CAMERA_TARGET)
 	janitor:Add(cameraController, "Destroy")
+
+	-- Arrastrar sobre la escena gira el personaje del preview (ratón y táctil).
+	-- Solo escucha en la categoría Character (Body/Faces/Hats): lo activa y lo
+	-- desactiva selectItem, y el cierre lo devuelve al frente.
+	local characterRotate = CharacterRotateController.new({
+		playerGui = playerGui,
+		uiGui = uiGui,
+		onYawChanged = function(yaw: number)
+			lobbyCharacter:setYaw(yaw)
+		end,
+	})
+	janitor:Add(characterRotate, "Destroy")
+	-- Fundido a negro para los cambios de cámara entre pestañas (como el BattlePass):
+	-- la cámara salta tapada en vez de cruzar la escena. Singleton por playerGui: no
+	-- va al janitor.
+	local fade = ScreenFade.new(playerGui)
+	-- Hay un `cover` en vuelo esperando a la pantalla negra. El cierre del locker
+	-- lo descubre para no dejar un parpadeo negro encima de su propia salida.
+	local pendingCameraFade = false
+	-- Hay un cierre esperando a la pantalla negra (salida desde Weapons).
+	-- `isOpen` ya está a false, pero la escena del locker sigue montada hasta el
+	-- callback: el teardown del feature debe limpiarla igualmente.
+	local closeFadePending = false
 	lockerFrame.Visible = false
 
 	MenuHover.bindButton(closeBtn, janitor)
 
-	-- Los tabs de categoría de Nav1 (Character/Effects/Weapons) se clonan de
-	-- Nav1.Template en populateMainCategoryNav; cada tab lleva su key de categoría.
 	local NAV1_MAIN_CATEGORY_ITEMS: { { key: LockerCategoryKey, title: string } } = {
 		{ key = LockerMainCategory.STYLE, title = "Character" },
 		{ key = LockerMainCategory.EFFECTS, title = "Effects" },
@@ -306,11 +370,9 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		{ key = "maestry", title = "Maestry" },
 	}
 	local navButtons = {} :: { GuiButton }
-	-- Janitor de los botones clonados de Nav1 (conexiones + hover). Se limpia en cada
-	-- repoblación para no acumular listeners de tabs destruidos.
+	-- Se limpia en cada repoblación para no acumular listeners de tabs destruidos.
 	local nav1ButtonsJanitor = Janitor.new()
 	janitor:Add(nav1ButtonsJanitor, "Destroy")
-	local activeNavSizeTweens = {} :: { [GuiButton]: Tween }
 	local selectedMainCategory: LockerCategoryKey? = nil
 	local selectedCatalogItem: LockerCatalogItem? = nil
 	local wrapsTargetWeaponCategory: WeaponCategory = WeaponCategoryMod.MAIN
@@ -330,16 +392,11 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	} :: { [WeaponCategory]: { [string]: { [string]: number } } }
 	local equippedLookup = {} :: { [string]: string }
 	local selectedNavKey: string? = nil
-	-- Forward decl: los controladores del stagger de Nav1/Nav2 se construyen más
-	-- abajo (cuando `navTemplate`/janitor están listos) pero se referencian antes:
-	-- `populateNavButtons` re-tweenea Nav2 al cambiar de categoría, y `setWrapsMode`
-	-- re-tweenea Nav1 al alternar entre el locker normal y el modo wraps.
-	local nav1Stagger: NavStaggerController.NavStaggerController? = nil
-	local nav2Stagger: NavStaggerController.NavStaggerController? = nil
-	-- Forward decl de la repoblación de Nav1: setWrapsMode las invoca para reconstruir
-	-- los tabs (Character/Effects/Weapons ↔ Maestry/Owned); se asignan más
-	-- abajo, cuando sus dependencias (handleMainCategoryButtonClick / showWrapsView)
-	-- ya existen.
+	-- Forward decl: se construyen más abajo, pero populateNavButtons y setWrapsMode
+	-- ya los re-tweenean.
+	local nav1Stagger: NavStaggerController.NavStaggerController
+	local nav2Stagger: NavStaggerController.NavStaggerController
+	-- Forward decl: setWrapsMode las usa; se asignan cuando sus dependencias existen.
 	local populateMainCategoryNav: () -> ()
 	local populateWrapsViewNav: () -> ()
 	local isOpen = false
@@ -356,14 +413,13 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	--   "owned"   → wraps que posees en el inventario
 	local wrapsView = "owned"
 
-	-- Panel de stats del arma: billboard en el mundo, así que se construye pronto
-	-- (setWrapsMode y selectItem lo ocultan). El constructor lo deja apagado.
+	-- Billboard en el mundo: se construye pronto porque setWrapsMode y selectItem lo
+	-- ocultan. Arranca apagado.
 	local weaponStatsPanel = WeaponStatsPanel.new(weaponStatsAnchor, janitor)
 
-	-- El HUD de monedas (LobbyStats) es compartido y por defecto sigue al Menu,
-	-- que el Locker esconde al abrirse. Mientras el Locker está abierto es él
-	-- quien manda: visible, salvo en la vista de wraps (pantalla limpia). Al
-	-- cerrarse devuelve el control al Menu (nil).
+	-- El HUD de monedas (LobbyStats) es compartido y por defecto sigue al Menu, que
+	-- el Locker esconde. Con el Locker abierto manda él: visible salvo en la vista de
+	-- wraps. Al cerrarse devuelve el control al Menu (nil).
 	local function syncSharedStatsHud()
 		menuController:setStatsHudOverride(if isOpen then not isWrapsMode else nil)
 	end
@@ -375,21 +431,15 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			weaponStatsPanel:hide()
 		end
 		syncSharedStatsHud()
-		if nav then nav.Visible = not enabled end
-		-- Entrar al modo wraps oculta el WeaponNav; al salir, updateActionFrameForSelected
-		-- lo vuelve a mostrar si toca.
+		nav.Visible = not enabled
+		-- Al salir, updateActionFrameForSelected lo vuelve a mostrar si toca.
 		if enabled then wrapsButton.Visible = false end
-		-- Reconstruir los tabs de Nav1 según el modo: wraps (Maestry/Owned)
-		-- vs locker normal (Character/Effects/Weapons). Cada repoblación destruye los
-		-- botones del modo anterior y clona los nuevos desde Nav1.Template.
 		if enabled then
 			populateWrapsViewNav()
 		else
 			populateMainCategoryNav()
 		end
-		if nav1Stagger then
-			nav1Stagger:play()
-		end
+		nav1Stagger:play()
 	end
 
 	actionPanel.frame.Visible = false
@@ -425,31 +475,19 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		return nil
 	end
 
-	local function cancelTweenMap(tweenMap: { [any]: Tween })
-		for _, tween in tweenMap do
-			tween:Cancel()
-		end
-
-		table.clear(tweenMap)
-	end
-
-
-	-- La implementación vive en LockerUtils (la comparte ResultsView); aquí solo se
-	-- fija la animación del locker y el janitor por defecto.
-	local function playPreviewIdleAnimation(previewModel: Model, ownerJanitor: any?)
-		LockerUtils.playPreviewIdleAnimation(previewModel, ownerJanitor or janitor, LOCKER_PREVIEW_IDLE_ANIMATION_ID)
-	end
-
 	local KILL_EFFECT_PREVIEW_COOLDOWN = 0.4
 
+	-- El preview de kill effects se hace SOBRE el personaje del lobby (P1), al que
+	-- apunta Workspace.Cameras.killEffects: al clic se oculta y en su sitio y pose
+	-- aparece un doble (LobbyCharacterPreview:buildLookClone) que recibe el efecto;
+	-- pasado KillEffectsRegistry.previewTime el doble se destruye. Sin preview del
+	-- lobby se usa el maniquí KillEffectDummy en DummySpawn.
 	local currentKillEffectDummy: Model? = nil
-	local killEffectIdleJanitor: any = nil
 	local killEffectRespawnTask: thread? = nil
 	local currentlyPreviewingEffectId: string? = nil
 	local nextAllowedPreviewAt = 0
-	-- Al entrar a la nav KillEffects el grid auto-selecciona el primer item y
-	-- dispara onSelectionChanged sin que el usuario haya clickeado. Esta flag
-	-- consume esa primera notificación para que el preview solo arranque por clic.
+	-- Al entrar a la nav KillEffects el grid auto-selecciona el primer item: esta flag
+	-- consume esa notificación para que el preview solo arranque por clic.
 	local suppressNextKillEffectPreview = false
 
 	local function destroyKillEffectDummy()
@@ -457,38 +495,41 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			task.cancel(killEffectRespawnTask)
 			killEffectRespawnTask = nil
 		end
-		if killEffectIdleJanitor then
-			killEffectIdleJanitor:Destroy()
-			killEffectIdleJanitor = nil
-		end
 		if currentKillEffectDummy and currentKillEffectDummy.Parent then
 			currentKillEffectDummy:Destroy()
 		end
 		currentKillEffectDummy = nil
 		currentlyPreviewingEffectId = nil
+		cameraController:followSubject(nil)
+		lobbyCharacter:setHiddenByOwner(false)
 	end
 
+	-- Doble del personaje del lobby (o el maniquí), listo para recibir el efecto.
 	local function spawnKillEffectDummy()
 		destroyKillEffectDummy()
-		local clone = killEffectDummyTemplate:Clone()
-		clone.Name = "KillEffectDummy"
-		local humanoid = clone:FindFirstChildOfClass("Humanoid")
-		if humanoid then
-			humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
-		end
-		clone.Parent = lockerFolder
-		LockerUtils.placePreviewCharacter(clone, dummySpawn)
-		LockerUtils.snapPartsToCanonicalPose(clone)
 
-		-- Anclar HRP para que el dummy no caiga por gravedad antes del clic.
-		-- El killEffect desancla todo en su paso final (Utils.anchor false).
-		local hrp = clone:FindFirstChild("HumanoidRootPart")
-		if hrp and hrp:IsA("BasePart") then
-			hrp.Anchored = true
+		local clone = lobbyCharacter:buildLookClone()
+		if clone then
+			-- Ya viene con la pose del personaje vivo: no se recoloca ni se pasa a
+			-- la pose canónica, o dejaría de coincidir con lo que se ve.
+			local hrp = clone:FindFirstChild("HumanoidRootPart")
+			if hrp and hrp:IsA("BasePart") then
+				hrp.Anchored = true
+			end
+			clone.Parent = lockerFolder
+			lobbyCharacter:setHiddenByOwner(true)
+		else
+			clone = killEffectDummyTemplate:Clone()
+			clone.Parent = lockerFolder
+			LockerUtils.placePreviewCharacter(clone, dummySpawn)
+			LockerUtils.snapPartsToCanonicalPose(clone)
+			-- Anclar HRP para que el maniquí no caiga antes de que el efecto lo
+			-- suelte (los kill effects desanclan todo en su paso final).
+			local hrp = clone:FindFirstChild("HumanoidRootPart")
+			if hrp and hrp:IsA("BasePart") then
+				hrp.Anchored = true
+			end
 		end
-
-		killEffectIdleJanitor = Janitor.new()
-		playPreviewIdleAnimation(clone, killEffectIdleJanitor)
 		currentKillEffectDummy = clone
 	end
 
@@ -503,23 +544,25 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		nextAllowedPreviewAt = now + KILL_EFFECT_PREVIEW_COOLDOWN
 
 		spawnKillEffectDummy()
-		-- Parar idle antes del apply: el effect destruye los Motor6Ds y la
-		-- AnimationTrack quedaría apuntando a joints inexistentes.
-		killEffectIdleJanitor:Destroy()
-		killEffectIdleJanitor = nil
 		currentlyPreviewingEffectId = effectId
-		KillEffectsRegistry.apply(effectId, currentKillEffectDummy :: Model)
-		killEffectRespawnTask = task.delay(2, function()
+		-- La cámara sigue un poco al cuerpo si sale volando hacia arriba. Se engancha
+		-- antes de aplicar el efecto para medir la subida desde la pose de reposo.
+		local dummy = currentKillEffectDummy :: Model
+		local followPart = dummy:FindFirstChild("LowerTorso")
+			or dummy:FindFirstChild("Torso")
+			or dummy:FindFirstChild("HumanoidRootPart")
+		if followPart and followPart:IsA("BasePart") then
+			cameraController:followSubject(followPart)
+		end
+		KillEffectsRegistry.apply(effectId, dummy)
+		killEffectRespawnTask = task.delay(KillEffectsRegistry.previewTime(effectId), function()
 			killEffectRespawnTask = nil
-			currentlyPreviewingEffectId = nil
-			spawnKillEffectDummy()
+			destroyKillEffectDummy()
 		end)
 	end
 
 	janitor:Add(destroyKillEffectDummy, true)
 
-	-- Todo el preview de outfit/cara/hat se aplica sobre el personaje del lobby
-	-- (LobbyCharacterPreview), no sobre un maniquí del locker.
 	local function applyEquippedFacePreview()
 		lobbyCharacter:applyFaceId(getOptionalString(equippedLookup.Faces) or getCurrentLoadout().Face)
 	end
@@ -539,8 +582,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 	local function applySelectedHatPreview(item: LockerCatalogItem?)
 		if item and item.Category == LockerCategory.HATS then
-			-- Igual que el body: si el hat está bloqueado por nivel, el preview lo
-			-- marca con el contorno de bloqueo (sin billboard, ese es solo del body).
+			-- Hat bloqueado por nivel: contorno de bloqueo (sin billboard, solo es del body).
 			local lockedLevel: number? = if getCurrentLevel() < item.LevelRequired
 				then item.LevelRequired
 				else nil
@@ -551,10 +593,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		applyEquippedHatPreview()
 	end
 
-	-- Body preview: a diferencia de face/hat reconstruye el modelo entero, por eso
-	-- el controlador solo lo rehace si el outfit cambió. Tras reconstruir, los
-	-- appliers se recrean dentro del controlador — los siguientes applySelectedFace/
-	-- HatPreview del onSelectionChanged ven los nuevos.
+	-- El body reconstruye el modelo entero (solo si el outfit cambió) y recrea los
+	-- appliers: los applySelectedFace/HatPreview posteriores ya ven los nuevos.
 	local function applyEquippedBodyPreview()
 		lobbyCharacter:applyOutfit(getOptionalString(equippedLookup.Outfits) or getCurrentLoadout().Outfit)
 	end
@@ -582,7 +622,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		actionPanel.activeTween = cancelTween(actionPanel.activeTween)
 		activePurchaseButtonScaleTween = cancelTween(activePurchaseButtonScaleTween)
 		activePurchaseButtonStrokeTween = cancelTween(activePurchaseButtonStrokeTween)
-		cancelTweenMap(activeNavSizeTweens)
 	end, true)
 
 	local function rebuildOwnedLookup()
@@ -738,11 +777,9 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		return getEquippedItemByCategory(category) or ItemDefaults.ITEM_ID
 	end
 
-	-- Mirror del server (LoadoutService._resolveWeaponWrapForLoadout) y del
-	-- preview controller. Equip es per-weapon: la slot `wrapsTable.Default`
-	-- es la del arma con id "Default", no un fallback que se propaga al resto.
-	-- Un wrap global del BP otorga ownership a todas las armas, pero equiparlo
-	-- sigue siendo manual per-arma desde el locker.
+	-- Mirror de LoadoutService._resolveWeaponWrapForLoadout y del preview controller:
+	-- equip per-weapon; `wrapsTable.Default` es la slot del arma "Default", no un
+	-- fallback. Un wrap global del BP da ownership a todas, pero se equipa por arma.
 	local function resolveWeaponWrap(loadout: LoadoutData, weaponCategory: WeaponCategory, weaponId: string?): string
 		local normalizedWeaponId = getOptionalString(weaponId) or ItemDefaults.ITEM_ID
 		local wrapsTableKey = if weaponCategory == WeaponCategoryMod.MAIN then "MainWeaponWraps" else "SpecialWeaponWraps"
@@ -775,6 +812,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			return categoryLookup ~= nil and categoryLookup[itemId] == true
 		end,
 		ownsWeaponWrap = isWrapOwnedForWeapon,
+		uiGui = uiGui,
 	})
 	janitor:Add(weaponPreviewController, "Destroy")
 
@@ -794,8 +832,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		weaponPreviewController:restoreEquippedFor(category)
 	end
 
-	-- Controlador de estado activo de Nav1 (tabs de categoría o de wraps, según el
-	-- modo). Los botones se registran en cada populateNav1, ya que son dinámicos.
+	-- Estado activo de Nav1: los botones son dinámicos y se registran en populateNav1.
 	local nav1TabController = NavTabController.new()
 	local navItemController = NavTabController.new()
 	janitor:Add(nav1TabController, "Destroy")
@@ -806,11 +843,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		table.clear(navButtons)
 		navItemController:clear()
 
-		for _, tween in activeNavSizeTweens do
-			tween:Cancel()
-		end
-		table.clear(activeNavSizeTweens)
-
 		for _, child in nav:GetChildren() do
 			if child ~= navTemplate and child:IsA("GuiButton") then
 				child:Destroy()
@@ -819,12 +851,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	local function getButtonStroke(button: GuiButton): UIStroke?
-		local stroke = button:FindFirstChildOfClass("UIStroke")
-		if stroke and stroke:IsA("UIStroke") then
-			return stroke
-		end
-
-		return nil
+		return button:FindFirstChildOfClass("UIStroke")
 	end
 
 	local function setSelectedNavButton(selectedButton: GuiButton)
@@ -863,10 +890,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		onActivated: () -> (),
 	}
 
-	-- Reconstruye los tabs de Nav1 clonando Nav1.Template: destruye los del modo
-	-- anterior, registra los nuevos en nav1TabController (estado activo) y engancha
-	-- hover de stroke + click. El template sólo tiene un hijo Title (sin Icon).
-	-- `selectedKey` marca el tab activo tras poblar (nil = ninguno; lo fija el caller).
+	-- Reconstruye los tabs de Nav1 clonando Nav1.Template (que solo tiene un hijo
+	-- Title, sin Icon). `selectedKey` marca el tab activo (nil = ninguno).
 	local function populateNav1(definitions: { Nav1TabDefinition }, selectedKey: string?)
 		nav1ButtonsJanitor:Cleanup()
 		nav1TabController:clear()
@@ -956,7 +981,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			panel.icon.Image = if CurrencyMod.resolve(item.Currency) == CurrencyMod.GEMS
 				then ACTION_ICON_PURCHASE_GEMS
 				else ACTION_ICON_PURCHASE
-			-- Item comprable: el botón muestra el precio (en lugar de "PURCHASE").
 			setPanelButtonText(panel, UIUtils.formatCashAmount(item.Price))
 			panel.button.BackgroundColor3 = ACTION_BTN_COLOR_PURCHASE
 		end
@@ -1003,23 +1027,14 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			return equippedWrap == item.id
 		end
 
-		local slot = CATEGORY_TO_LOADOUT_SLOT[item.Category]
-		if not slot then
-			return false
-		end
-
 		local equippedItem = getEquippedItemByCategory(item.Category)
 		return equippedItem == item.id
 	end
 
-	-- ── Panel de stats del arma (billboard Workspace.Locker.Stats) ───
-	-- Los stats de combate viven en Shared (WeaponsConfig), así que se derivan
-	-- en local (WeaponDisplayStats) sin red. El panel compara la SELECCIONADA
-	-- contra la EQUIPADA (delta bar verde/rojo). `weaponStatsPanel` se construye
-	-- arriba, junto a setWrapsMode.
+	-- Stats del arma: se derivan en local de Shared (WeaponDisplayStats), sin red, y
+	-- comparan la SELECCIONADA contra la EQUIPADA de su categoría.
 
 	type WeaponBaseStats = WeaponDisplayStats.WeaponDisplayStats
-	-- Valores a pintar + sus fills 0..1 (para comparar y mostrar).
 	type DisplayStats = {
 		damage: number,
 		fireRate: number,
@@ -1030,15 +1045,14 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		reloadFill: number,
 		ammoFill: number,
 	}
-	-- Arma seleccionada ahora (category/id, "" si ninguna). Se compara contra la
-	-- equipada de su misma categoría.
+	-- Arma seleccionada ("" si ninguna).
 	local statsSelectedCategory = ""
 	local statsSelectedId = ""
 	-- Token del debounce: invalida renders pendientes al cambiar de selección.
 	local statsRenderToken = 0
 
-	-- Calcula los fills 0..1 de los stats de un arma (las barras se normalizan
-	-- contra los rangos del arsenal; reload invertido = menos mejor).
+	-- Fills 0..1 normalizados contra los rangos del arsenal. Reload invertido: más
+	-- fill = recarga más rápida.
 	local function displayStatsFor(base: WeaponBaseStats): DisplayStats
 		local damage = base.damage
 		local ammo = base.ammoCapacity
@@ -1051,14 +1065,12 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			ammo = ammo,
 			damageFill = if base.damageMax > 0 then damage / base.damageMax else 0,
 			fireRateFill = if base.fireRateMax > 0 then fireRate / base.fireRateMax else 0,
-			-- Recarga: menos es mejor → barra más llena = recarga más rápida.
 			reloadFill = if reload > 0 then base.reloadMin / reload else 1,
 			ammoFill = if base.ammoMax > 0 then ammo / base.ammoMax else 0,
 		}
 	end
 
-	-- Bondad de la seleccionada vs la equipada en espacio de fill (los fills ya
-	-- codifican dirección: más fill = mejor para todos los stats, reload incluido).
+	-- Los fills ya codifican dirección: más fill = mejor en todos los stats.
 	local function dirFromFill(selFill: number, eqFill: number): string
 		if selFill > eqFill + 1e-3 then
 			return "up"
@@ -1101,14 +1113,12 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		}
 	end
 
-	-- El billboard vive en el mundo: sólo debe verse mientras la cámara está en la
-	-- previsualización de armas (Arsenal). En Character/Effects y en la vista de
-	-- wraps (que zooma sobre la mesa) queda oculto.
+	-- Solo en la cámara de armas (Arsenal); oculto en Character/Effects y en la vista
+	-- de wraps (que zooma sobre la mesa).
 	local function isWeaponPreviewContext(): boolean
 		return isOpen and not isWrapsMode and selectedMainCategory == LockerMainCategory.ARSENAL
 	end
 
-	-- Renderiza la comparación seleccionada-vs-equipada.
 	local function tryRenderStats()
 		local category = statsSelectedCategory
 		local selId = statsSelectedId
@@ -1128,8 +1138,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		weaponStatsPanel:setStats(buildStatsModel(displayStatsFor(selBase), displayStatsFor(eqBase)))
 	end
 
-	-- Item seleccionado: no-arma ⇒ oculta el panel. Arma ⇒ debounce 0.06s y
-	-- renderiza (evita ráfagas al scrollear: sólo el arma donde uno se detiene).
+	-- Debounce: al scrollear solo se renderiza el arma donde uno se detiene.
 	local function requestWeaponStatsForItem(item: LockerCatalogItem?)
 		if not item or not isWeaponCategory(item.Category) or not isWeaponPreviewContext() then
 			statsSelectedCategory = ""
@@ -1145,7 +1154,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		local myToken = statsRenderToken
 		task.delay(0.06, function()
 			if myToken ~= statsRenderToken then
-				return -- la selección cambió durante el debounce
+				return
 			end
 			tryRenderStats()
 		end)
@@ -1156,6 +1165,52 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local populateMainContentForNavItem: (LockerCategoryKey, string, string?, boolean?) -> ()
 	local clearItemGrid: () -> ()
 	local syncWeaponPreviewsFromLoadout: () -> ()
+	local bannersView: any = nil
+
+	-- Banner que se da por equipado: con un equip en vuelo ya es el pulsado (como
+	-- la grid); un perfil sin Loadout.Banner lleva el Default.
+	local function getShownBannerId(): string
+		if pendingShopAction and pendingShopAction.kind == "equip" and pendingShopAction.item.Category == LockerCategory.BANNERS then
+			return pendingShopAction.item.id
+		end
+		return getEquippedItemByCategory(LockerCategory.BANNERS) or ItemDefaults.ITEM_ID
+	end
+
+	local function refreshBanners()
+		if not bannersView:IsVisible() then
+			return
+		end
+		bannersView:Refresh()
+		bannerPreview:setContent(player.Name, getCurrentLevel(), getShownBannerId())
+	end
+
+	local function refreshEquipVisuals()
+		grid:RefreshVisibleState(false)
+		refreshBanners()
+	end
+
+	local function requestEquip(item: LockerCatalogItem)
+		local weaponCategoryForEquip, weaponIdForEquip = getWeaponWrapRequestContext(item.Category)
+
+		local equipAction = {
+			kind = "equip",
+			item = item,
+		}
+		pendingShopAction = equipAction
+		refreshEquipVisuals()
+		task.delay(SHOP_REQUEST_TIMEOUT, function()
+			if pendingShopAction == equipAction then
+				pendingShopAction = nil
+				refreshEquipVisuals()
+			end
+		end)
+		Network.Shop.EquipItem.Send({
+			category = item.Category,
+			itemId = item.id,
+			weaponCategory = weaponCategoryForEquip,
+			weaponId = weaponIdForEquip,
+		})
+	end
 
 	grid = LockerGrid.new(itemGrid, { default = itemGridTemplate, wraps = itemGridTemplate }, canUseHoverAnimations, {
 		canInteract = function(): boolean
@@ -1187,29 +1242,65 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			updateActionFrameForSelected()
 		end,
 		onOwnedItemActivated = function(item: LockerCatalogItem)
-			local weaponCategoryForEquip, weaponIdForEquip = getWeaponWrapRequestContext(item.Category)
-
-			local equipAction = {
-				kind = "equip",
-				item = item,
-			}
-			pendingShopAction = equipAction
-			grid:RefreshVisibleState(false)
-			task.delay(SHOP_REQUEST_TIMEOUT, function()
-				if pendingShopAction == equipAction then
-					pendingShopAction = nil
-					grid:RefreshVisibleState(false)
-				end
-			end)
-			Network.Shop.EquipItem.Send({
-				category = item.Category,
-				itemId = item.id,
-				weaponCategory = weaponCategoryForEquip,
-				weaponId = weaponIdForEquip,
-			})
+			requestEquip(item)
 		end,
 	})
 	janitor:Add(grid, "Destroy")
+
+	bannersView = LockerBanners.new(bannersFrame, bannersTemplate, itemGrid, {
+		canInteract = function(): boolean
+			return pendingShopAction == nil
+		end,
+		isItemEquipped = function(item: LockerCatalogItem): boolean
+			return getShownBannerId() == item.id
+		end,
+		onActivated = function(item: LockerCatalogItem)
+			requestEquip(item)
+		end,
+	})
+	janitor:Add(bannersView, "Destroy")
+
+	-- Banners poseídos, Default primero y luego por rareza. Los del pase ya llegan
+	-- filtrados por el catálogo; el filtro de posesión cubre los no comprables.
+	local function getBannerItems(): { LockerCatalogItem }
+		local items = {} :: { LockerCatalogItem }
+		for _, item in catalog:GetItems(LockerMainCategory.EFFECTS, LockerCategory.BANNERS) do
+			if item.id == ItemDefaults.ITEM_ID or isItemOwned(item) then
+				table.insert(items, item)
+			end
+		end
+		table.sort(items, function(a, b)
+			local aDefault = a.id == ItemDefaults.ITEM_ID
+			local bDefault = b.id == ItemDefaults.ITEM_ID
+			if aDefault ~= bDefault then
+				return aDefault
+			end
+			local rarityA = getRarityRank(a.Rarity)
+			local rarityB = getRarityRank(b.Rarity)
+			if rarityA ~= rarityB then
+				return rarityA > rarityB
+			end
+			return a.Name < b.Name
+		end)
+		return items
+	end
+
+	-- La grid de ítems y la de banners ocupan el mismo hueco. Con la tarjeta de banner
+	-- en escena el personaje del lobby se oculta, y solo se muestra al SALIR de
+	-- banners (el preview de kill effects también lo oculta mientras corre su doble).
+	local function setBannersViewActive(active: boolean, stagger: boolean?)
+		itemGrid.Visible = not active
+		if active then
+			bannerPreview:setVisible(true)
+			lobbyCharacter:setHiddenByOwner(true)
+			bannersView:Show(getBannerItems(), stagger)
+			refreshBanners()
+		elseif bannersView:IsVisible() then
+			bannersView:Hide()
+			bannerPreview:setVisible(false)
+			lobbyCharacter:setHiddenByOwner(false)
+		end
+	end
 
 	local function getPreferredSelectedQualifiedId(categoryKey: LockerCategoryKey, navKey: string, selectedQualifiedId: string?): string?
 		if selectedQualifiedId ~= nil then
@@ -1217,10 +1308,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end
 
 		-- El nav del body se llama "Body" pero su categoría es "Outfits" (única
-		-- traducción no-identidad nav→categoría, ver LockerConfig.ItemsConfigByNav).
-		-- Hay que comparar contra el NAV key "Body", no contra LockerCategory.OUTFITS
-		-- ("Outfits") — por eso antes nunca preseleccionaba el body equipado y el
-		-- grid caía al primer item (Default).
+		-- traducción no-identidad nav→categoría, ver LockerConfig.ItemsConfigByNav):
+		-- hay que comparar contra el NAV key.
 		if categoryKey == LockerMainCategory.STYLE and navKey == "Body" then
 			local equippedOutfit = getOptionalString(equippedLookup.Outfits) or getOptionalString(getCurrentLoadout().Outfit)
 			if equippedOutfit then
@@ -1253,7 +1342,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		return nil
 	end
 
-	local function getKillProgressForWeaponWrap(weaponCategory: WeaponCategory, weaponId: string, _wrapKey: string): number
+	local function getKillProgressForWeaponWrap(weaponCategory: WeaponCategory, weaponId: string): number
 		local weaponKills = Fusion.peek(DataController.WeaponKills) :: any
 		if type(weaponKills) ~= "table" then
 			return 0
@@ -1284,9 +1373,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		for _, item in items do
 			local isOwned = isWrapOwnedForWeapon(targetWeaponCategory, targetWeaponId, item.id)
 			local isChallenge = item.KillGoal ~= nil and item.KillGoal > 0
-			-- Filtro por sub-vista de Nav1:
-			--   Maestry → desafíos de kills del arma (desbloqueados o no).
-			--   Owned   → sólo lo que posees en el inventario.
 			local include: boolean
 			if wrapsView == "maestry" then
 				include = isChallenge
@@ -1299,9 +1385,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 				wrapItem.PreviewWeaponId = targetWeaponId
 				wrapItem.PreviewWeaponDisplayName = targetWeaponDisplayName
 				if isChallenge and not isOwned then
-					wrapItem.KillProgress = getKillProgressForWeaponWrap(targetWeaponCategory, targetWeaponId, item.id)
+					wrapItem.KillProgress = getKillProgressForWeaponWrap(targetWeaponCategory, targetWeaponId)
 				elseif isChallenge and isOwned then
-					-- Desafío ya desbloqueado (visible en Maestry/Owned): "UNLOCKED".
 					wrapItem.ChallengeUnlocked = true
 				end
 				table.insert(wrapItems, wrapItem)
@@ -1349,10 +1434,9 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		return wrapItems
 	end
 
-	-- `stagger` indica que la repoblación viene de una interacción de usuario
-	-- (cambio de categoría/nav, abrir locker) — los cards entran en orden con
-	-- UIScale 0→1. Las llamadas pasivas (observers de inventario/loadout) no
-	-- pasan stagger para evitar re-animar al comprar/equipar.
+	-- `stagger`: la repoblación viene de una interacción de usuario y las cards entran
+	-- en orden. Los observers de inventario/loadout no lo pasan, para no re-animar al
+	-- comprar/equipar.
 	populateMainContentForNavItem = function(categoryKey: LockerCategoryKey, navKey: string, selectedQualifiedId: string?, stagger: boolean?)
 		local previousNavKey = selectedNavKey
 		selectedNavKey = navKey
@@ -1362,9 +1446,20 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end
 
 		if navKey == LockerCategory.KILL_EFFECTS and previousNavKey ~= LockerCategory.KILL_EFFECTS then
-			spawnKillEffectDummy()
+			-- En reposo el preview es el propio personaje del lobby: solo asegurar que
+			-- no queda un doble de antes.
+			destroyKillEffectDummy()
 			suppressNextKillEffectPreview = true
 		end
+		if categoryKey == LockerMainCategory.EFFECTS and navKey == LockerCategory.BANNERS then
+			-- Sin selección en la grid: vuelven los previews de lo equipado y se
+			-- ocultan ActionFrame y botón Wraps (onSelectionChanged(nil)).
+			clearItemGrid()
+			setBannersViewActive(true, stagger)
+			return
+		end
+		setBannersViewActive(false)
+
 		local preferredSelectedQualifiedId = getPreferredSelectedQualifiedId(categoryKey, navKey, selectedQualifiedId)
 
 		local items = catalog:GetItems(categoryKey, navKey)
@@ -1388,12 +1483,10 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end
 
 		if isItemOwned(selectedItem) then
-			-- Arma poseída: el ActionFrame se oculta y se muestra el botón Wraps para
-			-- personalizar sus wraps. Otros items poseídos: nada.
+			-- Arma poseída: sin ActionFrame, con botón Wraps. Otros items poseídos: nada.
 			local showWraps = isWeaponCategory(selectedItem.Category) and not isWrapsMode
 			wrapsButton.Visible = showWraps
 			if showWraps then
-				-- Indicator: oculto si no hay wraps (sin contar Default); si hay, su número.
 				local ownedWrapsCount = countOwnedWrapsForWeapon(selectedItem.Category :: WeaponCategory, selectedItem.id)
 				wrapsIndicator.Visible = ownedWrapsCount > 0
 				if ownedWrapsCount > 0 then
@@ -1404,9 +1497,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		elseif (selectedItem.KillGoal ~= nil and selectedItem.KillGoal > 0)
 			or (selectedItem.Category == LockerCategory.WEAPON_WRAPS
 				and not (selectedItem.CanPurchase and selectedItem.Price > 0)) then
-			-- No comprables con cash → sin ActionFrame de compra:
-			--   · wraps de desafío de kills → se desbloquean por progreso.
-			--   · wraps sin precio (Price 0 / CanPurchase false).
+			-- No comprables con cash: wraps de desafío (se desbloquean por progreso) y
+			-- wraps sin precio.
 			wrapsButton.Visible = false
 			hideActionFrame()
 		else
@@ -1417,6 +1509,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 	local function refreshGridSelectionState()
 		grid:RefreshVisibleState()
+		refreshBanners()
 	end
 
 	syncWeaponPreviewsFromLoadout = function()
@@ -1440,7 +1533,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local function populateNavButtons(categoryKey: LockerCategoryKey)
 		clearNavButtons()
 		clearItemGrid()
-		hideActionFrame()
 
 		local itemDefinitions = LOCKER_NAV_ITEMS[categoryKey]
 		for layoutOrder, definition in ipairs(itemDefinitions) do
@@ -1462,7 +1554,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			bindStrokeHover(navButton, navItemsJanitor)
 
 			navItemsJanitor:Add(navButton.Activated:Connect(function()
-				-- Si ya estamos en esta nav, no repoblar (clic sobre la nav activa).
 				if selectedNavKey == definition.key then
 					return
 				end
@@ -1476,26 +1567,50 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			populateMainContentForNavItem(categoryKey, itemDefinitions[1].key, nil, true)
 		end
 
-		if nav2Stagger then
-			nav2Stagger:play()
-		end
+		nav2Stagger:play()
 	end
 
 	clearItemGrid = function()
 		grid:Clear()
-		restoreEquippedWeaponPreviews()
 		destroyKillEffectDummy()
 	end
 
-	local function selectItem(selectedKey: LockerCategoryKey)
+	-- `withoutFade` es para la apertura: la cámara la lleva el travelling de entrada
+	-- justo después, y el cover (asíncrono) llegaría tarde y lo taparía.
+	local function selectItem(selectedKey: LockerCategoryKey, withoutFade: boolean?)
 		if selectedMainCategory == selectedKey and selectedNavKey ~= nil then
 			return
 		end
 
+		local previousKey = selectedMainCategory
 		setSelectedMainCategory(selectedKey)
-		cameraController:setTargetPartName(CAMERA_TARGET_BY_MAIN_CATEGORY[selectedKey])
+		-- Fuera de Character el arrastre se apaga y el personaje vuelve girando al
+		-- frente: la cámara de kill effects mira al mismo maniquí.
+		characterRotate:setEnabled(selectedKey == LockerMainCategory.STYLE)
+		local cameraTarget = CAMERA_TARGET_BY_MAIN_CATEGORY[selectedKey]
+		-- Character ↔ Effects: cámaras cercanas, travelling en vez de negro. Con un
+		-- fundido en vuelo la cámara aún no ha llegado a la pestaña anterior, así que
+		-- ese caso sigue yendo a negro.
+		local isCharacterEffectsSwap = not pendingCameraFade
+			and (
+				(previousKey == LockerMainCategory.STYLE and selectedKey == LockerMainCategory.EFFECTS)
+				or (previousKey == LockerMainCategory.EFFECTS and selectedKey == LockerMainCategory.STYLE)
+			)
+		if withoutFade or isCharacterEffectsSwap then
+			cameraController:setTargetPartName(cameraTarget)
+		else
+			pendingCameraFade = true
+			fade:cover(function()
+				pendingCameraFade = false
+				-- El locker puede haberse cerrado o cambiado de pestaña antes del negro:
+				-- entonces solo se descubre.
+				if isOpen and selectedMainCategory == selectedKey then
+					cameraController:setTargetPartName(cameraTarget, true)
+				end
+				fade:reveal()
+			end)
+		end
 		if selectedKey ~= LockerMainCategory.ARSENAL then
-			-- Otra cámara (Character/Effects): fuera el billboard de stats.
 			weaponStatsPanel:hide()
 			restoreEquippedWeaponPreviews()
 		end
@@ -1518,8 +1633,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		selectItem(selectedKey)
 	end
 
-	-- Tabs de categoría del locker normal. Cada uno cambia la main-category; el tab
-	-- activo lo marca `selectedMainCategory` (nil al abrir → lo fija selectItem).
+	-- El tab activo lo marca `selectedMainCategory` (nil al abrir → lo fija selectItem).
 	populateMainCategoryNav = function()
 		local definitions = {} :: { Nav1TabDefinition }
 		for _, item in NAV1_MAIN_CATEGORY_ITEMS do
@@ -1552,8 +1666,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		local function promptBestFitPack(item: LockerCatalogItem)
 			local isGems = CurrencyMod.resolve(item.Currency) == CurrencyMod.GEMS
 			local deficit = item.Price - getBalanceFor(item)
-			-- Los dos catálogos tienen la misma forma salvo el campo de cantidad,
-			-- así que solo cambia de dónde se lee el importe del pack.
 			local packs: { any } = if isGems then StoreProducts.Gems.InOrder else StoreProducts.Cash.InOrder
 			local function amountOf(pack: any): number
 				return if isGems then pack.GemAmount else pack.CashAmount
@@ -1580,10 +1692,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			end
 		end
 
-		-- Condiciones de compra: nivel, inventario, wraps de desafío y saldo (si
-		-- falta saldo se ofrece el pack que mejor encaja en vez de comprar).
-		-- Cada rechazo avisa por toast: el botón de compra sigue visible cuando
-		-- el ítem está bloqueado, así que sin notificación el click no da feedback.
+		-- Si falta saldo se ofrece el pack que mejor encaja. Cada rechazo avisa por
+		-- toast: el botón sigue visible con el ítem bloqueado y si no el clic no da feedback.
 		local function canPurchase(item: LockerCatalogItem): boolean
 			if pendingShopAction then
 				return false
@@ -1600,7 +1710,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			end
 
 			if item.KillGoal ~= nil and item.KillGoal > 0 then
-				-- Los wraps de desafío de kills no se compran.
 				Notify.warning(`Unlock this wrap with {item.KillGoal} kills.`)
 				return false
 			end
@@ -1625,9 +1734,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 				item = item,
 			}
 			pendingShopAction = buyAction
-			-- Snapshot de la categoría/nav al momento de comprar: si el usuario
-			-- navega a otra vista durante el timeout, repoblar la vista ACTUAL
-			-- forzando un qualifiedId que probablemente no existe allí es incorrecto.
+			-- Snapshot de categoría/nav: si el usuario navega durante el timeout, no se
+			-- repuebla la vista nueva con un qualifiedId que no es suyo.
 			local buyMainCategory = selectedMainCategory
 			local buyNavKey = selectedNavKey
 			task.delay(SHOP_REQUEST_TIMEOUT, function()
@@ -1650,8 +1758,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			})
 		end
 
-		-- Handler de compra: idéntico para el botón de ambos ActionFrame (actúa sobre
-		-- selectedCatalogItem, no sobre el frame), así que se comparte.
 		local function onPurchaseActivated()
 			local item = selectedCatalogItem
 			if item then
@@ -1659,8 +1765,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			end
 		end
 
-		-- Wiring de hover/escala/click + handler de compra del ActionBtn del
-		-- ActionFrame (único panel de acción).
 		local function setupActionButton(button: GuiButton)
 			button.Active = true
 			button.Selectable = true
@@ -1720,12 +1824,12 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			end), "Disconnect")
 
 			janitor:Add(button.MouseButton1Up:Connect(function()
-				local targetScale = if purchaseButtonIsHovered and canUseHoverAnimations
+				local targetScale = if purchaseButtonIsHovered
 					then PURCHASE_BUTTON_HOVER_SCALE
 					else PURCHASE_BUTTON_DEFAULT_SCALE
 				tweenScale(targetScale, PURCHASE_BUTTON_HOVER_TWEEN_INFO)
 
-				local targetStrokeColor = if purchaseButtonIsHovered and canUseHoverAnimations then STROKE_WHITE else STROKE_DEFAULT
+				local targetStrokeColor = if purchaseButtonIsHovered then STROKE_WHITE else STROKE_DEFAULT
 				tweenStroke(targetStrokeColor, PURCHASE_BUTTON_HOVER_TWEEN_INFO)
 			end), "Disconnect")
 
@@ -1735,7 +1839,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		setupActionButton(actionPanel.button)
 	end
 
-	-- Sub-pestañas dentro de wraps: Maestry (desafíos) / Owned.
 	local function showWrapsView(view: string)
 		if not isWrapsMode or wrapsView == view then
 			return
@@ -1797,11 +1900,10 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 		if response.success then
 			if resolvedAction and resolvedAction.kind == "buy" then
+				GameSounds.play(GameSounds.Purchase)
 				Confetti.Rain(lockerFrame)
 			end
 		else
-			-- El server ya manda el motivo en inglés; el fallback cubre un payload
-			-- sin mensaje (p.ej. un rechazo nuevo que no lo rellene).
 			local message = if response.message ~= "" then response.message else "That purchase couldn't be completed."
 			Notify.warning(message)
 
@@ -1829,6 +1931,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 				return
 			end
 			updateActionFrameForSelected()
+			refreshBanners()
 		end), true)
 
 		local weaponKillsObserver = fusionScope:Observer(DataController.WeaponKills)
@@ -1883,28 +1986,25 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end
 	end
 
-	-- Al cerrar, la cámara vuelve al lobby con un travelling; en teardown del feature
-	-- se restaura al instante (animateCamera nil/false).
+	-- `animateCamera`: travelling al cerrar; en teardown del feature, al instante.
 	local function restoreLockerSceneState(animateCamera: boolean?)
 		weaponStatsPanel:hide()
-		-- Todas las salidas pasan por aquí (close, Visible=false y teardown del
-		-- feature), incluidas las que no llaman a setWrapsMode: soltar el HUD
-		-- compartido sin condiciones o se quedaría forzado ya en el lobby.
+		-- Antes de endPreview: devuelve el personaje del lobby si estaba oculto.
+		setBannersViewActive(false)
+		-- Todas las salidas pasan por aquí, incluidas las que no llaman a setWrapsMode:
+		-- soltar el HUD compartido sin condiciones o se quedaría forzado en el lobby.
 		menuController:setStatsHudOverride(nil)
 		restoreEquippedWeaponPreviews()
 		-- Soltar el preview del personaje del lobby: vuelve a mostrar lo equipado y
 		-- LobbyFeature retoma el control de los cambios de loadout.
+		characterRotate:reset()
 		lobbyCharacter:endPreview()
 		cameraController:restore(animateCamera)
 		CameraLock.release("locker")
 		setMenuVisibleInstant(true)
 	end
 
-	-- ── Stagger de aparición de los items de Nav ─────────────
-	-- Dos controladores separados: nav1 se re-anima al abrir el locker y al alternar
-	-- entre el locker normal y el modo wraps (setWrapsMode); nav2 se re-anima cada vez
-	-- que se repuebla (cambio de categoría en nav1). El tab activo depende del modo:
-	-- wrapsView en modo wraps, selectedMainCategory en el locker normal.
+	-- nav1 se re-anima al abrir y al alternar modo wraps; nav2 cada vez que se repuebla.
 	nav1Stagger = NavStaggerController.new({
 		{
 			container = nav1,
@@ -1920,38 +2020,37 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	janitor:Add(nav1Stagger, "Destroy")
 	janitor:Add(nav2Stagger, "Destroy")
 
+	-- Abrir desde el lobby NO pasa por negro: travelling hasta Workspace.Cameras.character
+	-- (espejo del de vuelta). El fundido queda para los cambios de pestaña.
 	local function openLockerGui()
-		if isOpen then
+		-- Durante el fundido de salida la escena sigue montada: reabrir pisaría el
+		-- cierre a medias (en la práctica solo lo alcanzaría un autoOpen).
+		if isOpen or closeFadePending then
 			return
 		end
 
+		GameSounds.play(GameSounds.Open)
 		isOpen = true
 		CameraLock.acquire("locker")
-		-- Tomar el preview del personaje del lobby: a partir de aquí el locker
-		-- controla lo que se muestra (selección sin equipar) y LobbyFeature deja
-		-- de sincronizarlo al loadout hasta que se cierre.
+		-- Desde aquí el locker controla lo que se muestra y LobbyFeature deja de
+		-- sincronizarlo al loadout hasta el cierre.
 		lobbyCharacter:beginPreview()
 		if dirtyWhileClosed then
 			dirtyWhileClosed = false
 			rebuildOwnedLookup()
 			rebuildEquippedLookup()
 		end
-		-- Reaplicar el BODY equipado primero (antes que cara/hat): beginPreview no
-		-- reconstruye el modelo, así que si el preview del lobby se construyó antes
-		-- de llegar el loadout (outfit nil → body por defecto), al abrir mostraría
-		-- un body no equipado. applyOutfit es no-op si ya coincide. El orden importa:
-		-- reconstruir el body recrea los appliers, y cara/hat se aplican sobre el
-		-- modelo nuevo.
+		-- BODY primero: beginPreview no reconstruye el modelo y el preview del lobby pudo
+		-- construirse antes de llegar el loadout. applyOutfit es no-op si ya coincide, y
+		-- reconstruir el body recrea los appliers sobre los que se aplican cara/hat.
 		applyEquippedBodyPreview()
 		applyEquippedFacePreview()
 		applyEquippedHatPreview()
 		hideActionFrame()
-		-- Construir los tabs de categoría de Nav1 (Character/Effects/Weapons) antes de
-		-- seleccionar la primera categoría, para que nav1TabController pueda marcarla.
+		-- Antes de selectItem, para que nav1TabController pueda marcar la categoría.
 		populateMainCategoryNav()
-		selectItem(LockerMainCategory.STYLE)
-		-- Abrimos en Character: la cámara parte de la del lobby/menú y se desplaza
-		-- (travelling) hasta Workspace.Cameras.character.
+		-- Sin fundido: solo fija el target; la cámara la lleva el apply de abajo.
+		selectItem(LockerMainCategory.STYLE, true)
 		cameraController:apply()
 		lockerFrame.Visible = true
 		-- Antes de esconder el Menu: si no, el HUD compartido se iría con él
@@ -1960,30 +2059,55 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		setMenuVisibleInstant(false)
 		ScenePresetController.applyFrom(lockerFolder)
 		nav1Stagger:play()
-		if nav2Stagger then nav2Stagger:play() end
+		nav2Stagger:play()
 	end
 
+	local function finishClose(animateCamera: boolean)
+		selectedMainCategory = nil
+		selectedNavKey = nil
+		selectedCatalogItem = nil
+		hideActionFrame()
+		restoreLockerSceneState(animateCamera)
+		setWrapsMode(false)
+		-- Liberar las cards (pooled) para que las texturas de wrap animadas dejen de
+		-- actualizarse cada Heartbeat.
+		clearItemGrid()
+		lockerFrame.Visible = false
+		ScenePresetController.applyLobbyOrRestore("[Locker]")
+	end
+
+	-- Desde Character y Effects se vuelve con travelling (cámaras cerca del lobby).
+	-- Desde Weapons se va a negro y la cámara se restaura de golpe.
 	local function closeLockerGui()
 		if not isOpen then
 			return
 		end
 
 		isOpen = false
-		selectedMainCategory = nil
-		selectedNavKey = nil
-		selectedCatalogItem = nil
-		statsSelectedCategory = ""
-		statsSelectedId = ""
-		weaponStatsPanel:hide()
-		hideActionFrame()
-		restoreLockerSceneState(true)
-		setWrapsMode(false)
-		-- Liberar las cards del grid (cards pooled, reabrir sigue siendo barato) para
-		-- que las texturas de wrap animadas dejen de actualizarse cada Heartbeat.
-		clearItemGrid()
-		destroyKillEffectDummy()
-		lockerFrame.Visible = false
-		ScenePresetController.applyLobbyOrRestore("[Locker]")
+		GameSounds.play(GameSounds.Close)
+
+		-- Con un fundido de pestaña en vuelo la pantalla ya va camino del negro y la
+		-- cámara aún no ha saltado: se aprovecha ese negro también.
+		local useFade = pendingCameraFade
+			or (selectedMainCategory ~= LockerMainCategory.STYLE and selectedMainCategory ~= LockerMainCategory.EFFECTS)
+		if not useFade then
+			finishClose(true)
+			return
+		end
+
+		-- Este cover sustituye al de la pestaña (ScreenFade descarta el obsoleto).
+		pendingCameraFade = false
+		closeFadePending = true
+		fade:cover(function()
+			-- El teardown del feature ya limpió la escena mientras fundía.
+			if not closeFadePending then
+				fade:reveal()
+				return
+			end
+			closeFadePending = false
+			finishClose(false)
+			fade:reveal()
+		end)
 	end
 
 	if lockerBtn then
@@ -1991,8 +2115,11 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 	janitor:Add(closeBtn.MouseButton1Click:Connect(function()
 		if isWrapsMode then
+			-- En modo wraps el CloseBtn vuelve a la lista de armas; suena como cierre
+			-- porque UISoundsController no pone click a los CloseBtn.
+			GameSounds.play(GameSounds.Close)
 			setWrapsMode(false)
-			local previousNavKey = wrapsTargetWeaponCategory or WeaponCategoryMod.MAIN
+			local previousNavKey = wrapsTargetWeaponCategory
 
 			cameraController:unzoom()
 
@@ -2008,8 +2135,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			closeLockerGui()
 		end
 	end), "Disconnect")
-	-- El click de los tabs de categoría de Nav1 lo engancha populateNav1 (botones
-	-- dinámicos): ya no hay botones estáticos que conectar aquí.
 
 	janitor:Add(lockerFrame:GetPropertyChangedSignal("Visible"):Connect(function()
 		if not lockerFrame.Visible and isOpen then
@@ -2020,7 +2145,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end), "Disconnect")
 
 	janitor:Add(function()
-		if isOpen then
+		if isOpen or closeFadePending then
+			closeFadePending = false
 			restoreLockerSceneState()
 			-- Igual que closeLockerGui: el preset del Locker no puede sobrevivir al
 			-- feature, o el lobby se queda con su lighting (y su DoF).
@@ -2028,10 +2154,9 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end
 	end, true)
 
-	-- `autoOpen` se lee AQUÍ, no al entrar: el locker ya se arranca solo al iniciar
-	-- el juego (ClientBootstrap) y ese arranque tarda — hay WaitForChild de por medio.
-	-- Si el jugador pulsa Locker mientras tanto, el bootstrap marca la opción sobre
-	-- la misma tabla y el clic no se pierde.
+	-- `autoOpen` se lee AQUÍ y no al entrar: el arranque tarda (WaitForChild) y si el
+	-- jugador pulsa Locker mientras tanto, ClientBootstrap marca la opción sobre esta
+	-- misma tabla y el clic no se pierde.
 	if options and options.autoOpen == true then
 		task.defer(openLockerGui)
 	end

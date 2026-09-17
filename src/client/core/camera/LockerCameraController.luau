@@ -1,28 +1,38 @@
 --!strict
 
 local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
 
-local Core = script.Parent.Parent
-local DepthOfFieldController = require(Core.lighting.DepthOfFieldController)
+-- Seguimiento del cuerpo en el preview de kill effects: la cámara cabecea hacia
+-- arriba una fracción de lo que sube el cuerpo, con tope; nunca baja del encuadre base.
+local FOLLOW_RENDER_STEP_NAME = "LockerCameraSubjectFollow"
+local FOLLOW_RATIO = 0.55 -- fracción del ángulo que sube el cuerpo que acompaña la cámara
+local FOLLOW_MAX_PITCH = math.rad(16) -- tope de cabeceo hacia arriba
+local FOLLOW_SMOOTHING = 5 -- 1/s; más alto = sigue más pegado
+local FOLLOW_REST_EPSILON = math.rad(0.05)
 
--- Travelling entre cámaras del locker (entrada, cambio de pestaña y salida): la
--- cámara se desplaza desde su posición actual hasta el target con ease-in-out.
+local function getElevation(from: Vector3, to: Vector3): number
+	local offset = to - from
+	return math.atan2(offset.Y, Vector3.new(offset.X, 0, offset.Z).Magnitude)
+end
+
 local MOVE_TWEEN_INFO = TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut)
 local WRAP_ZOOM_TWEEN_INFO = TweenInfo.new(0.85, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
 local LOCKER_FIELD_OF_VIEW = 70
 
--- Configuración por target: FOV y DOF personalizados por cámara. Los targets que
--- no aparezcan usan LOCKER_FIELD_OF_VIEW y no tocan el DOF.
+-- Claves = nombres de las Parts en Workspace.Cameras.
 local TARGET_CONFIG: {
 	[string]: {
 		fov: number,
-		dof: DepthOfFieldController.DepthOfFieldProperties?,
 	},
 } = {
 	character = {
 		fov = 40,
+	},
+	killEffects = {
+		fov = 66,
 	},
 }
 
@@ -34,16 +44,6 @@ local function getTargetFov(targetPartName: string?): number
 		end
 	end
 	return LOCKER_FIELD_OF_VIEW
-end
-
-local function getTargetDof(targetPartName: string?): DepthOfFieldController.DepthOfFieldProperties?
-	if targetPartName then
-		local config = TARGET_CONFIG[targetPartName]
-		if config then
-			return config.dof
-		end
-	end
-	return nil
 end
 
 export type LockerCameraController = {
@@ -58,7 +58,12 @@ export type LockerCameraController = {
 	_cameraApproachTween: Tween?,
 	_fovTween: Tween?,
 	_cameraApproachCompletedConnection: RBXScriptConnection?,
-	setTargetPartName: (self: LockerCameraController, targetPartName: string) -> (),
+	_followSubject: BasePart?,
+	_followStartElevation: number,
+	_followPitch: number,
+	_followBound: boolean,
+	followSubject: (self: LockerCameraController, subject: BasePart?) -> (),
+	setTargetPartName: (self: LockerCameraController, targetPartName: string, instant: boolean?) -> (),
 	zoomOnPosition: (self: LockerCameraController, targetPosition: Vector3) -> (),
 	unzoom: (self: LockerCameraController) -> (),
 	apply: (self: LockerCameraController, instant: boolean?) -> (),
@@ -94,11 +99,80 @@ function LockerCameraController.new(targetPartName: string?): LockerCameraContro
 	self._cameraApproachTween = nil
 	self._fovTween = nil
 	self._cameraApproachCompletedConnection = nil
+	self._followSubject = nil
+	self._followStartElevation = 0
+	self._followPitch = 0
+	self._followBound = false
 
 	return self
 end
 
+function LockerCameraController:_stopFollow()
+	if self._followBound then
+		RunService:UnbindFromRenderStep(FOLLOW_RENDER_STEP_NAME)
+		self._followBound = false
+	end
+	self._followSubject = nil
+	self._followPitch = 0
+end
+
+function LockerCameraController:_stepFollow(dt: number)
+	-- Travelling en curso (p. ej. clic durante la entrada a esta cámara): no se
+	-- pisa; el seguimiento retoma cuando termina.
+	local approach = self._cameraApproachTween
+	if approach and approach.PlaybackState == Enum.PlaybackState.Playing then
+		return
+	end
+
+	local base = self._targetPart.CFrame
+	local subject = self._followSubject
+	local hasSubject = subject ~= nil and subject.Parent ~= nil
+
+	local targetPitch = 0
+	if hasSubject then
+		local rise = getElevation(base.Position, (subject :: BasePart).Position) - self._followStartElevation
+		targetPitch = math.clamp(rise * FOLLOW_RATIO, 0, FOLLOW_MAX_PITCH)
+	end
+
+	self._followPitch += (targetPitch - self._followPitch) * (1 - math.exp(-FOLLOW_SMOOTHING * dt))
+
+	if not hasSubject and self._followPitch < FOLLOW_REST_EPSILON then
+		self._camera.CFrame = base
+		self:_stopFollow()
+		return
+	end
+
+	self._camera.CFrame = base * CFrame.Angles(self._followPitch, 0, 0)
+end
+
+-- La cámara acompaña ligeramente hacia arriba a `subject` (el cuerpo del kill
+-- effect), tomando como referencia su altura en el momento de la llamada: hay que
+-- llamarla ANTES de que el efecto lo mueva. `nil` suelta el sujeto y la cámara
+-- vuelve suave a su encuadre. Cualquier travelling (apply/zoom/restore) corta el
+-- seguimiento en seco.
+function LockerCameraController:followSubject(subject: BasePart?)
+	if not self._isApplied then
+		return
+	end
+
+	self._followSubject = subject
+	if not subject then
+		return
+	end
+
+	self._followStartElevation = getElevation(self._targetPart.Position, subject.Position)
+	if self._followBound then
+		return
+	end
+	self._followBound = true
+	RunService:BindToRenderStep(FOLLOW_RENDER_STEP_NAME, Enum.RenderPriority.Camera.Value + 1, function(dt)
+		self:_stepFollow(dt)
+	end)
+end
+
 function LockerCameraController:_cancelActiveTweens()
+	self:_stopFollow()
+
 	if self._cameraApproachTween then
 		self._cameraApproachTween:Cancel()
 		self._cameraApproachTween = nil
@@ -115,26 +189,18 @@ function LockerCameraController:_cancelActiveTweens()
 	end
 end
 
--- Cambia la cámara objetivo. Si el locker ya está aplicado, hace un travelling
--- desde la posición actual hasta el nuevo target (mismo movimiento que la entrada).
-function LockerCameraController:setTargetPartName(targetPartName: string)
+-- `instant`: salto de golpe, para quien tape el corte con un fundido a negro.
+function LockerCameraController:setTargetPartName(targetPartName: string, instant: boolean?)
 	local nextTargetPart = resolveTargetPart(targetPartName)
 	if self._targetPart == nextTargetPart and self._targetPartName == targetPartName then
 		return
-	end
-
-	-- Al SALIR de un target con DOF personalizado, restaurar inmediatamente para
-	-- que el blur del fondo se disipe durante el travelling (no al final de golpe).
-	local previousDof = getTargetDof(self._targetPartName)
-	if previousDof then
-		DepthOfFieldController.setProperties(nil)
 	end
 
 	self._targetPart = nextTargetPart
 	self._targetPartName = targetPartName
 
 	if self._isApplied then
-		self:apply()
+		self:apply(instant)
 	end
 end
 
@@ -182,13 +248,8 @@ function LockerCameraController:unzoom()
 	self._fovTween:Play()
 end
 
--- Desplaza la cámara (travelling) hasta el target actual. La primera vez (al abrir)
--- guarda el estado de cámara previo y enciende la DOF; en llamadas posteriores
--- (cambio de pestaña) solo desplaza, sin re-tocar la DOF para que no parpadee.
---
--- Con `instant` el encuadre se pone de golpe y el DOF también: es para quien tapa
--- el corte con un fundido a negro, donde un travelling de 0.6s solo se vería como
--- una espera con la pantalla en negro.
+-- Solo la primera llamada guarda el estado de cámara previo. `instant` es para quien
+-- tapa el corte con un fundido a negro (un travelling ahí sería espera en negro).
 function LockerCameraController:apply(instant: boolean?)
 	self:_cancelActiveTweens()
 
@@ -209,10 +270,6 @@ function LockerCameraController:apply(instant: boolean?)
 	if instant then
 		self._camera.CFrame = self._targetPart.CFrame
 		self._camera.FieldOfView = targetFov
-		local instantDof = getTargetDof(self._targetPartName)
-		if instantDof then
-			DepthOfFieldController.setProperties(instantDof)
-		end
 		return
 	end
 
@@ -223,26 +280,11 @@ function LockerCameraController:apply(instant: boolean?)
 		FieldOfView = targetFov,
 	})
 
-	-- Si el target tiene DOF personalizado, aplicarlo al TERMINAR el tween para
-	-- que no haya un cambio brusco de blur mientras la cámara viaja.
-	local targetDof = getTargetDof(self._targetPartName)
-	if targetDof then
-		self._cameraApproachCompletedConnection = self._cameraApproachTween.Completed:Connect(function(playbackState)
-			if playbackState ~= Enum.PlaybackState.Completed then
-				return
-			end
-			self._cameraApproachCompletedConnection = nil
-			DepthOfFieldController.setProperties(targetDof)
-		end)
-	end
-
 	self._cameraApproachTween:Play()
 	self._fovTween:Play()
 end
 
--- Restaura el estado de cámara previo a entrar al locker. Con `animated`, la cámara
--- hace un travelling de vuelta hasta la posición guardada y solo al terminar se
--- restaura el tipo/subject de cámara; sin él, la restauración es instantánea.
+-- Con `animated`, el tipo/subject de cámara solo se restaura al terminar el travelling.
 function LockerCameraController:restore(animated: boolean?)
 	if not self._isApplied then
 		return
@@ -250,16 +292,11 @@ function LockerCameraController:restore(animated: boolean?)
 
 	self:_cancelActiveTweens()
 
-	-- Restaurar DOF al inicio de la transición de salida (se disipa durante el
-	-- travelling, no de golpe al llegar).
-	DepthOfFieldController.setProperties(nil)
-
 	local savedCFrame = self._savedCFrame
 	local savedFieldOfView = self._savedFieldOfView
 
-	-- Restaura tipo/subject de cámara y limpia el estado guardado. `_isApplied` se
-	-- mantiene true hasta aquí para que el estado guardado (la cámara del lobby) no
-	-- se pierda si algo re-aplica durante el travelling.
+	-- `_isApplied` sigue true hasta aquí para que el estado guardado (la cámara del
+	-- lobby) no se pierda si algo re-aplica durante el travelling.
 	local function finalizeRestore()
 		local player = Players.LocalPlayer
 		local character = player.Character
@@ -296,10 +333,8 @@ function LockerCameraController:restore(animated: boolean?)
 			CFrame = savedCFrame,
 		})
 		self._cameraApproachCompletedConnection = self._cameraApproachTween.Completed:Connect(function(playbackState)
-			-- `Cancel()` también dispara Completed (estado Cancelled). Si el travelling
-			-- se interrumpe NO finalizamos: el estado guardado (la cámara del menú) debe
-			-- conservarse para quien retome el control, y no restauramos tipo/subject a
-			-- medias.
+			-- `Cancel()` también dispara Completed: si se interrumpe NO finalizamos, el
+			-- estado guardado debe conservarse para quien retome el control.
 			if playbackState ~= Enum.PlaybackState.Completed then
 				return
 			end

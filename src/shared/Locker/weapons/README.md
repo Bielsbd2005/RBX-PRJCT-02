@@ -16,6 +16,21 @@ script reemplaza los suyos sin preguntar y respeta los que no lo llevan (los
 autorados a mano antes de la migración): para migrar esos, pon
 `OVERWRITE_HANDAUTHORED = true` una vez, tras revisar el listado con `DRY_RUN`.
 
+El clon se limpia de todo lo que sólo sirve para disparar: scripts, texturas de
+wrap grabadas tras un playtest, sonidos (`Fired`, `Reload`), attachments
+(`HandleAttachment`, `TipAttachment`, `MuzzleFlash0/1`) y efectos (beams,
+partículas, luces). En la Tool siguen: el WeaponsSystem los busca por nombre.
+
+El clon se genera **anclado** (y sin colisión). La Tool viene desanclada y sin
+soldaduras que sobrevivan fuera de ella, y el preview 3D del locker
+(`WeaponPreviewController`) mueve el arma sólo con `PivotTo`: desanclada, cada
+pieza caería por su cuenta. El controlador vuelve a anclar el clone en runtime
+por si el modelo no se ha regenerado. El holster (`BackWeaponService`) no se ve
+afectado: desancla cada parte y la suelda al rig.
+
+No ancles la Tool: `BaseWeapon` sólo desancla `Handle` y la `PrimaryPart` al
+soldarlas, y cualquier otra parte anclada dejaría el arma clavada en el mundo.
+
 Rojo crea estas carpetas vacías (`init.meta.json` → `ignoreUnknownInstances`) y
 no toca lo que haya dentro, así que lo generado vive en el place — **guárdalo**
 después de ejecutar el script. `globIgnorePaths` (`default.project.json`) evita

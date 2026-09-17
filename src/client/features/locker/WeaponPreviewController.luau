@@ -1,13 +1,10 @@
 --!strict
--- WeaponPreviewController: gestiona los previews de armas (Main/Special) en el locker.
--- Encapsula clonación de templates, aplicación de wraps (con animación de scroll),
--- preview de armas bloqueadas (Highlight de bloqueo), motion de selección (rise + bob), y
--- transición down/up al cambiar de arma.
+-- Previews de armas (Main/Special) en el locker: clonado de templates, wraps (con
+-- scroll animado), Highlight de bloqueo, motion de selección y transiciones.
 --
--- Los dos previews (Main y Special) NO tienen un sitio fijo: hay dos anclas por
--- ROL — la mesa (arma en foco) y la pared (arma en segundo plano) — y al cambiar
--- de categoría ambos previews intercambian ancla con un tween en arco. Por
--- defecto la Main está en la mesa.
+-- Los dos previews NO tienen sitio fijo: hay dos anclas por ROL — la mesa (arma en
+-- foco) y la pared (segundo plano) — y al cambiar de categoría intercambian ancla
+-- con un tween en arco. Por defecto la Main está en la mesa.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
@@ -18,7 +15,10 @@ local WeaponCategoryMod = require(ReplicatedStorage:WaitForChild("Shared"):WaitF
 local ItemDefaults = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("ItemDefaults"))
 local LockerCategory = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("LockerCategory"))
 local LockerMainCategory = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("LockerMainCategory"))
+local Client = script.Parent.Parent.Parent
+
 local LockerUtils = require(script.Parent.LockerUtils)
+local PreviewHighlightPanels = require(Client.core.ui.PreviewHighlightPanels)
 
 local SELECTED_WEAPON_RISE_TWEEN_INFO = TweenInfo.new(0.06, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local SELECTED_WEAPON_RISE_HEIGHT = 0.28
@@ -26,21 +26,18 @@ local SELECTED_WEAPON_BOB_AMPLITUDE = 0.2
 local SELECTED_WEAPON_BOB_SPEED = 0.3
 local SELECTED_WEAPON_SWITCH_DOWN_TWEEN_INFO = TweenInfo.new(0.06, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 local SELECTED_WEAPON_SWITCH_DOWN_STUDS = 0.05
--- Bloqueo por nivel: mismo contorno que el preview del personaje del lobby
--- (LobbyCharacterPreview) — relleno negro casi opaco + contorno blanco.
+-- Bloqueo por nivel: mismo contorno que LobbyCharacterPreview.
 local LOCKED_HIGHLIGHT_NAME = "LockHighlight"
 local LOCKED_FILL_COLOR = Color3.fromRGB(0, 0, 0)
 local LOCKED_FILL_TRANSPARENCY = 0.1
 local LOCKED_OUTLINE_COLOR = Color3.fromRGB(255, 255, 255)
 local LOCKED_OUTLINE_TRANSPARENCY = 0.1
--- Intercambio mesa↔pared. El arco (subir a mitad de vuelo) evita que el arma
--- atraviese la mesa en línea recta y da sensación de "la cojo y la cuelgo".
+-- Intercambio mesa↔pared. El arco evita que el arma atraviese la mesa en línea recta.
 local WEAPON_SWAP_TWEEN_INFO = TweenInfo.new(0.55, Enum.EasingStyle.Quint, Enum.EasingDirection.InOut)
 local WEAPON_SWAP_ARC_HEIGHT = 1.1
 
 local DEFAULT_WRAP_STUDS_PER_TILE = 3
 local WEAPON_WRAP_TEXTURE_SCROLL_SPEED_U = 1
-local WEAPON_WRAP_TEXTURE_SCROLL_SPEED_V = 0
 
 local WEAPON_WRAP_TEXTURE_FACE_BY_NAME = {
 	ScrollTexture_Back = Enum.NormalId.Back,
@@ -87,8 +84,6 @@ export type LoadoutData = {
 }
 
 export type WeaponPreviewControllerOptions = {
-	-- Anclas por ROL, no por arma: el arma en foco va a `tableSpawn` y la otra a
-	-- `wallSpawn`; al cambiar de categoría se intercambian.
 	tableSpawn: LockerPreviewSpawnTarget,
 	wallSpawn: LockerPreviewSpawnTarget,
 	sharedWeaponAssets: Instance,
@@ -97,11 +92,13 @@ export type WeaponPreviewControllerOptions = {
 	getCurrentLoadout: () -> LoadoutData,
 	getEquippedItemByCategory: (category: string) -> string?,
 	isOwned: (category: string, itemId: string) -> boolean,
-	-- Ownership per-weapon de un wrap (Inventory.WeaponWrapsByWeapon[cat][weaponId][wrapId]).
-	-- Necesario para que la preview espeje la resolución del servidor: un wrap
-	-- equipado en una entrada del Loadout (incluida la clave "Default") no debe
-	-- propagarse a previews de armas que no lo poseen.
+	-- Ownership per-weapon de un wrap, para espejar la resolución del servidor: un
+	-- wrap equipado en una entrada del Loadout (incluida "Default") no se propaga a
+	-- armas que no lo poseen.
 	ownsWeaponWrap: (weaponCategory: string, weaponId: string, wrapId: string) -> boolean,
+	-- PlayerGui.UserInterface: sus paneles apagan los contornos de los previews
+	-- (ver PreviewHighlightPanels).
+	uiGui: Instance?,
 }
 
 export type WeaponPreviewController = {
@@ -123,8 +120,6 @@ export type WeaponPreviewController = {
 local WeaponPreviewController = {}
 WeaponPreviewController.__index = WeaponPreviewController
 
--- ── Helpers internos ──────────────────────────────────────────
-
 local WRAP_ORIGINAL_MATERIAL_ATTR = "WrapOriginalMaterial"
 
 local function getOptionalString(value: any): string?
@@ -141,9 +136,8 @@ local function getOptionalMaterial(value: any): Enum.Material?
 	return nil
 end
 
--- Aplica/restaura el Material de la parte del arma. Recuerda el material
--- original la primera vez para poder volver a él cuando una skin no define
--- Material (el preview reutiliza la misma instancia al cambiar de wrap).
+-- Recuerda el material original la primera vez para volver a él cuando una skin no
+-- define Material (el preview reutiliza la instancia al cambiar de wrap).
 local function applyMaterialToPart(part: BasePart, material: Enum.Material?)
 	if part:GetAttribute(WRAP_ORIGINAL_MATERIAL_ATTR) == nil then
 		part:SetAttribute(WRAP_ORIGINAL_MATERIAL_ATTR, part.Material.Name)
@@ -192,6 +186,22 @@ local function setWeaponPreviewPivot(previewInstance: Instance, pivot: CFrame)
 	end
 end
 
+-- El preview se mueve sólo con PivotTo, así que tiene que estar anclado: los modelos
+-- generados desde la Tool vienen desanclados y sin soldar. Se hace sobre el clone
+-- para no depender de cómo venga el asset.
+local function anchorWeaponPreview(previewInstance: Instance)
+	if previewInstance:IsA("BasePart") then
+		previewInstance.Anchored = true
+		previewInstance.CanCollide = false
+	end
+	for _, descendant in previewInstance:GetDescendants() do
+		if descendant:IsA("BasePart") then
+			descendant.Anchored = true
+			descendant.CanCollide = false
+		end
+	end
+end
+
 local function getWeaponPreviewPrimaryPart(previewInstance: Instance): BasePart?
 	if previewInstance:IsA("Model") then
 		local primaryPart = previewInstance.PrimaryPart
@@ -222,11 +232,10 @@ local function cancelTweenFromMap(map: { [any]: Tween }, key: any)
 	end
 end
 
--- Mirror exacto de LoadoutService._resolveWeaponWrapForLoadout: equip es
--- estrictamente per-weapon. `wrapsTable.Default` es la slot del arma con id
--- "Default", no un fallback que se propaga. Un wrap global del BP otorga
--- ownership a todas las armas, pero equiparlo sigue siendo manual per-arma.
--- El check de ownership es defense-in-depth contra Loadout stale.
+-- Mirror exacto de LoadoutService._resolveWeaponWrapForLoadout: equip estrictamente
+-- per-weapon. `wrapsTable.Default` es la slot del arma con id "Default", no un
+-- fallback. Un wrap global del BP da ownership a todas las armas, pero equiparlo
+-- sigue siendo manual por arma. El check de ownership cubre un Loadout stale.
 local function resolveWeaponWrap(
 	loadout: LoadoutData,
 	weaponCategory: WeaponCategory,
@@ -247,8 +256,6 @@ local function resolveWeaponWrap(
 	return ItemDefaults.ITEM_ID
 end
 
--- ── Constructor ────────────────────────────────────────────────
-
 function WeaponPreviewController.new(options: WeaponPreviewControllerOptions): WeaponPreviewController
 	local self = setmetatable({}, WeaponPreviewController) :: any
 	self._options = options
@@ -259,31 +266,36 @@ function WeaponPreviewController.new(options: WeaponPreviewControllerOptions): W
 	self._previewBasePivotByCategory = {} :: { [string]: CFrame }
 	self._lockedTemplateCache = {} :: { [string]: Instance }
 
-	-- Datos por categoría para el Heartbeat compartido (en vez de un Connect por
-	-- categoría × tipo de animación).
 	self._wrapAnimDataByCategory = {} :: { [string]: { textures: { Texture } } }
 	self._motionDataByCategory = {} :: {
 		[string]: { activePreview: Instance, basePivot: CFrame, elapsed: number }
 	}
 
-	-- Pool persistente de CFrameValue + listener por categoría. Antes cada
-	-- selección del locker (tap-tap-tap) alocaba 2× Instance.new("CFrameValue")
-	-- + 2× GetPropertyChangedSignal:Connect (1 down + 1 rise). En browsing
-	-- intensivo era GC pressure visible. Con el pool, el alloc ocurre 1 vez
-	-- por categoría y el listener lee el preview target via _motionTargetByCategory.
+	-- CFrameValue + listener persistentes por categoría (evita allocs por cada tap
+	-- del locker); el listener lee el preview destino de _motionTargetByCategory.
 	self._motionCFrameByCategory = {} :: { [string]: CFrameValue }
 	self._motionTargetByCategory = {} :: { [string]: Instance }
 	self._motionConnByCategory = {} :: { [string]: RBXScriptConnection }
 
-	-- Categoría en la mesa (foco). El resto va a la pared.
 	self._focusCategory = WeaponCategoryMod.MAIN :: WeaponCategory
-	-- Driver del intercambio mesa↔pared, uno por categoría (mismo patrón que el
-	-- CFrameValue del bob: cero allocs por cambio de nav).
+	-- Driver del intercambio mesa↔pared, uno por categoría (como el CFrameValue del bob).
 	self._swapAlphaByCategory = {} :: { [string]: NumberValue }
 	self._swapConnByCategory = {} :: { [string]: RBXScriptConnection }
 	self._swapStateByCategory = {} :: {
 		[string]: { preview: Instance, startPivot: CFrame, targetPivot: CFrame }
 	}
+
+	-- Contornos fuera mientras haya un panel abierto encima (como en el preview del
+	-- lobby): si no, el contorno se pinta por delante de la GUI que tapa el arma.
+	self._highlightsHidden = false
+	self._stopPanelObserver = PreviewHighlightPanels.observe(options.uiGui, function(hidden: boolean)
+		self._highlightsHidden = hidden
+		for _, preview in self._activePreviewByCategory do
+			if preview.Parent then
+				LockerUtils.setPreviewHighlightsEnabled(preview, not hidden)
+			end
+		end
+	end)
 
 	self._sharedHeartbeat = nil :: RBXScriptConnection?
 	return self
@@ -293,11 +305,10 @@ function WeaponPreviewController:_ensureHeartbeat()
 	if self._sharedHeartbeat then return end
 	self._sharedHeartbeat = RunService.Heartbeat:Connect(function(dt)
 		for _, data in self._wrapAnimDataByCategory do
-			local tU, tV = data.tileU, data.tileV
+			local tU = data.tileU
 			for _, texture in data.textures do
 				if texture.Parent then
 					texture.OffsetStudsU = (texture.OffsetStudsU + WEAPON_WRAP_TEXTURE_SCROLL_SPEED_U * dt) % tU
-					texture.OffsetStudsV = (texture.OffsetStudsV + WEAPON_WRAP_TEXTURE_SCROLL_SPEED_V * dt) % tV
 				end
 			end
 		end
@@ -321,12 +332,7 @@ function WeaponPreviewController:_ensureHeartbeat()
 	end)
 end
 
--- ── Métodos privados ───────────────────────────────────────────
-
 function WeaponPreviewController:_getSpawnFor(category: string): LockerPreviewSpawnTarget?
-	if not isWeaponCategory(category) then
-		return nil
-	end
 	return if category == self._focusCategory then self._options.tableSpawn else self._options.wallSpawn
 end
 
@@ -350,10 +356,6 @@ function WeaponPreviewController:_isLocked(category: WeaponCategory, itemId: str
 end
 
 function WeaponPreviewController:_resolveTemplate(category: string, itemId: string?, itemName: string?): Instance?
-	if not isWeaponCategory(category) then
-		return nil
-	end
-
 	local categoryFolder = self._options.sharedWeaponAssets:FindFirstChild(category)
 	if not categoryFolder then
 		return nil
@@ -361,8 +363,8 @@ function WeaponPreviewController:_resolveTemplate(category: string, itemId: stri
 
 	return (if itemId then categoryFolder:FindFirstChild(itemId) else nil)
 		or (if itemName then categoryFolder:FindFirstChild(itemName) else nil)
-		-- "Default" aquí es el nombre del Tool fallback en Locker.weapons.*; por convención
-		-- coincide con el item-id default del catálogo, así que reusamos ItemDefaults.ITEM_ID.
+		-- "Default" es el nombre del Tool fallback en Locker.weapons.*; por convención
+		-- coincide con ItemDefaults.ITEM_ID.
 		or categoryFolder:FindFirstChild(ItemDefaults.ITEM_ID)
 end
 
@@ -381,10 +383,9 @@ function WeaponPreviewController:_getStateId(
 	return previewId .. "::" .. resolvedWrapId .. "::unlocked"
 end
 
--- El arma bloqueada conserva su geometría y materiales: el bloqueo lo marca un
--- Highlight, igual que el body y los hats del preview del lobby. El clone vive en
--- _lockedTemplateCache y nunca se reutiliza para el estado desbloqueado (ver
--- _getStateId), así que no hace falta quitar el Highlight en ningún punto.
+-- El arma bloqueada conserva geometría y materiales: el bloqueo lo marca un
+-- Highlight. El clone vive en _lockedTemplateCache y nunca se reutiliza para el
+-- estado desbloqueado (ver _getStateId), así que el Highlight nunca hay que quitarlo.
 function WeaponPreviewController:_applyLockedAppearance(previewInstance: Instance, weaponCategory: WeaponCategory)
 	self._wrapAnimDataByCategory[weaponCategory] = nil
 
@@ -399,7 +400,6 @@ function WeaponPreviewController:_applyLockedAppearance(previewInstance: Instanc
 		highlight.Parent = previewInstance
 	end
 
-	-- Adornee explícito: el template puede ser Model o BasePart suelto.
 	if previewInstance:IsA("Model") or previewInstance:IsA("BasePart") then
 		highlight.Adornee = previewInstance :: any
 	end
@@ -433,11 +433,8 @@ function WeaponPreviewController:_applyWrap(previewInstance: Instance, weaponCat
 	local animated = validDef and wrapDefinition.isAnimated == true
 	local animatedTextures = {} :: { Texture }
 
-	-- Audit mobile: GetChildren() solo necesario al QUITAR un wrap (para
-	-- destruir scroll textures viejas). Cuando se aplica un wrap nuevo
-	-- iteramos directamente WEAPON_WRAP_TEXTURE_ORDER vía FindFirstChild,
-	-- evitando la alocación de la tabla de GetChildren() en cada tap del
-	-- locker browsing.
+	-- GetChildren() solo al QUITAR un wrap; al aplicar se usa FindFirstChild sobre
+	-- WEAPON_WRAP_TEXTURE_ORDER para no alocar en cada tap del locker.
 	if not textureId then
 		for _, child in primaryPart:GetChildren() do
 			if child:IsA("Texture") and string.sub(child.Name, 1, 14) == "ScrollTexture_" then
@@ -473,10 +470,8 @@ function WeaponPreviewController:_applyWrap(previewInstance: Instance, weaponCat
 
 	applyMaterialToPart(primaryPart, material)
 
-	if textureId and animated and #animatedTextures > 0 then
-		local tileU = if studsPerTile > 0.001 then studsPerTile else 1
-		local tileV = tileU
-		self._wrapAnimDataByCategory[weaponCategory] = { textures = animatedTextures, tileU = tileU, tileV = tileV }
+	if textureId and animated then
+		self._wrapAnimDataByCategory[weaponCategory] = { textures = animatedTextures, tileU = studsPerTile }
 		self:_ensureHeartbeat()
 	end
 end
@@ -517,11 +512,9 @@ end
 function WeaponPreviewController:_stopMotion(category: string, restoreToBase: boolean?)
 	self._motionDataByCategory[category] = nil
 
-	-- Un viaje mesa↔pared en curso manda sobre el bob. Sin esto, la repoblación de
-	-- la nav (populateMainContentForNavItem → restoreEquippedWeaponPreviews) caía
-	-- aquí justo después de arrancar el viaje, lo cancelaba y encima recolocaba el
-	-- arma en su ancla nueva: el arma aparecía de golpe en el destino y no se veía
-	-- el recorrido. El propio _travelToAnchor limpia su estado al terminar.
+	-- Un viaje mesa↔pared en curso manda sobre el bob: la repoblación de la nav
+	-- (restoreEquippedWeaponPreviews) llega justo después de arrancarlo y no debe
+	-- cancelarlo. _travelToAnchor limpia su estado al terminar.
 	if self._swapStateByCategory[category] then
 		return
 	end
@@ -537,10 +530,8 @@ function WeaponPreviewController:_stopMotion(category: string, restoreToBase: bo
 	end
 end
 
--- Devuelve el CFrameValue cacheado para la categoría (creándolo + conectando
--- el listener una sola vez por categoría). El listener lee
--- `_motionTargetByCategory[category]` cada update, así que cambiar el preview
--- activo no requiere reconectar.
+-- El listener se conecta una sola vez por categoría y lee
+-- `_motionTargetByCategory[category]`: cambiar el preview activo no reconecta.
 function WeaponPreviewController:_ensureMotionDriver(category: string): CFrameValue
 	local existing = self._motionCFrameByCategory[category]
 	if existing then
@@ -583,9 +574,6 @@ function WeaponPreviewController:_startMotion(category: WeaponCategory, startOff
 	})
 	self._activeMotionTweenByCategory[category] = riseTween
 
-	-- `:Once` auto-desconecta tras el primer fire (Completed se llama una vez,
-	-- tanto en finalización natural como en :Cancel). Antes este Connect
-	-- quedaba "vivo" hasta GC del closure capturado.
 	riseTween.Completed:Once(function(playbackState)
 		if self._activeMotionTweenByCategory[category] == riseTween then
 			self._activeMotionTweenByCategory[category] = nil
@@ -610,9 +598,8 @@ function WeaponPreviewController:_startMotion(category: WeaponCategory, startOff
 	riseTween:Play()
 end
 
--- Driver del intercambio: NumberValue 0→1 por categoría. En cada update lerpea
--- entre el ancla de salida y la de llegada, y añade el arco (sube a mitad de
--- vuelo). Cacheado por categoría igual que el CFrameValue del bob.
+-- Driver del intercambio: NumberValue 0→1 que lerpea entre anclas y añade el arco
+-- (sube a mitad de vuelo).
 function WeaponPreviewController:_ensureSwapDriver(category: string): NumberValue
 	local existing = self._swapAlphaByCategory[category]
 	if existing then
@@ -635,9 +622,7 @@ function WeaponPreviewController:_ensureSwapDriver(category: string): NumberValu
 	return alpha
 end
 
--- Manda una categoría a su ancla actual (según el foco) con el tween de arco.
--- `focused` decide qué pasa al llegar: la de la mesa retoma el bob; la de la
--- pared se queda quieta en su sitio.
+-- Al llegar, la de la mesa (`focused`) retoma el bob; la de la pared se queda quieta.
 function WeaponPreviewController:_travelToAnchor(category: WeaponCategory, focused: boolean)
 	local preview = self._activePreviewByCategory[category]
 	local spawnTarget = self:_getSpawnFor(category)
@@ -648,17 +633,16 @@ function WeaponPreviewController:_travelToAnchor(category: WeaponCategory, focus
 	local targetPivot = getSpawnPivot(spawnTarget)
 	local startPivot = getWeaponPreviewPivot(preview) or targetPivot
 
-	-- El ancla nueva pasa a ser la base: el bob y los restores posteriores
-	-- (_stopMotion con restoreToBase) tienen que referirse ya al destino.
+	-- El ancla nueva pasa a ser la base: el bob y los restores posteriores ya se
+	-- refieren al destino.
 	self._previewBasePivotByCategory[category] = targetPivot
 
-	-- Corta bob y cualquier tween en curso sin recolocar: seguimos desde donde
-	-- esté el arma ahora mismo, que es lo que hace que un cambio de nav a media
-	-- animación no dé saltos.
+	-- Sin recolocar: se sigue desde donde esté el arma, así un cambio de nav a media
+	-- animación no da saltos.
 	self:_stopMotion(category, false)
 
-	-- Invalida la transición de selección en vuelo (el down/up de applySelected):
-	-- su Completed recolocaría el arma en el ancla vieja.
+	-- Invalida el down/up de applySelected en vuelo: su Completed recolocaría el arma
+	-- en el ancla vieja.
 	self._selectionTransitionTokenByCategory[category] = (self._selectionTransitionTokenByCategory[category] or 0) + 1
 
 	self._swapStateByCategory[category] = {
@@ -678,8 +662,7 @@ function WeaponPreviewController:_travelToAnchor(category: WeaponCategory, focus
 		end
 		self._swapStateByCategory[category] = nil
 
-		-- El preview puede haberse reconstruido durante el viaje (cambio de arma o
-		-- de wrap a media animación), así que se lee el vivo, no el capturado.
+		-- El preview puede haberse reconstruido durante el viaje: se lee el vivo.
 		local arrived = self._activePreviewByCategory[category]
 		if playbackState ~= Enum.PlaybackState.Completed or not arrived or not arrived.Parent then
 			return
@@ -752,6 +735,7 @@ function WeaponPreviewController:_applyForCategory(category: string, itemId: str
 	end
 
 	clonedWeapon.Name = category .. "WeaponPreview"
+	anchorWeaponPreview(clonedWeapon)
 	clonedWeapon.Parent = spawnTarget :: Instance
 	setWeaponPreviewPivot(clonedWeapon, getSpawnPivot(spawnTarget))
 	local basePivot = getWeaponPreviewPivot(clonedWeapon)
@@ -763,25 +747,26 @@ function WeaponPreviewController:_applyForCategory(category: string, itemId: str
 		local loadout = self._options.getCurrentLoadout()
 		local resolvedWrapId = resolveWeaponWrap(loadout, previewCategory, resolvedWeaponId, self._options.ownsWeaponWrap)
 		self:_applyWrap(clonedWeapon, previewCategory, resolvedWrapId)
-		-- Contorno solo si NO está bloqueada: el bloqueo ya trae su propio Highlight
-		-- (relleno oscuro + contorno blanco), y un segundo Highlight encima no lo
-		-- sustituye, se suma.
+		-- Contorno solo si NO está bloqueada: un segundo Highlight no sustituye al de
+		-- bloqueo, se suma.
 		LockerUtils.applyPreviewOutline(clonedWeapon)
+	end
+
+	-- El clone nace con sus contornos encendidos: bajarlos si hay un panel abierto.
+	if self._highlightsHidden then
+		LockerUtils.setPreviewHighlightsEnabled(clonedWeapon, false)
 	end
 
 	self._activePreviewByCategory[category] = clonedWeapon
 	self._activePreviewItemIdByCategory[category] = previewStateId
 
-	-- Si el arma está a mitad de viaje mesa↔pared, el clone nuevo hereda el viaje:
-	-- si no, se quedaría clavado en el ancla mientras el driver sigue moviendo al
-	-- que acaba de morir.
+	-- Si el arma está a mitad de viaje mesa↔pared, el clone nuevo hereda el viaje (el
+	-- driver seguiría moviendo al que acaba de morir).
 	local swapState = self._swapStateByCategory[category]
 	if swapState then
 		swapState.preview = clonedWeapon
 	end
 end
-
--- ── API pública ────────────────────────────────────────────────
 
 function WeaponPreviewController:restoreEquippedFor(category: string)
 	if not isWeaponCategory(category) then
@@ -796,8 +781,8 @@ function WeaponPreviewController:restoreEquippedFor(category: string)
 	local previewId = LockerConfig.makeQualifiedId(category, equippedItemId)
 	self:_applyForCategory(category, equippedItemId, resolvedName, previewId)
 
-	-- Restaurar el wrap del loadout sobre el preview activo (cancela cualquier
-	-- preview de wrap no equipado que hubiera quedado por la última selección).
+	-- Reaplicar el wrap del loadout: cancela un preview de wrap no equipado que
+	-- hubiera quedado de la última selección.
 	local previewCategory = category :: WeaponCategory
 	if not self:_isLocked(previewCategory, equippedItemId) then
 		local activePreview = self._activePreviewByCategory[category]
@@ -868,10 +853,8 @@ function WeaponPreviewController:applySelected(item: LockerCatalogItem?)
 		return
 	end
 
-	-- Con un viaje mesa↔pared en curso no se hace el down/up de selección: el arma
-	-- ya se está moviendo y su clone nuevo hereda el viaje (_applyForCategory). Sin
-	-- esto, el down tween pisaría la referencia del tween de viaje y quedarían dos
-	-- drivers moviendo la misma arma.
+	-- Con un viaje mesa↔pared en curso no hay down/up: el clone nuevo hereda el viaje
+	-- (_applyForCategory), y el down tween pisaría la referencia del tween de viaje.
 	if self._swapStateByCategory[selectedCategory] then
 		self:_applyForCategory(item.Category, item.id, item.Name, item.qualifiedId)
 		return
@@ -892,9 +875,6 @@ function WeaponPreviewController:applySelected(item: LockerCatalogItem?)
 	local downPivot = currentBasePivot * CFrame.new(0, -SELECTED_WEAPON_SWITCH_DOWN_STUDS, 0)
 	local startPivot = getWeaponPreviewPivot(currentPreview) or currentBasePivot
 
-	-- Reusa el CFrameValue + listener cacheado por categoría. Antes 1 alloc
-	-- + 1 conexión efímera por click; ahora cero allocs (el listener leerá
-	-- _motionTargetByCategory[selectedCategory] = currentPreview).
 	self._motionTargetByCategory[selectedCategory] = currentPreview
 	local cframeValue = self:_ensureMotionDriver(selectedCategory)
 	cframeValue.Value = startPivot
@@ -966,6 +946,7 @@ end
 
 function WeaponPreviewController:Destroy()
 	self:destroyAll()
+	self._stopPanelObserver()
 	if self._sharedHeartbeat then
 		self._sharedHeartbeat:Disconnect()
 		self._sharedHeartbeat = nil
@@ -987,15 +968,13 @@ function WeaponPreviewController:Destroy()
 	end
 	table.clear(self._swapConnByCategory)
 	table.clear(self._swapAlphaByCategory)
-	table.clear(self._swapStateByCategory)
 	table.clear(self._motionConnByCategory)
 	table.clear(self._motionCFrameByCategory)
 	table.clear(self._motionTargetByCategory)
 	table.clear(self._wrapAnimDataByCategory)
 	table.clear(self._motionDataByCategory)
 	table.clear(self._activeMotionTweenByCategory)
-	-- Destruir los clones cacheados (parented a nil) antes de soltar la tabla, en
-	-- vez de solo table.clear, para liberarlos de inmediato al teardown.
+	-- Los clones cacheados están parented a nil: destruirlos para liberarlos ya.
 	for _, clone in self._lockedTemplateCache do
 		clone:Destroy()
 	end

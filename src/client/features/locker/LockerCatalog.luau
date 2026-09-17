@@ -20,10 +20,11 @@ export type LockerCatalogItem = {
 	Image: string,
 	CanPurchase: boolean,
 	isBPExclusive: boolean,
-	-- Temporada del pase que lo regaló (proyección `Season` de ItemsConfig, la
-	-- escribe el dashboard). Sin ella el ítem viene de la tienda y no lleva badge.
+	-- Temporada del pase que lo regaló (proyección `Season` de ItemsConfig, la escribe
+	-- el dashboard). Sin ella el ítem viene de la tienda y no lleva badge.
 	Season: string?,
-	SeasonName: string?,
+	-- Código corto para el badge de la card: "S1", "S2"… derivado de la season.
+	SeasonLabel: string?,
 	TextureID: string?,
 	BaseColor: Color3?,
 	Material: Enum.Material?,
@@ -53,6 +54,18 @@ local EMPTY_CATALOG_ITEMS = table.freeze({}) :: { LockerCatalogItem }
 
 local LockerCatalog = {}
 LockerCatalog.__index = LockerCatalog
+
+-- Código corto de temporada para el badge de la card ("S1"). El Id de la season
+-- ya viene con ese formato desde el dashboard; si no encaja, se reconstruye con
+-- el primer número que aparezca en el Id o en el Name.
+local function formatSeasonCode(seasonId: string, seasonName: string?): string
+	local upperId = string.upper(seasonId)
+	if string.match(upperId, "^S%d+$") then
+		return upperId
+	end
+	local number = string.match(seasonId, "%d+") or (if seasonName then string.match(seasonName, "%d+") else nil)
+	return if number then "S" .. number else upperId
+end
 
 local function makeCatalogCacheKey(categoryKey: LockerCategoryKey, navKey: string): string
 	return tostring(categoryKey) .. ":" .. tostring(navKey)
@@ -116,14 +129,13 @@ function LockerCatalog:_getTemplateItems(categoryKey: LockerCategoryKey, navKey:
 				end
 			end
 
-			-- Badge de temporada: el Name de la season si resuelve, el Id crudo si no.
 			local seasonId: string? = if type(definition.Season) == "string" and definition.Season ~= ""
 				then definition.Season
 				else nil
-			local seasonName: string? = nil
+			local seasonLabel: string? = nil
 			if seasonId then
 				local seasonDef = BattlePassConfig.GetSeasonById(seasonId)
-				seasonName = if seasonDef then seasonDef.Name else seasonId
+				seasonLabel = formatSeasonCode(seasonId, if seasonDef then seasonDef.Name else nil)
 			end
 
 			table.insert(catalogItems, {
@@ -137,12 +149,11 @@ function LockerCatalog:_getTemplateItems(categoryKey: LockerCategoryKey, navKey:
 				Rarity = tostring(definition.Rarity or "Common"),
 				Image = normalizeImageId(definition.Image, self._defaultThumbnail),
 				CanPurchase = definition.CanPurchase == true,
-				-- BP-exclusive si lo flagea ItemsConfig manualmente O si aparece como
-				-- reward en cualquier season del BattlePass (single source of truth).
+				-- BP-exclusive si lo flagea ItemsConfig O si es reward de cualquier season del pase.
 				isBPExclusive = definition.isBPExclusive == true
 					or BattlePassConfig.IsBPExclusive(tostring(sourceCategory), tostring(itemId)),
 				Season = seasonId,
-				SeasonName = seasonName,
+				SeasonLabel = seasonLabel,
 				TextureID = if type(definition.TextureID) == "string" then definition.TextureID else nil,
 				BaseColor = if typeof(definition.BaseColor) == "Color3" then definition.BaseColor else nil,
 				Material = if typeof(definition.Material) == "EnumItem" and definition.Material.EnumType == Enum.Material then definition.Material else nil,
@@ -184,8 +195,6 @@ function LockerCatalog:GetItems(categoryKey: LockerCategoryKey, navKey: string):
 		table.insert(catalogItems, item)
 	end
 
-	-- Orden: (1) poseídos primero, (2) por precio ascendente, (3) por nombre como
-	-- desempate. (Tanto poseídos como no-poseídos se ordenan por precio.)
 	table.sort(catalogItems, function(a, b)
 		local aOwned = self._isItemOwned(a)
 		local bOwned = self._isItemOwned(b)
