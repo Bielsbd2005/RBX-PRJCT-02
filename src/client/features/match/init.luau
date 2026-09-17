@@ -43,13 +43,16 @@ local DepthOfFieldController = require(Client.core.lighting.DepthOfFieldControll
 
 local MatchFeature = {}
 
-local function setResetButtonEnabled(enabled: boolean)
+-- "Reset Character": `false` lo apaga, `true` = por defecto (mata), BindableEvent =
+-- Roblox mantiene la confirmación y dispara el evento en vez de matar.
+-- SetCore falla hasta que CoreGui está listo, de ahí los reintentos.
+local function setResetButtonCallback(callback: boolean | BindableEvent)
 	task.spawn(function()
 		local ok = false
 		local attempts = 0
 		repeat
 			ok = pcall(function()
-				StarterGui:SetCore("ResetButtonCallback", enabled)
+				StarterGui:SetCore("ResetButtonCallback", callback)
 			end)
 			attempts += 1
 			if not ok then
@@ -234,8 +237,11 @@ function MatchFeature.start(menuController: any): any
 	-- El DoF concreto lo aporta el preset activo; aquí solo se enciende/apaga.
 	DepthOfFieldController.setEnabled(true)
 	TouchControlsController.setEnabled(false)
-	-- Reset de personaje: deshabilitado en lobby/menú, habilitado en partida.
-	setResetButtonEnabled(false)
+	-- En partida el reset NO mata: vuelve al menú como el botón Menu de la pantalla de
+	-- muerte (conectado más abajo). Matar contaría como muerte y pasaría por el cooldown.
+	local resetCharacterEvent = Instance.new("BindableEvent")
+	janitor:Add(resetCharacterEvent, "Destroy")
+	setResetButtonCallback(false)
 
 	MatchState.setOnPhaseChanged(function(_prev, nextPhase)
 		local inMenu = nextPhase == "Lobby" or nextPhase == "ReturningToMenu"
@@ -254,14 +260,14 @@ function MatchFeature.start(menuController: any): any
 
 		local inGameplay = nextPhase == "InMatch" or nextPhase == "Dying"
 		TouchControlsController.setEnabled(inGameplay)
-		setResetButtonEnabled(inGameplay)
+		setResetButtonCallback(if inGameplay then resetCharacterEvent else false)
 	end)
 	janitor:Add(function()
 		ResultsScene.clear()
 		MatchState.setOnPhaseChanged(nil)
 		DepthOfFieldController.setEnabled(false)
 		TouchControlsController.setEnabled(true)
-		setResetButtonEnabled(true)
+		setResetButtonCallback(true)
 	end, true)
 
 	local matchMenu = MatchMenu.new(menuController, playerGui, menuGui, MatchState.shouldKeepMenuHidden)
@@ -416,7 +422,36 @@ function MatchFeature.start(menuController: any): any
 		return not MatchState.isActive()
 	end
 
-	-- ── Bind de DeathView ────────────────────────────────────
+	-- Botón Menu de la pantalla de muerte y Reset Character: vivo o muerto el camino
+	-- es el mismo. Espera ReturnToMenuDone con timeout de recuperación.
+	local function returnToMenu()
+		if MatchState.getPhase() == "ReturningToMenu" then
+			return
+		end
+		MatchState.setPhase("ReturningToMenu")
+		iris:close(function()
+			if MatchState.getPhase() == "ReturningToMenu" then
+				Network.Match.RequestReturnToMenu.Send({})
+				task.delay(RETURN_TO_MENU_TIMEOUT, function()
+					if not featureAlive then return end
+					if MatchState.getPhase() == "ReturningToMenu" then
+						MatchState.setPhase("Lobby")
+						matchMenu:forceShow()
+						iris:open()
+						warn("[MatchFeature] ReturnToMenu timeout — recuperando estado.")
+					end
+				end)
+			end
+		end)
+	end
+
+	-- Se re-comprueba la fase por si el evento llega con ella ya cambiada.
+	janitor:Add(resetCharacterEvent.Event:Connect(function()
+		if MatchState.isActive() then
+			returnToMenu()
+		end
+	end), "Disconnect")
+
 	if deathView then
 		deathView:bind(function()
 			local phase = MatchState.getPhase()
@@ -431,26 +466,7 @@ function MatchFeature.start(menuController: any): any
 					respawnRequestSent = false
 				end
 			end)
-		end, function()
-			if MatchState.getPhase() == "ReturningToMenu" then
-				return
-			end
-			MatchState.setPhase("ReturningToMenu")
-			iris:close(function()
-				if MatchState.getPhase() == "ReturningToMenu" then
-					Network.Match.RequestReturnToMenu.Send({})
-					task.delay(RETURN_TO_MENU_TIMEOUT, function()
-						if not featureAlive then return end
-						if MatchState.getPhase() == "ReturningToMenu" then
-							MatchState.setPhase("Lobby")
-							matchMenu:forceShow()
-							iris:open()
-							warn("[MatchFeature] ReturnToMenu timeout — recuperando estado.")
-						end
-					end)
-				end
-			end)
-		end)
+		end, returnToMenu)
 	end
 
 	-- voteKey = nombre del mapa o GameConfig.RandomVoteKey.
