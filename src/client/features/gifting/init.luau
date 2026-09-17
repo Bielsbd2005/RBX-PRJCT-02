@@ -1,40 +1,16 @@
 --!strict
 --[[
-	gifting/init.luau  (Client Feature)
+	Recepción de regalos: muestra UserInterface.GiftAlert (el más antiguo de
+	PendingGifts) solo en lobby limpio: carga terminada, sin partida y sin panel
+	abierto. Mientras se muestra, OCULTA el menú.
 
-	Recepción de regalos. Observa PendingGifts (perfil replicado vía
-	DataController) y muestra UserInterface.GiftAlert cuando el jugador está
-	"idle" en el lobby, es decir:
-	  • la pantalla de carga terminó (PlayerGui.LoadingScreen destruida),
-	  • no hay partida en curso (MatchState.getPhase() == "Lobby"), y
-	  • ningún panel está abierto (solo el lobby).
-	Eso cubre los tres casos del flujo: al unirse tras la carga, al volver al
-	menú desde una partida, y al cerrar el último panel con regalos pendientes.
+	Shade y blur los pone ShadeController si GiftAlert tiene el atributo
+	`ShadowCenter` (o el alias `ShadeColor`) en Studio; este feature no los toca.
 
-	Al mostrar el alert se OCULTA el menú (menuController:hide). El Shade y su
-	blur de fondo van por atributo: el ShadeController pinta el overlay y activa
-	el blur al hacerse visible el frame, siempre que GiftAlert tenga `ShadeColor`
-	puesto en Studio (como el resto de paneles — este feature no toca ni el shade
-	ni el blur). Al retraerse (claim, sin más regalos, o al romperse las
-	condiciones) se restaura el menú, salvo que una partida o un panel se hayan
-	quedado con él.
+	"En lobby" se decide con MatchState y no con menuController:isHidden()/
+	Menu.Enabled: como este feature oculta el menú, esas señales se realimentarían.
 
-	La detección de "en lobby" se apoya en MatchState (fase de partida) y no en
-	menuController:isHidden()/Menu.Enabled: como ESTE feature oculta el menú al
-	presentar, usar esas señales para decidir se realimentaría (ocultar → creer
-	que hay que ocultar el alert). MatchState es independiente de quién ocultó
-	el menú.
-
-	Estructura GUI:
-		UserInterface.GiftAlert
-		  Container
-		    Claim        ← botón: reclama (el server concede el cash) y cierra
-		    Product      ← imagen del pack regalado (hoy sin cablear, ver TODO en `show`)
-		    Description  ← "<font color="#FF3A54">@Usuario</font> just gifted you <font color="#FFC850">X</font>! What an absolute legend, claim it right now! 🎉🔥"
-		    Value        ← cantidad de cash del pack ("3.000", etc.)
-
-	Los regalos se muestran de uno en uno (el más antiguo primero). Al reclamar,
-	PendingGifts se re-replica y el observer encadena el siguiente.
+	Estructura en Studio: GiftAlert.Container.Content.{ClaimBtn, Title.Text.Subtitle}.
 ]]
 
 local Players = game:GetService("Players")
@@ -58,7 +34,7 @@ local MatchState = require(Client.features.match.MatchState)
 
 local SENDER_COLOR_HEX = "#FF3A54"
 local GIFT_COLOR_HEX = "#FFC850"
-local DESCRIPTION_FORMAT = `<font color="{SENDER_COLOR_HEX}">@%s</font> just gifted you <font color="{GIFT_COLOR_HEX}">%s</font>! What an absolute legend, claim it right now! 🎉🔥`
+local SUBTITLE_FORMAT = `<font color="{SENDER_COLOR_HEX}">@%s</font> just gifted you <font color="{GIFT_COLOR_HEX}">%s</font>!`
 
 local SHOW_TWEEN_INFO = TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 local CLAIM_TIMEOUT = 5
@@ -78,17 +54,15 @@ function GiftingFeature.start(menuController: any): any
 	local uiGui = playerGui:WaitForChild("UserInterface") :: ScreenGui
 
 	local alertFrame = uiGui:WaitForChild("GiftAlert") :: GuiObject
-	local container = alertFrame:WaitForChild("Container") :: Frame
+	local content = alertFrame:WaitForChild("Container"):WaitForChild("Content") :: Frame
 
-	local claimBtn = container:WaitForChild("Claim") :: GuiButton
-	local descriptionLabel = container:WaitForChild("Description") :: TextLabel
-	local valueLabel = container:WaitForChild("Value") :: TextLabel
+	local claimBtn = content:WaitForChild("ClaimBtn") :: GuiButton
+	local subtitleLabel = content:WaitForChild("Title"):WaitForChild("Text"):WaitForChild("Subtitle") :: TextLabel
 
-	descriptionLabel.RichText = true
+	subtitleLabel.RichText = true
 
 	alertFrame.Visible = false
 
-	-- ── Estado ───────────────────────────────────────────────
 	local menuGui = menuController:getGui() :: ScreenGui
 	local dataReady = false
 	local presenting = false
@@ -100,7 +74,6 @@ function GiftingFeature.start(menuController: any): any
 	local claimedIds: { [string]: boolean } = {}
 	local loadingDone = false
 
-	-- ── Animaciones ──────────────────────────────────────────
 	local showTween: Tween? = nil
 
 	local function getAlertScale(): UIScale
@@ -122,19 +95,11 @@ function GiftingFeature.start(menuController: any): any
 	end
 	janitor:Add(stopAnimations, true)
 
-	-- ── Presentación ─────────────────────────────────────────
-
 	local function show(giftId: string, gift: any)
 		if currentGiftId == giftId and alertFrame.Visible then
 			return
 		end
 		currentGiftId = giftId
-
-		-- TODO: el alert ya no pinta la imagen del pack (GiftAlert.Container.
-		-- Product se queda con la que tenga en Studio). Antes la copiaba del
-		-- botón del pack dentro de UserInterface.Store, acoplándose al layout de
-		-- la tienda; con la GUI nueva hace falta otra fuente — p.ej. un campo
-		-- `Image` en StoreProducts — de la que leer aquí.
 
 		local cashAmount = tonumber(gift.CashAmount) or 0
 		if cashAmount <= 0 then
@@ -144,12 +109,10 @@ function GiftingFeature.start(menuController: any): any
 			end
 		end
 
-		local formattedCash = UIUtils.formatCashAmount(cashAmount)
-		valueLabel.Text = formattedCash
-		descriptionLabel.Text = string.format(
-			DESCRIPTION_FORMAT,
+		subtitleLabel.Text = string.format(
+			SUBTITLE_FORMAT,
 			escapeRichText(tostring(gift.SenderName or "???")),
-			formattedCash .. " Cash"
+			UIUtils.formatCashAmount(cashAmount)
 		)
 
 		stopAnimations()
@@ -179,14 +142,9 @@ function GiftingFeature.start(menuController: any): any
 		end
 	end
 
-	-- Oculta el alert (→ Shade fuera) y, si teníamos tomado el menú, lo restaura
-	-- SOLO si volvemos a un lobby limpio: si una partida arrancó o un panel se
-	-- abrió, ese dueño se queda el menú (el panel lo restaura al cerrarse).
-	local function retract()
-		if not presenting and not alertFrame.Visible then
-			return
-		end
-		hide()
+	-- Solo restaura el menú en lobby limpio: si una partida o un panel lo tomó, ese
+	-- dueño se lo queda.
+	local function releaseMenu()
 		if presenting then
 			presenting = false
 			if not MatchState.shouldKeepMenuHidden() and not menuController:hasOpenPanel() then
@@ -195,20 +153,18 @@ function GiftingFeature.start(menuController: any): any
 		end
 	end
 
-	-- ── Evaluación ───────────────────────────────────────────
-	-- Se llama en cada señal relevante (estado del menú, Menu.Enabled,
-	-- PendingGifts, fin de la carga) y decide si presentar el regalo más
-	-- antiguo o retraer el alert.
+	local function retract()
+		hide()
+		releaseMenu()
+	end
+
 	local function evaluate()
 		if not dataReady then
 			return
 		end
 
-		-- Bloqueado si NO estamos en lobby: carga sin terminar, partida en curso
-		-- (cualquier fase ≠ Lobby, vía MatchState — independiente de nuestro
-		-- propio ocultado de menú) o algún panel abierto. En esos casos se
-		-- retrae SIEMPRE, incluso con un claim en vuelo (su respuesta se procesa
-		-- igual): sin esto el alert quedaba sobrepuesto al entrar en partida.
+		-- Fuera de lobby se retrae SIEMPRE, incluso con un claim en vuelo (su
+		-- respuesta se procesa igual), o el alert queda encima al entrar en partida.
 		local blocked = (not loadingDone)
 			or MatchState.shouldKeepMenuHidden()
 			or menuController:hasOpenPanel()
@@ -219,7 +175,7 @@ function GiftingFeature.start(menuController: any): any
 		end
 
 		if claiming then
-			return -- no avanzar al siguiente regalo hasta resolver el claim
+			return
 		end
 
 		local oldestId: string? = nil
@@ -232,9 +188,8 @@ function GiftingFeature.start(menuController: any): any
 				end
 				local sentAt = tonumber(gift.SentAt) or 0
 				local oldestSentAt = if oldestGift then (tonumber(oldestGift.SentAt) or 0) else math.huge
-				-- Desempate por giftId: SentAt tiene resolución de segundos y
-				-- la iteración del mapa no es determinista — sin orden estable,
-				-- dos regalos del mismo segundo se alternaban entre réplicas.
+				-- Desempate por giftId: SentAt va en segundos y la iteración del mapa no es
+				-- determinista; sin orden estable dos regalos del mismo segundo se alternan.
 				if oldestId == nil
 					or sentAt < oldestSentAt
 					or (sentAt == oldestSentAt and giftId < (oldestId :: string))
@@ -250,10 +205,8 @@ function GiftingFeature.start(menuController: any): any
 			return
 		end
 
-		-- Estamos en lobby limpio y hay un regalo. Si aún no presentamos, exigir
-		-- que el menú esté REALMENTE visible antes de tomarlo — evita popear el
-		-- alert en un microhueco entre transiciones donde el menú aún no volvió.
-		-- Una vez presentando, no se re-chequea (nosotros lo ocultamos).
+		-- Antes de tomar el menú se exige que esté REALMENTE visible (evita microhuecos
+		-- entre transiciones). Una vez presentando no se re-chequea: lo ocultamos nosotros.
 		if not presenting and (menuController:isHidden() or not menuGui.Enabled) then
 			return
 		end
@@ -261,7 +214,6 @@ function GiftingFeature.start(menuController: any): any
 		present(oldestId, oldestGift)
 	end
 
-	-- ── Claim ────────────────────────────────────────────────
 	InteractiveScaleTween.bindButton(claimBtn, janitor, {
 		hoverScale = UITheme.ButtonHoverScale,
 		clickScale = UITheme.ButtonClickScale,
@@ -272,9 +224,8 @@ function GiftingFeature.start(menuController: any): any
 		if not giftId or claiming then
 			return
 		end
-		-- Anti doble-tap al encadenar regalos: el server descarta claims a
-		-- <0.3s SIN responder; sin este gate local, ese silencio dejaba la UI
-		-- muerta hasta el timeout de 5s.
+		-- Anti doble-tap: el server descarta SIN responder los claims demasiado
+		-- seguidos, y la UI quedaría bloqueada hasta CLAIM_TIMEOUT.
 		if os.clock() - lastShownAt < CLAIM_CLICK_GUARD then
 			return
 		end
@@ -283,8 +234,8 @@ function GiftingFeature.start(menuController: any): any
 		claimToken += 1
 		local token = claimToken
 		task.delay(CLAIM_TIMEOUT, function()
-			-- Respuesta perdida: liberar el botón sin marcar el regalo como
-			-- reclamado (el server decide; si concedió, la réplica lo borrará).
+			-- Respuesta perdida: no se marca como reclamado; si el server concedió,
+			-- la réplica lo borrará.
 			if claiming and claimToken == token then
 				claiming = false
 				claimingGiftId = nil
@@ -296,19 +247,15 @@ function GiftingFeature.start(menuController: any): any
 	end), "Disconnect")
 
 	janitor:Add(Network.Gifting.ClaimResponse.Listen(function(data: any)
-		-- Registrar SIEMPRE los claims exitosos, aunque la respuesta sea de un
-		-- intento viejo (timeout + retry): el regalo no debe re-mostrarse
-		-- mientras la réplica de PendingGifts se pone al día.
+		-- Registrar SIEMPRE los éxitos, aunque sean de un intento viejo: el regalo no
+		-- debe re-mostrarse mientras la réplica de PendingGifts se pone al día.
 		if data.success then
 			claimedIds[data.giftId] = true
 		end
-		-- Solo tratamos como "nuestra" la respuesta del gift que reclamamos:
-		-- una respuesta tardía de otro intento no debe liberar/consumir el
-		-- claim en vuelo (broadcast del namespace + retries).
+		-- Una respuesta tardía de otro gift no debe liberar el claim en vuelo.
 		if claiming and data.giftId == claimingGiftId then
 			claiming = false
 			claimingGiftId = nil
-			claimToken += 1
 			if data.success then
 				Notify.success(`+{UIUtils.formatCashAmount(data.cashAmount)} Cash`)
 			else
@@ -316,17 +263,13 @@ function GiftingFeature.start(menuController: any): any
 				Notify.warning(message)
 			end
 		end
-		-- No ocultamos aquí: evaluate() presenta el siguiente regalo (menú sigue
-		-- oculto, sin parpadeo) o retrae si no queda ninguno (restaura el menú).
+		-- No ocultamos aquí: evaluate() encadena el siguiente sin parpadeo del menú.
 		evaluate()
 	end), true)
 
-	-- ── Señales ──────────────────────────────────────────────
-	-- Pantalla de carga: el script de ReplicatedFirst destruye
-	-- PlayerGui.LoadingScreen al terminar. El orden de replicación dentro de
-	-- PlayerGui no está garantizado: si aún no existe cuando arrancamos, se
-	-- asume terminada PERO ChildAdded re-arma el gate si aparece después (sin
-	-- esto, el alert podía pintarse debajo de la pantalla de carga).
+	-- ReplicatedFirst destruye PlayerGui.LoadingScreen al terminar. El orden de
+	-- replicación en PlayerGui no está garantizado: si aún no existe se asume
+	-- terminada, pero ChildAdded re-arma el gate si aparece después.
 	local function watchLoadingScreen(gui: Instance)
 		loadingDone = false
 		janitor:Add(gui.Destroying:Connect(function()
@@ -348,15 +291,12 @@ function GiftingFeature.start(menuController: any): any
 		end), "Disconnect")
 	end
 
-	-- Cambios de estado del menú: show/hide y paneles abriéndose/cerrándose.
 	janitor:Add(menuController:onStateChanged(evaluate), true)
 
-	-- Menu.Enabled: la fase "Joining" de partida (MatchMenu:enforceHidden)
-	-- apaga el ScreenGui directamente, sin pasar por MenuController — sin esta
-	-- señal el alert podía aparecer sobre la transición de entrada a partida.
+	-- La fase "Joining" (MatchMenu:enforceHidden) apaga Menu.Enabled sin pasar
+	-- por MenuController.
 	janitor:Add(menuGui:GetPropertyChangedSignal("Enabled"):Connect(evaluate), "Disconnect")
 
-	-- Cambios de PendingGifts (regalo nuevo entregado / claim replicado).
 	local fusionScope = Fusion.scoped(Fusion)
 	janitor:Add(function()
 		Fusion.doCleanup(fusionScope)
@@ -365,21 +305,12 @@ function GiftingFeature.start(menuController: any): any
 	DataController:WhenReady():andThen(function()
 		dataReady = true
 		local observer = fusionScope:Observer(DataController.PendingGifts)
-		-- onBind dispara también inmediatamente → primer evaluate tras la carga.
+		-- onBind dispara también inmediatamente.
 		janitor:Add(observer:onBind(evaluate), true)
 	end)
 
-	-- Teardown (hot reload): si nos quedamos presentando, restaurar el menú para
-	-- no dejar al jugador sin lobby. (El blur lo suelta el ShadeController al
-	-- ocultarse el frame.)
-	janitor:Add(function()
-		if presenting then
-			presenting = false
-			if not MatchState.shouldKeepMenuHidden() and not menuController:hasOpenPanel() then
-				menuController:show()
-			end
-		end
-	end, true)
+	-- Teardown (hot reload): no dejar al jugador sin menú.
+	janitor:Add(releaseMenu, true)
 
 	return janitor
 end
