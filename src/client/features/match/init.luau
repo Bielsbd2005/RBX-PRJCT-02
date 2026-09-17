@@ -18,6 +18,7 @@ local MatchSnapshot = require(Shared.MatchSnapshot)
 local Network = require(Shared.networking.Network)
 
 local IrisTransition = require(Client.core.ui.IrisTransition)
+local ScreenFade = require(Client.core.ui.ScreenFade)
 
 local MatchState = require(script.MatchState)
 local MatchCamera = require(script.MatchCamera)
@@ -28,6 +29,7 @@ local MatchProgressionObserver = require(script.MatchProgressionObserver)
 
 local DeathScreenView = require(script.DeathScreenView)
 local ResultsView = require(script.ResultsView)
+local ResultsScene = require(script.ResultsScene)
 local KillCamFollowController = require(script.KillCamFollowController)
 local CharacterHighlightController = require(script.CharacterHighlightController)
 local HealthBillboardController = require(script.HealthBillboardController)
@@ -61,24 +63,14 @@ local LOCAL_VOTE_COOLDOWN = 0.3
 local JOIN_CONFIRM_TIMEOUT = 8
 local RESPAWN_REQUEST_TIMEOUT = 5
 local RETURN_TO_MENU_TIMEOUT = 8
--- Precarga de las réplicas de Resultados un poco antes de que acabe la ronda
--- (por tiempo o por puntuación cercana al límite) para evitar el "pop" al cortar
--- a la cámara de Resultados.
-local RESULTS_PRELOAD_LEAD_SECONDS = 5
--- Proporcional a WinScoreLimit: 20/240 era el ~8% final de la ronda. Con el
--- limite en 75 hay que bajarlo a 6 para precargar en ese mismo tramo; dejarlo
--- en 20 arrancaba la precarga al 73% del marcador, en casi todas las rondas.
-local RESULTS_PRELOAD_SCORE_LEAD = 6
--- Tras Results se espera a que arranque la votación para abrirla automáticamente;
--- si no llega en este tiempo (no se pudo iniciar), se vuelve al menú.
+-- Negro entre el fundido de fin de ronda y Resultados: frames para que las réplicas
+-- carguen idle, cara y hat antes de verse.
+local RESULTS_BLACK_HOLD = 0.35
+-- Si la votación no arranca en este tiempo tras Results, se vuelve al menú.
 local VOTE_AUTO_TIMEOUT = 8
 
--- Lighting 100% dirigido por atributo `LightingPreset` (ScenePresetController):
--- ningún nombre de preset vive en código. Cada contexto lee el atributo del nodo
--- de escena correspondiente:
---   * Lobby/menú → Workspace.Cameras.lobby      (atributo LightingPreset="Lobby")
---   * Partida    → el mapa cargado en Workspace.ActiveMap (o su modelo hijo), que
---                  el diseñador autora con su propio LightingPreset por mapa.
+-- Lighting por atributo `LightingPreset`, sin nombres de preset en código:
+-- lobby → Workspace.Cameras.lobby; partida → Workspace.ActiveMap o su modelo hijo.
 local function resolveLobbyPresetNode(): Instance?
 	local cameras = Workspace:FindFirstChild("Cameras")
 	return if cameras then cameras:FindFirstChild("lobby") else nil
@@ -92,7 +84,6 @@ local function resolveMapPresetNode(): Instance?
 	if activeMap:GetAttribute("LightingPreset") ~= nil then
 		return activeMap
 	end
-	-- El atributo lo suele llevar el modelo del mapa (hijo del contenedor ActiveMap).
 	for _, child in activeMap:GetChildren() do
 		if child:GetAttribute("LightingPreset") ~= nil then
 			return child
@@ -101,9 +92,8 @@ local function resolveMapPresetNode(): Instance?
 	return nil
 end
 
--- Aplica el preset leyendo el atributo del nodo. Devuelve true solo si el nodo
--- existía y llevaba atributo: quien necesite garantizar el cambio de look (el
--- lobby) debe reaccionar al false en vez de quedarse con el preset anterior.
+-- false = nodo ausente o sin atributo: quien necesite garantizar el cambio de look
+-- debe reaccionar en vez de quedarse con el preset anterior.
 local function applyScenePreset(node: Instance?): boolean
 	if node then
 		return ScenePresetController.applyFrom(node)
@@ -111,21 +101,16 @@ local function applyScenePreset(node: Instance?): boolean
 	return false
 end
 
--- ── Helpers de resolución de GUI ──
-
--- Pantalla de Resultados: frame bajo PlayerGui.UserInterface.Results.
 local function _resolveResultsFrame(playerGui: PlayerGui): GuiObject?
 	local ui = playerGui:FindFirstChild("UserInterface")
 	local node = if ui then ui:FindFirstChild("Results") else nil
 	if node and node:IsA("GuiObject") then
 		return node
 	end
-	-- Sin este frame, ResultsView queda no-op: ni frames de jugador ni rewards.
 	warn("[MatchFeature] No se encontró PlayerGui.UserInterface.Results — la pantalla de Resultados (frames + rewards) no se mostrará.")
 	return nil
 end
 
--- Pantalla de muerte: frame bajo PlayerGui.UserInterface.DeathScreen.
 local function _resolveDeathScreen(playerGui: PlayerGui): GuiObject?
 	local ui = playerGui:FindFirstChild("UserInterface")
 	local node = if ui then ui:FindFirstChild("DeathScreen") else nil
@@ -135,8 +120,7 @@ local function _resolveDeathScreen(playerGui: PlayerGui): GuiObject?
 	return nil
 end
 
--- Pantalla de votación independiente: PlayerGui.UserInterface.Voting (ya no vive
--- dentro del Menu). El CloseBtn es opcional (raíz o Header).
+-- CloseBtn opcional, en la raíz o en Header.
 local function _resolveVotingFrame(playerGui: PlayerGui): (GuiObject?, GuiButton?)
 	local ui = playerGui:FindFirstChild("UserInterface")
 	if not ui then
@@ -155,8 +139,7 @@ local function _resolveVotingFrame(playerGui: PlayerGui): (GuiObject?, GuiButton
 	return voting, closeBtn
 end
 
--- Resolver el Model del jugador/bot que mató al local. Para humanos vamos por
--- userId; para bots negativos buscamos el FakeUserId attribute en mapRoot/Bots.
+-- Bots: userId negativo = atributo FakeUserId del modelo en mapRoot.Bots.
 local function _resolveKillerCharacter(killerUserIdStr: string): Model?
 	if killerUserIdStr == "" then
 		return nil
@@ -171,8 +154,6 @@ local function _resolveKillerCharacter(killerUserIdStr: string): Model?
 		return if player then player.Character else nil
 	end
 
-	-- Bot: reusamos el cache de KillCamFollowController (mapRoot.Bots) en lugar de
-	-- escanear workspace:GetChildren() en cada muerte.
 	local botsFolder = KillCamFollowController.getBotsFolder()
 	if botsFolder then
 		for _, bot in botsFolder:GetChildren() do
@@ -184,8 +165,6 @@ local function _resolveKillerCharacter(killerUserIdStr: string): Model?
 	return nil
 end
 
--- ── Feature principal ────────────────────────────────────────
-
 function MatchFeature.start(menuController: any): any
 	local janitor = Janitor.new()
 	local fusionScope = Fusion.scoped(Fusion)
@@ -196,43 +175,31 @@ function MatchFeature.start(menuController: any): any
 	local deathScreenGui = _resolveDeathScreen(playerGui)
 	local resultsFrame = _resolveResultsFrame(playerGui)
 	local iris = IrisTransition.new(playerGui)
+	-- Tapa el montaje de la pantalla de Resultados.
+	local fade = ScreenFade.new(playerGui)
 
-	-- Voting opcional: si la GUI aún no tiene UserInterface.Voting (migración), se
-	-- deshabilita la votación pero el resto del feature (Play, HUD, fases) sigue.
 	if not votingFrame then
 		warn("[MatchFeature] UserInterface.Voting no encontrado — votación de mapa deshabilitada.")
 	end
 
-	-- D4: flag de vida del feature. Cualquier task.delay scheduled en
-	-- handlers de red o callbacks chequea `featureAlive` antes de mutar
-	-- estado — sin esto, una task disparada tras destroy() tocaría objetos
-	-- (matchMenu, hud, iris) ya destruidos por el janitor.
+	-- Todo task.delay de handlers debe comprobar featureAlive: tras destroy() tocaría
+	-- objetos ya destruidos por el janitor.
 	local featureAlive = true
 	janitor:Add(function()
 		featureAlive = false
 	end, true)
 
-	-- ── Inicializar sub-módulos ──────────────────────────────
 	MatchState.reset()
 
-	-- Lighting: preset del Lobby al arrancar y alternar entre el look del mapa y el
-	-- del Lobby según la fase. Todo por atributo (ver resolvers arriba); el Locker
-	-- se controla en su feature.
-	--
-	-- Robustez ante el race de replicación: al entrar a partida el modelo del mapa
-	-- (Workspace.ActiveMap) puede no haber replicado aún cuando llega el snapshot de
-	-- fase. Si el nodo no está, esperamos (poll acotado) y aplicamos en cuanto
-	-- aparezca. Un contador de generación cancela esperas obsoletas al cambiar de
-	-- fase o destruir el feature.
+	-- Al entrar a partida el mapa puede no haber replicado cuando llega la fase: se
+	-- hace poll acotado, y lightingGeneration cancela esperas obsoletas.
 	local lightingGeneration = 0
 	local function applyLobbyLighting()
 		lightingGeneration += 1
 		if applyScenePreset(resolveLobbyPresetNode()) then
 			return
 		end
-		-- Sin preset de lobby aplicable, volver al menú dejaría activo el preset del
-		-- mapa (o el del locker): el lobby heredaría su lighting y su DoF. Restaurar
-		-- el look base del place es el fallback correcto.
+		-- Si no, el lobby heredaría el lighting y el DoF del mapa o del locker.
 		warn("[MatchFeature] No se pudo aplicar el preset del lobby (falta Workspace.Cameras.lobby o su atributo LightingPreset); se restaura el lighting base.")
 		ScenePresetController.restore()
 	end
@@ -260,17 +227,12 @@ function MatchFeature.start(menuController: any): any
 		end)
 	end
 	janitor:Add(function()
-		-- Invalida cualquier espera de mapa pendiente al destruir el feature.
 		lightingGeneration += 1
 	end, true)
 
 	applyLobbyLighting()
-	-- DOF de fondo del menú: encendido al arrancar (estamos en Lobby) y alternado
-	-- por fase abajo. El DoF concreto lo aporta el preset activo (el locker trae el
-	-- suyo); este controller solo decide si está encendido.
+	-- El DoF concreto lo aporta el preset activo; aquí solo se enciende/apaga.
 	DepthOfFieldController.setEnabled(true)
-	-- Controles táctiles por defecto (joystick): ocultos al arrancar (Lobby) y solo
-	-- visibles en partida activa. Se alternan junto al resto del estado de fase.
 	TouchControlsController.setEnabled(false)
 	-- Reset de personaje: deshabilitado en lobby/menú, habilitado en partida.
 	setResetButtonEnabled(false)
@@ -281,20 +243,23 @@ function MatchFeature.start(menuController: any): any
 		if inMenu then
 			applyLobbyLighting()
 		else
-			-- Joining/InMatch/Dying/ShowingResults: el look lo autora el propio mapa
-			-- (atributo LightingPreset en Workspace.ActiveMap o su modelo).
 			applyMapLighting()
 		end
 
-		-- El joystick y el reset de personaje solo en gameplay activo (InMatch/Dying).
+		-- El podio de Resultados vive en el mapa y el servidor lo desmonta con su propio
+		-- reloj: hay que copiarlo mientras se juega.
+		if nextPhase == "InMatch" then
+			ResultsScene.captureWithRetries()
+		end
+
 		local inGameplay = nextPhase == "InMatch" or nextPhase == "Dying"
 		TouchControlsController.setEnabled(inGameplay)
 		setResetButtonEnabled(inGameplay)
 	end)
 	janitor:Add(function()
+		ResultsScene.clear()
 		MatchState.setOnPhaseChanged(nil)
 		DepthOfFieldController.setEnabled(false)
-		-- Restaurar el comportamiento por defecto de Roblox al desmontar el feature.
 		TouchControlsController.setEnabled(true)
 		setResetButtonEnabled(true)
 	end, true)
@@ -308,12 +273,9 @@ function MatchFeature.start(menuController: any): any
 	end
 
 	local matchHudGui = playerGui:FindFirstChild("MatchHud")
-	-- El popup de ganancias (Stats) salió del HUD a su propio ScreenGui; el HUD lo
-	-- enciende y apaga con el resto de la partida.
 	local matchStatsGui = playerGui:FindFirstChild("MatchStats")
 	if matchStatsGui and matchStatsGui:IsA("ScreenGui") then
-		-- Un reclonado en cada respawn dejaría al popup apuntando a un frame
-		-- destruido (sus refs se cachean al resolverlas).
+		-- Reclonar en cada respawn dejaría refs cacheadas a frames destruidos.
 		matchStatsGui.ResetOnSpawn = false
 	end
 	local hud = MatchHud.new(
@@ -323,15 +285,13 @@ function MatchFeature.start(menuController: any): any
 	janitor:Add(hud, "destroy")
 	hud:setScores(0, 0, GameConfig.MaxRoundDuration)
 
-	-- ── Vistas ───────────────────────────────────────────────
 	matchMenu:setPhaseLabel("DEPLOY")
 
 	local view = MapVoteView.new(votingFrame)
 	janitor:Add(view, "Destroy")
 
-	-- Panel de la pantalla de votación (independiente del Menu). Sin botón de
-	-- apertura: se abre programáticamente desde Play mientras hay votación activa.
-	-- El CloseBtn (si existe) la cierra y devuelve al menú sin afectar la votación.
+	-- Sin botón de apertura: se abre desde Play mientras hay votación activa. Cerrarla
+	-- no afecta a la votación.
 	local votingPanelOpen = false
 	local votingPanel: any = nil
 	if votingFrame then
@@ -354,13 +314,10 @@ function MatchFeature.start(menuController: any): any
 		then DeathScreenView.new(deathScreenGui)
 		else nil
 
-	-- Killcam que sigue al asesino desde delante (con karma cam si el asesino muere).
 	local killCam = KillCamFollowController.new(playerGui)
 	janitor:Add(killCam, "Destroy")
 
-	-- Scan compartido de workspace para evitar que cada controller haga su
-	-- propio `workspace:GetDescendants()` (eran dos escaneos secuenciales sobre
-	-- la misma jerarquía gigante).
+	-- Un solo GetDescendants compartido por ambos controllers.
 	local prescannedModels: { Model } = {}
 	for _, desc in workspace:GetDescendants() do
 		if desc:IsA("Model") then
@@ -369,9 +326,7 @@ function MatchFeature.start(menuController: any): any
 	end
 	CharacterHighlightController:Start(prescannedModels)
 	HealthBillboardController:Start(prescannedModels)
-	-- D1+D2: registrar Stop() en el janitor para que un teardown del feature
-	-- (e.g. hot reload) desconecte los PlayerAdded/DescendantAdded/Team
-	-- listeners que de otra forma se duplicarían en el siguiente Start().
+	-- Sin Stop() en teardown los listeners se duplicarían en el siguiente Start().
 	janitor:Add(function()
 		CharacterHighlightController:Stop()
 		HealthBillboardController:Stop()
@@ -380,33 +335,27 @@ function MatchFeature.start(menuController: any): any
 		janitor:Add(deathView, "Destroy")
 	end
 
-	-- Pantalla de Resultados (cámara + réplicas 3D + UI). Tolerante a frame nulo.
+	-- Tolerante a frame nulo.
 	local resultsView = ResultsView.new(resultsFrame)
 	janitor:Add(resultsView, "Destroy")
 
-	-- ── Estado local (ortogonal a MatchState) ────────────────
+	-- Estado local, ortogonal a MatchState.
 	local isVoting = false
 	local selectedVoteKey = ""
 	local lastLocalVoteAt = 0
 	local playEnabled = false
 	local respawnRequestSent = false
-	local resultsPreloaded = false
-	-- Último paquete de recompensas de fin de partida (Match.MatchResults). Llega
-	-- justo antes de RoundEnded; se pasa a resultsView:show. nil = sin recompensas.
+	-- Match.MatchResults llega justo antes de RoundEnded. nil = sin recompensas.
 	local latestMatchResults: any = nil
-	-- true cuando el jugador acaba de ver Results y debe entrar a la votación en
-	-- cuanto esta arranque (los del locker/lobby no la activan → no se les fuerza).
+	-- Solo quien viene de ver Results entra solo a la votación; a los del lobby no se les fuerza.
 	local pendingAutoVote = false
 
-	-- Estructura nueva: PlayBtn.Indicator { Enabled, Disabled (UIGradient), Status }.
-	-- Se muestra/oculta el gradiente según el estado.
 	local function setPlayEnabled(enabled: boolean)
 		playEnabled = enabled
 
 		local currentPlayButton = (matchMenu:getPlayButton() or playButton) :: GuiButton
 
-		-- Clickeable también durante la votación: ahí Play abre la pantalla de
-		-- votación en vez de unirse a la partida.
+		-- Durante la votación Play abre la pantalla de votación.
 		currentPlayButton.Active = enabled or isVoting
 
 		local indicator = currentPlayButton:FindFirstChild("Indicator")
@@ -438,10 +387,8 @@ function MatchFeature.start(menuController: any): any
 			return
 		end
 
-		-- No unirse mientras la pantalla de votación sigue abierta (incluida la
-		-- animación del ganador tras acabar la votación): el jugador debe estar 100%
-		-- de vuelta en el menú. Sin esto, pulsar espacio justo al terminar la
-		-- votación lo metía en partida con la GUI de votación sobrepuesta.
+		-- Incluye la animación del ganador: si no, espacio al acabar la votación entra
+		-- en partida con la GUI de votación encima.
 		if votingPanelOpen then
 			return
 		end
@@ -506,8 +453,7 @@ function MatchFeature.start(menuController: any): any
 		end)
 	end
 
-	-- ── Bind de votación ─────────────────────────────────────
-	-- voteKey = nombre del mapa (Option1/2/3) o GameConfig.RandomVoteKey (Random).
+	-- voteKey = nombre del mapa o GameConfig.RandomVoteKey.
 	view:bindVoteHandler(function(voteKey: string)
 		if not isVoting then
 			return
@@ -522,7 +468,6 @@ function MatchFeature.start(menuController: any): any
 		Network.Match.CastVote.Send({ mapName = voteKey })
 	end)
 
-	-- ── Conexiones de Players ────────────────────────────────
 	janitor:Add(Players.PlayerAdded:Connect(function()
 		hud:queuePlayerRowsUpdate()
 	end), "Disconnect")
@@ -531,12 +476,8 @@ function MatchFeature.start(menuController: any): any
 		hud:onPlayerRemoved(player.UserId)
 	end), "Disconnect")
 
-	-- Play tiene doble función: durante la votación abre la pantalla de votación;
-	-- en lobby normal intenta unirse a la partida.
 	local function onPlayPressed()
-		-- El espacio (y Play) solo funciona en el menú limpio: si hay cualquier
-		-- pestaña abierta (Settings, Locker, BattlePass, Store, Rewards, Voting…),
-		-- no hace nada — ni se une a partida ni abre la votación.
+		-- Solo con el menú limpio, sin ningún panel abierto.
 		if menuController:hasOpenPanel() then
 			return
 		end
@@ -549,7 +490,6 @@ function MatchFeature.start(menuController: any): any
 		tryJoinMatchFromLobby()
 	end
 
-	-- ── Play button ──────────────────────────────────────────
 	janitor:Add(playButton.MouseButton1Click:Connect(function()
 		onPlayPressed()
 	end), "Disconnect")
@@ -567,12 +507,8 @@ function MatchFeature.start(menuController: any): any
 		onPlayPressed()
 	end), "Disconnect")
 
-	-- ── MatchSnapshot: estado ambiental replicado ────────────
-	-- Fase/mapa/voto/score viajan como attributes (ReplicatedStorage.
-	-- MatchSnapshot): el valor vigente está siempre disponible —late joiners
-	-- incluidos— y los cambios llegan por AttributeChanged, sin resyncs ni
-	-- timeouts de recuperación. Los countdowns se derivan localmente de
-	-- PhaseEndsAt (reloj de servidor sincronizado), sin ticks de red.
+	-- Fase/mapa/voto/score llegan como attributes de MatchSnapshot. Los countdowns se
+	-- derivan localmente de PhaseEndsAt (reloj de servidor), sin ticks de red.
 	local snapshotPhase: string = MatchSnapshot.getPhase()
 
 	local function getPhaseTimeLeft(): number
@@ -606,7 +542,6 @@ function MatchFeature.start(menuController: any): any
 		end
 	end
 
-	-- HUD de ronda: score por AttributeChanged + countdown del ticker (abajo).
 	local function updateRoundHud()
 		if snapshotPhase ~= "InRound" then
 			return
@@ -615,23 +550,23 @@ function MatchFeature.start(menuController: any): any
 		local scoreB = MatchSnapshot.getNumber("ScoreB")
 		local timeLeft = getPhaseTimeLeft()
 		hud:setScores(scoreA, scoreB, timeLeft)
-
-		-- Precargar las réplicas de Resultados un poco antes del fin de ronda (por
-		-- tiempo o por puntuación cercana al límite) para evitar el "pop".
-		if not resultsPreloaded and MatchState.isActive() then
-			local nearTime = timeLeft <= RESULTS_PRELOAD_LEAD_SECONDS
-			local nearScore = math.max(scoreA, scoreB)
-				>= GameConfig.WinScoreLimit - RESULTS_PRELOAD_SCORE_LEAD
-			if nearTime or nearScore then
-				resultsPreloaded = true
-				local lt, entries = hud:captureEndResultsData()
-				resultsView:preload(lt, entries)
-			end
-		end
 	end
 
 	local function applySnapshotPhase(phase: string)
 		snapshotPhase = phase
+
+		-- Congelar la cámara aquí y no en RoundEnded: Phase=Results replica antes que el
+		-- respawn en el lobby, pero RoundEnded (ByteNet, fin de frame) llega DESPUÉS y
+		-- dejaría ver un frame del lobby.
+		if phase == "Results" and MatchState.isActive() then
+			MatchCamera.holdCurrent(function()
+				if not featureAlive then
+					return false
+				end
+				return MatchState.getPhase() == "ShowingResults"
+					or (MatchState.isActive() and snapshotPhase == "Results")
+			end)
+		end
 		local wasVoting = isVoting
 		isVoting = phase == "Voting"
 		setPlayEnabled(phase == "InRound")
@@ -643,11 +578,11 @@ function MatchFeature.start(menuController: any): any
 			view:setSelectedMap("")
 			view:updateTimer(getPhaseTimeLeft())
 			applyVoterIds()
-			-- Quien venía de ver Results entra a la votación automáticamente.
 			if pendingAutoVote then
 				pendingAutoVote = false
 				if votingPanel then
-					votingPanel:open()
+					-- true = sin sonido (no la abre el usuario).
+					votingPanel:open(true)
 				end
 			end
 		elseif wasVoting and not isVoting then
@@ -657,11 +592,9 @@ function MatchFeature.start(menuController: any): any
 				matchMenu:setPhaseLabel("DEPLOY")
 				view:hide()
 				if votingPanel then
-					votingPanel:close()
+					votingPanel:close(true)
 				end
 			end
-			-- Solo animamos el ganador si el jugador está viendo la pantalla; si
-			-- no, reseteamos en silencio (sigue en el menú).
 			local winnerMapName = MatchSnapshot.getString("WinnerMapName")
 			if votingPanelOpen and winnerMapName ~= "" then
 				view:showWinner(winnerMapName, finishVote)
@@ -686,8 +619,6 @@ function MatchFeature.start(menuController: any): any
 		janitor:Add(MatchSnapshot.observe(scoreKey, updateRoundHud), "Disconnect")
 	end
 
-	-- Ticker local 1 Hz para los countdowns (voto y ronda) derivados de
-	-- PhaseEndsAt — el servidor ya no emite ticks periódicos.
 	task.spawn(function()
 		while featureAlive do
 			if isVoting then
@@ -699,7 +630,6 @@ function MatchFeature.start(menuController: any): any
 		end
 	end)
 
-	-- ── Menu GUI tracking ────────────────────────────────────
 	janitor:Add(menuGui:GetPropertyChangedSignal("Enabled"):Connect(function()
 		matchMenu:enforceHidden()
 	end), "Disconnect")
@@ -714,11 +644,8 @@ function MatchFeature.start(menuController: any): any
 		end
 	end), "Disconnect")
 
-	-- ── CharacterAdded ───────────────────────────────────────
 	janitor:Add(Players.LocalPlayer.CharacterAdded:Connect(function(character)
-		-- Si Espacio sigue pulsado al respawnear (p. ej. el jugador lo usó
-		-- para confirmar respawn o entrar a la partida), bloquea el primer
-		-- salto hasta que suelte la tecla.
+		-- Espacio aún pulsado (usado para entrar o respawnear): bloquear el salto hasta soltarlo.
 		if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
 			task.spawn(function()
 				local humanoid = character:WaitForChild("Humanoid", 2)
@@ -741,9 +668,8 @@ function MatchFeature.start(menuController: any): any
 
 		local phase = MatchState.getPhase()
 
-		-- Durante resultados, el jugador fue teleportado al lobby: limpiar armas. La
-		-- cámara cinemática de Resultados ya conduce la vista cada frame (re-afirma
-		-- Scriptable), así que un respawn aquí no necesita re-forzarla.
+		-- El jugador reaparece en el lobby: limpiar armas. La cámara de Resultados ya
+		-- re-afirma Scriptable cada frame.
 		if phase == "ShowingResults" then
 			local guard = function()
 				return MatchState.getPhase() == "ShowingResults"
@@ -757,25 +683,22 @@ function MatchFeature.start(menuController: any): any
 					end
 				end)
 			end
-			-- Reset HUD al respawnear durante resultados — evita mostrar kills/deaths
-			-- de la partida anterior si el jugador rejoin antes de volver al lobby.
 			hud:resetMatchState()
 			matchMenu:enforceHidden()
 			return
 		end
 
+		-- La cámara de lobby la re-afirma ClientBootstrap en su CharacterAdded; no duplicar aquí.
 		if not MatchState.isActive() then
 			return
 		end
 
-		-- "Dying": la death screen cubre la pantalla; no tocamos la cámara
-		-- hasta que DeathScreenHide reactive la de gameplay.
+		-- La cámara no se toca hasta que DeathScreenHide reactive la de gameplay.
 		if phase == "Dying" then
 			matchMenu:enforceHidden()
 			return
 		end
 
-		-- InMatch: restaurar HUD y cámara de gameplay.
 		hud:setEnabled(true)
 		if deathScreenGui then
 			deathScreenGui.Visible = false
@@ -786,7 +709,6 @@ function MatchFeature.start(menuController: any): any
 		matchMenu:enforceHidden()
 	end), "Disconnect")
 
-	-- ── Network: JoinMatchSpawned ────────────────────────────
 	janitor:Add(Network.Match.JoinMatchSpawned.Listen(function(_: {})
 		MatchState.setPhase("InMatch")
 		killCam:stop()
@@ -797,7 +719,6 @@ function MatchFeature.start(menuController: any): any
 			deathView:hide()
 		end
 		resultsView:hide()
-		resultsPreloaded = false
 		pendingAutoVote = false
 		latestMatchResults = nil
 		hud:setScores(0, 0, GameConfig.MaxRoundDuration)
@@ -813,7 +734,6 @@ function MatchFeature.start(menuController: any): any
 		iris:open()
 	end), true)
 
-	-- ── Network: PlayerStreakState (stats de combate para el marcador) ──
 	janitor:Add(Network.Match.PlayerStreakState.Listen(function(data: {
 		userId: string,
 		kills: number,
@@ -827,7 +747,6 @@ function MatchFeature.start(menuController: any): any
 		hud:applyPlayerState(userId, data.kills, data.deaths, data.assists)
 	end), true)
 
-	-- ── Network: BotRoster ───────────────────────────────────
 	janitor:Add(Network.Match.BotRoster.Listen(function(data: { json: string })
 		local ok, roster = pcall(HttpService.JSONDecode, HttpService, data.json)
 		if not ok or type(roster) ~= "table" then
@@ -850,9 +769,6 @@ function MatchFeature.start(menuController: any): any
 		hud:setBotRoster(parsed)
 	end), true)
 
-	-- ── Network: TeamCosmetics ───────────────────────────────
-	-- Cosméticos (outfit/face/hat) de mis compañeros reales, para sus réplicas en
-	-- Resultados. Solo llega mi propio equipo.
 	janitor:Add(Network.Match.TeamCosmetics.Listen(function(data: { json: string })
 		local ok, list = pcall(HttpService.JSONDecode, HttpService, data.json)
 		if not ok or type(list) ~= "table" then
@@ -871,21 +787,21 @@ function MatchFeature.start(menuController: any): any
 		hud:setPlayerCosmetics(byUserId)
 	end), true)
 
-	-- ── Network: MatchResults ────────────────────────────────
-	-- Recompensas de fin de partida del jugador (outcome + cash + items). Llega
-	-- justo antes de RoundEnded; se guarda para pasárselo a resultsView:show.
+	-- OJO: el servidor lo manda ANTES que RoundEnded pero llega DESPUÉS (ByteNet vacía
+	-- la cola de broadcast antes que la por-jugador). Por eso además de guardarlas se
+	-- pintan sobre la pantalla ya abierta.
 	janitor:Add(Network.Match.MatchResults.Listen(function(data: { json: string })
 		local ok, decoded = pcall(HttpService.JSONDecode, HttpService, data.json)
 		if ok and type(decoded) == "table" then
-			-- JSON puede omitir un array vacío: normalizar `rewards` a tabla.
+			-- Un array vacío puede no sobrevivir al JSON.
 			if type(decoded.rewards) ~= "table" then
 				decoded.rewards = {}
 			end
 			latestMatchResults = decoded
+			resultsView:applyRewards(decoded)
 		end
 	end), true)
 
-	-- ── Network: DeathScreenShow ─────────────────────────────
 	janitor:Add(Network.Match.DeathScreenShow.Listen(function(data: {
 		respawnCooldown: number,
 		killerUserId: string,
@@ -912,9 +828,8 @@ function MatchFeature.start(menuController: any): any
 			killerUserId = data.killerUserId,
 		})
 
-		-- Sin asesino (caída al vacío, reset de personaje, daño de entorno) la tarjeta
-		-- va a nil, no con el nombre vacío: `_populateCard` ya distingue los dos casos
-		-- y con la tabla puesta rotulaba un "Eliminated by " colgando.
+		-- Sin asesino (vacío, entorno) va nil y no una tabla con nombre vacío:
+		-- _populateCard rotularía un "Eliminated by " colgando.
 		local killer = if data.killerName ~= ""
 			then {
 				name = data.killerName,
@@ -926,7 +841,6 @@ function MatchFeature.start(menuController: any): any
 		deathView:show(data.respawnCooldown, killer)
 	end), true)
 
-	-- ── Network: DeathScreenHide ─────────────────────────────
 	janitor:Add(Network.Match.DeathScreenHide.Listen(function(_: {})
 		respawnRequestSent = false
 		killCam:stop()
@@ -944,7 +858,6 @@ function MatchFeature.start(menuController: any): any
 		end
 	end), true)
 
-	-- ── Network: ReturnToMenuDone ────────────────────────────
 	janitor:Add(Network.Match.ReturnToMenuDone.Listen(function(_: {})
 		MatchState.setPhase("Lobby")
 		killCam:stop()
@@ -963,7 +876,6 @@ function MatchFeature.start(menuController: any): any
 		iris:open()
 	end), true)
 
-	-- ── Network: RoundEnded ──────────────────────────────────
 	janitor:Add(Network.Match.RoundEnded.Listen(function(_data: {
 		winnerTeam: string,
 		scoreA: number,
@@ -973,7 +885,6 @@ function MatchFeature.start(menuController: any): any
 		local wasActive = prevPhase == "InMatch" or prevPhase == "Dying" or prevPhase == "ReturningToMenu"
 		local wasJoining = prevPhase == "Joining"
 
-		-- Limpiar estado inmediatamente.
 		MatchState.setPhase("Lobby")
 		matchMenu:setPhaseLabel("ENDING")
 		killCam:stop()
@@ -988,29 +899,25 @@ function MatchFeature.start(menuController: any): any
 
 		MatchWeapons.cleanAllWithRetries(playerGui, notInActiveMatch)
 
-		-- Capturar datos de jugadores ANTES de resetear roster. Las réplicas se
-		-- clonan en resultsView:show desde los Characters vivos, así que hay que
-		-- mostrarla pronto (antes de que el servidor desmonte el mapa/bots).
+		-- ANTES de resetear: el servidor despawnea bots y manda a los jugadores al lobby
+		-- nada más acabar la ronda (el mapa sí se queda hasta el final de Resultados).
 		local localTeam, playerEntries = hud:captureEndResultsData()
 		hud:resetMatchState()
 
-		-- Si estaba en partida: pantalla de Resultados (cámara results + réplicas).
-		-- Auto-cierre tras EndResultsDuration → vuelta al lobby/menú.
+		-- Fundido a negro → con la pantalla tapada se montan réplicas y cámara → reveal.
 		if wasActive then
 			MatchState.setPhase("ShowingResults")
 			matchMenu:enforceHidden()
-			-- Cámara cinemática (tilt + zoom + dolly dramático hacia el encuadre).
-			-- Autoritaria mientras estemos en ShowingResults (se re-impone cada frame
-			-- y se auto-detiene al salir de la fase).
-			MatchCamera.startResultsCinematic(function()
-				return MatchState.getPhase() == "ShowingResults"
-			end)
-			-- Sin flash negro al entrar a Results: reset deja el iris abierto al
-			-- instante (open() siempre cubre de negro y luego revela).
-			iris:reset()
-			resultsView:show(localTeam, playerEntries, GameConfig.EndResultsDuration, function()
-				-- onFinished (cierre de la pantalla de Resultados)
-				if not featureAlive or MatchState.getPhase() ~= "ShowingResults" then
+			local roundEndedAt = os.clock()
+			local function isShowingResults(): boolean
+				return featureAlive and MatchState.getPhase() == "ShowingResults"
+			end
+
+			-- Normalmente ya congelada desde applySnapshotPhase; esto cambia el guard a esta fase.
+			MatchCamera.holdCurrent(isShowingResults)
+
+			local function onResultsFinished()
+				if not isShowingResults() then
 					return
 				end
 				resultsView:hide()
@@ -1019,13 +926,11 @@ function MatchFeature.start(menuController: any): any
 				MatchCamera.forceLobbyWithRetries(notInActiveMatch)
 				latestMatchResults = nil
 
-				-- Tras Results, enviar a la votación automáticamente. Si ya empezó,
-				-- abrir directo; si no (la fase Voting suele llegar casi a la vez),
-				-- esperar al observer de fase vía pendingAutoVote, con fallback al
-				-- menú por timeout.
+				-- La fase Voting suele llegar casi a la vez: si aún no, la abre applySnapshotPhase
+				-- vía pendingAutoVote.
 				matchMenu:setPhaseLabel("VOTING")
 				if isVoting and votingPanel then
-					votingPanel:open()
+					votingPanel:open(true)
 				else
 					pendingAutoVote = true
 					task.delay(VOTE_AUTO_TIMEOUT, function()
@@ -1037,7 +942,31 @@ function MatchFeature.start(menuController: any): any
 						end
 					end)
 				end
-			end, latestMatchResults)
+			end
+
+			-- Si algo saca al jugador de Resultados a mitad del fundido, descubrir la pantalla.
+			fade:cover(function()
+				if not isShowingResults() then
+					fade:reveal()
+					return
+				end
+				-- Si venía de ReturningToMenu el iris puede estar cerrado.
+				iris:reset()
+				resultsView:preload(localTeam, playerEntries)
+
+				task.delay(RESULTS_BLACK_HOLD, function()
+					if not isShowingResults() then
+						fade:reveal()
+						return
+					end
+					MatchCamera.startResultsCinematic(isShowingResults)
+					-- La ventana del servidor empezó en RoundEnded: se descuenta el fundido para cerrar
+					-- a la vez que desmonta el mapa.
+					local remaining = GameConfig.EndResultsDuration - (os.clock() - roundEndedAt)
+					resultsView:show(localTeam, playerEntries, remaining, onResultsFinished, latestMatchResults)
+					fade:reveal()
+				end)
+			end)
 		elseif wasJoining then
 			MatchCamera.forceLobbyWithRetries(notInActiveMatch)
 			iris:open()
@@ -1045,10 +974,6 @@ function MatchFeature.start(menuController: any): any
 		end
 	end), true)
 
-	-- ── DataController observers ─────────────────────────────
-	-- Level up / BP tier-up / wrap challenge unlock / daily task claim viven
-	-- en MatchProgressionObserver (extraído de aquí). Wirea sus observers al
-	-- janitor del feature, así un teardown limpia todo.
 	MatchProgressionObserver.attach({
 		hud = hud,
 		matchHudGui = if matchHudGui and matchHudGui:IsA("ScreenGui") then matchHudGui else nil,
@@ -1056,7 +981,6 @@ function MatchFeature.start(menuController: any): any
 		janitor = janitor,
 	})
 
-	-- ── Cleanup ──────────────────────────────────────────────
 	janitor:Add(function()
 		MatchState.reset()
 		isVoting = false
@@ -1071,11 +995,10 @@ function MatchFeature.start(menuController: any): any
 		resultsView:hide()
 		MatchCamera.stopResultsCinematic()
 		iris:reset()
+		fade:reset()
 		Fusion.doCleanup(fusionScope)
 	end, true)
 
-	-- Sync inicial del estado event-driven (streaks + roster de bots); el
-	-- estado ambiental ya se reconcilió arriba al observar el snapshot.
 	Network.Match.RequestMatchSync.Send({})
 
 	return janitor

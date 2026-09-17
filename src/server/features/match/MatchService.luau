@@ -57,6 +57,9 @@ local LOBBY_RESPAWN_DEBOUNCE = 2
 local MULTIKILL_WINDOW = 4
 local PICKUP_ELIGIBILITY_WINDOW = 15
 local PICKUP_ELIGIBILITY_MAX_QUEUED = 8
+-- Part de Workspace donde aparecen TODOS los mapas: el pivot del modelo del mapa
+-- se coloca en su CFrame al cargar. Sin ella, el mapa se queda donde se autoró.
+local MAP_ANCHOR_NAME = "MapAnchor"
 
 local _activeMapName = ""
 local _activeMapContainer: BasePart? = nil
@@ -1257,6 +1260,17 @@ local function _loadMapClone(mapName: string): (boolean, string)
 		return false, "Error clonando mapa: " .. tostring(result)
 	end
 
+	-- Se mueve ANTES de parentar a Workspace: así el mapa replica ya en su sitio
+	-- y nada (spawns, RoamGraph, bots) llega a leer la posición autorada.
+	local anchor = Workspace:FindFirstChild(MAP_ANCHOR_NAME)
+	if not anchor or not anchor:IsA("BasePart") then
+		warn(string.format("[MatchService] Workspace.%s no existe; el mapa '%s' se queda en su posición autorada.", MAP_ANCHOR_NAME, mapName))
+	elseif not result:IsA("Model") then
+		warn(string.format("[MatchService] ServerStorage/Maps/%s no es un Model; no se puede mover a Workspace.%s.", mapName, MAP_ANCHOR_NAME))
+	else
+		result:PivotTo(anchor.CFrame)
+	end
+
 	local container = _ensureActiveMapContainer()
 	result.Parent = container
 	_activeMapContainer = container
@@ -1467,10 +1481,8 @@ function _enterResults(winnerTeam: string)
 		warn(("[MatchService] MATCH_END no se emitió: %s"):format(tostring(emitResult)))
 	end
 
-	-- Desmontar la ronda: mapa, listeners de muerte, campos de scope ronda de
-	-- las sesiones y el objeto Round entero (no hay tablas que "limpiar": la
-	-- siguiente ronda nace en un objeto nuevo).
-	_clearActiveMap()
+	-- Desmontar la ronda: listeners de muerte, campos de scope ronda de las sesiones y
+	-- el objeto Round. El mapa NO: los clientes ven Resultados sobre su podio.
 	for _, session in _sessions do
 		if session.deathConn then
 			session.deathConn:Disconnect()
@@ -1493,6 +1505,7 @@ function _enterResults(winnerTeam: string)
 		if _phaseGeneration ~= generation then
 			return
 		end
+		_clearActiveMap()
 		_enterIdle()
 		_tryStartVoting()
 	end)
@@ -1786,6 +1799,11 @@ local function _onRequestJoinMatch(_: {}, player: Player)
 
 		if player.Parent == Players then
 			Network.Match.JoinMatchSpawned.SendTo({}, player)
+
+				-- Marcador completo para el que entra: el cliente vacía sus stats al recibir
+				-- JoinMatchSpawned y luego solo recibe cambios. El broadcast de arriba solo
+				-- lleva al propio jugador y se dedupea.
+			KillAttributionService:SendAllStreaksTo(player)
 
 			-- Cosméticos de equipo para Resultados: el recién llegado recibe a sus
 			-- compañeros y los compañeros se actualizan para incluirlo a él.
