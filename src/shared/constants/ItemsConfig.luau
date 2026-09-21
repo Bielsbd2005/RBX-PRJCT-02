@@ -292,8 +292,8 @@ Special = {
 		-- thumbnail por defecto hasta que haya iconos propios.
 		Default = { Name = "Wave",    Price = 0,    LevelRequired = 0,  Rarity = "Common",   CanPurchase = false, AnimationId = asset(507770239) },
 		Point   = { Name = "Point",   Price = 65,   LevelRequired = 1,  Rarity = "Common",   CanPurchase = true,  AnimationId = asset(507770453) },
-		Cheer   = { Name = "Cheer",   Price = 200,  LevelRequired = 3,  Rarity = "Uncommon", CanPurchase = true,  AnimationId = asset(507770677) },
-		Laugh   = { Name = "Laugh",   Price = 250,  LevelRequired = 4,  Rarity = "Uncommon", CanPurchase = true,  AnimationId = asset(507770818) },
+		Cheer   = { Name = "Cheer",   Price = 200,  LevelRequired = 3,  Rarity = "Common",   CanPurchase = true,  AnimationId = asset(507770677) },
+		Laugh   = { Name = "Laugh",   Price = 250,  LevelRequired = 4,  Rarity = "Common",   CanPurchase = true,  AnimationId = asset(507770818) },
 		Dance   = { Name = "Dance",   Price = 400,  LevelRequired = 6,  Rarity = "Rare",     CanPurchase = true,  AnimationId = asset(507771019), Looped = true },
 		Groove  = { Name = "Groove",  Price = 1000, LevelRequired = 10, Rarity = "Epic",     CanPurchase = true,  AnimationId = asset(507776043), Looped = true },
 		Shuffle = { Name = "Shuffle", Price = 2000, LevelRequired = 16, Rarity = "Epic",     CanPurchase = true,  AnimationId = asset(507777268), Looped = true },
