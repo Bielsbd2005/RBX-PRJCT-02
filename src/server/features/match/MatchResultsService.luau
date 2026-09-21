@@ -22,6 +22,8 @@ type DataService = DataServiceMod.DataServiceModule
 
 -- Solo display: lo concedido por progresión no se ve afectado.
 local MAX_ITEMS = 6
+-- Los bonus escalados se redondean a este múltiplo: en pantalla no debe salir un 29.
+local BONUS_STEP = 5
 
 export type MatchContext = ResultsRewards.MatchContext
 
@@ -176,8 +178,18 @@ function MatchResultsService:_computeItemUnlocks(player: Player): { ResultItem }
 end
 
 -- Síncrono (sin yields): se envía en el mismo frame que RoundEnded.
-function MatchResultsService:BuildResults(player: Player, ctx: MatchContext): MatchResults
-	local cash = ResultsRewards.resolveCash(ctx)
+-- `bonusScale` (0..1) lo calcula MatchService: 0 = sin participación mínima (no hay
+-- bonus, ni el upsell VIP); si no, tiempo en partida sobre ronda completa × techo diario. El
+-- importe escalado es el que se pinta Y el que se concede; lo que redondea a 0 se cae.
+function MatchResultsService:BuildResults(player: Player, ctx: MatchContext, bonusScale: number): MatchResults
+	local cash: { ResultsRewards.ResolvedCashReward } = {}
+	for _, entry in ResultsRewards.resolveCash(ctx) do
+		-- Hacia abajo: redondeando al más cercano, la ronda corta cobraría de más por hora.
+		local scaled = math.floor(entry.cash * math.clamp(bonusScale, 0, 1) / BONUS_STEP) * BONUS_STEP
+		if scaled > 0 then
+			table.insert(cash, { id = entry.id, title = entry.title, cash = scaled, locked = entry.locked })
+		end
+	end
 	local items = self:_computeItemUnlocks(player)
 
 	local rewards: { DisplayReward } = {}
@@ -214,7 +226,7 @@ function MatchResultsService:GrantCash(
 )
 	for _, entry in cash do
 		if not entry.locked and entry.cash > 0 then
-			RewardService.AwardCash(player, entry.cash, "MatchEnd::" .. entry.id, matchId)
+			RewardService.AwardCash(player, entry.cash, "MatchEnd::" .. entry.id, matchId, true)
 		end
 	end
 end

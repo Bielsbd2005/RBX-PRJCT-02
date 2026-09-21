@@ -24,6 +24,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ActionRewards = require(Shared:WaitForChild("constants"):WaitForChild("ActionRewards"))
+local DailyTasks = require(Shared:WaitForChild("constants"):WaitForChild("DailyTasks"))
+local GameConfig = require(Shared:WaitForChild("GameConfig"))
 local TelemetryService = require(script.Parent.TelemetryService)
 
 local DataServiceMod = require(script.Parent.data.DataService)
@@ -43,15 +45,61 @@ end
 
 --[[
 	Award: concede XP y Cash de `actionKey`, aplicando `extraUpdates` atómicamente con el Cash.
-	Retorna (ok, xpGranted, cashGranted); ok=true aunque una tabla dé 0. (false, 0, 0) si la
-	clave no existe o el profile no está cargado.
+	Retorna (ok, xpGranted, cashGranted, cashBase); ok=true aunque una tabla dé 0.
+	(false, 0, 0, 0) si la clave no existe o el profile no está cargado.
 	`opts.skipCash` / `opts.skipXP` suprimen una moneda de forma independiente: su monto
 	vuelve como 0 y no se persiste ni registra. `extraUpdates` se aplican siempre.
+	`opts.played` pasa el Cash por el techo diario: `cashGranted` es lo cobrado y
+	`cashBase` lo de ActionRewards, que es con lo que MatchService llena el cap de ronda.
 ]]
 type AwardOptions = {
 	skipCash: boolean?,
 	skipXP: boolean?,
+	-- Cash JUGADO (combate): pasa por el techo diario (GameConfig.DailyPlayedCashTiers).
+	played: boolean?,
 }
+
+-- Cash jugado ya cobrado hoy. El día es el de las diarias (UTC), para que todo lo
+-- "diario" del juego cambie a la vez.
+local function _playedCashToday(data: any, todayKey: string): number
+	local played = data.PlayedCash
+	if type(played) == "table" and played.DateKey == todayKey and type(played.Amount) == "number" then
+		return played.Amount
+	end
+	return 0
+end
+
+-- Updates que suman `amount` al Cash jugado de hoy (o lo estrenan si cambió el día).
+local function _playedCashUpdates(data: any, amount: number): { BatchUpdateEntry }
+	local todayKey = DailyTasks.TodayKey()
+	local played = data.PlayedCash
+	if type(played) == "table" and played.DateKey == todayKey then
+		return { { path = { "PlayedCash", "Amount" }, delta = amount } }
+	end
+	return {
+		{ path = { "PlayedCash", "DateKey" }, value = todayKey },
+		{ path = { "PlayedCash", "Amount" }, value = amount },
+	}
+end
+
+--[[
+	Multiplicador del techo diario para el próximo Cash jugado del jugador: el Factor del
+	tramo en el que cae lo que ya cobró hoy. Un award que cruza un tramo se paga entero
+	al factor del tramo de partida (el error es de un award). 1 sin profile.
+]]
+function RewardService.PlayedCashFactor(player: Player): number
+	local profile = if _dataService then _dataService:GetProfile(player) else nil
+	if not profile or not profile.Data then
+		return 1
+	end
+	local earned = _playedCashToday(profile.Data, DailyTasks.TodayKey())
+	for _, tier in GameConfig.DailyPlayedCashTiers do
+		if earned < tier.UpTo then
+			return tier.Factor
+		end
+	end
+	return 1
+end
 
 function RewardService.Award(
 	player: Player,
@@ -59,9 +107,9 @@ function RewardService.Award(
 	extraUpdates: { BatchUpdateEntry }?,
 	itemSku: string?,
 	opts: AwardOptions?
-): (boolean, number, number)
+): (boolean, number, number, number)
 	if not _dataService or not player then
-		return false, 0, 0
+		return false, 0, 0, 0
 	end
 
 	local skipCash = if opts then opts.skipCash == true else false
@@ -69,22 +117,32 @@ function RewardService.Award(
 
 	if not ActionRewards.Has(actionKey) then
 		warn(("[RewardService] Acción desconocida: %s — no se concede nada"):format(tostring(actionKey)))
-		return false, 0, 0
+		return false, 0, 0, 0
 	end
 
-	if not _dataService:GetProfile(player) then
+	local profile = _dataService:GetProfile(player)
+	if not profile then
 		-- Sin profile no se persiste nada: los callers que deban esperar al ProfileLoaded
 		-- encolan ellos mismos (p.ej. MatchService._deferUntilProfile).
-		return false, 0, 0
+		return false, 0, 0, 0
 	end
 
 	local xpAmount = if skipXP then 0 else ActionRewards.GetXP(actionKey)
-	local cashAmount = if skipCash then 0 else ActionRewards.GetCash(actionKey)
+	local cashBase = if skipCash then 0 else ActionRewards.GetCash(actionKey)
+	local played = if opts then opts.played == true else false
+	local cashAmount = if played and cashBase > 0
+		then math.floor(cashBase * RewardService.PlayedCashFactor(player) + 0.5)
+		else cashBase
 
 	local updates: { BatchUpdateEntry } = {}
 	if cashAmount > 0 then
 		table.insert(updates, { path = { "Stats", "Cash" }, delta = cashAmount })
 		table.insert(updates, { path = { "Stats", "TotalCashEarned" }, delta = cashAmount })
+		if played then
+			for _, entry in _playedCashUpdates(profile.Data, cashAmount) do
+				table.insert(updates, entry)
+			end
+		end
 	end
 	if extraUpdates then
 		for _, entry in extraUpdates do
@@ -132,7 +190,7 @@ function RewardService.Award(
 		TelemetryService.RecordXP(player, actionKey, xpAmount, itemSku)
 	end
 
-	return ok, xpAmount, cashAmount
+	return ok, xpAmount, cashAmount, cashBase
 end
 
 --[[
@@ -143,13 +201,20 @@ end
 	si se persistió. `itemSku` une el movimiento con otra serie: los bonus de fin de
 	partida pasan el `matchId`, sin el cual no se puede cruzar con MATCH_END.
 ]]
-function RewardService.AwardCash(player: Player, amount: number, sourceLabel: string, itemSku: string?): boolean
+function RewardService.AwardCash(
+	player: Player,
+	amount: number,
+	sourceLabel: string,
+	itemSku: string?,
+	countAsPlayed: boolean?
+): boolean
 	if not _dataService or not player or type(amount) ~= "number" or amount <= 0 then
 		return false
 	end
 
 	amount = math.floor(amount)
-	if not _dataService:GetProfile(player) then
+	local profile = _dataService:GetProfile(player)
+	if not profile then
 		return false
 	end
 
@@ -157,6 +222,13 @@ function RewardService.AwardCash(player: Player, amount: number, sourceLabel: st
 		{ path = { "Stats", "Cash" }, delta = amount },
 		{ path = { "Stats", "TotalCashEarned" }, delta = amount },
 	}
+	-- Suma al Cash jugado de hoy SIN reescalar: quien llama ya aplicó PlayedCashFactor
+	-- (los bonus de fin de partida se pintan antes de concederse y deben coincidir).
+	if countAsPlayed then
+		for _, entry in _playedCashUpdates(profile.Data, amount) do
+			table.insert(updates, entry)
+		end
+	end
 
 	local batchOk, batchErr = pcall(function()
 		return _dataService:BatchUpdate(player, updates)

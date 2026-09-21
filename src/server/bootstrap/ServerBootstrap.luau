@@ -79,6 +79,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 
 	local DataService = require(serverRoot.core.data.DataService)
 	local RewardService = require(serverRoot.core.RewardService)
+	local BattlePassConfig = require(Shared:WaitForChild("constants"):WaitForChild("BattlePassConfig"))
 	local GamePassService = require(serverRoot.core.GamePassService)
 	local ShopService = require(serverRoot.features.shop.ShopService)
 	local SettingsService = require(serverRoot.features.settings.SettingsService)
@@ -271,21 +272,31 @@ function ServerBootstrap.start(serverRoot: Script): ()
 			-- Killed: notificaciones async para services con side-effects; los nuevos se
 			-- suscriben aquí sin tocar WeaponsSystem.luau.
 			if WeaponsSystem.Killed and WeaponsSystem.Killed.Event then
-				WeaponsSystem.Killed.Event:Connect(function(killer: Player, _victimHum: Humanoid, _weaponName: string, wasHeadshot: boolean)
-					-- Dailies siguen la señal cruda a propósito: su payout ya está acotado por diseño.
-					-- OnKill lleva dentro la racha de bajas; el headshot es su propia tarea.
+				WeaponsSystem.Killed.Event:Connect(function(killer: Player, victimHum: Humanoid, _weaponName: string, wasHeadshot: boolean)
+					-- Killed dispara con CUALQUIER humanoid que muera a tiros, también un cuerpo del
+					-- lobby: aquí sólo cuentan las kills de partida. El pcall cubre un `killer` nil
+					-- (kill de entorno).
+					local okMatchKill, isMatchKill = pcall(function()
+						return MatchService:IsMatchKill(killer, victimHum)
+					end)
+					if not okMatchKill or not isMatchKill then
+						return
+					end
+
+					-- Las dailies no pasan por el cap de la ronda a propósito: su payout ya está acotado
+					-- por diseño. OnKill lleva dentro la racha de bajas; el headshot es su propia tarea.
 					if (DailyTasksService :: any).OnKill then
 						pcall(function() (DailyTasksService :: any):OnKill(killer) end)
 					end
 					if wasHeadshot and (DailyTasksService :: any).OnHeadshot then
 						pcall(function() (DailyTasksService :: any):OnHeadshot(killer) end)
 					end
-					-- Battle Pass respeta el MatchXPCap igual que el XP de cuenta, para que farmear
-					-- kills no suba el pase sin límite. El check va DENTRO del pcall: `killer` puede
-					-- llegar nil (kill de entorno) y no debe tumbar el handler.
+					-- El pase tiene su propio cupo por ronda, para que farmear kills no lo suba sin
+					-- límite. La reserva va DENTRO del pcall: `killer` puede llegar nil (kill de
+					-- entorno) y no debe tumbar el handler.
 					if (BattlePassService :: any).OnKill then
 						pcall(function()
-							if not MatchService:IsXPCapReached(killer) then
+							if MatchService:TryConsumeBattlePassXP(killer, BattlePassConfig.XPRates.PerKill) then
 								(BattlePassService :: any):OnKill(killer)
 							end
 						end)

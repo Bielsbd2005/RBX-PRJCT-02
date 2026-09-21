@@ -24,6 +24,7 @@ local Network = require(Shared.networking.Network)
 local ItemsConfig = require(Shared.constants.ItemsConfig)
 local WeaponsConfig = require(Shared.constants.WeaponsConfig)
 local ActionRewards = require(Shared.constants.ActionRewards)
+local GameConfig = require(Shared.GameConfig)
 local WeaponTypes = WeaponsSystemFolder:WaitForChild("WeaponTypes")
 local Libraries = WeaponsSystemFolder:WaitForChild("Libraries")
 local ShoulderCamera = require(Libraries:WaitForChild("ShoulderCamera"))
@@ -134,7 +135,11 @@ local CLIENT_TO_SERVER_EVENTS = {
 
 -- Contribuidores de daño por humanoid (asistencias). Claves débiles como red de
 -- seguridad; el flujo normal limpia con Died/AncestryChanged.
-local damageContributors: { [Humanoid]: { [Player]: number } } = setmetatable({}, { __mode = "k" }) :: any
+-- `damage` es el del enfrentamiento en curso: tras AssistWindow segundos sin darle, el
+-- siguiente impacto empieza de cero. La asistencia pide AssistMinDamage reciente
+-- (GameConfig), porque los bots se rematan entre sí y una bala suelta cobraría.
+type DamageContribution = { damage: number, lastAt: number }
+local damageContributors: { [Humanoid]: { [Player]: DamageContribution } } = setmetatable({}, { __mode = "k" }) :: any
 local assistDiedConnections: { [Humanoid]: RBXScriptConnection } = setmetatable({}, { __mode = "k" }) :: any
 local assistAncestryConnections: { [Humanoid]: RBXScriptConnection } = setmetatable({}, { __mode = "k" }) :: any
 
@@ -289,8 +294,16 @@ end
 flushAssists = function(target: Humanoid, killerPlayer: Player?)
 	local assistEvent = WeaponsSystem.remoteEvents["PlayerAssist"]
 	if damageContributors[target] then
-		for contributor, _ in damageContributors[target] do
-			if contributor ~= killerPlayer and contributor.Parent then
+		local now = os.clock()
+		for contributor, contribution in damageContributors[target] do
+			local earned = contribution.damage >= GameConfig.AssistMinDamage
+				and now - contribution.lastAt <= GameConfig.AssistWindow
+			-- Sólo asistencias de partida: un cuerpo del lobby también muere a tiros y, sin
+			-- esto, sumaría Stats.Assists y avanzaría la diaria.
+			local inMatch = MatchService ~= nil
+				and MatchService.IsMatchKill ~= nil
+				and (MatchService :: any):IsMatchKill(contributor, target)
+			if earned and inMatch and contributor ~= killerPlayer and contributor.Parent then
 				if assistEvent then
 					assistEvent:FireClient(contributor)
 				end
@@ -920,7 +933,14 @@ local function _defaultDamageCallback(system, target, amount, damageType, dealer
 					end)
 				end
 			end
-			damageContributors[target][dealerPlayer] = (damageContributors[target][dealerPlayer] or 0) + finalDamage
+			local now = os.clock()
+			local contribution = damageContributors[target][dealerPlayer]
+			if not contribution or now - contribution.lastAt > GameConfig.AssistWindow then
+				contribution = { damage = 0, lastAt = now }
+				damageContributors[target][dealerPlayer] = contribution
+			end
+			contribution.damage += finalDamage
+			contribution.lastAt = now
 
 			_accumulateStat(dealerPlayer, "DamageDealt", finalDamage)
 		end

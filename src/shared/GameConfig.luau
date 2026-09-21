@@ -34,6 +34,11 @@ export type GameConfigType = {
 	MatchCashCap: number,
 	MatchXPCap: number,
 	MatchCapGraceFraction: number,
+	AssistMinDamage: number,
+	AssistWindow: number,
+	MatchEndMinSeconds: number,
+	MatchEndMinContribution: number,
+	DailyPlayedCashTiers: { { UpTo: number, Factor: number } },
 	Teams: TeamsDefinition,
 	Maps: { MapDefinition },
 }
@@ -58,16 +63,37 @@ local GameConfig: GameConfigType = {
 	-- La usan MatchService y AIService.
 	KillAttributionWindow = 2,
 	-- Caps anti-farm por partida, no un límite de juego normal. Ambos deben morder
-	-- en el mismo número de kills: si se cambia uno, recalcular el otro con los
-	-- rates de ActionRewards. Son el tope de una ronda COMPLETA (MaxRoundDuration):
-	-- MatchService los devenga con el reloj para que las rondas cortas no den el cupo entero.
+	-- en el mismo número de kills CON la mezcla real de headshots y asistencias (no con
+	-- kills puras): si se cambia uno, recalcular el otro con ActionRewards. Son el tope de una ronda COMPLETA (MaxRoundDuration):
+	-- MatchService los devenga con el reloj de CADA JUGADOR (desde su primera entrada a la
+	-- ronda), para que ni la ronda corta ni entrar tarde den el cupo entero.
+	-- MatchXPCap mide también el cupo del XP de pase, que lleva contador aparte
+	-- (MatchService:TryConsumeBattlePassXP).
 	MatchCashCap = 500,
-	MatchXPCap = 1300,
+	MatchXPCap = 1000,
 	-- Fracción del cap disponible en el segundo 0: sin colchón, las primeras kills
 	-- de un buen arranque no pagarían. Acotada por arriba por el farmeo (se cobra
 	-- entera en cada ronda): no subirla sin simular el XP/h del caso peor (solo
 	-- contra bots, rondas cortadas por puntos).
-	MatchCapGraceFraction = 0.08,
+	MatchCapGraceFraction = 0.05,
+	-- Asistencia: daño mínimo a la víctima, con el último impacto dentro de la ventana
+	-- (segundos) previa a su muerte. El suelo evita cobrar por una bala suelta a un bot
+	-- que luego remata otro.
+	AssistMinDamage = 25,
+	AssistWindow = 6,
+	-- Bonus de fin de partida (ResultsRewards): segundos EN PARTIDA (el lobby no cuenta) y
+	-- kills + asistencias mínimos para cobrarlos. Se pagan escalados por esos segundos
+	-- sobre MaxRoundDuration: la ronda corta no rinde más por hora.
+	MatchEndMinSeconds = 120,
+	MatchEndMinContribution = 3,
+	-- Techo diario del Cash JUGADO (combate + bonus de fin de partida; diarias, pase,
+	-- códigos y packs no cuentan). Tramos sobre lo ya cobrado hoy (día UTC), en orden:
+	-- el primero cubre una sesión larga de tryhard; el resto frena macros y maratones.
+	DailyPlayedCashTiers = {
+		{ UpTo = 16000, Factor = 1 },
+		{ UpTo = 20000, Factor = 0.5 },
+		{ UpTo = math.huge, Factor = 0.1 },
+	},
 	Teams = {
 		A = {
 			Name = "TeamA",

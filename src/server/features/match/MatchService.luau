@@ -163,9 +163,24 @@ type Round = {
 	scoreA: number,
 	scoreB: number,
 	statsByUserId: { [number]: CombatStats },
-	-- Cash/XP concedidos esta ronda (caps por moneda independientes).
+	-- Cash/XP concedidos esta ronda (caps por moneda independientes). PlayerRemoving NO
+	-- los borra: salir y volver a entrar reiniciaría el cap.
 	cashEarnedByUserId: { [number]: number },
 	xpEarnedByUserId: { [number]: number },
+	-- XP de PASE concedido esta ronda. Cupo aparte del de cuenta: headshots y asistencias
+	-- llenan el de cuenta antes y, compartido, recortarían el pase a quien mejor apunta.
+	bpXpEarnedByUserId: { [number]: number },
+	-- os.time() de la PRIMERA entrada de cada jugador a esta ronda (set-if-absent): de
+	-- aquí arranca su cap, para que quien entra tarde no herede el cupo acumulado.
+	-- Tampoco se borra en PlayerRemoving.
+	firstJoinAtByUserId: { [number]: number },
+	-- Segundos EN PARTIDA (fuera del menú) ya acumulados y, mientras está dentro, desde
+	-- cuándo. Gatean y escalan los bonus de fin de partida.
+	inMatchSecondsByUserId: { [number]: number },
+	inMatchSinceByUserId: { [number]: number },
+	-- Tramos abiertos por jugador esta ronda (1 = entró y se quedó). Solo telemetría:
+	-- la alerta de reentradas del ingest salta por encima de dos.
+	entriesByUserId: { [number]: number },
 	-- Timestamps de kills recientes (ventana de multikill).
 	recentKillTimestampsByUserId: { [number]: { number } },
 	-- Elegibilidad server-side de health pickups. Los pickups son solo visuales en el
@@ -206,6 +221,11 @@ local function _newRound(): Round
 		statsByUserId = {},
 		cashEarnedByUserId = {},
 		xpEarnedByUserId = {},
+		bpXpEarnedByUserId = {},
+		firstJoinAtByUserId = {},
+		inMatchSecondsByUserId = {},
+		inMatchSinceByUserId = {},
+		entriesByUserId = {},
 		recentKillTimestampsByUserId = {},
 		pickupCreditsByUserId = {},
 		recentDeathBySpawn = setmetatable({}, { __mode = "k" }) :: any,
@@ -227,14 +247,52 @@ local function _roundStats(userId: number): CombatStats?
 	return stats
 end
 
--- Acumula lo concedido esta ronda para los caps por moneda.
-local function _trackRoundEarnings(userId: number, cashGranted: number, xpGranted: number)
+-- Acumula lo de esta ronda para los caps por moneda. El Cash es el BASE de ActionRewards,
+-- no el cobrado: si el techo diario lo recorta, más kills no deben compensarlo.
+local function _trackRoundEarnings(userId: number, cashBase: number, xpGranted: number)
 	local round = _round
 	if not round then
 		return
 	end
-	round.cashEarnedByUserId[userId] = (round.cashEarnedByUserId[userId] or 0) + cashGranted
+	round.cashEarnedByUserId[userId] = (round.cashEarnedByUserId[userId] or 0) + cashBase
 	round.xpEarnedByUserId[userId] = (round.xpEarnedByUserId[userId] or 0) + xpGranted
+end
+
+-- Entrada del jugador a la partida dentro de la ronda activa (spawn conseguido). La
+-- primera fija el arranque de su cap; todas abren un tramo de tiempo en partida.
+local function _markEnteredMatch(userId: number)
+	local round = _round
+	if not round then
+		return
+	end
+	local now = os.time()
+	if round.firstJoinAtByUserId[userId] == nil then
+		round.firstJoinAtByUserId[userId] = now
+	end
+	if round.inMatchSinceByUserId[userId] == nil then
+		round.inMatchSinceByUserId[userId] = now
+		round.entriesByUserId[userId] = (round.entriesByUserId[userId] or 0) + 1
+	end
+end
+
+-- Salida de la partida (vuelta al menú o desconexión): cierra el tramo abierto.
+local function _markLeftMatch(userId: number)
+	local round = _round
+	if not round then
+		return
+	end
+	local since = round.inMatchSinceByUserId[userId]
+	if since then
+		round.inMatchSecondsByUserId[userId] = (round.inMatchSecondsByUserId[userId] or 0) + math.max(0, os.time() - since)
+		round.inMatchSinceByUserId[userId] = nil
+	end
+end
+
+-- Segundos que el jugador lleva EN PARTIDA esta ronda, con el tramo abierto incluido.
+local function _inMatchSeconds(round: Round, userId: number): number
+	local since = round.inMatchSinceByUserId[userId]
+	local open = if since then math.max(0, os.time() - since) else 0
+	return (round.inMatchSecondsByUserId[userId] or 0) + open
 end
 
 -- Empuja una kill como crédito de pickup consumible. Llamado en ambos paths de
@@ -490,18 +548,23 @@ local function _hasProfile(player: Player): boolean
 	return _dataService ~= nil and _dataService:GetProfile(player) ~= nil
 end
 
--- Cupo de recompensa disponible AHORA en la ronda en curso. El cap de GameConfig es
--- el de una ronda COMPLETA y se devenga linealmente a lo largo de MaxRoundDuration,
--- desde un colchón (MatchCapGraceFraction). Con un cap plano, las rondas cortadas por
--- WinScoreLimit subirían el techo por hora.
-local function _capAllowance(fullCap: number): number
+-- Cupo de recompensa disponible AHORA para `userId`. El cap de GameConfig es el de una
+-- ronda COMPLETA y se devenga linealmente desde un colchón (MatchCapGraceFraction): con
+-- un cap plano, las rondas cortadas por WinScoreLimit subirían el techo por hora. El
+-- reloj es el del JUGADOR (su primera entrada), no el de la ronda, o entrar tarde daría
+-- casi todo el cupo de golpe. Sin entrada registrada no hay cupo.
+local function _capAllowance(fullCap: number, userId: number): number
 	local round = _round
 	if not round then
 		return fullCap
 	end
+	local joinedAt = round.firstJoinAtByUserId[userId]
+	if not joinedAt then
+		return 0
+	end
 	local grace = GameConfig.MatchCapGraceFraction
 	local full = math.max(1, GameConfig.MaxRoundDuration)
-	local elapsed = math.clamp(os.time() - round.startedAt, 0, full)
+	local elapsed = math.clamp(os.time() - joinedAt, 0, full)
 	return fullCap * (grace + (1 - grace) * (elapsed / full))
 end
 
@@ -510,13 +573,13 @@ end
 local function _isCashCapReached(userId: number): boolean
 	local round = _round
 	local earned = if round then round.cashEarnedByUserId[userId] or 0 else 0
-	return earned >= _capAllowance(GameConfig.MatchCashCap)
+	return earned >= _capAllowance(GameConfig.MatchCashCap, userId)
 end
 
 local function _isXPCapReached(userId: number): boolean
 	local round = _round
 	local earned = if round then round.xpEarnedByUserId[userId] or 0 else 0
-	return earned >= _capAllowance(GameConfig.MatchXPCap)
+	return earned >= _capAllowance(GameConfig.MatchXPCap, userId)
 end
 
 local function _grantActionRewardsToAttacker(attacker: Player?, action: string, weaponId: string?)
@@ -537,10 +600,10 @@ local function _grantActionRewardsToAttacker(attacker: Player?, action: string, 
 		return
 	end
 
-	local ok, xpGranted, cashGranted =
-		RewardService.Award(attacker, action, nil, weaponId, { skipCash = skipCash, skipXP = skipXP })
+	local ok, xpGranted, _cashGranted, cashBase =
+		RewardService.Award(attacker, action, nil, weaponId, { skipCash = skipCash, skipXP = skipXP, played = true })
 	if ok then
-		_trackRoundEarnings(attacker.UserId, cashGranted, xpGranted)
+		_trackRoundEarnings(attacker.UserId, cashBase, xpGranted)
 	end
 end
 
@@ -1214,6 +1277,17 @@ local function _emitMatchEndTelemetry(botTeams: { [number]: string }): string?
 		)
 	end
 
+	-- Aparte del roster a propósito: `players` pierde a quien salió o acabó en el menú,
+	-- que es justo quien entra y sale para exprimir la ronda.
+	local entries = {}
+	for userId, count in round.entriesByUserId do
+		table.insert(entries, {
+			userId = userId,
+			entries = count,
+			inMatchSeconds = _inMatchSeconds(round, userId),
+		})
+	end
+
 	TelemetryService.Enqueue("MATCH_END", {
 		matchId = round.matchId,
 		mapName = _activeMapName,
@@ -1228,6 +1302,7 @@ local function _emitMatchEndTelemetry(botTeams: { [number]: string }): string?
 		-- Participantes bot, para separar rondas de relleno de rondas reales.
 		botCount = _countKeys(botTeams),
 		players = players,
+		entries = entries,
 	})
 
 	return nil
@@ -1369,12 +1444,27 @@ function _enterResults(winnerTeam: string)
 	-- El cliente las pinta al llegar (ResultsView:applyRewards). El cash se concede
 	-- abajo (task.defer), server-authoritative.
 	local resultsByUserId: { [number]: any } = {}
+	-- Participación: los bonus (y la daily de victorias) piden un mínimo de tiempo EN
+	-- PARTIDA y de kills + asistencias; estar dentro al sonar el final no basta.
+	local participatedByUserId: { [number]: boolean } = {}
 	local winnerIsTeam = winnerTeam == "A" or winnerTeam == "B"
 	for userId in eligibleByUserId do
 		local player = Players:GetPlayerByUserId(userId)
 		if not player then
 			continue
 		end
+		local stats = round.statsByUserId[userId]
+		local contribution = if stats then stats.kills + stats.assists else 0
+		local secondsInMatch = _inMatchSeconds(round, userId)
+		local participated = secondsInMatch >= GameConfig.MatchEndMinSeconds
+			and contribution >= GameConfig.MatchEndMinContribution
+		participatedByUserId[userId] = participated
+		-- Proporcional al tiempo en partida, igual que devenga el cap de combate.
+		-- El techo diario entra aquí y no al conceder: lo pintado debe ser lo cobrado.
+		local bonusScale = if participated
+			then math.clamp(secondsInMatch / math.max(1, GameConfig.MaxRoundDuration), 0, 1)
+				* RewardService.PlayedCashFactor(player)
+			else 0
 		local side = teamOf(userId)
 		local won = winnerIsTeam and side == winnerTeam
 		local maxForSide = if side then teamMaxKills[side] else 0
@@ -1384,7 +1474,7 @@ function _enterResults(winnerTeam: string)
 			isMVP = maxForSide > 0 and killsOf(userId) == maxForSide,
 			isVIP = MatchResultsService:IsVIPCached(player),
 		}
-		local results = MatchResultsService:BuildResults(player, context)
+		local results = MatchResultsService:BuildResults(player, context, bonusScale)
 		resultsByUserId[userId] = results
 		-- Solo el payload de display viaja al cliente (no `cash`, que lleva id interno).
 		local payload = { outcome = results.outcome, rewards = results.rewards }
@@ -1426,9 +1516,12 @@ function _enterResults(winnerTeam: string)
 			if winnerTeam == "A" or winnerTeam == "B" then
 				if snapshotTeamByUserId[userId] == winnerTeam then
 					table.insert(updates, { path = { "Stats", "Wins" }, delta = 1 })
-					pcall(function()
-						DailyTasksService:OnMatchWon(player)
-					end)
+					-- La daily paga Cash: misma exigencia de participación que los bonus.
+					if participatedByUserId[userId] then
+						pcall(function()
+							DailyTasksService:OnMatchWon(player)
+						end)
+					end
 				else
 					table.insert(updates, { path = { "Stats", "Losses" }, delta = 1 })
 				end
@@ -1790,6 +1883,7 @@ local function _onRequestJoinMatch(_: {}, player: Player)
 
 		session.pendingSpawn = false
 		session.deathAt = 0
+		_markEnteredMatch(player.UserId)
 		Network.Match.DeathScreenHide.SendTo({}, player)
 
 		if player.Parent == Players then
@@ -1883,6 +1977,7 @@ local function _onRequestReturnToMenu(_: {}, player: Player)
 	end
 	session.returnToMenuCooldownAt = now
 
+	_markLeftMatch(player.UserId)
 	session.inMenu = true
 	session.respawnDebounce = false
 	session.pendingSpawn = false
@@ -1898,12 +1993,45 @@ local function _onRequestReturnToMenu(_: {}, player: Player)
 end
 
 --[[
-	Cap de XP de la ronda actual, para fuentes de XP que NO pasan por
-	GrantCombatReward (el XP del Battle Pass, colgado de WeaponsSystem.Killed en
-	ServerBootstrap). Fuera de ronda nunca capa.
+	Reserva `amount` de XP de pase en el cupo de la ronda (el mismo devengo que MatchXPCap,
+	con contador propio) y devuelve si cabía. Reservar y comprobar van juntos para que quien
+	concede el XP (ServerBootstrap, colgado de WeaponsSystem.Killed) no pueda olvidar apuntarlo.
+	Sin ronda activa no hay cupo.
 ]]
-function MatchService:IsXPCapReached(player: Player): boolean
-	return _isXPCapReached(player.UserId)
+function MatchService:TryConsumeBattlePassXP(player: Player, amount: number): boolean
+	local round = _round
+	if not round or amount <= 0 then
+		return false
+	end
+	local userId = player.UserId
+	local earned = round.bpXpEarnedByUserId[userId] or 0
+	if earned >= _capAllowance(GameConfig.MatchXPCap, userId) then
+		return false
+	end
+	round.bpXpEarnedByUserId[userId] = earned + amount
+	return true
+end
+
+--[[
+	true si la kill ocurrió DENTRO de la partida: ronda activa, killer en partida y
+	víctima bot de la ronda o jugador en partida. Para quien cuelga de
+	WeaponsSystem.Killed (ServerBootstrap), que dispara con cualquier humanoid que
+	muera a tiros, también un cuerpo del lobby.
+]]
+function MatchService:IsMatchKill(killer: Player, victimHumanoid: Humanoid): boolean
+	if not _isRoundActive() or _isPlayerInMenu(killer.UserId) then
+		return false
+	end
+	local victimCharacter = victimHumanoid.Parent
+	if not victimCharacter then
+		return false
+	end
+	local victimPlayer = Players:GetPlayerFromCharacter(victimCharacter)
+	if victimPlayer then
+		return not _isPlayerInMenu(victimPlayer.UserId)
+	end
+	-- Los bots sólo existen durante la ronda y AIService marca su modelo con BotTeam.
+	return victimCharacter:GetAttribute("BotTeam") ~= nil
 end
 
 function MatchService:GrantCombatReward(player: Player, actionKey: string, extraUpdates: any?, itemSku: string?)
@@ -1915,10 +2043,15 @@ function MatchService:GrantCombatReward(player: Player, actionKey: string, extra
 		return false, 0, 0
 	end
 
-	local ok, xpGranted, cashGranted =
-		RewardService.Award(player, actionKey, extraUpdates, itemSku, { skipCash = skipCash, skipXP = skipXP })
+	local ok, xpGranted, cashGranted, cashBase = RewardService.Award(
+		player,
+		actionKey,
+		extraUpdates,
+		itemSku,
+		{ skipCash = skipCash, skipXP = skipXP, played = true }
+	)
 	if ok then
-		_trackRoundEarnings(player.UserId, cashGranted, xpGranted)
+		_trackRoundEarnings(player.UserId, cashBase, xpGranted)
 
 		-- Asistencias de la partida: las difundimos vía streak para Resultados.
 		if actionKey == "Assist" then
@@ -2038,12 +2171,12 @@ function MatchService:Start(dataService: DataService): ()
 		end
 		_sessions[userId] = nil
 
-		-- Entradas del jugador en la ronda activa (las de bots permanecen).
+		-- Entradas del jugador en la ronda activa (las de bots permanecen). Lo ganado y
+		-- su primera entrada se quedan: son el cap de quien sale y vuelve a entrar.
+		_markLeftMatch(userId)
 		local round = _round
 		if round then
 			round.statsByUserId[userId] = nil
-			round.cashEarnedByUserId[userId] = nil
-			round.xpEarnedByUserId[userId] = nil
 			round.recentKillTimestampsByUserId[userId] = nil
 			round.pickupCreditsByUserId[userId] = nil
 		end

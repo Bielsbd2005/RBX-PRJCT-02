@@ -132,6 +132,13 @@ export type LoginStreak = {
 	LastLoginDateKey: string, -- "YYYY-MM-DD" UTC
 }
 
+-- Cash JUGADO (combate + bonus de fin de partida) cobrado en el día UTC `DateKey`.
+-- RewardService lo usa para el techo diario por tramos (GameConfig.DailyPlayedCashTiers).
+export type PlayedCash = {
+	DateKey: string, -- "YYYY-MM-DD" UTC
+	Amount: number,
+}
+
 -- Marcadores "NEW!" del Locker: category → itemId → true (presencia = no visto).
 -- El server los pone al conceder; el cliente los limpia con Locker.MarkItemSeen.
 export type NewItemFlags = { [string]: { [string]: boolean } }
@@ -225,6 +232,7 @@ export type PlayerProfile = {
 	Settings: Settings,
 	Rewards: Rewards,
 	LoginStreak: LoginStreak,
+	PlayedCash: PlayedCash,
 	NewItemFlags: NewItemFlags,
 	DailyTasks: DailyTasksState,
 	BattlePass: BattlePassState,
@@ -343,6 +351,11 @@ local DEFAULT: PlayerProfile = {
 		Current = 0,
 		Best = 0,
 		LastLoginDateKey = "",
+	},
+
+	PlayedCash = {
+		DateKey = "",
+		Amount = 0,
 	},
 
 	NewItemFlags = {},
