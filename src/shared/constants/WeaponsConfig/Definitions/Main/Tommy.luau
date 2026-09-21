@@ -10,7 +10,7 @@ return {
 		AmmoCapacity = 50,
 		FireMode = "Automatic",
 		GravityFactor = 0.5,
-		HitDamage = 11,
+		HitDamage = 12,
 		MaxSpread = 1,
 		MuzzleFlashSize0 = 1.1,
 		MuzzleFlashSize1 = 1.4,

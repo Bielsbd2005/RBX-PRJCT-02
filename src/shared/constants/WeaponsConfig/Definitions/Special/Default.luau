@@ -8,7 +8,7 @@ return {
 	Config = {
 		AmmoCapacity = 12,
 		GravityFactor = 0.5,
-		HitDamage = 25,
+		HitDamage = 20,
 		MaxSpread = 0.4,
 		MuzzleFlashSize0 = 0.75,
 		MuzzleFlashSize1 = 0.95,
