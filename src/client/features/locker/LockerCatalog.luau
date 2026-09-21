@@ -20,10 +20,11 @@ export type LockerCatalogItem = {
 	Image: string,
 	CanPurchase: boolean,
 	isBPExclusive: boolean,
+	isVIPExclusive: boolean,
 	-- Temporada del pase que lo regaló (proyección `Season` de ItemsConfig, la escribe
 	-- el dashboard). Sin ella el ítem viene de la tienda y no lleva badge.
 	Season: string?,
-	-- Código corto para el badge de la card: "S1", "S2"… derivado de la season.
+	-- Texto del badge de la card: "S1", "S2"… derivado de la season, o "VIP".
 	SeasonLabel: string?,
 	TextureID: string?,
 	BaseColor: Color3?,
@@ -132,8 +133,9 @@ function LockerCatalog:_getTemplateItems(categoryKey: LockerCategoryKey, navKey:
 			local seasonId: string? = if type(definition.Season) == "string" and definition.Season ~= ""
 				then definition.Season
 				else nil
-			local seasonLabel: string? = nil
-			if seasonId then
+			local isVIPExclusive = definition.isVIPExclusive == true
+			local seasonLabel: string? = if isVIPExclusive then "VIP" else nil
+			if seasonId and not isVIPExclusive then
 				local seasonDef = BattlePassConfig.GetSeasonById(seasonId)
 				seasonLabel = formatSeasonCode(seasonId, if seasonDef then seasonDef.Name else nil)
 			end
@@ -152,6 +154,7 @@ function LockerCatalog:_getTemplateItems(categoryKey: LockerCategoryKey, navKey:
 				-- BP-exclusive si lo flagea ItemsConfig O si es reward de cualquier season del pase.
 				isBPExclusive = definition.isBPExclusive == true
 					or BattlePassConfig.IsBPExclusive(tostring(sourceCategory), tostring(itemId)),
+				isVIPExclusive = isVIPExclusive,
 				Season = seasonId,
 				SeasonLabel = seasonLabel,
 				TextureID = if type(definition.TextureID) == "string" then definition.TextureID else nil,
@@ -184,12 +187,12 @@ function LockerCatalog:GetItems(categoryKey: LockerCategoryKey, navKey: string):
 		return EMPTY_CATALOG_ITEMS
 	end
 
-	-- Items exclusivos del Battle Pass: ocultos hasta poseerlos. La invalidación
+	-- Items exclusivos del Battle Pass o del VIP: ocultos hasta poseerlos. La invalidación
 	-- de _sortedCache vía InvalidateSorted() (al cambiar Inventory) reconstruye
 	-- la lista cuando un item BP entra al inventario.
 	local catalogItems = {} :: { LockerCatalogItem }
 	for _, item in templateItems do
-		if item.isBPExclusive and not self._isItemOwned(item) then
+		if (item.isBPExclusive or item.isVIPExclusive) and not self._isItemOwned(item) then
 			continue
 		end
 		table.insert(catalogItems, item)

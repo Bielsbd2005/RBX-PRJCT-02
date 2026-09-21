@@ -47,6 +47,8 @@ local _pendingByUserId: { [number]: { [number]: boolean } } = {}
 
 local _gainedListeners: { (player: Player, passId: number) -> () } = {}
 
+local _resolvedListeners: { (player: Player, passId: number, owns: boolean) -> () } = {}
+
 local function _fire(player: Player, passId: number)
 	for _, listener in _gainedListeners do
 		-- Por listener: uno que reviente no debe impedir los demás.
@@ -63,6 +65,10 @@ local function _store(player: Player, passId: number, owns: boolean)
 
 	local had = owned[passId]
 	owned[passId] = owns
+
+	for _, listener in _resolvedListeners do
+		task.spawn(listener, player, passId, owns)
+	end
 
 	if owns and had ~= true then
 		_fire(player, passId)
@@ -161,6 +167,25 @@ function GamePassService.Owns(player: Player, passId: number): boolean
 	end
 
 	return owned[passId] == true
+end
+
+-- Como Owns pero sin lanzar fetch y distinguiendo "sin resolver" (nil) de "no lo
+-- posee": para retirar un beneficio persistido hace falta un "no" confirmado.
+function GamePassService.Peek(player: Player, passId: number): boolean?
+	if _override ~= nil then
+		return _override
+	end
+	if passId <= 0 then
+		return false
+	end
+	local owned = _ownedByUserId[player.UserId]
+	return if owned then owned[passId] else nil
+end
+
+-- Cada resolución (prefetch, compra), sea sí o no; thread propio. Con el override
+-- de Studio no se dispara nunca: usar Peek.
+function GamePassService.OnOwnershipResolved(listener: (player: Player, passId: number, owns: boolean) -> ())
+	table.insert(_resolvedListeners, listener)
 end
 
 -- Compra o prefetch confirmado; thread propio. Sin unsubscribe: los consumidores

@@ -10,6 +10,7 @@ export type ItemConfig = {
 	Image: string?,
 	CanPurchase: boolean?,
 	isBPExclusive: boolean?,  -- Sólo vía Battle Pass: oculto en Locker hasta poseerse y rechazado por Shop.
+	isVIPExclusive: boolean?, -- Lo concede el gamepass VIP (VIPItemsService); oculto en Locker hasta poseerse.
 	TextureID: string?,
 	BaseColor: Color3?,
 	Material: Enum.Material?,  -- De la parte principal del arma; nil conserva el original.
@@ -388,7 +389,7 @@ Special = {
 		Shark     = { Name = "Shark",     Price = 0, LevelRequired = 0, Rarity = "Rare",  Image = "rbxassetid://134534862804519", CanPurchase = false, isBPExclusive = true, Season = "S1", SeasonTier = 29 },
 		Adventure = { Name = "Adventure", Price = 0, LevelRequired = 0, Rarity = "Epic",      Image = "rbxassetid://128435788752887", CanPurchase = false, isBPExclusive = true, Season = "S1", SeasonTier = 30 },
 		Bunny     = { Name = "Bunny",     Price = 0, LevelRequired = 0, Rarity = "Common",    Image = "rbxassetid://134209005674999", CanPurchase = false, isBPExclusive = true, Season = "S1", SeasonTier = 35 },
-		Crown     = { Name = "Crown",     Price = 0, LevelRequired = 0, Rarity = "Legendary", Image = "rbxassetid://138029493389714", CanPurchase = false, isBPExclusive = true, Season = "S1", SeasonTier = 38 },
+		Crown     = { Name = "Crown",     Price = 0, LevelRequired = 0, Rarity = "Legendary", Image = "rbxassetid://138029493389714", CanPurchase = false, isVIPExclusive = true },
 	},
 
 	Outfits = {
