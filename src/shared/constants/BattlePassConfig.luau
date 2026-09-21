@@ -19,7 +19,7 @@ export type RewardKind = "Cash" | "Gems" | "Item"
 export type Reward = {
 	Kind: RewardKind,
 	Amount: number?,    -- Cash o Gems
-	Category: string?,  -- Item: "Hats" | "Faces" | "KillEffects" | "Outfits" | "Banners" | "Main" | "Special" | "WeaponWraps"
+	Category: string?,  -- Item: "Hats" | "Faces" | "KillEffects" | "Emotes" | "Outfits" | "Banners" | "Main" | "Special" | "WeaponWraps"
 	ItemId: string?,    -- Item: id en ItemsConfig
 	Icon: string?,      -- Override de UI (rbxassetid://...). Si nil, fallback a ItemsConfig.
 	Label: string?,     -- Override del texto. Si nil, fallback a "+Amount" o ItemsConfig.Name.

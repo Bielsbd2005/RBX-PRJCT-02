@@ -59,6 +59,7 @@ export type Inventory = {
 		Special: { [string]: { [string]: number | boolean } },
 	},
 	KillEffects: { [string]: boolean },
+	Emotes: { [string]: boolean },
 	Faces: { [string]: boolean },
 	Hats: { [string]: boolean },
 	Outfits: { [string]: boolean },
@@ -81,6 +82,7 @@ export type Loadout = {
 	MainWeaponWraps: { [string]: string },
 	SpecialWeaponWraps: { [string]: string },
 	KillEffect: string,
+	Emote: string, -- Se reproduce en partida con la tecla E (ver EmoteController)
 	Face: string,
 	Hat: string?,
 	Outfit: string,
@@ -293,6 +295,7 @@ local DEFAULT: PlayerProfile = {
 			},
 		},
 		KillEffects = { Default = true },
+		Emotes = { Default = true },
 		Faces = { Default = true },
 		Hats = {},
 		Outfits = { Default = true },
@@ -311,6 +314,7 @@ local DEFAULT: PlayerProfile = {
 			Default = "Default",
 		},
 		KillEffect = "Default",
+		Emote = "Default",
 		Face = "Default",
 		-- Hat omitido a propósito: es opcional.
 		Outfit = "Default",

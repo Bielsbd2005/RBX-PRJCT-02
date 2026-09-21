@@ -39,6 +39,7 @@ local CurrencyMod = require(Shared.constants.Currency)
 local LockerMainCategory = require(Shared.constants.LockerMainCategory)
 local Network = require(Shared.networking.Network)
 local KillEffectsRegistry = require(Shared.Locker.killEffects.KillEffectsRegistry)
+local EmotePlayer = require(Shared.Locker.emotes.EmotePlayer)
 local DataController = require(Client.core.data.DataController)
 local StoreProducts = require(Shared.constants.StoreProducts)
 local UITheme = require(Client.core.ui.UITheme)
@@ -562,6 +563,15 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 
 	janitor:Add(destroyKillEffectDummy, true)
+
+	-- Emotes: se previsualizan sobre el mismo dummy que los kill effects. Si el
+	-- dummy está a medio kill effect (o no existe), se respawnea antes.
+	local function previewEmote(emoteId: string)
+		if not currentKillEffectDummy or killEffectRespawnTask then
+			spawnKillEffectDummy()
+		end
+		EmotePlayer.play(currentKillEffectDummy :: Model, emoteId)
+	end
 
 	local function applyEquippedFacePreview()
 		lobbyCharacter:applyFaceId(getOptionalString(equippedLookup.Faces) or getCurrentLoadout().Face)
@@ -1238,6 +1248,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 				else
 					previewKillEffect(item.id)
 				end
+			elseif item and item.Category == LockerCategory.EMOTES then
+				previewEmote(item.id)
 			end
 			updateActionFrameForSelected()
 		end,
@@ -1321,6 +1333,13 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			local equippedFace = getOptionalString(equippedLookup.Faces) or getOptionalString(getCurrentLoadout().Face)
 			if equippedFace then
 				return LockerConfig.makeQualifiedId(LockerCategory.FACES, equippedFace)
+			end
+		end
+
+		if categoryKey == LockerMainCategory.EFFECTS and navKey == LockerCategory.EMOTES then
+			local equippedEmote = getOptionalString(equippedLookup.Emotes) or getOptionalString(getCurrentLoadout().Emote)
+			if equippedEmote then
+				return LockerConfig.makeQualifiedId(LockerCategory.EMOTES, equippedEmote)
 			end
 		end
 
@@ -1450,6 +1469,8 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			-- no queda un doble de antes.
 			destroyKillEffectDummy()
 			suppressNextKillEffectPreview = true
+		elseif navKey == LockerCategory.EMOTES and previousNavKey ~= LockerCategory.EMOTES then
+			spawnKillEffectDummy()
 		end
 		if categoryKey == LockerMainCategory.EFFECTS and navKey == LockerCategory.BANNERS then
 			-- Sin selección en la grid: vuelven los previews de lo equipado y se

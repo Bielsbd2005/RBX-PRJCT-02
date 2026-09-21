@@ -662,7 +662,10 @@ function LockerGrid:_applyCatalogItemToCard(card: GuiObject, item: LockerCatalog
 		end
 
 		local selectedItem = self._gridButtonItems[button]
-		if self._selectedCatalogButton == button and not (selectedItem and selectedItem.Category == LockerCategory.KILL_EFFECTS) then
+		-- Kill effects y emotes se pueden re-clicar para volver a ver el preview.
+		local isReplayable = selectedItem ~= nil
+			and (selectedItem.Category == LockerCategory.KILL_EFFECTS or selectedItem.Category == LockerCategory.EMOTES)
+		if self._selectedCatalogButton == button and not isReplayable then
 			return
 		end
 

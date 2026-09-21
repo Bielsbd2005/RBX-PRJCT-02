@@ -7,6 +7,7 @@ local LockerCategory = {}
 
 LockerCategory.WEAPON_WRAPS = "WeaponWraps"
 LockerCategory.KILL_EFFECTS = "KillEffects"
+LockerCategory.EMOTES = "Emotes"
 LockerCategory.FACES = "Faces"
 LockerCategory.HATS = "Hats"
 LockerCategory.OUTFITS = "Outfits"
@@ -15,6 +16,7 @@ LockerCategory.BANNERS = "Banners"
 LockerCategory.ALL = {
 	LockerCategory.WEAPON_WRAPS,
 	LockerCategory.KILL_EFFECTS,
+	LockerCategory.EMOTES,
 	LockerCategory.FACES,
 	LockerCategory.HATS,
 	LockerCategory.OUTFITS,
@@ -24,6 +26,7 @@ LockerCategory.ALL = {
 export type LockerCategory =
 	"WeaponWraps"
 	| "KillEffects"
+	| "Emotes"
 	| "Faces"
 	| "Hats"
 	| "Outfits"

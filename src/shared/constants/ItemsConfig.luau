@@ -19,6 +19,8 @@ export type ItemConfig = {
 	ScrollSpeedU: number?,
 	ScrollSpeedV: number?,
 	KillChallenge: { Kills: number }?,
+	AnimationId: string?,   -- Emotes: animación R15 que reproduce EmotePlayer.
+	Looped: boolean?,       -- Emotes: true = se repite hasta que el jugador se mueva.
 }
 
 export type ItemCategory = { [string]: ItemConfig }
@@ -28,6 +30,7 @@ export type ItemsConfigType = {
 	Special: ItemCategory,
 	WeaponWraps: ItemCategory,
 	KillEffects: ItemCategory,
+	Emotes: ItemCategory,
 	Faces: ItemCategory,
 	Hats: ItemCategory,
 	Outfits: ItemCategory,
@@ -281,6 +284,19 @@ Special = {
 		KE_P10   = { Name = "Kill P10",  Price = 65000,  LevelRequired = 46,  Rarity = "Legendary", Image = "rbxassetid://0", CanPurchase = true },
 		KE_P11   = { Name = "Kill P11",  Price = 100000, LevelRequired = 58, Rarity = "Legendary", Image = "rbxassetid://0", CanPurchase = true },
 		KE_P12   = { Name = "Kill P12",  Price = 300000, LevelRequired = 102, Rarity = "Legendary", Image = "rbxassetid://0", CanPurchase = true },
+	},
+
+	Emotes = {
+		-- Animaciones stock de Roblox (R15, públicas: sirven en cualquier juego).
+		-- Se reproducen en partida con la tecla E. Sin Image: el Locker cae en su
+		-- thumbnail por defecto hasta que haya iconos propios.
+		Default = { Name = "Wave",    Price = 0,    LevelRequired = 0,  Rarity = "Common",   CanPurchase = false, AnimationId = asset(507770239) },
+		Point   = { Name = "Point",   Price = 65,   LevelRequired = 1,  Rarity = "Common",   CanPurchase = true,  AnimationId = asset(507770453) },
+		Cheer   = { Name = "Cheer",   Price = 200,  LevelRequired = 3,  Rarity = "Uncommon", CanPurchase = true,  AnimationId = asset(507770677) },
+		Laugh   = { Name = "Laugh",   Price = 250,  LevelRequired = 4,  Rarity = "Uncommon", CanPurchase = true,  AnimationId = asset(507770818) },
+		Dance   = { Name = "Dance",   Price = 400,  LevelRequired = 6,  Rarity = "Rare",     CanPurchase = true,  AnimationId = asset(507771019), Looped = true },
+		Groove  = { Name = "Groove",  Price = 1000, LevelRequired = 10, Rarity = "Epic",     CanPurchase = true,  AnimationId = asset(507776043), Looped = true },
+		Shuffle = { Name = "Shuffle", Price = 2000, LevelRequired = 16, Rarity = "Epic",     CanPurchase = true,  AnimationId = asset(507777268), Looped = true },
 	},
 
 	Faces = {

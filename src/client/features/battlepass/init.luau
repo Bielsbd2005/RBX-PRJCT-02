@@ -104,6 +104,7 @@ local CATEGORY_LABEL: { [string]: string } = {
 	Faces = "Face",
 	Hats = "Hat",
 	KillEffects = "Kill Effect",
+	Emotes = "Emote",
 	WeaponWraps = "Wrap",
 	Banners = "Banner",
 	Main = "Weapon",

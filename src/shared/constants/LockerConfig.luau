@@ -23,6 +23,8 @@ local EFFECTS_NAV_ITEMS = table.freeze({
 	{ key = "KillEffects", title = "Kill Effects", thumbnail = "rbxassetid://130437553674754" },
 	-- Thumbnail PROVISIONAL (el de Kill Effects) hasta que haya icono propio.
 	{ key = "Banners", title = "Banners", thumbnail = "rbxassetid://130437553674754" },
+	-- Thumbnail provisional (el de Kill Effects): subir un icono propio de emotes.
+	{ key = "Emotes", title = "Emotes", thumbnail = "rbxassetid://130437553674754" },
 })
 
 local NAV_ITEMS = table.freeze({
@@ -46,6 +48,7 @@ local ITEMS_CONFIG_BY_NAV = table.freeze({
 	Effects = table.freeze({
 		KillEffects = "KillEffects",
 		Banners = "Banners",
+		Emotes = "Emotes",
 	}),
 })
 
@@ -55,6 +58,7 @@ local CATEGORY_TO_LOADOUT_SLOT = table.freeze({
 	-- WeaponWraps no se mapea: el wrap equipado es por arma (MainWeaponWraps[weaponId] /
 	-- SpecialWeaponWraps[weaponId]); sus call-sites (ShopService, locker/init) tienen ramas explícitas.
 	KillEffects = "KillEffect",
+	Emotes = "Emote",
 	Faces = "Face",
 	Hats = "Hat",
 	Outfits = "Outfit",

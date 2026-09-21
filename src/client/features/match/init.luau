@@ -33,6 +33,7 @@ local ResultsScene = require(script.ResultsScene)
 local KillCamFollowController = require(script.KillCamFollowController)
 local CharacterHighlightController = require(script.CharacterHighlightController)
 local HealthBillboardController = require(script.HealthBillboardController)
+local EmoteController = require(script.EmoteController)
 local MapVoteView = require(script.MapVoteView)
 local PanelController = require(Client.core.ui.PanelController)
 local BlurController = require(Client.core.ui.BlurController)
@@ -289,6 +290,9 @@ function MatchFeature.start(menuController: any): any
 		if matchStatsGui and matchStatsGui:IsA("ScreenGui") then matchStatsGui else nil
 	)
 	janitor:Add(hud, "destroy")
+
+	-- Tecla E → emote equipado (Loadout.Emote).
+	janitor:Add(EmoteController.start(), true)
 	hud:setScores(0, 0, GameConfig.MaxRoundDuration)
 
 	matchMenu:setPhaseLabel("DEPLOY")
