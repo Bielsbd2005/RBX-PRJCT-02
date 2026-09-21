@@ -493,6 +493,10 @@ function MatchFeature.start(menuController: any): any
 	end), "Disconnect")
 
 	local function onPlayPressed()
+		-- LoadingScreen.client (ReplicatedFirst) la destruye al terminar su iris.
+		if playerGui:FindFirstChild("LoadingScreen") then
+			return
+		end
 		-- Solo con el menú limpio, sin ningún panel abierto.
 		if menuController:hasOpenPanel() then
 			return
