@@ -174,11 +174,17 @@ local function isEnemyHumanoidForPlayer(humanoid, player)
 	return TeamUtils.areEnemies(player.Character, targetCharacter)
 end
 
--- HitVFX de jugador solo contra enemigos. Superficies no se bloquean aquí.
+-- Health (replicado por el server) además del state: el state Dead lo decide el
+-- dueño del personaje y puede llegar tarde, dejando un frame de impactos al cadáver.
+local function isDeadHumanoid(humanoid: Humanoid): boolean
+	return humanoid.Health <= 0 or humanoid:GetState() == Enum.HumanoidStateType.Dead
+end
+
+-- HitVFX de jugador solo contra enemigos vivos. Superficies no se bloquean aquí.
 local function shouldPlayPlayerHitVFX(hitInfo, player): boolean
 	local h = hitInfo.h
 	if h and typeof(h) == "Instance" and h:IsA("Humanoid") then
-		return isEnemyHumanoidForPlayer(h, player)
+		return not isDeadHumanoid(h) and isEnemyHumanoidForPlayer(h, player)
 	end
 	return true
 end
@@ -645,7 +651,7 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 				if shouldPlayPlayerHitVFX(hitInfo, self.player) then
 					HitVFX.play(hitInfo, localPlayerInitiatedShot)
 				end
-			elseif hitSound then
+			elseif hitSound and shouldPlayPlayerHitVFX(hitInfo, self.player) then
 				hitSound:Play()
 			end
 			self:_spawnHitMark(hitPart, hitPoint, hitNormal, parabola)
@@ -760,7 +766,7 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 							local humanoid = self.weaponsSystem.getHumanoid(explodedPart)
 							if humanoid and
 								explodedPart.Name == "UpperTorso" and
-								humanoid:GetState() ~= Enum.HumanoidStateType.Dead and
+								not isDeadHumanoid(humanoid) and
 								self.weaponsSystem.gui and
 								explodedPart.Parent ~= self.player.Character and
 								isEnemyHumanoidForPlayer(humanoid, self.player)
@@ -787,7 +793,7 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 					if hitPart and hitPart:IsA("Terrain") then
 						hitPartColor = workspace.Terrain:GetMaterialColor(hitMaterial or Enum.Material.Sand)
 					end
-					if hitInfo.h and hitInfo.h:IsA("Humanoid") and hitParticles and numHitParticles > 0 and hitPart and isEnemyHumanoidForPlayer(hitInfo.h, self.player) then
+					if hitInfo.h and hitInfo.h:IsA("Humanoid") and hitParticles and numHitParticles > 0 and hitPart and shouldPlayPlayerHitVFX(hitInfo, self.player) then
 						hitParticles.Color = ColorSequence.new(Color3.fromRGB(255, 255, 255))
 						hitParticles:Emit(numHitParticles)
 						visualEffectsLingerTime = math.max(visualEffectsLingerTime, hitParticles.Lifetime.Max)
@@ -811,7 +817,7 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 						visualEffectsLingerTime = math.max(visualEffectsLingerTime, hitParticles.Lifetime.Max)
 					end
 
-					if hitSound then
+					if hitSound and shouldPlayPlayerHitVFX(hitInfo, self.player) then
 						hitSound:Play()
 						visualEffectsLingerTime = math.max(visualEffectsLingerTime, hitSound.TimeLength)
 					end
@@ -939,7 +945,7 @@ function BulletWeapon:onHit(hitInfo)
 		then
 			self:applyDamage(hitInfo)
 		elseif hitInfo.h:IsA("Humanoid") and
-			hitInfo.h:GetState() ~= Enum.HumanoidStateType.Dead and
+			not isDeadHumanoid(hitInfo.h) and
 			self.weaponsSystem.gui and
 			self.player == Players.LocalPlayer and
 			isEnemyHumanoidForPlayer(hitInfo.h, self.player)
