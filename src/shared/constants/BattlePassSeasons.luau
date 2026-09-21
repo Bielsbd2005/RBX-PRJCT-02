@@ -2,9 +2,9 @@
 return {
 	ActiveSeasonId = "S1",
 	Products = {
-		SkipProductId = 0,
+		SkipProductId = 3713312760,
 		SkipRobuxPrice = 49,
-		Skip5ProductId = 0,
+		Skip5ProductId = 3713312815,
 		Skip5RobuxPrice = 199,
 	},
 	Seasons = {

@@ -98,11 +98,11 @@ local CASH_PACKS = {
 
 -- ProductId = 0 → pendientes de crear en el panel de Roblox.
 local GEM_PACKS = {
-	{ ButtonName = "Gems1", ProductId = 0, RobuxPrice = 49, GemAmount = 100 },
-	{ ButtonName = "Gems2", ProductId = 0, RobuxPrice = 99, GemAmount = 250 },
-	{ ButtonName = "Gems3", ProductId = 0, RobuxPrice = 199, GemAmount = 600 },
-	{ ButtonName = "Gems4", ProductId = 0, RobuxPrice = 399, GemAmount = 1400 },
-	{ ButtonName = "Gems5", ProductId = 0, RobuxPrice = 799, GemAmount = 3000 },
+	{ ButtonName = "Gems1", ProductId = 3713310604, RobuxPrice = 49, GemAmount = 100 },
+	{ ButtonName = "Gems2", ProductId = 3713310633, RobuxPrice = 99, GemAmount = 250 },
+	{ ButtonName = "Gems3", ProductId = 3713310658, RobuxPrice = 199, GemAmount = 600 },
+	{ ButtonName = "Gems4", ProductId = 3713310686, RobuxPrice = 399, GemAmount = 1400 },
+	{ ButtonName = "Gems5", ProductId = 3713310707, RobuxPrice = 799, GemAmount = 3000 },
 }
 
 -- En el orden en que se pintan. `RobuxPrice` debe coincidir con el precio del panel
