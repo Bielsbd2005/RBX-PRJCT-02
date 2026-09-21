@@ -128,7 +128,13 @@ local function _resolveAuthHeader()
 		return HttpService:GetSecret(TelemetryConfig.SecretKey)
 	end)
 	if not ok or secret == nil then
-		_debug("Secreto '" .. TelemetryConfig.SecretKey .. "' no disponible — enviando sin auth")
+		-- Fuera de Studio esto condena cada batch a un 401: nunca es solo debug.
+		warn(
+			("[Telemetry] Secreto '%s' no disponible (%s) — enviando sin auth"):format(
+				TelemetryConfig.SecretKey,
+				if ok then "nil" else tostring(secret)
+			)
+		)
 		return
 	end
 
@@ -163,7 +169,12 @@ local function _drainAccumulator(userId: number): { faucets: any, sinks: any }?
 	end
 
 	local drained = { faucets = acc.faucets, sinks = acc.sinks }
-	_accumulators[userId] = _newAccumulator()
+	-- El relevo hereda startedAt: SERVER_FLUSH drena cada ServerFlushSeconds, y un
+	-- startedAt nuevo dejaba sessionSeconds en «desde el último flush» (≤ 5 min) en
+	-- vez de la sesión entera. Toda tasa por hora del dashboard divide por ese dato.
+	local fresh = _newAccumulator()
+	fresh.startedAt = acc.startedAt
+	_accumulators[userId] = fresh
 	return drained
 end
 
@@ -241,7 +252,7 @@ local function _backoffSeconds(attempt: number): number
 	return capped * (0.5 + math.random())
 end
 
-local function _postBatch(batch: { any }, urgent: boolean): boolean
+local function _postBatch(batch: { any }, urgent: boolean): (boolean, string?)
 	local body
 	local encoded = pcall(function()
 		body = HttpService:JSONEncode({
@@ -263,6 +274,7 @@ local function _postBatch(batch: { any }, urgent: boolean): boolean
 
 	-- En apagado no hay tiempo para backoff: un intento y fuera.
 	local maxAttempts = if urgent then 1 else TelemetryConfig.MaxRetries
+	local lastReason: string? = nil
 
 	for attempt = 1, maxAttempts do
 		local ok, response = pcall(function()
@@ -280,13 +292,21 @@ local function _postBatch(batch: { any }, urgent: boolean): boolean
 			return true
 		end
 
-		-- 4xx (salvo 429) es un error nuestro: reintentar no lo arregla.
-		if ok and type(response) == "table" then
+		if not ok then
+			-- RequestAsync lanza si HTTP está desactivado en el universo o si el
+			-- dominio de la URL no es el que autoriza el secreto.
+			lastReason = tostring(response)
+		elseif type(response) == "table" then
 			local status = tonumber(response.StatusCode) or 0
+			lastReason = ("HTTP %d %s"):format(status, string.sub(tostring(response.Body), 1, 200))
+
+			-- 4xx (salvo 429) es un error nuestro: reintentar no lo arregla.
 			if status >= 400 and status < 500 and status ~= 429 then
 				_debug(("batch rechazado con %d — no se reintenta"):format(status))
-				return false
+				return false, lastReason
 			end
+		else
+			lastReason = "respuesta inesperada de RequestAsync"
 		end
 
 		if attempt < maxAttempts then
@@ -294,7 +314,7 @@ local function _postBatch(batch: { any }, urgent: boolean): boolean
 		end
 	end
 
-	return false
+	return false, lastReason
 end
 
 --[[
@@ -313,8 +333,13 @@ local function _flushOnce(urgent: boolean?)
 	_sending = true
 	local batch = _takeBatch()
 
-	local ok, sent = pcall(_postBatch, batch, urgent == true)
+	local ok, sent, reason = pcall(_postBatch, batch, urgent == true)
 	if not ok or not sent then
+		-- Solo el primero de la racha: en producción es el único rastro de que la
+		-- telemetría no sale, pero no puede inundar el log del servidor.
+		if _consecutiveFailures == 0 then
+			warn("[Telemetry] batch descartado — " .. tostring(if ok then reason else sent))
+		end
 		_consecutiveFailures += 1
 		_droppedEvents += #batch
 		if _consecutiveFailures >= TelemetryConfig.CircuitBreakerThreshold then
