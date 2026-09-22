@@ -6,6 +6,7 @@ local CollectionService = game:GetService("CollectionService")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ItemsConfig = require(Shared.constants.ItemsConfig)
 local ItemDefaults = require(Shared.constants.ItemDefaults)
+local WeaponWrapParts = require(script.Parent.WeaponWrapParts)
 
 local CosmeticsTemplates = {}
 
@@ -192,7 +193,7 @@ function CosmeticsTemplates.attachHatToCharacter(character: Model, accessory: Ac
 	weld.Parent = handle
 end
 
-local function _applyWrapToPrimaryPart(primaryPart: BasePart, wrapId: string)
+local function _applyWrapToPart(primaryPart: BasePart, wrapId: string)
 	local wrapsConfig = ItemsConfig.WeaponWraps
 	local wrapDefinition = if type(wrapsConfig) == "table" then wrapsConfig[wrapId] else nil
 	local validDefinition = type(wrapDefinition) == "table"
@@ -265,7 +266,9 @@ function CosmeticsTemplates.applyWeaponWrapToTool(tool: Tool, wrapId: string)
 		return
 	end
 
-	_applyWrapToPrimaryPart(primaryPart, wrapId)
+	for _, part in WeaponWrapParts.get(tool, primaryPart) do
+		_applyWrapToPart(part, wrapId)
+	end
 end
 
 -- Para modelos de display (Shared.Locker.weapons.*), que no siempre traen
@@ -276,7 +279,9 @@ function CosmeticsTemplates.applyWeaponWrapToModel(weaponModel: Instance, wrapId
 		return
 	end
 
-	_applyWrapToPrimaryPart(primaryPart, wrapId)
+	for _, part in WeaponWrapParts.get(weaponModel, primaryPart) do
+		_applyWrapToPart(part, wrapId)
+	end
 end
 
 --[[

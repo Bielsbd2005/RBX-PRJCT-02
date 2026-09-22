@@ -13,6 +13,7 @@ local RunService = game:GetService("RunService")
 local LockerConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("LockerConfig"))
 local WeaponCategoryMod = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("WeaponCategory"))
 local ItemDefaults = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("ItemDefaults"))
+local WeaponWrapParts = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Locker"):WaitForChild("WeaponWrapParts"))
 local LockerCategory = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("LockerCategory"))
 local LockerMainCategory = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("LockerMainCategory"))
 local Client = script.Parent.Parent.Parent
@@ -433,42 +434,44 @@ function WeaponPreviewController:_applyWrap(previewInstance: Instance, weaponCat
 	local animated = validDef and wrapDefinition.isAnimated == true
 	local animatedTextures = {} :: { Texture }
 
-	-- GetChildren() solo al QUITAR un wrap; al aplicar se usa FindFirstChild sobre
-	-- WEAPON_WRAP_TEXTURE_ORDER para no alocar en cada tap del locker.
-	if not textureId then
-		for _, child in primaryPart:GetChildren() do
-			if child:IsA("Texture") and string.sub(child.Name, 1, 14) == "ScrollTexture_" then
-				child:Destroy()
+	for _, part in WeaponWrapParts.get(previewInstance, primaryPart) do
+		-- GetChildren() solo al QUITAR un wrap; al aplicar se usa FindFirstChild sobre
+		-- WEAPON_WRAP_TEXTURE_ORDER para no alocar en cada tap del locker.
+		if not textureId then
+			for _, child in part:GetChildren() do
+				if child:IsA("Texture") and string.sub(child.Name, 1, 14) == "ScrollTexture_" then
+					child:Destroy()
+				end
 			end
 		end
-	end
 
-	if textureId then
-		for _, textureName in WEAPON_WRAP_TEXTURE_ORDER do
-			local existingTexture = primaryPart:FindFirstChild(textureName)
-			local texture: Texture
-			if existingTexture and existingTexture:IsA("Texture") then
-				texture = existingTexture
-			else
-				texture = Instance.new("Texture")
-				texture.Name = textureName
-				texture.Face = WEAPON_WRAP_TEXTURE_FACE_BY_NAME[textureName]
-				texture.Parent = primaryPart
+		if textureId then
+			for _, textureName in WEAPON_WRAP_TEXTURE_ORDER do
+				local existingTexture = part:FindFirstChild(textureName)
+				local texture: Texture
+				if existingTexture and existingTexture:IsA("Texture") then
+					texture = existingTexture
+				else
+					texture = Instance.new("Texture")
+					texture.Name = textureName
+					texture.Face = WEAPON_WRAP_TEXTURE_FACE_BY_NAME[textureName]
+					texture.Parent = part
+				end
+
+				texture.Texture = textureId
+				texture.Transparency = 0
+				texture.StudsPerTileU = studsPerTile
+				texture.StudsPerTileV = studsPerTile
+				texture.OffsetStudsU = 0
+				texture.OffsetStudsV = 0
+				table.insert(animatedTextures, texture)
 			end
-
-			texture.Texture = textureId
-			texture.Transparency = 0
-			texture.StudsPerTileU = studsPerTile
-			texture.StudsPerTileV = studsPerTile
-			texture.OffsetStudsU = 0
-			texture.OffsetStudsV = 0
-			table.insert(animatedTextures, texture)
+		elseif baseColor then
+			part.Color = baseColor
 		end
-	elseif baseColor then
-		primaryPart.Color = baseColor
-	end
 
-	applyMaterialToPart(primaryPart, material)
+		applyMaterialToPart(part, material)
+	end
 
 	if textureId and animated then
 		self._wrapAnimDataByCategory[weaponCategory] = { textures = animatedTextures, tileU = studsPerTile }

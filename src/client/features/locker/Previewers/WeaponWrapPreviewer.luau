@@ -6,6 +6,7 @@ local UserInputService = game:GetService("UserInputService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ItemDefaults = require(Shared:WaitForChild("constants"):WaitForChild("ItemDefaults"))
+local WeaponWrapParts = require(Shared:WaitForChild("Locker"):WaitForChild("WeaponWrapParts"))
 local wrapPreviewTemplate = ReplicatedStorage:WaitForChild("Templates"):WaitForChild("Wrap")
 local sharedWeaponAssets = Shared:WaitForChild("Locker"):WaitForChild("weapons")
 
@@ -196,7 +197,7 @@ local function getWrapPreviewPrimaryPart(previewInstance: Instance): BasePart?
     return nil
 end
 
-local function applyWrapAppearanceToPrimaryPart(previewPrimaryPart: BasePart, item: WeaponWrapPreviewItem, previewJanitor: any): ()
+local function applyWrapAppearance(parts: { BasePart }, item: WeaponWrapPreviewItem, previewJanitor: any): ()
     local textureId = if type(item.TextureID) == "string" and item.TextureID ~= "" then item.TextureID else nil
     local baseColor = item.BaseColor
     local material = if typeof(item.Material) == "EnumItem" and item.Material.EnumType == Enum.Material then item.Material else nil
@@ -204,42 +205,44 @@ local function applyWrapAppearanceToPrimaryPart(previewPrimaryPart: BasePart, it
     local studsPerTile = math.max(0.01, tonumber(item.StudsPerTile) or DEFAULT_WRAP_STUDS_PER_TILE)
     local animatedTextures = {} :: { Texture }
 
-    if not textureId and typeof(baseColor) == "Color3" then
-        previewPrimaryPart.Color = baseColor
-    end
+    for _, part in parts do
+        if not textureId and typeof(baseColor) == "Color3" then
+            part.Color = baseColor
+        end
 
-    if material then
-        previewPrimaryPart.Material = material
-    end
+        if material then
+            part.Material = material
+        end
 
-    for _, child in previewPrimaryPart:GetChildren() do
-        if child:IsA("Texture") and string.sub(child.Name, 1, 14) == "ScrollTexture_" then
-            if not textureId then
-                child:Destroy()
+        for _, child in part:GetChildren() do
+            if child:IsA("Texture") and string.sub(child.Name, 1, 14) == "ScrollTexture_" then
+                if not textureId then
+                    child:Destroy()
+                end
             end
         end
-    end
 
-    if textureId then
-        for _, textureName in WEAPON_WRAP_TEXTURE_ORDER do
-            local existingTexture = previewPrimaryPart:FindFirstChild(textureName)
-            local texture: Texture
-            if existingTexture and existingTexture:IsA("Texture") then
-                texture = existingTexture
-            else
-                texture = Instance.new("Texture")
-                texture.Name = textureName
-                texture.Face = WEAPON_WRAP_TEXTURE_FACE_BY_NAME[textureName]
-                texture.Parent = previewPrimaryPart
+        if textureId then
+            for _, textureName in WEAPON_WRAP_TEXTURE_ORDER do
+                local existingTexture = part:FindFirstChild(textureName)
+                local texture: Texture
+                if existingTexture and existingTexture:IsA("Texture") then
+                    texture = existingTexture
+                else
+                    texture = Instance.new("Texture")
+                    texture.Name = textureName
+                    texture.Face = WEAPON_WRAP_TEXTURE_FACE_BY_NAME[textureName]
+                    texture.Parent = part
+                end
+
+                texture.Texture = textureId
+                texture.Transparency = 0
+                texture.StudsPerTileU = studsPerTile
+                texture.StudsPerTileV = studsPerTile
+                texture.OffsetStudsU = 0
+                texture.OffsetStudsV = 0
+                table.insert(animatedTextures, texture)
             end
-
-            texture.Texture = textureId
-            texture.Transparency = 0
-            texture.StudsPerTileU = studsPerTile
-            texture.StudsPerTileV = studsPerTile
-            texture.OffsetStudsU = 0
-            texture.OffsetStudsV = 0
-            table.insert(animatedTextures, texture)
         end
     end
 
@@ -316,7 +319,7 @@ function WeaponWrapPreviewer.applyAppearance(instance: Instance, item: WeaponWra
     if not primaryPart then
         return false
     end
-    applyWrapAppearanceToPrimaryPart(primaryPart, item, previewJanitor)
+    applyWrapAppearance(WeaponWrapParts.get(instance, primaryPart), item, previewJanitor)
     return true
 end
 
@@ -340,7 +343,7 @@ function WeaponWrapPreviewer.Render(viewportNode: ViewportFrame, item: WeaponWra
         return false, usedWeaponTemplate
     end
 
-    applyWrapAppearanceToPrimaryPart(previewPrimaryPart, item, previewJanitor)
+    applyWrapAppearance(WeaponWrapParts.get(clonedWrap, previewPrimaryPart), item, previewJanitor)
 
     local modelCenter: CFrame
     local updatedSize: Vector3
