@@ -1464,6 +1464,17 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			restoreEquippedWeaponPreviews()
 		end
 
+		if categoryKey == LockerMainCategory.EFFECTS and navKey == LockerCategory.BANNERS then
+			-- Sin selección en la grid: vuelven los previews de lo equipado y se
+			-- ocultan ActionFrame y botón Wraps (onSelectionChanged(nil)).
+			clearItemGrid()
+			setBannersViewActive(true, stagger)
+			return
+		end
+		-- Antes de crear el doble de emotes: salir de banners vuelve a mostrar el
+		-- personaje del lobby, y si el doble ya estaba creado quedaban los dos.
+		setBannersViewActive(false)
+
 		if navKey == LockerCategory.KILL_EFFECTS and previousNavKey ~= LockerCategory.KILL_EFFECTS then
 			-- En reposo el preview es el propio personaje del lobby: solo asegurar que
 			-- no queda un doble de antes.
@@ -1472,14 +1483,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		elseif navKey == LockerCategory.EMOTES and previousNavKey ~= LockerCategory.EMOTES then
 			spawnKillEffectDummy()
 		end
-		if categoryKey == LockerMainCategory.EFFECTS and navKey == LockerCategory.BANNERS then
-			-- Sin selección en la grid: vuelven los previews de lo equipado y se
-			-- ocultan ActionFrame y botón Wraps (onSelectionChanged(nil)).
-			clearItemGrid()
-			setBannersViewActive(true, stagger)
-			return
-		end
-		setBannersViewActive(false)
 
 		local preferredSelectedQualifiedId = getPreferredSelectedQualifiedId(categoryKey, navKey, selectedQualifiedId)
 

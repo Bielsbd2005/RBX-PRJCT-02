@@ -90,6 +90,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	local BattlePassService = require(serverRoot.features.battlepass.BattlePassService)
 	local GiftingService = require(serverRoot.features.gifting.GiftingService)
 	local LockerService = require(serverRoot.features.locker.LockerService)
+	local EmoteAssetService = require(serverRoot.features.locker.EmoteAssetService)
 	local ClearDataCommandService = require(serverRoot.features.testing.ClearDataCommandService)
 	local TrainingDummyService = require(serverRoot.features.testing.TrainingDummyService)
 
@@ -310,6 +311,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 
 	MatchService:Start(DataService)
 	LockerService:Start(DataService)
+	EmoteAssetService:Start()
 	ClearDataCommandService:Start(DataService)
 	TrainingDummyService:Start()
 
