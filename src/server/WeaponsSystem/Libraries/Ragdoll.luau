@@ -168,7 +168,11 @@ function Ragdoll:setJointRagdolled(jointName, ragdolled)
 	local joint = self.joints[jointName]
 	if not joint then return end
 
-	joint.constraint.Enabled = ragdolled
+	-- constraint puede ser nil si WaitForChild agotó el timeout en setupJoint;
+	-- el motor se sigue gestionando para que destroy() pueda restaurarlo.
+	if joint.constraint then
+		joint.constraint.Enabled = ragdolled
+	end
 	if joint.motor and joint.motor:IsA("Motor6D") then
 		if ragdolled then
 			joint.motor.Part1 = nil
