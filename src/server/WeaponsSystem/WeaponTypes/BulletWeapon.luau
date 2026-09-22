@@ -18,6 +18,8 @@ local Parabola = require(Libraries:WaitForChild("Parabola"))
 local Roblox = require(Libraries:WaitForChild("Roblox"))
 local WeaponsNetwork = require(Libraries:WaitForChild("WeaponsNetwork"))
 local HitVFX = require(Libraries:WaitForChild("HitVFX"))
+local WeaponBolt = require(Libraries:WaitForChild("WeaponBolt"))
+local FireZone = if IsServer then require(Libraries:WaitForChild("FireZone")) else nil
 local TeamUtils = require(Shared.utils.TeamUtils)
 
 local Effects = WeaponsSystemFolder:WaitForChild("Assets"):WaitForChild("Effects")
@@ -38,6 +40,15 @@ local PARABOLA_MID_GRAVITY_THRESHOLD = 0.33
 local PARABOLA_SAMPLES_HIGH = 3
 local PARABOLA_SAMPLES_MID = 2
 local PARABOLA_SAMPLES_LOW = 1
+
+-- Cada grupo lee sus claves de config con el prefijo (BoltTravel, PumpDelay…). El ciclo
+-- por defecto se ajusta a lo que queda de cooldown tras el delay, entre min y max.
+-- forward: se mueve hacia la boca en vez de hacia la culata.
+local MOVING_PART_GROUPS = {
+	{ name = "Bolt", fill = 0.9, minCycle = 0.04, maxCycle = 0.12, forward = false },
+	{ name = "Pump", fill = 0.8, minCycle = 0.1, maxCycle = 0.45, forward = false },
+	{ name = "SniperBolt", fill = 0.7, minCycle = 0.2, maxCycle = 0.8, forward = true },
+}
 
 local localRandom = Random.new()
 local localPlayer = not IsServer and Players.LocalPlayer
@@ -221,6 +232,14 @@ function BulletWeapon.new(weaponsSystem, instance)
 	self._viewKickBase = nil :: CFrame?
 	self._viewKickPart = nil :: BasePart?
 
+	self._movingParts = nil :: { { group: any, bolt: WeaponBolt.WeaponBolt } }?
+	if not IsServer then
+		self._movingParts = {}
+		for _, group in MOVING_PART_GROUPS do
+			table.insert(self._movingParts, { group = group, bolt = WeaponBolt.new(self.instance, group.name) })
+		end
+	end
+
 	self:addOptionalDescendant("tipAttach", "TipAttachment")
 
 	self:addOptionalDescendant("chargeGlowPart", "ChargeGlow")
@@ -274,11 +293,16 @@ function BulletWeapon:_resolveShotEffect()
 	local effectName = self:getConfigValue("ShotEffect")
 	self.bulletEffectTemplate = if effectName then ShotsFolder:FindFirstChild(effectName) else nil
 	if not self.bulletEffectTemplate then
+		-- Sin template simulateProjectile no puede clonar y el disparo no llegaría a
+		-- impactar: se cae al "Bullet" para que un asset pendiente no rompa el arma.
+		self.bulletEffectTemplate = ShotsFolder:FindFirstChild("Bullet")
 		warn(string.format(
-			"[BulletWeapon] %s: sin template de bala para ShotEffect=%s (Assets.Effects.Shots)",
+			"[BulletWeapon] %s: sin template de bala para ShotEffect=%s (Assets.Effects.Shots), se usa Bullet",
 			self.instance:GetFullName(), tostring(effectName)
 		))
-		return
+		if not self.bulletEffectTemplate then
+			return
+		end
 	end
 
 	local beam0 = self.bulletEffectTemplate:FindFirstChild("Beam0")
@@ -313,6 +337,9 @@ function BulletWeapon:onEquippedChanged()
 
 			self:_resetViewKick()
 			self._viewKickJoint = nil
+			for _, entry in self._movingParts or {} do
+				entry.bolt:reset()
+			end
 
 			local chargingSound = self:getSound("Charging")
 			local dischargingSound = self:getSound("Discharging")
@@ -471,6 +498,8 @@ function BulletWeapon:simulateFire(firingPlayer, fireInfo)
 		self.lastFireSound:Stop()
 	end
 	self.lastFireSound = self:tryPlaySound("Fired", self:getConfigValue("FiredPlaybackSpeedRange"))
+
+	self:_kickMovingParts()
 
 	local numProjectiles = self:getConfigValue("NumProjectiles")
 	local randomGenerator = Random.new(self:getRandomSeedForId(fireInfo.id))
@@ -988,6 +1017,23 @@ function BulletWeapon:onHit(hitInfo)
 
 		WeaponsNetwork.broadcastExplosionVFX(explosion.Position)
 	end
+
+	if IsServer and FireZone and self.player and self:getConfigValue("FireZoneOnImpact") then
+		-- validateHit comprueba el punto pero no la normal, que llega tal cual del cliente.
+		local normal = if typeof(hitNormal) == "Vector3" and hitNormal.Magnitude > 0.5 and hitNormal.Magnitude < 1.5
+			then hitNormal.Unit
+			else Vector3.yAxis
+		FireZone.spawn({
+			weaponsSystem = self.weaponsSystem,
+			dealer = self.player,
+			weaponName = self.instance.Name,
+			impact = hitPoint,
+			normal = normal,
+			radius = self:getConfigValue("FireZoneRadius"),
+			duration = self:getConfigValue("FireZoneDuration"),
+			damagePerSecond = self:getConfigValue("FireZoneDamage"),
+		})
+	end
 end
 
 function BulletWeapon:fire(origin, dir, charge)
@@ -1097,6 +1143,44 @@ function BulletWeapon:_ensureViewKickRefs(): boolean
 	end
 
 	return false
+end
+
+-- La dirección boca→Handle define el eje de movimiento. En cliente self.handle es nil
+-- (sólo lo asigna el servidor).
+function BulletWeapon:_resolveMovingParts(): boolean
+	if not self._movingParts or not self.tipAttach then
+		return false
+	end
+	for _, entry in self._movingParts do
+		if not entry.bolt:isResolved() then
+			local handle = self.instance:FindFirstChild("Handle")
+			if not (handle and handle:IsA("BasePart")) then
+				return false
+			end
+			local back = handle.Position - self.tipAttach.WorldPosition
+			entry.bolt:resolve(if entry.group.forward then -back else back)
+		end
+	end
+	return true
+end
+
+function BulletWeapon:_kickMovingParts()
+	if not self:_resolveMovingParts() then
+		return
+	end
+
+	local cooldown = self:getConfigValue("ShotCooldown")
+	if self:getConfigValue("FireMode") == "Burst" then
+		cooldown = self:getConfigValue("BurstShotCooldown") or cooldown
+	end
+	local now = os.clock()
+	for _, entry in self._movingParts do
+		local group = entry.group
+		local delay = self:getConfigValue(group.name .. "Delay")
+		local cycle = self:getConfigValue(group.name .. "CycleTime")
+			or math.clamp((cooldown - delay) * group.fill, group.minCycle, group.maxCycle)
+		entry.bolt:kick(now, cycle, delay)
+	end
 end
 
 function BulletWeapon:_resetViewKick()
@@ -1217,6 +1301,15 @@ function BulletWeapon:onStepped(dt)
 	BaseWeapon.onStepped(self, dt)
 
 	local now = os.clock()
+
+	if self:_resolveMovingParts() then
+		local empty = self:getAmmoInWeapon() <= 0
+		for _, entry in self._movingParts do
+			local name = entry.group.name
+			local locked = empty and self:getConfigValue(name .. "LockOnEmpty")
+			entry.bolt:step(now, self:getConfigValue(name .. "Travel"), locked)
+		end
+	end
 
 	local chargingSound = self:getSound("Charging")
 	local dischargingSound = self:getSound("Discharging")

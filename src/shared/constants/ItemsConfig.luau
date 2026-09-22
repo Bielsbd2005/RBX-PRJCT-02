@@ -70,6 +70,8 @@ Special = {
     Laser   = { Name = "Laser",   Price = 40000, LevelRequired = 73,  Rarity = "Epic",      Image = asset(104390588207353),  CanPurchase = true },
     RPG     = { Name = "RPG",     Price = 100000, LevelRequired = 117,  Rarity = "Legendary",      Image = asset(135425656083964), CanPurchase = true },
     -- RESERVADO: la definición (Definitions/<Category>/<Id>.luau) ya existe; falta el Tool ServerStorage.WeaponTools.<Category>.<Id>.
+    -- TODO: entrada temporal para probar la Flare; precio, nivel, rareza e Image reales según la escalera de economía.
+    Flare   = { Name = "Flare",   Price = 100, LevelRequired = 0,  Rarity = "Epic",      Image = "rbxassetid://0", CanPurchase = true },
     -- Descomentar con la Image real cuando esté el Tool (sin él se compraría y no haría nada); precio, nivel y rareza ya son los de la escalera.
     -- Revolver = { Name = "Revolver", Price = 6500, LevelRequired = 27, Rarity = "Rare", Image = "rbxassetid://0", CanPurchase = true },
     -- Burst = { Name = "Burst", Price = 12500, LevelRequired = 39, Rarity = "Epic", Image = "rbxassetid://0", CanPurchase = true },

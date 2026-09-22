@@ -888,17 +888,16 @@ local function _defaultDamageCallback(system, target, amount, damageType, dealer
 
 	local targetPlayer = Players:GetPlayerFromCharacter(targetCharacter)
 	local dealerPlayer = dealer and Players:GetPlayerFromCharacter(dealer.Character)
+	-- damageData.Name gana al Tool equipado: el daño diferido (FireZone) debe acreditar
+	-- al arma que lo causó aunque el dealer haya cambiado de arma.
 	local weaponName = "Unknown Weapon"
-	if dealer and dealer.Character then
+	if typeof(damageData) == "Instance" then
+		weaponName = damageData.Name
+	elseif typeof(damageData) == "table" and type(damageData.Name) == "string" then
+		weaponName = damageData.Name
+	elseif dealer and dealer.Character then
 		local equippedTool = dealer.Character:FindFirstChildOfClass("Tool")
 		if equippedTool then weaponName = equippedTool.Name end
-	end
-	if weaponName == "Unknown Weapon" and damageData then
-		if typeof(damageData) == "Instance" then
-			weaponName = damageData.Name
-		elseif typeof(damageData) == "table" and damageData.Name then
-			weaponName = damageData.Name
-		end
 	end
 	-- wasHeadshot llega vía hitInfo (BulletWeapon.onHit); si no viene (p. ej. una
 	-- explosión), cuenta como bodyshot.

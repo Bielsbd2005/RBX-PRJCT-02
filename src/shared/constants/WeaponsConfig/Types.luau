@@ -47,6 +47,10 @@ export type BulletWeaponConfig = BaseWeaponConfig & {
 	BlastDamage: number?,
 	BlastRadius: number?,
 	BlastPressure: number?,
+	FireZoneOnImpact: boolean?,
+	FireZoneRadius: number?,
+	FireZoneDuration: number?,
+	FireZoneDamage: number?,
 
 	-- Carga (armas de carga tipo railgun/arco)
 	ChargeRate: number?,
@@ -67,6 +71,18 @@ export type BulletWeaponConfig = BaseWeaponConfig & {
 	ViewKickDistance: number?,
 	ViewKickPerShot: number?,
 	ViewKickReturn: number?,
+	BoltTravel: number?,
+	BoltCycleTime: number?,
+	BoltLockOnEmpty: boolean?,
+	BoltDelay: number?,
+	PumpTravel: number?,
+	PumpCycleTime: number?,
+	PumpDelay: number?,
+	PumpLockOnEmpty: boolean?,
+	SniperBoltTravel: number?,
+	SniperBoltCycleTime: number?,
+	SniperBoltDelay: number?,
+	SniperBoltLockOnEmpty: boolean?,
 	FiredPlaybackSpeedRange: number?,
 
 	-- VFX
