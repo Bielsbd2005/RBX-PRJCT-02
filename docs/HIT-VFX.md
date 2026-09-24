@@ -39,10 +39,6 @@ El motor clona la plantilla, la orienta a la normal (las partículas salen "haci
 arriba" del Attachment → `EmissionDirection = Top`) y emite la ráfaga. Reusa todo
 en pool por categoría → cero `Instance.new` en régimen.
 
-> **Migración:** los emitters de headshot que tenías en el `HeadShotAttachment`
-> de las cabezas (`Shared.Bodies.*`) cópialos dentro de `HitVFX/Headshot`. Antes
-> los emitía `DamageBillboardHandler`; ahora los emite HitVFX.
-
 ## Sonido — vive en SoundService
 
 El sonido de hit/headshot **no** se toca en HitVFX. Está en

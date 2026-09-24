@@ -26,8 +26,7 @@ animaciones, el tag `WeaponsSystemWeapon` y el atributo `WeaponCategory`
 de la Tool. Sin definición, la Tool no se instancia como arma.
 
 `CurrentAmmo` e `IsReloading` los escribe BaseWeapon en runtime, así que no se
-autoran en la Tool. `Shotgun` y `OptimalRange` sí son de la Tool: los leen el
-crosshair y el auto-aim.
+autoran en la Tool.
 
 ## Modelo de display
 

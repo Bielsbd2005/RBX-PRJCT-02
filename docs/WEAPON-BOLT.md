@@ -24,7 +24,7 @@ boca → `Handle` (`Handle` → boca en `SniperBolt`). Si la pieza está rotada 
 en una dirección rara, ponle un atributo `BoltAxis` (Vector3, espacio local de la parte)
 con la dirección de ida.
 
-`Pump` también recibe el wrap del arma (`Shared/Locker/WeaponWrapParts.luau`).
+`Pump` y `Barrel` también reciben el wrap del arma (`Shared/Locker/WeaponWrapParts.luau`).
 
 ## Config (`WeaponsConfig`)
 
@@ -37,6 +37,21 @@ Por grupo, con prefijo `Bolt`, `Pump` o `SniperBolt`:
 
 Defaults en `WeaponsConfig/Schema.luau`. En una escopeta de bombeo el cerrojo va unido
 al Pump: pon a `Bolt` el mismo `Delay` y `CycleTime` que al `Pump` para que se muevan juntos.
+
+## Apertura al recargar (`ReloadHinge.luau`)
+
+Aparte de los grupos anteriores, la pieza llamada **`Barrel`** gira sobre su **eje Z local**
+al empezar la recarga (como el tambor de un revólver al abrirse para sacar el casquillo),
+se queda abierta mientras dura y vuelve con un tween al terminar.
+
+- `ReloadHingeAngle`: grados. 0 desactiva la apertura, que es el default; un valor negativo
+  la abre hacia el otro lado.
+- `ReloadHingeOpenTime` / `ReloadHingeCloseTime`: segundos de ida y de vuelta.
+
+Studio: un `Attachment` llamado `Hinge` hijo de la pieza marca dónde está la bisagra; sin
+él la pieza gira sobre su propio centro. Para girar sobre otro eje, ponle a la pieza un
+atributo `HingeAxis` (Vector3, espacio local de la parte). La pieza `Barrel` no puede ser el `PrimaryPart` del
+Model ni el `Handle`: girarlos movería el arma entera.
 
 ## Notas
 

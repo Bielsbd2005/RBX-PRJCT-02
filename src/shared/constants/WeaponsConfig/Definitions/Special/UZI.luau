@@ -8,10 +8,8 @@ return {
 	Config = {
 		FireMode = "Automatic",
 		GravityFactor = 0.5,
-		HitDamage = 8,
+		HitDamage = 7,
 		MaxSpread = 1.2,
-		MuzzleFlashSize0 = 0.75,
-		MuzzleFlashSize1 = 0.95,
 		RecoilDecay = 0.87,
 		RecoilMax = 0.55,
 		RecoilMin = 0.5,

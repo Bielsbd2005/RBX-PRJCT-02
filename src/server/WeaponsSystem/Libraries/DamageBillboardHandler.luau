@@ -1,3 +1,4 @@
+--!strict
 -- Números de daño flotantes y sonido de impacto (solo cliente). Perfil único, sin
 -- distinción de móvil.
 
@@ -11,9 +12,6 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 if RunService:IsServer() then
 	return {}
 end
-
-local cfgRoot             = script.Parent.Parent.Configuration
-local HeadshotMultiplier  = cfgRoot:WaitForChild("HeadshotMultiplier")  -- NumberValue
 
 local localPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
 
@@ -462,8 +460,8 @@ function DamageBillboardHandler:ShowDamageBillboard(damageAmount: number, adorne
 		end
 	end
 
-	local mult = (HeadshotMultiplier and HeadshotMultiplier.Value) or 1
-	local shownDamage = headshot and math.ceil(damageAmount * mult) or math.ceil(damageAmount)
+	-- damageAmount ya trae el multiplicador de headshot del arma (BulletWeapon).
+	local shownDamage = math.ceil(damageAmount)
 
 	local progressivePitch = getCurrentPitch()
 	playUIAudio(headshot and "Headshot" or "Hit", progressivePitch)

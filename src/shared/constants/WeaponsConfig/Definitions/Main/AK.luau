@@ -11,14 +11,10 @@ return {
 		FireMode = "Automatic",
 		GravityFactor = 0.5,
 		HitDamage = 17,
-		-- La dispersión más cerrada del escalón Common: junto al daño, el eje que justifica su precio.
 		MaxSpread = 0.45,
-		MuzzleFlashSize0 = 1.1,
-		MuzzleFlashSize1 = 1.4,
 		RecoilDecay = 0.81,
 		RecoilMax = 0.1,
 		RecoilMin = 0.1,
-		-- Más lenta que la Groza a propósito: pega más fuerte, no más rápido, para no dominarla en todo.
 		ShotCooldown = 0.135,
 	},
 } :: Types.WeaponDefinition

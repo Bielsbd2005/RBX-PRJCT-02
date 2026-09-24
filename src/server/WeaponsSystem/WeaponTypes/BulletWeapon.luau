@@ -1,3 +1,4 @@
+--!strict
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
 local Debris = game:GetService("Debris")
@@ -19,6 +20,7 @@ local Roblox = require(Libraries:WaitForChild("Roblox"))
 local WeaponsNetwork = require(Libraries:WaitForChild("WeaponsNetwork"))
 local HitVFX = require(Libraries:WaitForChild("HitVFX"))
 local WeaponBolt = require(Libraries:WaitForChild("WeaponBolt"))
+local ReloadHinge = require(Libraries:WaitForChild("ReloadHinge"))
 local FireZone = if IsServer then require(Libraries:WaitForChild("FireZone")) else nil
 local TeamUtils = require(Shared.utils.TeamUtils)
 
@@ -41,6 +43,12 @@ local PARABOLA_SAMPLES_HIGH = 3
 local PARABOLA_SAMPLES_MID = 2
 local PARABOLA_SAMPLES_LOW = 1
 
+-- El AmmoPart reaparece creciendo desde esta fracción de su tamaño.
+local AMMO_PART_APPEAR_SCALE = 0.3
+local AMMO_PART_GROW_TWEEN = TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+-- Aparte del tamaño: el rebote de Back sobre la transparencia la sacaría de [0, 1].
+local AMMO_PART_FADE_TWEEN = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
 -- Cada grupo lee sus claves de config con el prefijo (BoltTravel, PumpDelay…). El ciclo
 -- por defecto se ajusta a lo que queda de cooldown tras el delay, entre min y max.
 -- forward: se mueve hacia la boca en vez de hacia la culata.
@@ -58,8 +66,8 @@ type ProjectileEntry = { active: boolean, callback: ((number) -> ())? }
 local activeProjectiles: { ProjectileEntry } = {}
 local projectileLoopConn: RBXScriptConnection? = nil
 
--- Buffer reusado: FireServer serializa de forma síncrona, así que es seguro mutarlo
--- entre llamadas.
+-- Buffer reusado: el Send de ByteNet serializa en el momento, así que es seguro
+-- mutarlo entre llamadas.
 local _hitInfoSendBuffer: { [string]: any } = {}
 
 -- Pool de clones de bulletEffect por template (Parent=nil en reposo): clonar el
@@ -232,7 +240,12 @@ function BulletWeapon.new(weaponsSystem, instance)
 	self._viewKickBase = nil :: CFrame?
 	self._viewKickPart = nil :: BasePart?
 
+	self._ammoParts = nil :: { { part: BasePart, transparency: number, size: Vector3, mesh: SpecialMesh?, meshScale: Vector3?, tweens: { Tween } } }?
+	self._ammoPartsHidden = false
+
 	self._movingParts = nil :: { { group: any, bolt: WeaponBolt.WeaponBolt } }?
+	-- Apertura al recargar: la pieza "Barrel" gira mientras dura la recarga.
+	self._reloadHinge = if IsServer then nil else ReloadHinge.new(self.instance, "Barrel")
 	if not IsServer then
 		self._movingParts = {}
 		for _, group in MOVING_PART_GROUPS do
@@ -246,9 +259,6 @@ function BulletWeapon.new(weaponsSystem, instance)
 	self:addOptionalDescendant("chargeCompleteParticles", "ChargeCompleteParticles")
 	self:addOptionalDescendant("dischargeCompleteParticles", "DischargeCompleteParticles")
 
-	self:addOptionalDescendant("muzzleFlash0", "MuzzleFlash0")
-	self:addOptionalDescendant("muzzleFlash1", "MuzzleFlash1")
-	self:addOptionalDescendant("muzzleFlashBeam", "MuzzleFlash")
 
 	self.bulletEffectTemplate = nil
 	self.hitMarkTemplate = nil
@@ -324,9 +334,10 @@ function BulletWeapon:onEquippedChanged()
 	BaseWeapon.onEquippedChanged(self)
 
 	if not IsServer then
-		if self.weaponsSystem.camera then
-			if self.equipped then
-				self.startupFinished = false
+		if self.equipped then
+			self.startupFinished = false
+			if self.player == Players.LocalPlayer then
+				self:_startStartupTimer()
 			end
 		end
 
@@ -340,6 +351,10 @@ function BulletWeapon:onEquippedChanged()
 			for _, entry in self._movingParts or {} do
 				entry.bolt:reset()
 			end
+			if self._reloadHinge then
+				self._reloadHinge:reset()
+			end
+			self:_setAmmoPartsHidden(false)
 
 			local chargingSound = self:getSound("Charging")
 			local dischargingSound = self:getSound("Discharging")
@@ -355,12 +370,30 @@ function BulletWeapon:onEquippedChanged()
 
 		-- Roblox no re-emite Tool.Activated para un botón ya mantenido al cambiar de
 		-- arma: sin esto el arma nueva no dispara hasta soltar y volver a pulsar.
-		if self.equipped and self.player == Players.LocalPlayer then
+		-- En táctil no aplica: cualquier dedo (el del joystick) cuenta como MouseButton1 y
+		-- el Deactivate solo llega del FireButton (ManualActivationOnly), así que dispararía solo.
+		if self.equipped and self.player == Players.LocalPlayer and not UserInputService.TouchEnabled then
 			if UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then
 				self:setActivated(true)
 			end
 		end
 	end
+end
+
+--[[
+	StartupTime cuenta desde el equip, no desde que arranca la animación de apuntar:
+	con zoom activo a ese track se le baja el peso a 0 en el mismo frame en que se
+	reproduce, IsPlaying rebota cada frame y un temporizador atado a él nunca terminaba
+	(cambiar de arma apuntando dejaba el arma nueva sin disparar hasta soltar el zoom).
+]]
+function BulletWeapon:_startStartupTimer()
+	self._startupToken = (self._startupToken or 0) + 1
+	local thisToken = self._startupToken
+	task.delay(self:getConfigValue("StartupTime"), function()
+		if self._startupToken == thisToken and self.equipped then
+			self.startupFinished = true
+		end
+	end)
 end
 
 function BulletWeapon:onReloadAction(actionName, inputState, inputObj)
@@ -373,52 +406,17 @@ function BulletWeapon:getRandomSeedForId(id)
 	return id
 end
 
--- La dispersión por partícula viene del SpreadAngle/VelocitySpread del template.
-local function _emitMuzzleParticles(bulletEffect: Instance, origin: Vector3, dir: Vector3, totalParticles: number)
-	local muzzleParticles = bulletEffect:FindFirstChild("MuzzleParticles", true)
-	if not muzzleParticles then
+-- Los ParticleEmitter hijos de TipAttachment deben ir con Enabled = false en Studio:
+-- solo emiten aquí, EmitCount partículas cada uno (1 si no tiene el atributo).
+function BulletWeapon:_emitMuzzleEffects()
+	if not self.tipAttach then
 		return
 	end
-	local emitter = muzzleParticles.Parent
-	emitter.CFrame = CFrame.new(origin, origin + dir)
-	emitter.Velocity = Vector3.new(
-		localRandom:NextNumber(-10, 10),
-		localRandom:NextNumber(-10, 10),
-		localRandom:NextNumber(-10, 10)
-	)
-	muzzleParticles:Emit(totalParticles)
-end
-
--- El apagado va en su propio timer y no en el step del proyectil: el path hitscan
--- no registra step y un proyectil puede morir antes de MuzzleFlashTime.
-function BulletWeapon:_showMuzzleFlash(randomGenerator: Random)
-	if not (self.tipAttach and self.muzzleFlash0 and self.muzzleFlash1 and self.muzzleFlashBeam) then
-		return
-	end
-
-	local minFlashRotation = self:getConfigValue("MuzzleFlashRotation0")
-	local maxFlashRotation = self:getConfigValue("MuzzleFlashRotation1")
-	local minFlashSize = self:getConfigValue("MuzzleFlashSize0")
-	local maxFlashSize = self:getConfigValue("MuzzleFlashSize1")
-	local flashRotation = randomGenerator:NextNumber(minFlashRotation, maxFlashRotation)
-	local flashSize = randomGenerator:NextNumber(minFlashSize, maxFlashSize)
-	local baseCFrame = self.tipAttach.CFrame * CFrame.Angles(0, 0, flashRotation)
-	self.muzzleFlash0.CFrame = baseCFrame * CFrame.new(flashSize * -0.5, 0, 0) * CFrame.Angles(0, math.pi, 0)
-	self.muzzleFlash1.CFrame = baseCFrame * CFrame.new(flashSize * 0.5, 0, 0) * CFrame.Angles(0, math.pi, 0)
-
-	self.muzzleFlashBeam.Enabled = true
-	self.muzzleFlashBeam.Width0 = flashSize
-	self.muzzleFlashBeam.Width1 = flashSize
-
-	-- Token: el timer de un disparo anterior no debe apagar el flash del siguiente.
-	local token = (self._muzzleFlashToken or 0) + 1
-	self._muzzleFlashToken = token
-	local muzzleFlashBeam = self.muzzleFlashBeam
-	task.delay(self:getConfigValue("MuzzleFlashTime"), function()
-		if self._muzzleFlashToken == token then
-			muzzleFlashBeam.Enabled = false
+	for _, emitter in self.tipAttach:GetChildren() do
+		if emitter:IsA("ParticleEmitter") then
+			emitter:Emit(emitter:GetAttribute("EmitCount") or 1)
 		end
-	end)
+	end
 end
 
 local HIT_MARK_LIFETIME = 5
@@ -429,13 +427,39 @@ local HIT_MARK_HEAT_END = Color3.fromRGB(255, 255, 255)
 local HIT_MARK_HEAT_DURATION = 1.5
 local HIT_MARK_HEAT_TWEEN = TweenInfo.new(HIT_MARK_HEAT_DURATION, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
+-- El ScorchMark del RPG (…Explosion.ScorchMark) se autora en Studio: se respeta
+-- su color y se entra y sale de su transparencia con fundidos (el de salida acaba
+-- justo cuando Debris borra la marca).
+local SCORCH_MARK_FADE_IN_TWEEN = TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local SCORCH_MARK_FADE_OUT_TWEEN = TweenInfo.new(1, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+
+local function isAuthoredScorchMark(instance: Instance): boolean
+	return instance:IsA("Decal") and instance.Name == "ScorchMark" and instance:FindFirstAncestor("Explosion") ~= nil
+end
+
+local function animateAuthoredScorchMarks(hitMark: Instance)
+	for _, descendant in hitMark:GetDescendants() do
+		if isAuthoredScorchMark(descendant) then
+			local decal = descendant :: Decal
+			local targetTransparency = decal.Transparency
+			decal.Transparency = 1
+			TweenService:Create(decal, SCORCH_MARK_FADE_IN_TWEEN, { Transparency = targetTransparency }):Play()
+			task.delay(HIT_MARK_LIFETIME - SCORCH_MARK_FADE_OUT_TWEEN.Time, function()
+				if decal.Parent then
+					TweenService:Create(decal, SCORCH_MARK_FADE_OUT_TWEEN, { Transparency = 1 }):Play()
+				end
+			end)
+		end
+	end
+end
+
 function BulletWeapon:_applyHitMarkHeat(hitMark: Instance)
 	if hitMark:IsA("BasePart") then
 		hitMark.Color = HIT_MARK_HEAT_START
 		TweenService:Create(hitMark, HIT_MARK_HEAT_TWEEN, { Color = HIT_MARK_HEAT_END }):Play()
 	end
 	for _, descendant in hitMark:GetDescendants() do
-		if descendant:IsA("Decal") or descendant:IsA("Texture") then
+		if (descendant:IsA("Decal") or descendant:IsA("Texture")) and not isAuthoredScorchMark(descendant) then
 			descendant.Color3 = HIT_MARK_HEAT_START
 			TweenService:Create(descendant, HIT_MARK_HEAT_TWEEN, { Color3 = HIT_MARK_HEAT_END }):Play()
 		end
@@ -464,6 +488,7 @@ function BulletWeapon:_spawnHitMark(hitPart: BasePart, hitPoint: Vector3, hitNor
 
 	local hitMark = self.hitMarkTemplate:Clone()
 	hitMark.Parent = hitPart
+	animateAuthoredScorchMarks(hitMark)
 	CollectionService:AddTag(hitMark, "WeaponsSystemIgnore")
 
 	local incomingVec = parabola:sampleVelocity(1).Unit
@@ -500,6 +525,7 @@ function BulletWeapon:simulateFire(firingPlayer, fireInfo)
 	self.lastFireSound = self:tryPlaySound("Fired", self:getConfigValue("FiredPlaybackSpeedRange"))
 
 	self:_kickMovingParts()
+	self:_emitMuzzleEffects()
 
 	local numProjectiles = self:getConfigValue("NumProjectiles")
 	local randomGenerator = Random.new(self:getRandomSeedForId(fireInfo.id))
@@ -517,9 +543,7 @@ function BulletWeapon:simulateFire(firingPlayer, fireInfo)
 		-- onRenderStepped lo aplica y decae.
 		self._viewKick = math.min(self._viewKick + self:getConfigValue("ViewKickPerShot"), 1)
 
-		coroutine.wrap(function()
-			local recoilDelayTime = self:getConfigValue("RecoilDelayTime")
-			task.wait(recoilDelayTime)
+		task.delay(self:getConfigValue("RecoilDelayTime"), function()
 
 			local recoilMin, recoilMax = self:getConfigValue("RecoilMin"), self:getConfigValue("RecoilMax")
 			local intensityToAdd = randomGenerator:NextNumber(recoilMin, recoilMax)
@@ -535,7 +559,7 @@ function BulletWeapon:simulateFire(firingPlayer, fireInfo)
 			if weaponsGui then
 				weaponsGui:setCrosshairScale(1 + intensityToAdd)
 			end
-		end)()
+		end)
 	end
 end
 
@@ -618,14 +642,6 @@ function BulletWeapon:simulateProjectile(firingPlayer, fireInfo, projectileIdx, 
 	local beam1 = bulletEffect:FindFirstChild("Beam1")
 	if beam1 then
 		beam1.Enabled = true
-	end
-
-	local numMuzzleParticles = self:getConfigValue("NumMuzzleParticles")
-	_emitMuzzleParticles(bulletEffect, origin, dir, numMuzzleParticles)
-
-	-- Solo en el primer proyectil de un disparo multi-bala.
-	if projectileIdx == 1 then
-		self:_showMuzzleFlash(localRandom)
 	end
 
 	if flyingSound then
@@ -948,8 +964,9 @@ function BulletWeapon:applyDamage(hitInfo)
 		return
 	end
 
-	-- _defaultDamageCallback lee hitInfo.wasHeadshot (poblado en onHit).
-	self.weaponsSystem.doDamage(hitInfo.h, damage, nil, self.player, hitInfo)
+	-- _defaultDamageCallback lee hitInfo.wasHeadshot (poblado en onHit). El arma va
+	-- explícita: con un proyectil en vuelo el Tool equipado puede ser ya otro.
+	self.weaponsSystem.doDamage(hitInfo.h, damage, nil, self.player, hitInfo, self.instance)
 end
 
 function BulletWeapon:onHit(hitInfo)
@@ -963,9 +980,11 @@ function BulletWeapon:onHit(hitInfo)
 		hitInfo.wasHeadshot = wasHeadshot == true
 
 		-- En el server, headshot solo si el part golpeado es "Head" (validateHit ya
-		-- verificó la proximidad part/punto).
+		-- verificó la proximidad part/punto). El multiplicador se fija aquí y no se lee
+		-- del payload, que es del cliente.
 		if IsServer then
 			hitInfo.wasHeadshot = hitPart.Name == "Head"
+			hitInfo.headshotMultiplier = self:getConfigValue("HeadshotMultiplier")
 		end
 
 		if IsServer and
@@ -979,7 +998,11 @@ function BulletWeapon:onHit(hitInfo)
 			self.player == Players.LocalPlayer and
 			isEnemyHumanoidForPlayer(hitInfo.h, self.player)
 		then
-			self.weaponsSystem.gui:OnHitOtherPlayer(self:calculateDamage(hitInfo.d), hitInfo.h, hitPart)
+			local shownDamage = self:calculateDamage(hitInfo.d)
+			if hitPart.Name == "Head" then
+				shownDamage *= self:getConfigValue("HeadshotMultiplier")
+			end
+			self.weaponsSystem.gui:OnHitOtherPlayer(shownDamage, hitInfo.h, hitPart)
 		end
 	end
 
@@ -1006,10 +1029,10 @@ function BulletWeapon:onHit(hitInfo)
 					humanoid:GetState() ~= Enum.HumanoidStateType.Dead and
 					self.weaponsSystem.playersOnDifferentTeams(self.weaponsSystem.getPlayerFromHumanoid(humanoid), self.player)
 				then
-					self.weaponsSystem.doDamage(humanoid, damageToDeal, nil, self.player)
+					self.weaponsSystem.doDamage(humanoid, damageToDeal, nil, self.player, nil, self.instance)
 				end
 			elseif not CollectionService:HasTag(explodedPart, "WeaponsSystemIgnore") then
-				self.weaponsSystem.doDamage(explodedPart, damageToDeal, nil, self.player)
+				self.weaponsSystem.doDamage(explodedPart, damageToDeal, nil, self.player, nil, self.instance)
 			end
 		end)
 
@@ -1019,15 +1042,32 @@ function BulletWeapon:onHit(hitInfo)
 	end
 
 	if IsServer and FireZone and self.player and self:getConfigValue("FireZoneOnImpact") then
-		-- validateHit comprueba el punto pero no la normal, que llega tal cual del cliente.
-		local normal = if typeof(hitNormal) == "Vector3" and hitNormal.Magnitude > 0.5 and hitNormal.Magnitude < 1.5
-			then hitNormal.Unit
-			else Vector3.yAxis
+		local normal = hitNormal
+		local impact = hitPoint
+		local hitHumanoid = hitInfo.h
+		if typeof(hitHumanoid) == "Instance" and hitHumanoid:IsA("Humanoid") then
+			if isEnemyHumanoidForPlayer(hitHumanoid, self.player) then
+				FireZone.ignite({
+					weaponsSystem = self.weaponsSystem,
+					dealer = self.player,
+					weaponName = self.instance.Name,
+					humanoid = hitHumanoid,
+					damagePerSecond = self:getConfigValue("FireZoneDamage"),
+				})
+			end
+			-- La zona se apoya bajo el jugador, no bajo el punto del cuerpo donde entró
+			-- la bengala (una cabeza a 5 studs con la normal hacia fuera).
+			local root = hitHumanoid.RootPart
+			if root then
+				impact = root.Position
+				normal = Vector3.yAxis
+			end
+		end
 		FireZone.spawn({
 			weaponsSystem = self.weaponsSystem,
 			dealer = self.player,
 			weaponName = self.instance.Name,
-			impact = hitPoint,
+			impact = impact,
 			normal = normal,
 			radius = self:getConfigValue("FireZoneRadius"),
 			duration = self:getConfigValue("FireZoneDuration"),
@@ -1039,6 +1079,14 @@ end
 function BulletWeapon:fire(origin, dir, charge)
 	if not self:isCharged() then
 		return
+	end
+
+	-- Antes de enviar fireInfo: el server valida el hit contra este dir y los demás
+	-- clientes simulan desde él, así que todos ven la misma bala desviada.
+	local hipFireSpread = self:getConfigValue("HipFireSpread")
+	local camera = self.weaponsSystem and self.weaponsSystem.camera
+	if hipFireSpread > 0 and not IsServer and camera and not camera:isZoomed() then
+		dir = Roblox.applySpread(dir, localRandom, 0, math.rad(hipFireSpread))
 	end
 
 	BaseWeapon.fire(self, origin, dir, charge)
@@ -1183,6 +1231,68 @@ function BulletWeapon:_kickMovingParts()
 	end
 end
 
+-- El proyectil cargado (AmmoPart) desaparece al disparar y vuelve al recargar creciendo
+-- desde AMMO_PART_APPEAR_SCALE. Solo cliente: la transparencia y el tamaño locales no
+-- replican, pero CurrentAmmo sí, así que cada cliente lo oculta también en las armas de
+-- los demás.
+function BulletWeapon:_setAmmoPartsHidden(hidden: boolean)
+	if IsServer or hidden == self._ammoPartsHidden then
+		return
+	end
+	local parts = self._ammoParts
+	if not parts then
+		parts = {}
+		self._ammoParts = parts
+		local partName = self:getConfigValue("AmmoPart")
+		for _, part in if partName then self.instance:GetDescendants() else {} do
+			if part.Name == partName and part:IsA("BasePart") then
+				-- Un SpecialMesh ignora el Size de la parte: hay que escalar el mesh.
+				local mesh = part:FindFirstChildOfClass("SpecialMesh")
+				table.insert(parts, {
+					part = part,
+					transparency = part.Transparency,
+					size = part.Size,
+					mesh = mesh,
+					meshScale = mesh and mesh.Scale,
+					tweens = {},
+				})
+			end
+		end
+	end
+
+	self._ammoPartsHidden = hidden
+	for _, entry in parts do
+		for _, tween in entry.tweens do
+			tween:Cancel()
+		end
+		table.clear(entry.tweens)
+
+		if hidden then
+			entry.part.Transparency = 1
+			entry.part.Size = entry.size
+			if entry.mesh then
+				entry.mesh.Scale = entry.meshScale
+			end
+		else
+			local function play(instance: Instance, info: TweenInfo, goal: { [string]: any })
+				local tween = TweenService:Create(instance, info, goal)
+				table.insert(entry.tweens, tween)
+				tween:Play()
+			end
+
+			entry.part.Transparency = 1
+			play(entry.part, AMMO_PART_FADE_TWEEN, { Transparency = entry.transparency })
+			if entry.mesh then
+				entry.mesh.Scale = entry.meshScale * AMMO_PART_APPEAR_SCALE
+				play(entry.mesh, AMMO_PART_GROW_TWEEN, { Scale = entry.meshScale })
+			else
+				entry.part.Size = entry.size * AMMO_PART_APPEAR_SCALE
+				play(entry.part, AMMO_PART_GROW_TWEEN, { Size = entry.size })
+			end
+		end
+	end
+end
+
 function BulletWeapon:_resetViewKick()
 	self._viewKick = 0
 	local joint = self._viewKickJoint
@@ -1237,14 +1347,6 @@ function BulletWeapon:onRenderStepped(dt)
 
 			if not aimTrack.IsPlaying and not self.reloading then
 				aimTrack:Play(0.15)
-				-- Token: IsPlaying puede rebotar y entrar aquí varias veces seguidas.
-				self._startupToken = (self._startupToken or 0) + 1
-				local thisToken = self._startupToken
-				task.delay(self:getConfigValue("StartupTime"), function()
-					if self._startupToken == thisToken then
-						self.startupFinished = true
-					end
-				end)
 			end
 
 			if aimZoomTrack and not self.reloading then
@@ -1280,8 +1382,10 @@ function BulletWeapon:onRenderStepped(dt)
 
 			local recoilDecay = self:getConfigValue("RecoilDecay")
 			self.recoilIntensity = math.clamp(self.recoilIntensity * recoilDecay, 0, math.huge)
-		else
-			warn("no aimTrack")
+		elseif not self._warnedNoAimTrack then
+			-- onRenderStepped corre cada frame: sin el flag esto inunda el Output.
+			self._warnedNoAimTrack = true
+			warn(("[BulletWeapon] %s sin aimTrack"):format(self.instance.Name))
 		end
 	end
 end
@@ -1302,8 +1406,19 @@ function BulletWeapon:onStepped(dt)
 
 	local now = os.clock()
 
+	local empty = self:getAmmoInWeapon() <= 0
+	self:_setAmmoPartsHidden(empty)
+
 	if self:_resolveMovingParts() then
-		local empty = self:getAmmoInWeapon() <= 0
+		self._reloadHinge:resolve()
+		self._reloadHinge:step(
+			dt,
+			self.reloading == true,
+			self:getConfigValue("ReloadHingeAngle"),
+			self:getConfigValue("ReloadHingeOpenTime"),
+			self:getConfigValue("ReloadHingeCloseTime")
+		)
+
 		for _, entry in self._movingParts do
 			local name = entry.group.name
 			local locked = empty and self:getConfigValue(name .. "LockOnEmpty")

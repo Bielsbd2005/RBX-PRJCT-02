@@ -18,7 +18,7 @@ autorados a mano antes de la migración): para migrar esos, pon
 
 El clon se limpia de todo lo que sólo sirve para disparar: scripts, texturas de
 wrap grabadas tras un playtest, sonidos (`Fired`, `Reload`), attachments
-(`HandleAttachment`, `TipAttachment`, `MuzzleFlash0/1`) y efectos (beams,
+(`HandleAttachment`, `TipAttachment`) y efectos (beams,
 partículas, luces). En la Tool siguen: el WeaponsSystem los busca por nombre.
 
 El clon se genera **anclado** (y sin colisión). La Tool viene desanclada y sin

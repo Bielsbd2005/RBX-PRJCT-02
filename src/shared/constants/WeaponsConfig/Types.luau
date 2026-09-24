@@ -12,10 +12,16 @@ export type BaseWeaponConfig = {
 	AmmoCapacity: number?,
 	ReloadTime: number?,
 	ReloadAnimation: string?,
+	ReloadHingeAngle: number?,
+	ReloadHingeOpenTime: number?,
+	ReloadHingeCloseTime: number?,
 	RunAnimation: string?,
 	HasScope: boolean?,
 	ZoomFactor: number?,
 	CrosshairScale: number?,
+	CrosshairSpread: number?,
+	CrosshairAimSpread: number?,
+	CrosshairHideTop: boolean?,
 }
 
 export type BulletWeaponConfig = BaseWeaponConfig & {
@@ -28,12 +34,16 @@ export type BulletWeaponConfig = BaseWeaponConfig & {
 
 	-- Proyectil
 	ShotEffect: string?,
+	AmmoPart: string?,
 	NumProjectiles: number?,
+	IsShotgun: boolean?,
+	OptimalRange: number?,
 	BulletSpeed: number?,
 	GravityFactor: number?,
 	MaxDistance: number?,
 	MinSpread: number?,
 	MaxSpread: number?,
+	HipFireSpread: number?,
 	ShouldMovePart: boolean?,
 	TracerFadeTime: number?,
 	BeamWidth0: number?,
@@ -41,6 +51,7 @@ export type BulletWeaponConfig = BaseWeaponConfig & {
 
 	-- Daño
 	HitDamage: number?,
+	HeadshotMultiplier: number?,
 	FullDamageDistance: number?,
 	ZeroDamageDistance: number?,
 	ExplodeOnImpact: boolean?,
@@ -86,12 +97,6 @@ export type BulletWeaponConfig = BaseWeaponConfig & {
 	FiredPlaybackSpeedRange: number?,
 
 	-- VFX
-	MuzzleFlashTime: number?,
-	MuzzleFlashSize0: number?,
-	MuzzleFlashSize1: number?,
-	MuzzleFlashRotation0: number?,
-	MuzzleFlashRotation1: number?,
-	NumMuzzleParticles: number?,
 	NumHitParticles: number?,
 	HitMarkEffect: string?,
 	HitMarkHeatEffect: boolean?,

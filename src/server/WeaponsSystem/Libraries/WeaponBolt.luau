@@ -8,15 +8,13 @@
 	cliente cuando alguien dispara, así que todos lo ven.
 ]]
 
-local LOCAL_WELD_NAME = "BoltClientWeld"
+local WeaponJoint = require(script.Parent:WaitForChild("WeaponJoint"))
+
 -- Fracción del ciclo de ida (hacia atrás, o hacia delante en SniperBolt); el resto es el regreso.
 local PULL_FRACTION = 0.3
 
 type Bolt = {
-	part: BasePart,
-	joint: JointInstance,
-	prop: string,
-	base: CFrame,
+	entry: WeaponJoint.Entry,
 	axis: Vector3, -- unitario, en el espacio local de la parte
 }
 
@@ -48,54 +46,6 @@ function WeaponBolt.new(tool: Instance, partName: string): WeaponBolt
 	}, WeaponBolt)
 end
 
--- Un WeldConstraint no admite offset: se desactiva en local y se sustituye por un Weld
--- equivalente (tampoco replica).
-local function _resolveJoint(part: BasePart, tool: Instance): (JointInstance?, string)
-	local existing = part:FindFirstChild(LOCAL_WELD_NAME)
-	if existing and existing:IsA("Weld") then
-		return existing, "C1"
-	end
-
-	for _, j in part:GetJoints() do
-		if j:IsA("JointInstance") then
-			local other = if j.Part0 == part then j.Part1 else j.Part0
-			if other and other:IsDescendantOf(tool) then
-				return j, if j.Part0 == part then "C0" else "C1"
-			end
-		elseif j:IsA("WeldConstraint") and j.Enabled then
-			local other = if j.Part0 == part then j.Part1 else j.Part0
-			if other and other:IsDescendantOf(tool) then
-				local weld = Instance.new("Weld")
-				weld.Name = LOCAL_WELD_NAME
-				weld.Part0 = other
-				weld.Part1 = part
-				weld.C0 = other.CFrame:ToObjectSpace(part.CFrame)
-				j.Enabled = false
-				weld.Parent = part
-				return weld, "C1"
-			end
-		end
-	end
-	return nil, "C1"
-end
-
--- Eje local de la parte más alineado con la dirección de ida. El atributo BoltAxis
--- (Vector3, espacio local de la parte) lo fuerza si el modelo no está alineado.
-local function _resolveAxis(part: BasePart, backWorld: Vector3): Vector3
-	local override = part:GetAttribute("BoltAxis")
-	if typeof(override) == "Vector3" and override.Magnitude > 1e-3 then
-		return override.Unit
-	end
-	local v = part.CFrame:VectorToObjectSpace(backWorld)
-	local ax, ay, az = math.abs(v.X), math.abs(v.Y), math.abs(v.Z)
-	if ax >= ay and ax >= az then
-		return Vector3.new(math.sign(v.X), 0, 0)
-	elseif ay >= az then
-		return Vector3.new(0, math.sign(v.Y), 0)
-	end
-	return Vector3.new(0, 0, math.sign(v.Z))
-end
-
 -- Una vez por arma: los descendientes del Tool replican juntos, así que no hace falta
 -- reintentar. backWorld = dirección de ida en mundo (boca→culata, o al revés en SniperBolt).
 function WeaponBolt.resolve(self: WeaponBolt, backWorld: Vector3)
@@ -108,28 +58,10 @@ function WeaponBolt.resolve(self: WeaponBolt, backWorld: Vector3)
 		return
 	end
 
-	local model = self.tool:FindFirstChildOfClass("Model")
-	local root = model and model.PrimaryPart
-	for _, part in self.tool:GetDescendants() do
-		if part.Name ~= self.partName or not part:IsA("BasePart") then
-			continue
-		end
-		-- Mover la raíz del ensamblaje arrastraría el arma entera.
-		if part == root or part == self.tool:FindFirstChild("Handle") then
-			warn(`[WeaponBolt] {part:GetFullName()}: no puede ser el PrimaryPart ni el Handle`)
-			continue
-		end
-		local joint, prop = _resolveJoint(part, self.tool)
-		if not joint then
-			warn(`[WeaponBolt] {part:GetFullName()}: no está soldado a otra parte del arma`)
-			continue
-		end
+	for _, entry in WeaponJoint.collect(self.tool, self.partName) do
 		table.insert(bolts, {
-			part = part,
-			joint = joint,
-			prop = prop,
-			base = (joint :: any)[prop],
-			axis = _resolveAxis(part, backWorld),
+			entry = entry,
+			axis = WeaponJoint.resolveAxis(entry.part, backWorld, "BoltAxis"),
 		})
 	end
 end
@@ -179,10 +111,7 @@ function WeaponBolt.step(self: WeaponBolt, now: number, travel: number, locked: 
 	self.applied = f
 
 	for _, bolt in bolts do
-		if bolt.joint.Parent then
-			-- part_new = part_old * CFrame.new(offset) ⇒ prop = CFrame.new(-offset) * base
-			(bolt.joint :: any)[bolt.prop] = CFrame.new(-bolt.axis * (f * travel)) * bolt.base
-		end
+		WeaponJoint.setTransform(bolt.entry, CFrame.new(bolt.axis * (f * travel)))
 	end
 end
 
@@ -191,9 +120,7 @@ function WeaponBolt.reset(self: WeaponBolt)
 	self.wasLocked = false
 	self.applied = 0
 	for _, bolt in self.bolts or {} do
-		if bolt.joint.Parent then
-			(bolt.joint :: any)[bolt.prop] = bolt.base
-		end
+		WeaponJoint.reset(bolt.entry)
 	end
 end
 

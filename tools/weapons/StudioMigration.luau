@@ -127,7 +127,7 @@ if not displayRoot then
 end
 
 -- Piezas funcionales del arma que el WeaponsSystem busca por nombre en la Tool
--- (TipAttachment, HandleAttachment, MuzzleFlash*, sonidos Fired/Reload...). En
+-- (TipAttachment, HandleAttachment, sonidos Fired/Reload...). En
 -- el display nadie las lee: el locker encuadra por PrimaryPart y el holster
 -- suelda cada BasePart. Sólo pesan —el holster replica el clon a todos los
 -- clientes— y un emisor o luz guardado encendido brillaría en la espalda.
@@ -149,7 +149,7 @@ local function stripNonDisplayContent(model)
 	local strippedFunctional = 0
 
 	for _, descendant in model:GetDescendants() do
-		-- Destruir un Attachment se lleva a sus hijos (el Beam del muzzle, por
+		-- Destruir un Attachment se lleva a sus hijos (los emitters de TipAttachment, por
 		-- ejemplo), que siguen en la lista: no contarlos dos veces.
 		if not descendant:IsDescendantOf(model) then
 			continue

@@ -12,8 +12,6 @@ return {
 		GravityFactor = 0.5,
 		HitDamage = 12,
 		MaxSpread = 1,
-		MuzzleFlashSize0 = 1.1,
-		MuzzleFlashSize1 = 1.4,
 		RecoilDecay = 0.85,
 		RecoilMax = 0.3,
 		RecoilMin = 0.15,

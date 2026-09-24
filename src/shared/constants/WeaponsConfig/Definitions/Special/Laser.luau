@@ -13,8 +13,6 @@ return {
 		HitDamage = 25,
 		HitMarkEffect = "Scorch",
 		MaxSpread = 0.2,
-		MuzzleFlashSize0 = 0.9,
-		MuzzleFlashSize1 = 1.1,
 		RecoilDecay = 0.8,
 		RecoilMax = 0.2,
 		RecoilMin = 0.1,

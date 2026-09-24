@@ -1,4 +1,4 @@
---!nonstrict
+--!strict
 --[[
 	Spawnea un orbe de Health desde el suelo bajo la victima cada vez que el
 	jugador local mata a alguien. El orbe orbita en su sitio durante unos
@@ -92,8 +92,6 @@ local TEMPLATE_NAME = "Health"
 
 type PickupEntry = {
 	item: Instance,
-	character: Model,
-	rootPart: BasePart,
 	primary: BasePart?,
 	basePartSizes: { [BasePart]: Vector3 },
 	baseScale: number,
@@ -187,12 +185,29 @@ local function _setAnchored(instance: Instance, anchored: boolean, canCollide: b
 	end
 end
 
-local function _canPickupHealth(character: Model): boolean
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	if not humanoid then
-		return false
+-- Se resuelve en cada tick y no al crear el orbe: el killer puede morir y reaparecer
+-- (LoadCharacter destruye el cuerpo) antes de recogerlo, y un cadáver no recoge.
+local function _resolveLivePicker(): (BasePart?, Humanoid?)
+	local character = Players.LocalPlayer and Players.LocalPlayer.Character
+	if not character then
+		return nil, nil
 	end
-	return humanoid.Health < humanoid.MaxHealth
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local rootPart = character:FindFirstChild("HumanoidRootPart")
+	if not humanoid or humanoid.Health <= 0 or not rootPart or not rootPart:IsA("BasePart") then
+		return nil, nil
+	end
+	return rootPart, humanoid
+end
+
+local function _canPickupHealth(humanoid: Humanoid): boolean
+	return humanoid.Health > 0 and humanoid.Health < humanoid.MaxHealth
+end
+
+local function _startDespawn(entry: PickupEntry)
+	entry.state = "Despawning"
+	entry.despawnElapsed = 0
+	entry.floatAnchorPos = _getPivotPosition(entry.item) or entry.floatAnchorPos
 end
 
 local function _scaleItem(item: Instance, ratio: number, baseScale: number, basePartSizes: { [BasePart]: Vector3 }?)
@@ -236,11 +251,11 @@ end
 
 local function _pickupTickEntry(entry: PickupEntry, dt: number)
 	local item = entry.item
-	local rootPart = entry.rootPart
-	if not item.Parent or not rootPart.Parent then
+	if not item.Parent then
 		entry.active = false
 		return
 	end
+	local rootPart, humanoid = _resolveLivePicker()
 
 	local state = entry.state
 	if state == "Falling" then
@@ -270,8 +285,8 @@ local function _pickupTickEntry(entry: PickupEntry, dt: number)
 		local bob = math.sin(entry.floatTime * FLOAT_FREQUENCY * math.pi * 2) * FLOAT_AMPLITUDE * riseSmoothT
 		_setPivot(item, CFrame.new(centerPos + Vector3.new(0, bob, 0)))
 
-		local distToPlayer = (entry.floatAnchorPos - rootPart.Position).Magnitude
-		if distToPlayer <= MAGNET_RADIUS and _canPickupHealth(entry.character) then
+		local distToPlayer = if rootPart then (entry.floatAnchorPos - rootPart.Position).Magnitude else math.huge
+		if distToPlayer <= MAGNET_RADIUS and humanoid and _canPickupHealth(humanoid) then
 			entry.state = "Magnet"
 			local p0 = _getPivotPosition(item) or entry.floatAnchorPos
 			entry.p0 = p0
@@ -295,6 +310,10 @@ local function _pickupTickEntry(entry: PickupEntry, dt: number)
 	end
 
 	if state == "Magnet" then
+		if not rootPart then
+			_startDespawn(entry)
+			return
+		end
 		local duration = entry.duration or 0.5
 		entry.t += dt / duration
 		entry.p2 = rootPart.Position
@@ -346,6 +365,11 @@ local function _pickupLoopTick(dt: number)
 			_pickupTickEntry(entry, dt)
 		end
 		if not entry.active then
+			-- Red de seguridad: un orbe que sale del bucle sin recogerse no puede quedarse
+			-- congelado en ClientVisualEffects.
+			if not entry.picked and entry.item.Parent then
+				entry.item:Destroy()
+			end
 			local n = #activePickups
 			activePickups[i] = activePickups[n]
 			activePickups[n] = nil
@@ -365,7 +389,7 @@ local function _ensurePickupLoop()
 	pickupLoopConn = RunService.Heartbeat:Connect(_pickupLoopTick)
 end
 
-local function _spawnHealth(victimPos: Vector3, folder: Folder, character: Model, rootPart: BasePart)
+local function _spawnHealth(victimPos: Vector3, folder: Folder)
 	local template = _resolveTemplate()
 	if not template then
 		return
@@ -401,8 +425,6 @@ local function _spawnHealth(victimPos: Vector3, folder: Folder, character: Model
 
 	table.insert(activePickups, {
 		item = item,
-		character = character,
-		rootPart = rootPart,
 		primary = primary,
 		basePartSizes = basePartSizes,
 		baseScale = baseScale,
@@ -441,23 +463,13 @@ function PickupDropEffect.Play(victimPos: Vector3?)
 		return
 	end
 
-	local player = Players.LocalPlayer
-	if not player then
-		return
-	end
-
-	local character = player.Character
-	if not character then
-		return
-	end
-
-	local rootPart = character:FindFirstChild("HumanoidRootPart")
-	if not rootPart or not rootPart:IsA("BasePart") then
+	-- Aunque el killer esté muerto (trade): si reaparece a tiempo, puede recogerlo.
+	if not Players.LocalPlayer then
 		return
 	end
 
 	local folder = _ensureFolder()
-	_spawnHealth(victimPos, folder, character, rootPart)
+	_spawnHealth(victimPos, folder)
 end
 
 return PickupDropEffect

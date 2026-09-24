@@ -16,8 +16,6 @@ return {
 		HitDamage = 14,
 		MaxSpread = 1.4,
 		MinSpread = 0.3,
-		MuzzleFlashSize0 = 1.3,
-		MuzzleFlashSize1 = 1.6,
 		RecoilDecay = 0.88,
 		RecoilMax = 0.5,
 		RecoilMin = 0.2,

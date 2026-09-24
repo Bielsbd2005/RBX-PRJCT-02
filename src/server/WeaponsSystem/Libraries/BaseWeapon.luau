@@ -1,6 +1,8 @@
+--!strict
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
+local GuiService = game:GetService("GuiService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local IsServer = RunService:IsServer()
@@ -295,7 +297,7 @@ function BaseWeapon:onEquippedChanged()
 		RunService:UnbindFromRenderStep(self.activeRenderStepName)
 		self.activeRenderStepName = nil
 	end
-	self:cleanupConnection("localStepped")
+	self:cleanupConnection("localStepped", "localMenuOpened", "localFocusLost")
 
 	if not IsServer and self.weaponsSystem then
 		self.weaponsSystem.setWeaponEquipped(self, self.equipped)
@@ -306,6 +308,15 @@ function BaseWeapon:onEquippedChanged()
 					self:onRenderStepped(dt)
 				end)
 				self.activeRenderStepName = renderStepName
+
+				-- Con el menú de Roblox (Esc) o al perder el foco de la ventana, el botón se
+				-- suelta sin que llegue Tool.Deactivated: un automático seguía disparando solo.
+				self.connections.localMenuOpened = GuiService.MenuOpened:Connect(function()
+					self:setActivated(false)
+				end)
+				self.connections.localFocusLost = UserInputService.WindowFocusReleased:Connect(function()
+					self:setActivated(false)
+				end)
 			end
 			self.connections.localStepped = RunService.Heartbeat:Connect(function(dt)
 				self:onStepped(dt)
@@ -331,16 +342,6 @@ function BaseWeapon:setActivated(activated, fromNetwork)
 
 	if self.activated == activated then
 		return
-	end
-
-	-- Debounce server-side contra spam por exploit del RemoteEvent.
-	if IsServer and fromNetwork then
-		local now = os.clock()
-		local last = self._lastActivatedAt or 0
-		if now - last < 0.1 then
-			return
-		end
-		self._lastActivatedAt = now
 	end
 
 	self.activated = activated
@@ -738,12 +739,10 @@ function BaseWeapon:onStepped(dt)
 	-- sumaría latencia frente al disparo manual cuando nextFireTime cae entre ticks.
 	if not self._autoAimIsAimingAtEnemy then return end
 
-	if self.instance and self.instance:GetAttribute("Shotgun") == true then
-		local optimalRange = self.instance:GetAttribute("OptimalRange")
-		if type(optimalRange) ~= "number" or optimalRange <= 0 then
-			optimalRange = 30
-		end
-		if (targetPos - cameraOrigin).Magnitude > optimalRange then return end
+	if self:getConfigValue("IsShotgun") == true
+		and (targetPos - cameraOrigin).Magnitude > self:getConfigValue("OptimalRange")
+	then
+		return
 	end
 
 	if os.clock() < (self.nextFireTime or 0) then return end
@@ -942,23 +941,44 @@ function BaseWeapon:onReloaded(player, fromNetwork)
 	-- El token invalida callbacks superpuestos (cancelReload o un reload nuevo).
 	self._reloadToken = (self._reloadToken or 0) + 1
 	local token = self._reloadToken
+	self._reloadEndsAt = startTime + reloadTime
 
 	task.delay(reloadTime, function()
 		if self._reloadToken ~= token then return end
 		if not self.reloading then return end
 
-		self.instance:SetAttribute("CurrentAmmo", self:getConfigValue("AmmoCapacity"))
-		self.reloading = false
-		self.instance:SetAttribute("IsReloading", false)
-		-- Reponer canReload: si no, un arma a tope que nunca disparó no podría
-		-- volver a recargar.
-		self.canReload = true
+		self:_finishReload()
 
 		-- El pulso de cierre: es el que se lee como "cargador dentro".
 		if isLocalReload then
 			Haptics.play("ReloadEnd")
 		end
 	end)
+end
+
+function BaseWeapon:_finishReload()
+	self.instance:SetAttribute("CurrentAmmo", self:getConfigValue("AmmoCapacity"))
+	self.reloading = false
+	self.instance:SetAttribute("IsReloading", false)
+	-- Reponer canReload: si no, un arma a tope que nunca disparó no podría
+	-- volver a recargar.
+	self.canReload = true
+end
+
+--[[
+	Servidor: cierra la recarga si le falta menos de `tolerance`. El cliente la empieza
+	antes (el servidor la arranca al recibir la petición) y su primer disparo al
+	terminar llega cuando el task.delay del servidor aún no ha corrido.
+]]
+function BaseWeapon:completeReloadIfDue(tolerance: number): ()
+	if not IsServer or not self.reloading or not self._reloadEndsAt then
+		return
+	end
+	if os.clock() < self._reloadEndsAt - tolerance then
+		return
+	end
+	self._reloadToken = (self._reloadToken or 0) + 1
+	self:_finishReload()
 end
 
 function BaseWeapon:cancelReload(player, fromNetwork)

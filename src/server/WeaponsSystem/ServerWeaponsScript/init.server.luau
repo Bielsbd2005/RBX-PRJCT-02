@@ -1,3 +1,4 @@
+--!strict
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
@@ -16,7 +17,13 @@ local function initializeWeaponsSystemAssets()
 		local decalNonZeroTransparencyValues = { ["ScorchMark"] = 0.25 }
 		local particleEmittersToDisable = { ["Smoke"] = true }
 		local imageLabelNonZeroTransparencyValues = { ["Impact"] = 0.25 }
+		-- FireZone se autora entero en Studio (ver docs/FIRE-ZONE.md): su transparencia,
+		-- sus decals y sus emitters quedan como estén.
+		local fireZone = effectsFolder:FindFirstChild("FireZone")
 		for _, descendant in effectsFolder:GetDescendants() do
+			if fireZone and (descendant == fireZone or descendant:IsDescendantOf(fireZone)) then
+				continue
+			end
 			if descendant:IsA("BasePart") then
 				if partNonZeroTransparencyValues[descendant.Name] ~= nil then
 					descendant.Transparency = partNonZeroTransparencyValues[descendant.Name]
@@ -24,6 +31,10 @@ local function initializeWeaponsSystemAssets()
 					descendant.Transparency = 0
 				end
 			elseif descendant:IsA("Decal") then
+				-- El ScorchMark del RPG (…Explosion.ScorchMark) queda como se autora en Studio.
+				if descendant.Name == "ScorchMark" and descendant:FindFirstAncestor("Explosion") then
+					continue
+				end
 				descendant.Transparency = 0
 				if decalNonZeroTransparencyValues[descendant.Name] ~= nil then
 					descendant.Transparency = decalNonZeroTransparencyValues[descendant.Name]

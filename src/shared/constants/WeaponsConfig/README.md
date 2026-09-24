@@ -43,8 +43,7 @@ arma: WeaponsSystem avisa y la ignora.
 - Los Tools que viven en un almacén (`ServerStorage`, `ReplicatedStorage`) son
   templates: `WeaponsSystem.onWeaponAdded` los ignora aunque lleven el tag.
 - `WeaponsSystem.createWeaponForInstance` toma `WeaponType` de la definición;
-  el Tool ya no necesita ese atributo.
+  el Tool no lleva ese atributo.
 - `Hotbar` y `BotAI` leen `AmmoCapacity` / `ShotCooldown` vía
   `WeaponsConfig.GetValueForTool(tool, key)`.
-- El locker pinta stats con `DisplayStats` en local; ya no existe
-  `Network.WeaponStats` ni `WeaponStatsService`.
+- El locker pinta stats con `DisplayStats` en local, sin pedirlas al server.
