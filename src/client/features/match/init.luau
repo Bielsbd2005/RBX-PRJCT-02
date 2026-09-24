@@ -889,6 +889,11 @@ function MatchFeature.start(menuController: any): any
 			hud:setEnabled(false)
 			return
 		end
+		-- Una muerte del mismo frame que el fin de ronda llega DESPUÉS de RoundEnded (ByteNet
+		-- vacía los broadcasts antes que los envíos por jugador) y taparía los Resultados.
+		if not MatchState.isActive() then
+			return
+		end
 
 		MatchState.setPhase("Dying")
 		respawnRequestSent = false
