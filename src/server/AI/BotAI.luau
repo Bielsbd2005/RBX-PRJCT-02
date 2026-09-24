@@ -44,45 +44,24 @@ local NAV_PHASE_ATTR = "NavPhase"
 -- suspendido, el FSM arranca igual pasado este tiempo en vez de colgarse.
 local SPAWN_GROUND_TIMEOUT = 1.5
 
-local _weaponDataRemote: RemoteEvent? = nil
-local _weaponFiredRemote: RemoteEvent? = nil
+-- El WeaponsSystem vivo es el que ServerWeaponsScript copia a ReplicatedStorage al
+-- arrancar; se resuelve al primer disparo porque al cargar este módulo puede no estar.
+local _weaponsSystem: any = nil
+local _weaponsNetwork: any = nil
 
---[[
-@desc Resolves and caches the WeaponData RemoteEvent lazily: it may not exist yet at
-@desc module load, and hit-direction indicators would be lost for the whole server.
-]]
-local function _getWeaponDataRemote(): RemoteEvent?
-	if _weaponDataRemote and _weaponDataRemote.Parent then
-		return _weaponDataRemote
+local function _getWeaponsSystem(): (any, any)
+	if not _weaponsSystem then
+		local folder = ReplicatedStorage:FindFirstChild("WeaponsSystem")
+		local systemModule = folder and folder:FindFirstChild("WeaponsSystem")
+		local libraries = folder and folder:FindFirstChild("Libraries")
+		local networkModule = libraries and libraries:FindFirstChild("WeaponsNetwork")
+		if not (systemModule and networkModule) then
+			return nil, nil
+		end
+		_weaponsSystem = require(systemModule :: ModuleScript)
+		_weaponsNetwork = require(networkModule :: ModuleScript)
 	end
-	local wsFolder = ReplicatedStorage:FindFirstChild("WeaponsSystem")
-	local remote = wsFolder and wsFolder:FindFirstChild("WeaponData")
-	if remote and remote:IsA("RemoteEvent") then
-		_weaponDataRemote = remote
-		return remote
-	end
-	return nil
-end
-
--- Broadcast de disparos con LOD por distancia observador↔tirador (ver
--- BotConfig.Combat.ShotBroadcast*). Cuadrados precalculados: el loop de
--- broadcast corre por jugador por disparo.
-local SHOT_RANGE2 = BotConfig.Combat.ShotBroadcastRange ^ 2
-local SHOT_LOD2 = BotConfig.Combat.ShotBroadcastLodDistance ^ 2
-local SHOT_LOD_DIVISOR = math.max(1, math.floor(BotConfig.Combat.ShotBroadcastLodDivisor))
-
-local function _getWeaponFiredRemote(): RemoteEvent?
-	if _weaponFiredRemote and _weaponFiredRemote.Parent then
-		return _weaponFiredRemote
-	end
-	local wsFolder = ReplicatedStorage:FindFirstChild("WeaponsSystem")
-	local network = wsFolder and wsFolder:FindFirstChild("Network")
-	local fired = network and network:FindFirstChild("WeaponFired")
-	if fired and fired:IsA("RemoteEvent") then
-		_weaponFiredRemote = fired
-		return fired
-	end
-	return nil
+	return _weaponsSystem, _weaponsNetwork
 end
 
 local AGENT_PARAMS = {
@@ -121,61 +100,6 @@ local PLAYER_PRIORITY_BIAS = BotConfig.Combat.PlayerPriorityBias
 local AIM_GATE_COS = math.cos(math.rad(2))
 
 local EYE_OFFSET = Vector3.new(0, 1.5, 0)
-
--- Cache Player -> HumanoidRootPart del Character actual, para filtrar el broadcast de disparos por rango.
-local _playerRootByPlayer: { [Player]: BasePart } = {}
-
-local function _updateCachedPlayerRoot(player: Player, char: Model)
-	local root = char:FindFirstChild("HumanoidRootPart")
-	if root and root:IsA("BasePart") then
-		_playerRootByPlayer[player] = root
-		return
-	end
-	local conn: RBXScriptConnection?
-	conn = char.ChildAdded:Connect(function(child)
-		if child.Name == "HumanoidRootPart" and child:IsA("BasePart") then
-			if player.Character == char then
-				_playerRootByPlayer[player] = child :: BasePart
-			end
-			if conn then conn:Disconnect(); conn = nil end
-		end
-	end)
-	char.AncestryChanged:Connect(function(_, parent)
-		if parent == nil and conn then
-			conn:Disconnect()
-			conn = nil
-		end
-	end)
-end
-
--- Dedupe guard: a player joining between PlayerAdded:Connect and the initial GetPlayers()
--- loop would be wired twice (same race AI/init.luau guards with _wiredPlayers).
-local _rootCacheWiredPlayers: { [Player]: true } = {}
-
-local function _wirePlayerRootCache(player: Player)
-	if _rootCacheWiredPlayers[player] then
-		return
-	end
-	_rootCacheWiredPlayers[player] = true
-	if player.Character then
-		_updateCachedPlayerRoot(player, player.Character)
-	end
-	player.CharacterAdded:Connect(function(char)
-		_updateCachedPlayerRoot(player, char)
-	end)
-	player.CharacterRemoving:Connect(function()
-		_playerRootByPlayer[player] = nil
-	end)
-end
-
-Players.PlayerAdded:Connect(_wirePlayerRootCache)
-for _, _existingPlayer in Players:GetPlayers() do
-	_wirePlayerRootCache(_existingPlayer)
-end
-Players.PlayerRemoving:Connect(function(p)
-	_rootCacheWiredPlayers[p] = nil
-	_playerRootByPlayer[p] = nil
-end)
 
 local STATES = {
 	PATROL = "PATROL",
@@ -1190,9 +1114,9 @@ function BotAI:Start(
 
 					local hit = math.random(1, 100) <= precision
 					local weapon = self._tool
-					local firedRemote = _getWeaponFiredRemote()
+					local weaponsSystem, weaponsNetwork = _getWeaponsSystem()
 
-					if weapon and firedRemote then
+					if weapon and weaponsNetwork then
 						local tipAttach = self._tipAttachment
 						local origin: Vector3
 						if tipAttach and tipAttach.Parent then
@@ -1222,45 +1146,26 @@ function BotAI:Start(
 							id = self._nextShotId,
 						}
 						self._nextShotId += 1
-						-- LOD por distancia (ver BotConfig.Combat.ShotBroadcast*):
-						-- cada evento que llega al cliente es una simulación
-						-- completa de bala. A los observadores lejanos no se les
-						-- mandan los fallos, y de los aciertos solo 1 de cada
-						-- SHOT_LOD_DIVISOR. El id sigue siendo único y creciente.
-						local shotId = fireInfo.id
-						local sendFarShot = hit and (shotId % SHOT_LOD_DIVISOR == 0)
-						for p, pRoot in _playerRootByPlayer do
-							if pRoot.Parent then
-								local delta = origin - pRoot.Position
-								local pd2 = delta:Dot(delta)
-								if pd2 < SHOT_LOD2 or (pd2 < SHOT_RANGE2 and sendFarShot) then
-									firedRemote:FireClient(p, nil, weapon, fireInfo)
-								end
-							end
-						end
+						weaponsNetwork.broadcastWeaponFired(nil, weapon, fireInfo, { origin = origin, hit = hit })
 					end
 
-					if hit then
+					-- Sin Tool (_setupTool no encontró el template) el bot no dispara: si no,
+					-- haría daño con disparos invisibles.
+					if hit and weapon then
 						-- Reuse the hum cached by _evaluateTarget instead of a
 						-- FindFirstChildOfClass per landed shot.
 						local targetHum = self._currentTargetHum
 						if not targetHum or not targetHum.Parent then
 							targetHum = currentTarget:FindFirstChildOfClass("Humanoid")
 						end
-						if targetHum and (targetHum :: Humanoid).Health > 0 then
-							local dmg = math.random(profile.DamageMin, profile.DamageMax)
-
-							LastAttackerStore.set(targetHum :: Humanoid, self._fakeUserId, if weapon then weapon.Name else "NPC")
-
-							;(targetHum :: Humanoid):TakeDamage(dmg)
-
-							if isPlayer then
-								local victimPlayer = self._currentTargetPlayer
-								local dataRemote = _getWeaponDataRemote()
-								if victimPlayer and dataRemote then
-									dataRemote:FireClient(victimPlayer, "HitByOtherPlayer", rootPart.Position)
-								end
-							end
+						if targetHum and (targetHum :: Humanoid).Health > 0 and weaponsSystem then
+							weaponsSystem.applyBotDamage(
+								targetHum :: Humanoid,
+								math.random(profile.DamageMin, profile.DamageMax),
+								self._dummy,
+								self._fakeUserId,
+								weapon.Name
+							)
 						end
 					end
 				end

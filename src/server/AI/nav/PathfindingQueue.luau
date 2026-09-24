@@ -21,6 +21,9 @@ type Entry = {
 	originPart: BasePart,
 	dest: Vector3,
 	callback: (ok: boolean) -> (),
+	-- true = el que la pidió ya no la quiere (bot muerto, destino nuevo): se descarta
+	-- sin ComputeAsync y sin callback.
+	isStale: (() -> boolean)?,
 }
 
 local PathfindingQueue = {}
@@ -36,13 +39,20 @@ local _inFlight = 0
 -- whose Path is mid-compute are requeued. Each compute clears its own flag.
 local _busyPaths: { [Path]: boolean } = {}
 
-function PathfindingQueue.enqueue(path: Path, originPart: BasePart, dest: Vector3, callback: (ok: boolean) -> ())
+function PathfindingQueue.enqueue(
+	path: Path,
+	originPart: BasePart,
+	dest: Vector3,
+	callback: (ok: boolean) -> (),
+	isStale: (() -> boolean)?
+)
 	_tail += 1
 	_queue[_tail] = {
 		path = path,
 		originPart = originPart,
 		dest = dest,
 		callback = callback,
+		isStale = isStale,
 	}
 end
 
@@ -72,6 +82,9 @@ RunService.Heartbeat:Connect(function()
 		_head += 1
 		if not entry then
 			break
+		end
+		if entry.isStale and entry.isStale() then
+			continue
 		end
 		if _busyPaths[entry.path] then
 			-- This Path is mid-compute. Push to the back; retried once the

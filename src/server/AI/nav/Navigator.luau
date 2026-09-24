@@ -44,6 +44,9 @@ export type Navigator = typeof(setmetatable({} :: {
 	_lastFailureAt: number,
 	_postBlockedUntil: number,
 	_generation: number,
+	_computePending: boolean,
+	_deferredDest: Vector3?,
+	_deferredScheduled: boolean,
 	_conns: { RBXScriptConnection },
 	_stopped: boolean,
 }, Navigator))
@@ -62,6 +65,9 @@ function Navigator.new(humanoid: Humanoid, rootPart: BasePart, agentParams: { [s
 		_lastFailureAt = 0,
 		_postBlockedUntil = 0,
 		_generation = 0,
+		_computePending = false,
+		_deferredDest = nil,
+		_deferredScheduled = false,
 		_conns = {},
 		_stopped = false,
 	}, Navigator) :: Navigator
@@ -71,6 +77,8 @@ function Navigator.new(humanoid: Humanoid, rootPart: BasePart, agentParams: { [s
 		self._postBlockedUntil = os.clock() + BotConfig.Pathfinding.PostBlockedCooldown
 		self._generation += 1
 		self._isMoving = false
+		self._computePending = false
+		self._deferredDest = nil
 		self:_halt()
 		self._currentWaypoints = nil
 		-- Limpiar _currentDest: si no, una goTo posterior al mismo destino cae en el
@@ -144,6 +152,28 @@ function Navigator:goTo(dest: Vector3, opts: GoToOpts?)
 		end
 	end
 
+	-- Destino que se mueve (CHASE a 20 Hz tras un objetivo que corre): el throttle de
+	-- same-dest no lo cubre y cada llamada lanzaría un ComputeAsync. Como mucho uno por
+	-- MinComputeInterval; se guarda el último destino y se lanza al cumplirse.
+	local sinceCompute = now - self._lastComputeAt
+	if (self._isMoving or self._computePending) and sinceCompute < BotConfig.Pathfinding.MinComputeInterval then
+		self._onArrived = opts and opts.onArrived
+		self._onFailed = opts and opts.onFailed
+		self._deferredDest = dest
+		if not self._deferredScheduled then
+			self._deferredScheduled = true
+			task.delay(BotConfig.Pathfinding.MinComputeInterval - sinceCompute, function()
+				self._deferredScheduled = false
+				local deferred = self._deferredDest
+				self._deferredDest = nil
+				if deferred and not self._stopped then
+					self:goTo(deferred, { onArrived = self._onArrived, onFailed = self._onFailed })
+				end
+			end)
+		end
+		return
+	end
+
 	self._onArrived = opts and opts.onArrived
 	self._onFailed = opts and opts.onFailed
 
@@ -152,6 +182,8 @@ function Navigator:goTo(dest: Vector3, opts: GoToOpts?)
 
 	self._currentDest = dest
 	self._lastComputeAt = now
+	self._computePending = true
+	self._deferredDest = nil
 
 	-- Se pasa el rootPart: la cola lee la posición al lanzar ComputeAsync, así el
 	-- path arranca donde el bot ESTÁ y no donde estaba al encolar.
@@ -159,6 +191,7 @@ function Navigator:goTo(dest: Vector3, opts: GoToOpts?)
 		if self._stopped or self._generation ~= gen then
 			return
 		end
+		self._computePending = false
 
 		if not ok or self._path.Status ~= Enum.PathStatus.Success then
 			-- Limpiar _currentDest: si no, el throttle de same-dest bloquea futuras
@@ -193,6 +226,9 @@ function Navigator:goTo(dest: Vector3, opts: GoToOpts?)
 		self._currentWaypoints = wps
 		self._isMoving = true
 		self:_startWalk(gen)
+	end, function(): boolean
+		-- Superada por otra goTo, cancel o Stop: la cola la descarta sin computar.
+		return self._stopped or self._generation ~= gen
 	end)
 end
 
@@ -324,6 +360,8 @@ function Navigator:cancel(notifyFailed: boolean?)
 	end
 	self._generation += 1
 	self._isMoving = false
+	self._computePending = false
+	self._deferredDest = nil
 	-- Cortar la marcha aquí y no delegarlo al walk loop: hasta su próximo despertar
 	-- (o nunca, si estaba entre waypoints) el rig seguiría corriendo. BotAI llama
 	-- cancel() constantemente en combate.
@@ -351,9 +389,11 @@ function Navigator:recomputeLast()
 	local dest = self._currentDest
 	local onArrived = self._onArrived
 	local onFailed = self._onFailed
-	-- Bumpear gen aborta el walk en curso; isMoving=false salta el throttle de goTo.
+	-- Bumpear gen aborta el walk en curso; isMoving/computePending=false saltan los
+	-- throttles de goTo.
 	self._generation += 1
 	self._isMoving = false
+	self._computePending = false
 	self:goTo(dest, { onArrived = onArrived, onFailed = onFailed })
 end
 

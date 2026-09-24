@@ -287,11 +287,23 @@ local function _refreshAliveLists()
 	local deadUnreported: { BotRecord }? = nil
 	for name, bot in _botsByName do
 		if bot.model.Parent == nil then
-			if bot.deathConnection then
-				bot.deathConnection:Disconnect()
-				bot.deathConnection = nil
+			-- Modelo borrado sin Died (p. ej. FallenPartsDestroyHeight): es una muerte no
+			-- reportada. Borrarlo sin más dejaría su IA corriendo, su identidad en el
+			-- roster y el modelo en _aliveTargets; handleDeath lo limpia todo.
+			if not bot.hasDeathBeenReported then
+				deadUnreported = deadUnreported or {}
+				table.insert(deadUnreported, bot)
+			else
+				pcall(function()
+					bot.ai:Stop()
+				end)
+				pcall(_removeAliveTarget, bot.model)
+				if bot.deathConnection then
+					bot.deathConnection:Disconnect()
+					bot.deathConnection = nil
+				end
+				_botsByName[name] = nil
 			end
-			_botsByName[name] = nil
 		elseif bot.humanoid.Health <= 0 then
 			-- NO desconectar deathConnection aquí: el cuerpo quedaría sin ragdoll ni
 			-- Destroy. Si Died no corrió, se dispara diferido como fallback.
@@ -454,11 +466,13 @@ local function _refillBotRigPoolAsync(poolKey: string)
 			pool = {}
 			_botRigPoolByKey[poolKey] = pool
 		end
+		-- Yield ANTES de clonar: task.spawn corre síncrono hasta el primer yield, así que
+		-- sin él el primer Clone caería en el mismo frame que el spawn que pidió el refill.
+		task.wait()
 		while #pool < BOT_RIG_POOL_TARGET and _countParkedRigs() < MAX_TOTAL_PARKED_RIGS do
 			local rig = _clonePreparedRig(poolKey)
 			if not rig then break end
 			table.insert(pool, rig)
-			-- Sin este yield todos los clones caerían en el mismo frame.
 			task.wait()
 		end
 		_botRigRefillingByKey[poolKey] = false
@@ -583,7 +597,18 @@ local function _markBotTeam(model: Model, team: "A" | "B")
 	(teamValue :: StringValue).Value = team
 end
 
-local function _spawnOneBot(team: "A" | "B"): boolean
+-- Lo que _spawnOneBotUnchecked lleva creado, para deshacerlo si lanza a medias.
+type PartialSpawn = {
+	botName: string?,
+	identity: BotIdentity?,
+	fakeUserId: number?,
+	recycled: boolean,
+	model: Model?,
+	ai: any,
+	descendantConn: RBXScriptConnection?,
+}
+
+local function _spawnOneBotUnchecked(team: "A" | "B", partial: PartialSpawn): boolean
 	if not _isRoundActive then
 		return false
 	end
@@ -609,9 +634,13 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 		local entry = table.remove(recycled, #recycled)
 		identity = entry.identity
 		fakeUserId = entry.fakeUserId
+		partial.recycled = true
 	else
 		identity, fakeUserId = _assignIdentity()
 	end
+	partial.botName = botName
+	partial.identity = identity
+	partial.fakeUserId = fakeUserId
 	_botIdentityByName[botName] = identity
 	_botFakeUserIdByName[botName] = fakeUserId
 	_identityByFakeUserId[fakeUserId] = identity
@@ -619,12 +648,11 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 
 	local outfitId = if identity.appearance then identity.appearance.outfitId else nil
 	local botModel = _createBotModel(botName, outfitId)
+	partial.model = botModel
 	local humanoid = botModel:FindFirstChildOfClass("Humanoid")
 	local root = botModel:FindFirstChild("HumanoidRootPart")
 	if not humanoid or not root or not root:IsA("BasePart") then
-		botModel:Destroy()
-		warn(string.format("[AIService] Bot template inválido para %s (falta Humanoid/HumanoidRootPart)", botName))
-		return false
+		error(string.format("Bot template inválido para %s (falta Humanoid/HumanoidRootPart)", botName))
 	end
 
 	_markBotTeam(botModel, team)
@@ -642,6 +670,7 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 	local weaponId = if identity.appearance then identity.appearance.weaponId else nil
 	local personality = BotPersonality.getById(identity.personalityId)
 	local botAIInstance = BotAI.new(botModel, team, fakeUserId, wrapId, if personality then personality.combat else nil, weaponId)
+	partial.ai = botAIInstance
 
 	local botsFolder = mapRoot:FindFirstChild("Bots")
 	if not botsFolder then
@@ -677,6 +706,7 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 			CollisionGroups.applyToNewPart(botModel, descendant)
 		end
 	end)
+	partial.descendantConn = descendantConn
 
 	-- Inmunidad al spawn como los jugadores (MatchService), pero invisible por coste
 	-- en móvil. SpawnProtectedUntil lo lee BotAI._getBestTarget.
@@ -771,6 +801,56 @@ local function _spawnOneBot(team: "A" | "B"): boolean
 	_botsByName[botName] = record
 	table.insert(_botNamesByTeam[team], botName)
 	return true
+end
+
+local function _rollbackPartialSpawn(team: "A" | "B", partial: PartialSpawn)
+	if partial.ai then
+		pcall(partial.ai.Stop, partial.ai)
+	end
+	if partial.descendantConn then
+		partial.descendantConn:Disconnect()
+	end
+	local model = partial.model
+	if model then
+		pcall(_removeAliveTarget, model)
+		model:Destroy()
+	end
+	local botName = partial.botName
+	if botName then
+		_botsByName[botName] = nil
+		_botIdentityByName[botName] = nil
+		_botFakeUserIdByName[botName] = nil
+		local names = _botNamesByTeam[team]
+		local index = table.find(names, botName)
+		if index then
+			table.remove(names, index)
+		end
+	end
+	local fakeUserId = partial.fakeUserId
+	if fakeUserId then
+		_botModelByFakeUserId[fakeUserId] = nil
+		if partial.recycled and partial.identity then
+			-- Identidad de un bot que ya jugó la ronda: sigue en el roster y vuelve al pool.
+			table.insert(_recycledByTeam[team], { identity = partial.identity, fakeUserId = fakeUserId })
+		else
+			-- Nueva y nunca spawneada: fuera del roster, o sería un bot fantasma.
+			_identityByFakeUserId[fakeUserId] = nil
+			_teamByFakeUserId[fakeUserId] = nil
+		end
+	end
+end
+
+-- Un error a medias no puede escapar: dentro del task.spawn del pump dejaría
+-- _spawnPumpRunning en true para siempre (sin bots el resto del servidor).
+local function _spawnOneBot(team: "A" | "B"): boolean
+	local partial: PartialSpawn = { recycled = false }
+	local ok, result = pcall(_spawnOneBotUnchecked, team, partial)
+	if ok then
+		return result
+	end
+	warn(string.format("[AIService] Spawn de bot fallido (equipo %s): %s", team, tostring(result)))
+	_rollbackPartialSpawn(team, partial)
+	return false
 end
 
 -- Los spawns se reparten entre Heartbeats (MAX_SPAWNS_PER_STEP por paso). El pump

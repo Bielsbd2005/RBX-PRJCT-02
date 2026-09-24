@@ -111,8 +111,7 @@ local WEAPON_TOOLS_ROOT_NAME = "WeaponTools"
 local WEAPON_MAIN_CATEGORY = "Main"
 
 -- Misma resolución que LoadoutService._findLoadoutToolTemplate: ruta canónica
--- ServerStorage.WeaponTools.Main.<weaponId>, con fallback legacy a
--- WeaponTools.<weaponId> directo.
+-- ServerStorage.WeaponTools.Main.<weaponId>, con fallback a WeaponTools.<weaponId>.
 local function _findWeaponToolTemplate(weaponId: string): Tool?
 	local root = ServerStorage:FindFirstChild(WEAPON_TOOLS_ROOT_NAME)
 	if not root then
@@ -181,6 +180,11 @@ function BotAppearance.roll(personality: BotPersonality.Personality): BotAppeara
 	local outfitPool = BotPersonality.filterByRarity(_outfitPool, "Outfits",     personality)
 	-- Un Noob (Common) carga el arma de inicio; tiers altos sacan el catálogo entero.
 	local weaponPool = BotPersonality.filterByRarity(_weaponPool, "Main", personality)
+	-- Sin ninguna Tool de su rareza en ServerStorage el bot se quedaría sin arma (y sin
+	-- disparar): mejor cualquier Main que haya.
+	if #weaponPool == 0 then
+		weaponPool = _weaponPool
+	end
 
 	local hatId: string? = nil
 	if #hatPool > 0 and math.random() < personality.hatProbability then
