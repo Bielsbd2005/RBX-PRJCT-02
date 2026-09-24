@@ -1,3 +1,4 @@
+--!strict
 local function _isDescendantOfStarterGear(instance: Instance): boolean
 	return instance:FindFirstAncestorOfClass("StarterGear") ~= nil
 end
@@ -110,27 +111,16 @@ local ConfigurationValues = {
 local WEAPON_TAG = "WeaponsSystemWeapon"
 local WEAPON_TYPES_LOOKUP = {}
 
+-- Solo broadcasts servidor → cliente: la entrada del cliente va por Network.Weapons
+-- (ByteNet), así que ningún RemoteEvent de aquí conecta OnServerEvent.
 local REMOTE_EVENT_NAMES = {
 	"WeaponFired",
-	"WeaponHit",
-	"WeaponReloadRequest",
 	"WeaponReloaded",
 	"WeaponReloadCanceled",
-	"WeaponActivated",
 	"PlayerEliminated",
 	"PlayerAssist",
 	"PlayExplosionVFX",
-}
-
--- Solo estos eventos aceptan tráfico cliente→servidor. El resto son broadcasts
--- servidor→cliente: conectar su OnServerEvent dejaría a un exploiter dispararlos
--- como input (p. ej. "WeaponReloaded" → munición infinita sin ownership ni guards).
-local CLIENT_TO_SERVER_EVENTS = {
-	WeaponFired = true,
-	WeaponHit = true,
-	WeaponReloadRequest = true,
-	WeaponReloadCanceled = true,
-	WeaponActivated = true,
+	"DamageOverTimeVFX",
 }
 
 -- Contribuidores de daño por humanoid (asistencias). Claves débiles como red de
@@ -141,6 +131,8 @@ local CLIENT_TO_SERVER_EVENTS = {
 type DamageContribution = { damage: number, lastAt: number }
 local damageContributors: { [Humanoid]: { [Player]: DamageContribution } } = setmetatable({}, { __mode = "k" }) :: any
 local assistDiedConnections: { [Humanoid]: RBXScriptConnection } = setmetatable({}, { __mode = "k" }) :: any
+-- Último disparo (arma + sid) que ya sumó ShotsHit, por tirador.
+local _lastHitShotByPlayer: { [Player]: { sid: number, weapon: any } } = setmetatable({}, { __mode = "k" }) :: any
 local assistAncestryConnections: { [Humanoid]: RBXScriptConnection } = setmetatable({}, { __mode = "k" }) :: any
 
 local LastAttackerStore = require(Libraries:WaitForChild("LastAttackerStore"))
@@ -149,6 +141,23 @@ type PendingStats = { ShotsFired: number, ShotsHit: number, DamageDealt: number 
 local _pendingStatsByPlayer: { [Player]: PendingStats } = {}
 local STATS_FLUSH_INTERVAL = 5
 
+local function _flushPlayerStats(player: Player, stats: PendingStats)
+	local updates = {}
+	if stats.ShotsFired > 0 then
+		table.insert(updates, { path = { "Stats", "ShotsFired" }, delta = stats.ShotsFired })
+	end
+	if stats.ShotsHit > 0 then
+		table.insert(updates, { path = { "Stats", "ShotsHit" }, delta = stats.ShotsHit })
+	end
+	if stats.DamageDealt > 0 then
+		table.insert(updates, { path = { "Stats", "DamageDealt" }, delta = stats.DamageDealt })
+	end
+	if #updates > 0 then
+		pcall(DataService.BatchUpdate, DataService, player, updates)
+	end
+	_pendingStatsByPlayer[player] = nil
+end
+
 local function _flushPendingStats()
 	if not DataService then return end
 	for player, stats in _pendingStatsByPlayer do
@@ -156,21 +165,25 @@ local function _flushPendingStats()
 			_pendingStatsByPlayer[player] = nil
 			continue
 		end
-		local updates = {}
-		if stats.ShotsFired > 0 then
-			table.insert(updates, { path = { "Stats", "ShotsFired" }, delta = stats.ShotsFired })
-		end
-		if stats.ShotsHit > 0 then
-			table.insert(updates, { path = { "Stats", "ShotsHit" }, delta = stats.ShotsHit })
-		end
-		if stats.DamageDealt > 0 then
-			table.insert(updates, { path = { "Stats", "DamageDealt" }, delta = stats.DamageDealt })
-		end
-		if #updates > 0 then
-			pcall(DataService.BatchUpdate, DataService, player, updates)
-		end
-		_pendingStatsByPlayer[player] = nil
+		_flushPlayerStats(player, stats)
 	end
+end
+
+-- Volcado final en ProfileUnloading (perfil aún vivo) y no en PlayerRemoving: el orden
+-- de los handlers de PlayerRemoving no está garantizado y el de DataService libera el
+-- perfil, con lo que el BatchUpdate fallaría y se perderían los últimos segundos.
+local _profileUnloadingHooked = false
+local function _hookProfileUnloading()
+	if _profileUnloadingHooked or not IsServer or not DataService or not DataService.ProfileUnloading then
+		return
+	end
+	_profileUnloadingHooked = true
+	DataService.ProfileUnloading:Connect(function(player: Player)
+		local stats = _pendingStatsByPlayer[player]
+		if stats then
+			_flushPlayerStats(player, stats)
+		end
+	end)
 end
 
 local function _accumulateStat(player: Player, key: string, delta: number)
@@ -182,26 +195,32 @@ local function _accumulateStat(player: Player, key: string, delta: number)
 	;(entry :: any)[key] = (entry :: any)[key] + delta
 end
 
-task.spawn(function()
-	while true do
-		task.wait(STATS_FLUSH_INTERVAL)
-		_flushPendingStats()
-	end
-end)
-
-Players.PlayerRemoving:Connect(function(player)
-	local stats = _pendingStatsByPlayer[player]
-	if stats and DataService then
-		local updates = {}
-		if stats.ShotsFired > 0 then table.insert(updates, { path = { "Stats", "ShotsFired" }, delta = stats.ShotsFired }) end
-		if stats.ShotsHit > 0 then table.insert(updates, { path = { "Stats", "ShotsHit" }, delta = stats.ShotsHit }) end
-		if stats.DamageDealt > 0 then table.insert(updates, { path = { "Stats", "DamageDealt" }, delta = stats.DamageDealt }) end
-		if #updates > 0 then
-			pcall(DataService.BatchUpdate, DataService, player, updates)
+-- El módulo se requiere también en cliente, donde no hay stats que volcar.
+if IsServer then
+	task.spawn(function()
+		while true do
+			task.wait(STATS_FLUSH_INTERVAL)
+			_flushPendingStats()
 		end
-		_pendingStatsByPlayer[player] = nil
-	end
-end)
+	end)
+
+	_hookProfileUnloading()
+
+	Players.PlayerRemoving:Connect(function(player)
+		if _profileUnloadingHooked then
+			-- Diferido: el ProfileUnloading de DataService (su propio PlayerRemoving) ya
+			-- habrá volcado; esto solo limpia si el jugador nunca tuvo perfil.
+			task.defer(function()
+				_pendingStatsByPlayer[player] = nil
+			end)
+			return
+		end
+		local stats = _pendingStatsByPlayer[player]
+		if stats and DataService then
+			_flushPlayerStats(player, stats)
+		end
+	end)
+end
 
 local function _clearDamageContributors(target: Humanoid)
 	damageContributors[target] = nil
@@ -251,6 +270,8 @@ WeaponsSystem.currentWeapon = nil
 WeaponsSystem.aimRayCallback = nil
 WeaponsSystem._hotbarFallbackInProgress = false
 WeaponsSystem._hotbarFallbackTarget = nil
+-- Cliente: arma guardada a propósito (emotes). Desactiva el re-equipado del hotbar.
+WeaponsSystem.holstered = false
 
 WeaponsSystem.CurrentWeaponChanged = Instance.new("BindableEvent")
 
@@ -271,8 +292,8 @@ function WeaponsSystem.accumulateStat(player: Player, key: string, delta: number
 	_accumulateStat(player, key, delta)
 end
 
-function WeaponsSystem.setLastAttacker(humanoid: Humanoid, userId: number, weaponId: string, headshot: boolean?)
-	LastAttackerStore.set(humanoid, userId, weaponId, headshot)
+function WeaponsSystem.setLastAttacker(humanoid: Humanoid, userId: number, weaponId: string, headshot: boolean?, weaponCategory: string?)
+	LastAttackerStore.set(humanoid, userId, weaponId, headshot, weaponCategory)
 end
 
 -- Llamar desde ServerBootstrap antes de WeaponsSystem.setup(). Claves opcionales:
@@ -284,7 +305,11 @@ function WeaponsSystem.injectServices(services: {
 	BattlePassService: any?,
 	RewardService: any?,
 })
-	if services.DataService ~= nil then DataService = services.DataService; WeaponsSystem._dataService = DataService end
+	if services.DataService ~= nil then
+		DataService = services.DataService
+		WeaponsSystem._dataService = DataService
+		_hookProfileUnloading()
+	end
 	if services.MatchService ~= nil then MatchService = services.MatchService end
 	if services.DailyTasksService ~= nil then DailyTasksService = services.DailyTasksService end
 	if services.BattlePassService ~= nil then BattlePassService = services.BattlePassService end
@@ -392,6 +417,10 @@ local function _tryReequipHotbarFallback(previousWeapon): (boolean, any)
 		return false, nil
 	end
 
+	if WeaponsSystem.holstered then
+		return false, nil
+	end
+
 	if WeaponsSystem._hotbarFallbackInProgress then
 		return true, previousWeapon
 	end
@@ -496,20 +525,9 @@ function WeaponsSystem.setup()
 			local remoteEvent = Instance.new("RemoteEvent")
 			remoteEvent.Name = remoteEventName
 			remoteEvent.Parent = networkFolder
-
-			if CLIENT_TO_SERVER_EVENTS[remoteEventName] then
-				local callback = NetworkingCallbacks[remoteEventName]
-				if not callback then
-					warn("There is no server callback implemented for the WeaponsSystem RemoteEvent \"%s\"!")
-					warn("A default no-op function will be implemented so that the queue cannot be abused.")
-					callback = function(...) end
-				end
-				WeaponsSystem.connections[remoteEventName .. "Remote"] = remoteEvent.OnServerEvent:Connect(function(...)
-					callback(...)
-				end)
-			end
 			WeaponsSystem.remoteEvents[remoteEventName] = remoteEvent
 		end
+		NetworkingCallbacks.listenClientInput()
 
 		networkFolder.Parent = WeaponsSystemFolder
 		WeaponsSystem.networkFolder = networkFolder
@@ -566,6 +584,7 @@ function WeaponsSystem.resetClientRuntimeState()
 	WeaponsSystem.currentWeapon = nil
 	WeaponsSystem._hotbarFallbackInProgress = false
 	WeaponsSystem._hotbarFallbackTarget = nil
+	WeaponsSystem.holstered = false
 	WeaponsSystem.aimRayCallback = nil
 
 	if WeaponsSystem.gui then
@@ -886,28 +905,45 @@ local function _defaultDamageCallback(system, target, amount, damageType, dealer
 		end
 	end
 
+	-- Con ForceField (protección de spawn) TakeDamage no hace nada: tampoco debe contar
+	-- para asistencias, DamageDealt ni último atacante.
+	if targetCharacter:FindFirstChildOfClass("ForceField") then
+		return
+	end
+
 	local targetPlayer = Players:GetPlayerFromCharacter(targetCharacter)
 	local dealerPlayer = dealer and Players:GetPlayerFromCharacter(dealer.Character)
 	-- damageData.Name gana al Tool equipado: el daño diferido (FireZone) debe acreditar
 	-- al arma que lo causó aunque el dealer haya cambiado de arma.
 	local weaponName = "Unknown Weapon"
+	local weaponCategory: string? = nil
 	if typeof(damageData) == "Instance" then
 		weaponName = damageData.Name
+		weaponCategory = WeaponsConfig.ResolveToolIdentity(damageData)
 	elseif typeof(damageData) == "table" and type(damageData.Name) == "string" then
 		weaponName = damageData.Name
+		weaponCategory = if type(damageData.Category) == "string" then damageData.Category else nil
 	elseif dealer and dealer.Character then
 		local equippedTool = dealer.Character:FindFirstChildOfClass("Tool")
-		if equippedTool then weaponName = equippedTool.Name end
+		if equippedTool then
+			weaponName = equippedTool.Name
+			weaponCategory = WeaponsConfig.ResolveToolIdentity(equippedTool)
+		end
 	end
-	-- wasHeadshot llega vía hitInfo (BulletWeapon.onHit); si no viene (p. ej. una
-	-- explosión), cuenta como bodyshot.
+	-- wasHeadshot y headshotMultiplier llegan vía hitInfo (BulletWeapon.onHit); si no
+	-- vienen (p. ej. una explosión), cuenta como bodyshot.
 	local wasHeadshot = type(hitInfo) == "table" and hitInfo.wasHeadshot == true
-	local finalDamage = wasHeadshot and (amount * 2) or amount
+	local headshotMultiplier = if wasHeadshot and type(hitInfo.headshotMultiplier) == "number"
+		then hitInfo.headshotMultiplier
+		else 1
+	local finalDamage = amount * headshotMultiplier
 	local isLethal = target.Health <= finalDamage
+	-- El exceso sobre la vida restante no se inflige: no cuenta para asistencias ni stats.
+	local creditedDamage = math.min(finalDamage, target.Health)
 
 	if dealer and dealer.Character then
 		if dealerPlayer then
-			WeaponsSystem.setLastAttacker(target, dealerPlayer.UserId, weaponName, wasHeadshot)
+			WeaponsSystem.setLastAttacker(target, dealerPlayer.UserId, weaponName, wasHeadshot, weaponCategory)
 
 			if not damageContributors[target] then
 				damageContributors[target] = {}
@@ -938,10 +974,21 @@ local function _defaultDamageCallback(system, target, amount, damageType, dealer
 				contribution = { damage = 0, lastAt = now }
 				damageContributors[target][dealerPlayer] = contribution
 			end
-			contribution.damage += finalDamage
+			contribution.damage += creditedDamage
 			contribution.lastAt = now
 
-			_accumulateStat(dealerPlayer, "DamageDealt", finalDamage)
+			_accumulateStat(dealerPlayer, "DamageDealt", creditedDamage)
+
+			-- ShotsHit = disparos que dañaron a alguien, uno por sid: ni paredes ni cada
+			-- perdigón (ShotsFired suma 1 por disparo). Explosión y quemadura no llevan sid.
+			local sid = if type(hitInfo) == "table" then hitInfo.sid else nil
+			if typeof(sid) == "number" then
+				local last = _lastHitShotByPlayer[dealerPlayer]
+				if not last or last.sid ~= sid or last.weapon ~= damageData then
+					_lastHitShotByPlayer[dealerPlayer] = { sid = sid, weapon = damageData }
+					_accumulateStat(dealerPlayer, "ShotsHit", 1)
+				end
+			end
 		end
 
 		target:TakeDamage(finalDamage)
@@ -986,6 +1033,15 @@ local function _defaultDamageCallback(system, target, amount, damageType, dealer
 	end
 end
 
+-- Indicador de dirección del impacto en el cliente de la víctima, si es un jugador.
+local function _notifyVictimHit(target: Humanoid, dealerCharacter: Model)
+	local targetPlayer = Players:GetPlayerFromCharacter(target.Parent)
+	local dealerRoot = dealerCharacter:FindFirstChild("HumanoidRootPart")
+	if targetPlayer and dealerRoot and dealerRoot:IsA("BasePart") then
+		WeaponData:FireClient(targetPlayer, "HitByOtherPlayer", dealerRoot.Position)
+	end
+end
+
 function WeaponsSystem.doDamage(target, amount, damageType, dealer, hitInfo, damageData)
 	if not target or ancestorHasTag(target, "WeaponsSystemIgnore") then
 		return
@@ -993,10 +1049,8 @@ function WeaponsSystem.doDamage(target, amount, damageType, dealer, hitInfo, dam
 	if IsServer then
 		if target:IsA("Humanoid") and dealer and dealer:IsA("Player") and dealer.Character then
 			local dealerHumanoid = dealer.Character:FindFirstChildOfClass("Humanoid")
-			local targetPlayer = Players:GetPlayerFromCharacter(target.Parent)
-			local dealerHRP = dealer.Character:FindFirstChild("HumanoidRootPart")
-			if dealerHumanoid and target ~= dealerHumanoid and targetPlayer and dealerHRP then
-				WeaponData:FireClient(targetPlayer, "HitByOtherPlayer", dealerHRP.Position)
+			if dealerHumanoid and target ~= dealerHumanoid then
+				_notifyVictimHit(target, dealer.Character)
 			end
 		end
 
@@ -1006,6 +1060,25 @@ function WeaponsSystem.doDamage(target, amount, damageType, dealer, hitInfo, dam
 		local handler = _damageCallback or _defaultDamageCallback
 		handler(WeaponsSystem, target, amount, damageType, dealer, hitInfo, damageData)
 	end
+end
+
+--[[
+	Daño de un bot. Los bots no tienen Player, así que no pasan por el callback de
+	doDamage, pero comparten sus reglas: WeaponsSystemIgnore, sin fuego amigo, último
+	atacante para la atribución de la kill y aviso de dirección a la víctima. Las
+	asistencias humanas sobre esa víctima las cierra el Died que deja doDamage.
+]]
+function WeaponsSystem.applyBotDamage(target: Humanoid, amount: number, botCharacter: Model, botUserId: number, weaponName: string)
+	if not IsServer or target.Health <= 0 or ancestorHasTag(target, "WeaponsSystemIgnore") then
+		return
+	end
+	local targetCharacter = target.Parent
+	if not targetCharacter or not targetCharacter:IsA("Model") or TeamUtils.isSameTeam(botCharacter, targetCharacter) then
+		return
+	end
+	WeaponsSystem.setLastAttacker(target, botUserId, weaponName, false)
+	target:TakeDamage(amount)
+	_notifyVictimHit(target, botCharacter)
 end
 
 local function _defaultGetTeamCallback(player)

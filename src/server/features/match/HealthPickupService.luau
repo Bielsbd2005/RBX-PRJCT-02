@@ -1,11 +1,11 @@
 --!strict
 
-local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Network = require(Shared.networking.Network)
 local NetGuards = require(Shared.networking.NetGuards)
+local RateLimiter = require(script.Parent.Parent.Parent.utils.RateLimiter)
 
 local HealthPickupService = {}
 
@@ -23,8 +23,8 @@ type Predicates = {
 
 local _started = false
 local _predicates: Predicates = nil :: any
-local _cooldowns: { [number]: number } = {}
-local _playerRemovingConn: RBXScriptConnection? = nil
+-- Se marca solo tras un heal concedido.
+local _limiter = RateLimiter.new(PICKUP_REQUEST_COOLDOWN)
 
 local function _applyHealthPickup(character: Model): boolean
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
@@ -35,7 +35,7 @@ local function _applyHealthPickup(character: Model): boolean
 	return true
 end
 
-local function _onRequestPickup(data: { kind: string }, player: Player): ()
+local function _onRequestPickup(data: Network.RequestPickupPayload, player: Player): ()
 	-- Solo "Health" existe; otros kinds se ignoran sin consumir cooldown.
 	if not NetGuards.validate(data, { kind = NetGuards.MAX.Kind }) or data.kind ~= "Health" then
 		return
@@ -45,9 +45,7 @@ local function _onRequestPickup(data: { kind: string }, player: Player): ()
 		return
 	end
 
-	local now = time()
-	local cooldownAt = _cooldowns[player.UserId] or 0
-	if now < cooldownAt then
+	if not _limiter:isReady(player) then
 		return
 	end
 
@@ -62,7 +60,7 @@ local function _onRequestPickup(data: { kind: string }, player: Player): ()
 		return
 	end
 
-	_cooldowns[player.UserId] = now + PICKUP_REQUEST_COOLDOWN
+	_limiter:mark(player)
 
 	_applyHealthPickup(character)
 end
@@ -74,10 +72,6 @@ function HealthPickupService:Start(predicates: Predicates): ()
 	_started = true
 	_predicates = predicates
 
-	_playerRemovingConn = Players.PlayerRemoving:Connect(function(player: Player)
-		_cooldowns[player.UserId] = nil
-	end)
-
 	Network.Match.RequestPickup.Listen(_onRequestPickup)
 end
 
@@ -86,11 +80,7 @@ function HealthPickupService:Stop(): ()
 		return
 	end
 	_started = false
-	if _playerRemovingConn then
-		_playerRemovingConn:Disconnect()
-		_playerRemovingConn = nil
-	end
-	table.clear(_cooldowns)
+	_limiter:clearAll()
 end
 
 return HealthPickupService

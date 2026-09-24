@@ -21,6 +21,7 @@ local NetGuards = require(Shared.networking.NetGuards)
 local GameConfig = require(Shared.GameConfig)
 local MatchSnapshot = require(Shared.MatchSnapshot)
 local TelemetryService = require(script.Parent.Parent.Parent.core.TelemetryService)
+local RateLimiter = require(script.Parent.Parent.Parent.utils.RateLimiter)
 
 type MapDefinition = typeof(GameConfig.Maps[1])
 
@@ -39,8 +40,10 @@ type Deps = {
 local VotingService = {}
 VotingService.__index = VotingService
 
--- ~3 cambios/s: UX responsive sin spam que sature la replicación.
-local VOTE_CHANGE_COOLDOWN = 0.3
+-- Claramente por debajo de LOCAL_VOTE_COOLDOWN del cliente (0.3): el cliente mide el
+-- envío y el servidor la llegada, y con jitter un cambio legítimo se descartaría en
+-- silencio con la UI marcando otro mapa.
+local VOTE_CHANGE_COOLDOWN = 0.15
 local DEFAULT_PLACEHOLDER_IMAGE = "rbxasset://textures/ui/GuiImagePlaceholder.png"
 
 -- Opción "Random": cuarto candidato siempre presente, sin mapa concreto. Si gana
@@ -50,8 +53,7 @@ local RANDOM_KEY = GameConfig.RandomVoteKey
 local _deps: Deps = nil :: any
 local _started = false
 local _activeVote: ActiveVoteState? = nil
-local _voteCooldownsByUserId: { [number]: number } = {}
-local _castVoteConn: any = nil
+local _voteLimiter = RateLimiter.new(VOTE_CHANGE_COOLDOWN)
 
 local function _pickRandomMapOptions(pool: { MapDefinition }, count: number): { MapDefinition }
 	local shuffled = table.clone(pool)
@@ -89,13 +91,7 @@ local function _publishVotes(vote: ActiveVoteState)
 end
 
 local function _isVoteChangeAllowed(player: Player): boolean
-	local now = time()
-	local last = _voteCooldownsByUserId[player.UserId] or 0
-	if now - last < VOTE_CHANGE_COOLDOWN then
-		return false
-	end
-	_voteCooldownsByUserId[player.UserId] = now
-	return true
+	return _voteLimiter:tryConsume(player)
 end
 
 local function _isValidOption(vote: ActiveVoteState, mapName: string): boolean
@@ -154,7 +150,7 @@ local function _resolveWinner(vote: ActiveVoteState): string
 	return winner
 end
 
-local function _onCastVote(data: { mapName: string }, player: Player)
+local function _onCastVote(data: Network.CastVotePayload, player: Player)
 	-- Cap de longitud antes de cualquier procesado.
 	if not NetGuards.validate(data, { mapName = NetGuards.MAX.MapName }) then
 		return
@@ -253,9 +249,9 @@ function VotingService:Start(deps: Deps)
 	_started = true
 	_deps = deps
 	_activeVote = nil
-	table.clear(_voteCooldownsByUserId)
+	_voteLimiter:clearAll()
 
-	_castVoteConn = Network.Match.CastVote.Listen(_onCastVote)
+	Network.Match.CastVote.Listen(_onCastVote)
 end
 
 function VotingService:DisconnectPlayer(userId: number)
@@ -264,7 +260,7 @@ function VotingService:DisconnectPlayer(userId: number)
 		vote.votesByUserId[userId] = nil
 		_publishVotes(vote)
 	end
-	_voteCooldownsByUserId[userId] = nil
+	_voteLimiter:clearPlayer(userId)
 end
 
 -- Arranca una votación. Devuelve false si ya hay una activa o faltan mapas.
@@ -289,7 +285,7 @@ function VotingService:StartVote(): boolean
 
 	_activeVote = vote
 	-- Limpiar cooldowns para que el primer voto del nuevo ciclo no quede bloqueado.
-	table.clear(_voteCooldownsByUserId)
+	_voteLimiter:clearAll()
 
 	local function imageOf(definition: MapDefinition): string
 		return if definition.PlaceholderImage ~= "" then definition.PlaceholderImage else DEFAULT_PLACEHOLDER_IMAGE

@@ -36,6 +36,9 @@ export type GameConfigType = {
 	MatchCapGraceFraction: number,
 	AssistMinDamage: number,
 	AssistWindow: number,
+	ShotBroadcastRange: number,
+	ShotBroadcastLodDistance: number,
+	ShotBroadcastLodDivisor: number,
 	MatchEndMinSeconds: number,
 	MatchEndMinContribution: number,
 	DailyPlayedCashTiers: { { UpTo: number, Factor: number } },
@@ -65,10 +68,10 @@ local GameConfig: GameConfigType = {
 	-- Caps anti-farm por partida, no un límite de juego normal. Ambos deben morder
 	-- en el mismo número de kills CON la mezcla real de headshots y asistencias (no con
 	-- kills puras): si se cambia uno, recalcular el otro con ActionRewards. Son el tope de una ronda COMPLETA (MaxRoundDuration):
-	-- MatchService los devenga con el reloj de CADA JUGADOR (desde su primera entrada a la
+	-- KillRewardsService los devenga con el reloj de CADA JUGADOR (desde su primera entrada a la
 	-- ronda), para que ni la ronda corta ni entrar tarde den el cupo entero.
 	-- MatchXPCap mide también el cupo del XP de pase, que lleva contador aparte
-	-- (MatchService:TryConsumeBattlePassXP).
+	-- (KillRewardsService, _tryConsumeBattlePassXP).
 	MatchCashCap = 500,
 	MatchXPCap = 1000,
 	-- Fracción del cap disponible en el segundo 0: sin colchón, las primeras kills
@@ -81,6 +84,13 @@ local GameConfig: GameConfigType = {
 	-- que luego remata otro.
 	AssistMinDamage = 25,
 	AssistWindow = 6,
+	-- Cada WeaponFired que recibe un cliente simula la bala completa. Por distancia
+	-- observador↔tirador (jugador o bot): > Range no se envía; <= LodDistance, todo. Entre
+	-- medias, si se sabe si el disparo acierta (bots), 1 de cada LodDivisor aciertos y
+	-- ningún fallo; si no se sabe (jugadores), todo.
+	ShotBroadcastRange = 300,
+	ShotBroadcastLodDistance = 60,
+	ShotBroadcastLodDivisor = 2,
 	-- Bonus de fin de partida (ResultsRewards): segundos EN PARTIDA (el lobby no cuenta) y
 	-- kills + asistencias mínimos para cobrarlos. Se pagan escalados por esos segundos
 	-- sobre MaxRoundDuration: la ronda corta no rinde más por hora.

@@ -30,26 +30,6 @@ local SettingsNamespace = ByteNet.DefineNamespace("Settings", function()
 			}),
 			ReliabilityType = "Reliable",
 		}),
-
-		-- C → S. value debe estar en la whitelist de SettingsService.
-		UpdateChoice = ByteNet.DefinePacket({
-			Value = ByteNet.Struct({
-				key   = ByteNet.String,
-				value = ByteNet.String,
-			}),
-			ReliabilityType = "Reliable",
-		}),
-
-		-- C → S. Componentes 0..1.
-		UpdateColor = ByteNet.DefinePacket({
-			Value = ByteNet.Struct({
-				key = ByteNet.String,
-				r   = ByteNet.Float32,
-				g   = ByteNet.Float32,
-				b   = ByteNet.Float32,
-			}),
-			ReliabilityType = "Reliable",
-		}),
 	}
 end)
 
@@ -105,11 +85,6 @@ local RewardsNamespace = ByteNet.DefineNamespace("Rewards", function()
 			ReliabilityType = "Reliable",
 		}),
 
-		ClaimNotifications = ByteNet.DefinePacket({
-			Value = ByteNet.Struct({}),
-			ReliabilityType = "Reliable",
-		}),
-
 		RedeemCode = ByteNet.DefinePacket({
 			Value = ByteNet.Struct({
 				code = ByteNet.String,
@@ -154,11 +129,23 @@ local MatchNamespace = ByteNet.DefineNamespace("Match", function()
 			ReliabilityType = "Reliable",
 		}),
 
+		-- S → C. Respuesta a RequestJoinMatch cuando no se entra: sin ella el cliente
+		-- esperaría JOIN_CONFIRM_TIMEOUT. reason: "TeamsFull" | "DataNotLoaded" | "SpawnFailed".
+		JoinRejected = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				reason = ByteNet.String,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- roster: "userId:A,userId:B" de los jugadores reales elegibles. El cliente no puede
+		-- sacar el bando de Player.Team: SpawnAtLobby lo pone a nil en el mismo frame.
 		RoundEnded = ByteNet.DefinePacket({
 			Value = ByteNet.Struct({
 				winnerTeam = ByteNet.String,
 				scoreA = ByteNet.Int32,
 				scoreB = ByteNet.Int32,
+				roster = ByteNet.String,
 			}),
 			ReliabilityType = "Reliable",
 		}),
@@ -257,18 +244,6 @@ local MatchNamespace = ByteNet.DefineNamespace("Match", function()
 	}
 end)
 
-local LockerNamespace = ByteNet.DefineNamespace("Locker", function()
-	return {
-		MarkItemSeen = ByteNet.DefinePacket({
-			Value = ByteNet.Struct({
-				category = ByteNet.String,
-				itemId   = ByteNet.String,
-			}),
-			ReliabilityType = "Reliable",
-		}),
-	}
-end)
-
 -- Los skips de nivel no tienen packet: el cliente lanza PromptProductPurchase y el
 -- servidor concede en ProcessReceipt (el resultado llega por Response).
 local BattlePassNamespace = ByteNet.DefineNamespace("BattlePass", function()
@@ -350,13 +325,83 @@ local GiftingNamespace = ByteNet.DefineNamespace("Gifting", function()
 	}
 end)
 
+-- C → S del WeaponsSystem. Los broadcasts S → C siguen en los RemoteEvents de
+-- WeaponsSystem/Network. Van todos por aquí y no algunos por RemoteEvent: el server
+-- descarta un WeaponHit cuyo WeaponFired no ha llegado, y ByteNet solo garantiza el
+-- orden entre sus propios paquetes. El server revalida todo en WeaponSecurity.
+local WeaponsNamespace = ByteNet.DefineNamespace("Weapons", function()
+	return {
+		WeaponFired = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				weapon = ByteNet.Inst,
+				id     = ByteNet.Float64,
+				origin = ByteNet.Vec3,
+				dir    = ByteNet.Vec3,
+				charge = ByteNet.Float32,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+
+		WeaponHit = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				weapon = ByteNet.Inst,
+				sid    = ByteNet.Float64,
+				pid    = ByteNet.Uint8,
+				part   = ByteNet.Inst,
+				p      = ByteNet.Vec3,
+				n      = ByteNet.Vec3,
+				d      = ByteNet.Float32,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+
+		WeaponReloadRequest = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				weapon = ByteNet.Inst,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+
+		WeaponReloadCanceled = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				weapon = ByteNet.Inst,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+	}
+end)
+
+-- Payloads C → S tal como llegan al handler. Deben coincidir con el Struct de cada
+-- packet de arriba; el contenido es del cliente y se valida con NetGuards.
+export type Empty = {}
+export type SliderPayload = { key: string, value: number }
+export type TogglePayload = { key: string, value: boolean }
+export type ShopItemPayload = { itemId: string, category: string, weaponCategory: string, weaponId: string }
+export type RedeemCodePayload = { code: string }
+export type CastVotePayload = { mapName: string }
+export type RequestPickupPayload = { kind: string }
+export type ClaimTierPayload = { tier: number }
+export type SendGiftPayload = { receiverUserId: string, productId: number }
+export type ClaimGiftPayload = { giftId: string }
+export type WeaponFiredPayload = { weapon: Instance?, id: number, origin: Vector3, dir: Vector3, charge: number }
+export type WeaponHitPayload = {
+	weapon: Instance?,
+	sid: number,
+	pid: number,
+	part: Instance?,
+	p: Vector3,
+	n: Vector3,
+	d: number,
+}
+export type WeaponPayload = { weapon: Instance? }
+
 return {
 	Settings    = SettingsNamespace,
 	Shop        = ShopNamespace,
 	Combat      = CombatNamespace,
 	Rewards     = RewardsNamespace,
-	Locker      = LockerNamespace,
 	Match       = MatchNamespace,
 	BattlePass  = BattlePassNamespace,
 	Gifting     = GiftingNamespace,
+	Weapons     = WeaponsNamespace,
 }

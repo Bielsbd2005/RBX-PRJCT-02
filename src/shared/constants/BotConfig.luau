@@ -54,9 +54,6 @@ export type BotConfigType = {
 		MaxEngageDistance: number,
 		ChaseStandoffDistance: number,
 		ChaseResumeDistance: number,
-		ShotBroadcastRange: number,
-		ShotBroadcastLodDistance: number,
-		ShotBroadcastLodDivisor: number,
 		VsPlayer: CombatTargetProfile,
 		VsBot: CombatTargetProfile,
 	},
@@ -140,13 +137,6 @@ local BotConfig: BotConfigType = {
 		-- Histéresis del standoff; debe ser > MinEngageDistance para que el retroceso
 		-- del strafe no reactive el path enseguida.
 		ChaseResumeDistance = 18,
-
-		-- Cada WeaponFired que recibe un cliente simula la bala completa. Por distancia
-		-- observador↔tirador: > Range no se envía; > LodDistance solo 1 de cada
-		-- LodDivisor aciertos y ningún fallo; <= LodDistance, todo.
-		ShotBroadcastRange = 120,
-		ShotBroadcastLodDistance = 60,
-		ShotBroadcastLodDivisor = 2,
 
 		VsPlayer = {
 			DamageMin = 2,

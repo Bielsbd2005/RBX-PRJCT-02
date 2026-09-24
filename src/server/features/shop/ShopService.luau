@@ -18,20 +18,17 @@
 	repetidos de categorías distintas.
 ]]
 
-local Players           = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local Packages = ReplicatedStorage:WaitForChild("Packages")
 local Shared   = ReplicatedStorage:WaitForChild("Shared")
 
 local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
 local TelemetryService = require(script.Parent.Parent.Parent.core.TelemetryService)
 type DataService = DataServiceMod.DataServiceModule
 
-local Sift = require(Packages.sift) :: any
-
 local Network     = require(Shared.networking.Network)
 local NetGuards   = require(Shared.networking.NetGuards)
+local RateLimiter = require(script.Parent.Parent.Parent.utils.RateLimiter)
 local InventoryRepository = require(Shared.data.InventoryRepository)
 local ItemsConfig = require(Shared.constants.ItemsConfig)
 local Currency = require(Shared.constants.Currency)
@@ -94,31 +91,13 @@ local INSUFFICIENT_FUNDS_MESSAGE: { [string]: string } = {
 
 local _itemCache: { [string]: { [string]: any } } = {}
 
-local _cooldowns: { [number]: { [string]: number } } = {}
+-- Se marca solo tras un éxito real: una compra rechazada no castiga al jugador.
+local _limiter = RateLimiter.new(COOLDOWN)
 
 -- nil hasta Start(); los call sites siempre corren después (Start es la primera
 -- llamada del bootstrap).
 local _dataService: DataService = nil :: any
 local _started = false
-
-local function _isCooldownReady(player: Player, action: string): boolean
-	local playerCooldowns = _cooldowns[player.UserId]
-	if not playerCooldowns then
-		return true
-	end
-	local last = playerCooldowns[action] or 0
-	return time() - last >= COOLDOWN
-end
-
--- Llamar solo tras éxito real.
-local function _markCooldown(player: Player, action: string)
-	local playerCooldowns = _cooldowns[player.UserId]
-	if not playerCooldowns then
-		playerCooldowns = {}
-		_cooldowns[player.UserId] = playerCooldowns
-	end
-	playerCooldowns[action] = time()
-end
 
 local function _getPath(data: any, path: { string }): any
 	local pointer: any = data
@@ -131,7 +110,7 @@ local function _getPath(data: any, path: { string }): any
 	return pointer
 end
 
-local function _onBuyItem(data: { itemId: string, category: string, weaponCategory: string, weaponId: string }, player: Player): ()
+local function _onBuyItem(data: Network.ShopItemPayload, player: Player): ()
 	-- ByteNet no impone maxLength en strings: se rechazan payloads largos antes de
 	-- gsub/concat/lookup (DoS asimétrico).
 	if not NetGuards.validate(data, {
@@ -145,7 +124,7 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 	end
 
 	-- Cooldown sin marcar: se marca tras éxito real.
-	if not _isCooldownReady(player, "buy") then
+	if not _limiter:isReady(player, "buy") then
 		Network.Shop.Response.SendTo({ success = false, message = "Too many requests. Slow down." }, player)
 		return
 	end
@@ -211,7 +190,7 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 		end
 	end
 
-	local playerLevel: number = profile.Data.Stats.Level or 1
+	local playerLevel: number = profile.Data.Stats.Level or 0
 	if playerLevel < (itemConfig.LevelRequired or 1) then
 		Network.Shop.Response.SendTo({
 			success = false,
@@ -244,18 +223,10 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 	if data.category == LockerCategory.WEAPON_WRAPS then
 		local resolvedWeaponCategory = weaponCategoryForWraps :: string
 		local resolvedWeaponId = weaponIdForWraps :: string
-		table.insert(updates, {
-			path = { "Inventory", "WeaponWrapsByWeapon", resolvedWeaponCategory, resolvedWeaponId, data.itemId },
-			value = true,
-		})
-		table.insert(updates, {
-			path = { "InventoryMeta", "WeaponWraps", data.itemId },
-			value = { AcquiredAt = os.time(), Source = "Shop" },
-		})
-		table.insert(updates, {
-			path = { "NewItemFlags", "WeaponWraps", data.itemId },
-			value = true,
-		})
+		local wrapUpdates = _dataService:GrantWeaponWrapUpdates(data.itemId, {
+			{ category = resolvedWeaponCategory, weaponId = resolvedWeaponId },
+		}, "Shop")
+		table.move(wrapUpdates, 1, #wrapUpdates, #updates + 1, updates)
 
 		local wrapsRootPath = WEAPON_WRAPS_PATH_BY_CATEGORY[resolvedWeaponCategory]
 		if wrapsRootPath then
@@ -269,10 +240,6 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 		table.insert(updates, {
 			path = { "InventoryMeta", data.category, data.itemId },
 			value = { AcquiredAt = os.time(), Source = "Shop" },
-		})
-		table.insert(updates, {
-			path = { "NewItemFlags", data.category, data.itemId },
-			value = true,
 		})
 	end
 
@@ -293,7 +260,7 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 	local success = _dataService:BatchUpdate(player, updates)
 
 	if success then
-		_markCooldown(player, "buy")
+		_limiter:mark(player, "buy")
 
 		-- Forzar el guardado ANTES de registrar la compra: BatchUpdate solo escribe en
 		-- memoria y el autosave de ProfileStore llega hasta 30 s después; si el server
@@ -343,7 +310,7 @@ local function _onBuyItem(data: { itemId: string, category: string, weaponCatego
 	end
 end
 
-local function _onEquipItem(data: { category: string, itemId: string, weaponCategory: string, weaponId: string }, player: Player): ()
+local function _onEquipItem(data: Network.ShopItemPayload, player: Player): ()
 	if not NetGuards.validate(data, {
 		category       = M.Category,
 		itemId         = M.Id,
@@ -351,11 +318,6 @@ local function _onEquipItem(data: { category: string, itemId: string, weaponCate
 		weaponId       = M.Id,
 	}) or data.itemId == "" then
 		Network.Shop.Response.SendTo({ success = false, message = "Invalid request." }, player)
-		return
-	end
-
-	if not _isCooldownReady(player, "equip") then
-		Network.Shop.Response.SendTo({ success = false, message = "Too many requests. Slow down." }, player)
 		return
 	end
 
@@ -372,7 +334,19 @@ local function _onEquipItem(data: { category: string, itemId: string, weaponCate
 		return
 	end
 
+	-- Cooldown por slot: el Locker manda juntos los equips de varios slots. La clave sale
+	-- del slot validado, nunca de strings del cliente: si no, variándolos se salta el
+	-- cooldown y el mapa del limitador crece sin tope.
+	local function isRateLimited(cooldownKey: string): boolean
+		if _limiter:isReady(player, cooldownKey) then
+			return false
+		end
+		Network.Shop.Response.SendTo({ success = false, message = "Too many requests. Slow down." }, player)
+		return true
+	end
+
 	local ok = false
+	local cooldownKey: string
 	if data.category == LockerCategory.WEAPON_WRAPS then
 		local weaponCategory = _resolveWeaponCategory(data.weaponCategory)
 		if not weaponCategory then
@@ -405,6 +379,10 @@ local function _onEquipItem(data: { category: string, itemId: string, weaponCate
 			return
 		end
 
+		cooldownKey = "equip:wrap:" .. weaponCategory
+		if isRateLimited(cooldownKey) then
+			return
+		end
 		ok = _dataService:SetValue(player, { wrapsRootPath[1], wrapsRootPath[2], targetWeaponId }, data.itemId)
 	else
 		local isOwned = _getPath(profile.Data.Inventory, { data.category, data.itemId })
@@ -419,11 +397,15 @@ local function _onEquipItem(data: { category: string, itemId: string, weaponCate
 			return
 		end
 
+		cooldownKey = "equip:" .. loadoutSlot
+		if isRateLimited(cooldownKey) then
+			return
+		end
 		ok = _dataService:SetValue(player, { "Loadout", loadoutSlot }, data.itemId)
 	end
 
 	if ok then
-		_markCooldown(player, "equip")
+		_limiter:mark(player, cooldownKey)
 		Network.Shop.Response.SendTo({
 			success = true,
 			message = itemConfig.Name .. " equipped.",
@@ -451,13 +433,12 @@ function ShopService:Start(dataService: DataService): ()
 	for category, items in ItemsConfig do
 		_itemCache[category] = {}
 		for itemId, config in items do
-			_itemCache[category][itemId] = Sift.Dictionary.merge(config, { category = category })
+			local entry = table.clone(config)
+			entry.category = category
+			_itemCache[category][itemId] = entry
 		end
 	end
 
-	Players.PlayerRemoving:Connect(function(player: Player)
-		_cooldowns[player.UserId] = nil
-	end)
 
 	Network.Shop.BuyItem.Listen(_onBuyItem)
 	Network.Shop.EquipItem.Listen(_onEquipItem)
