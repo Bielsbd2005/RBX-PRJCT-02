@@ -63,11 +63,16 @@ export type LockerCameraController = {
 	_followPitch: number,
 	_followBound: boolean,
 	followSubject: (self: LockerCameraController, subject: BasePart?) -> (),
-	setTargetPartName: (self: LockerCameraController, targetPartName: string, instant: boolean?) -> (),
+	setTargetPartName: (
+		self: LockerCameraController,
+		targetPartName: string,
+		instant: boolean?,
+		tweenInfo: TweenInfo?
+	) -> (),
 	zoomOnPosition: (self: LockerCameraController, targetPosition: Vector3) -> (),
 	unzoom: (self: LockerCameraController) -> (),
-	apply: (self: LockerCameraController, instant: boolean?) -> (),
-	restore: (self: LockerCameraController, animated: boolean?) -> (),
+	apply: (self: LockerCameraController, instant: boolean?, tweenInfo: TweenInfo?) -> (),
+	restore: (self: LockerCameraController, animated: boolean?, tweenInfo: TweenInfo?) -> (),
 	Destroy: (self: LockerCameraController) -> (),
 }
 
@@ -190,7 +195,8 @@ function LockerCameraController:_cancelActiveTweens()
 end
 
 -- `instant`: salto de golpe, para quien tape el corte con un fundido a negro.
-function LockerCameraController:setTargetPartName(targetPartName: string, instant: boolean?)
+-- `tweenInfo` sustituye al travelling por defecto.
+function LockerCameraController:setTargetPartName(targetPartName: string, instant: boolean?, tweenInfo: TweenInfo?)
 	local nextTargetPart = resolveTargetPart(targetPartName)
 	if self._targetPart == nextTargetPart and self._targetPartName == targetPartName then
 		return
@@ -200,7 +206,7 @@ function LockerCameraController:setTargetPartName(targetPartName: string, instan
 	self._targetPartName = targetPartName
 
 	if self._isApplied then
-		self:apply(instant)
+		self:apply(instant, tweenInfo)
 	end
 end
 
@@ -250,7 +256,7 @@ end
 
 -- Solo la primera llamada guarda el estado de cámara previo. `instant` es para quien
 -- tapa el corte con un fundido a negro (un travelling ahí sería espera en negro).
-function LockerCameraController:apply(instant: boolean?)
+function LockerCameraController:apply(instant: boolean?, tweenInfo: TweenInfo?)
 	self:_cancelActiveTweens()
 
 	if not self._isApplied then
@@ -273,10 +279,11 @@ function LockerCameraController:apply(instant: boolean?)
 		return
 	end
 
-	self._cameraApproachTween = TweenService:Create(self._camera, MOVE_TWEEN_INFO, {
+	local info = tweenInfo or MOVE_TWEEN_INFO
+	self._cameraApproachTween = TweenService:Create(self._camera, info, {
 		CFrame = self._targetPart.CFrame,
 	})
-	self._fovTween = TweenService:Create(self._camera, MOVE_TWEEN_INFO, {
+	self._fovTween = TweenService:Create(self._camera, info, {
 		FieldOfView = targetFov,
 	})
 
@@ -285,7 +292,7 @@ function LockerCameraController:apply(instant: boolean?)
 end
 
 -- Con `animated`, el tipo/subject de cámara solo se restaura al terminar el travelling.
-function LockerCameraController:restore(animated: boolean?)
+function LockerCameraController:restore(animated: boolean?, tweenInfo: TweenInfo?)
 	if not self._isApplied then
 		return
 	end
@@ -322,14 +329,15 @@ function LockerCameraController:restore(animated: boolean?)
 	end
 
 	if animated and savedCFrame ~= nil then
+		local info = tweenInfo or MOVE_TWEEN_INFO
 		self._camera.CameraType = Enum.CameraType.Scriptable
 		if savedFieldOfView ~= nil then
-			self._fovTween = TweenService:Create(self._camera, MOVE_TWEEN_INFO, {
+			self._fovTween = TweenService:Create(self._camera, info, {
 				FieldOfView = savedFieldOfView,
 			})
 			self._fovTween:Play()
 		end
-		self._cameraApproachTween = TweenService:Create(self._camera, MOVE_TWEEN_INFO, {
+		self._cameraApproachTween = TweenService:Create(self._camera, info, {
 			CFrame = savedCFrame,
 		})
 		self._cameraApproachCompletedConnection = self._cameraApproachTween.Completed:Connect(function(playbackState)

@@ -2,12 +2,11 @@
 --[[
 	Panel de stats del arma seleccionada, con comparación contra el arma equipada.
 
-	Es un BillboardGui en el mundo (Workspace.Locker.Stats.Part.BillboardGui.WeaponStats),
-	así que sólo debe verse mientras se previsualiza un arma: quien lo monta llama a
-	:setStats y :hide, y ocultar apaga el BillboardGui entero.
+	Es un SurfaceGui fijo en el mundo y siempre visible: :setStats solo cambia
+	los valores.
 
 	Jerarquía esperada (autoría en Studio) — los CUATRO stats llevan barra:
-		Workspace.Locker.Stats.Part.BillboardGui.WeaponStats
+		Workspace.Locker.Stats.SurfaceGui.WeaponStats
 		  └─ <Stat>.Bar.{Fill, Delta}   +   los labels Value / Delta
 
 	Los labels pueden colgar de un contenedor `<Stat>.Title` (Damage, Reload,
@@ -121,7 +120,6 @@ export type StatsModel = {
 
 export type WeaponStatsPanel = {
 	setStats: (self: WeaponStatsPanel, model: StatsModel) -> (),
-	hide: (self: WeaponStatsPanel) -> (),
 	Destroy: (self: WeaponStatsPanel) -> (),
 }
 
@@ -194,28 +192,17 @@ local function applyDelta(node: StatNodes, delta: number, dir: string)
 	label.TextColor3 = colorForDir(dir)
 end
 
--- `statsRoot` es el ancla en el mundo (Workspace.Locker.Stats); dentro se busca el
--- BillboardGui y en él el frame WeaponStats. Si falta alguno, el panel queda inerte.
-local function resolveStatsNodes(statsRoot: Instance?): (BillboardGui?, GuiObject?)
-	if not statsRoot then
-		return nil, nil
-	end
-
-	local billboard = if statsRoot:IsA("BillboardGui")
-		then statsRoot :: BillboardGui
-		else statsRoot:FindFirstChildWhichIsA("BillboardGui", true)
-	if not billboard then
-		return nil, nil
-	end
-
-	local frame = billboard:FindFirstChild("WeaponStats", true)
-	return billboard, if frame and frame:IsA("GuiObject") then frame else nil
+-- `statsRoot` es el ancla en el mundo (Workspace.Locker.Stats). Si falta el
+-- frame WeaponStats, el panel queda inerte.
+local function resolveStatsFrame(statsRoot: Instance?): GuiObject?
+	local frame = if statsRoot then statsRoot:FindFirstChild("WeaponStats", true) else nil
+	return if frame and frame:IsA("GuiObject") then frame else nil
 end
 
 function WeaponStatsPanel.new(statsRoot: Instance?, janitor: any): WeaponStatsPanel
-	local billboard, statsGui = resolveStatsNodes(statsRoot)
+	local statsGui = resolveStatsFrame(statsRoot)
 	if not statsGui then
-		warn("[WeaponStatsPanel] No se encontró el BillboardGui con WeaponStats — el panel de stats no se mostrará")
+		warn("[WeaponStatsPanel] No se encontró Workspace.Locker.Stats…WeaponStats — el panel de stats no se actualizará")
 	end
 
 	local nodes: { [string]: StatNodes } = {}
@@ -250,30 +237,13 @@ function WeaponStatsPanel.new(statsRoot: Instance?, janitor: any): WeaponStatsPa
 	end
 
 	local self = setmetatable({
-		_billboard = billboard,
-		_statsFrame = statsGui,
 		_nodes = nodes,
 		_alive = true,
 	}, WeaponStatsPanel) :: any
 
-	-- El billboard vive en el mundo: arranca apagado para que no asome en el
-	-- lobby ni en las cámaras que no son la de armas.
-	self:_setVisible(false)
-
 	janitor:Add(self, "Destroy")
 
 	return self
-end
-
--- Apaga el BillboardGui entero: con solo el frame, el billboard seguiría
--- renderizando en el mundo.
-function WeaponStatsPanel._setVisible(self: any, visible: boolean)
-	if self._billboard then
-		self._billboard.Enabled = visible
-	end
-	if self._statsFrame then
-		self._statsFrame.Visible = visible
-	end
 end
 
 function WeaponStatsPanel._animateValue(self: any, node: StatNodes, target: number, dir: string)
@@ -322,7 +292,6 @@ function WeaponStatsPanel.setStats(self: any, model: StatsModel)
 	if not self._alive then
 		return
 	end
-	self:_setVisible(true)
 
 	for _, def in STAT_DEFS do
 		local stat = (model :: any)[def.key] :: StatValue?
@@ -335,18 +304,13 @@ function WeaponStatsPanel.setStats(self: any, model: StatsModel)
 	end
 end
 
-function WeaponStatsPanel.hide(self: any)
-	self:_setVisible(false)
+function WeaponStatsPanel.Destroy(self: any)
+	self._alive = false
 	for _, node in self._nodes do
 		node.gen += 1
 		Retween.cancel(node.fillSlot)
 		Retween.cancel(node.deltaSlot)
 	end
-end
-
-function WeaponStatsPanel.Destroy(self: any)
-	self._alive = false
-	self:hide()
 end
 
 return WeaponStatsPanel

@@ -53,11 +53,52 @@ DataController.WeaponKills   = nil :: any
 DataController.Settings      = nil :: any
 DataController.Rewards       = nil :: any
 DataController.LoginStreak   = nil :: any
-DataController.NewItemFlags  = nil :: any
 DataController.DailyTasks    = nil :: any
 DataController.BattlePass    = nil :: any
 DataController.Metadata      = nil :: any
 DataController.PendingGifts  = nil :: any
+
+-- Equipados optimistas del Locker: Loadout publica la Replica con estos valores
+-- encima hasta que la Replica trae el mismo valor (o se retiran). Clave = path unido.
+local _realLoadout: any = nil
+local _loadoutOverrides: { [string]: { path: { string }, value: any } } = {}
+
+local function _getAtPath(root: any, path: { string }): any
+	local node = root
+	for _, key in path do
+		if type(node) ~= "table" then
+			return nil
+		end
+		node = node[key]
+	end
+	return node
+end
+
+-- Copia solo la rama que se toca: el resto sigue compartiendo tablas con la Replica.
+local function _withValueAtPath(root: any, path: { string }, index: number, value: any): any
+	local copy = if type(root) == "table" then table.clone(root) else {}
+	local key = path[index]
+	if index == #path then
+		copy[key] = value
+	else
+		copy[key] = _withValueAtPath(copy[key], path, index + 1, value)
+	end
+	return copy
+end
+
+local function _publishLoadout()
+	for key, override in _loadoutOverrides do
+		if _getAtPath(_realLoadout, override.path) == override.value then
+			_loadoutOverrides[key] = nil
+		end
+	end
+
+	local loadout = _realLoadout
+	for _, override in _loadoutOverrides do
+		loadout = _withValueAtPath(loadout, override.path, 1, override.value)
+	end
+	DataController.Loadout:set(loadout)
+end
 
 function DataController:Start(): ()
 	if _started then
@@ -76,12 +117,12 @@ function DataController:Start(): ()
 	DataController.Stats         = _scope:Value(_deepCopy(DataTemplate.Stats))
 	DataController.Inventory     = _scope:Value(_deepCopy(DataTemplate.Inventory))
 	DataController.InventoryMeta = _scope:Value(_deepCopy(DataTemplate.InventoryMeta))
-	DataController.Loadout       = _scope:Value(_deepCopy(DataTemplate.Loadout))
+	_realLoadout = _deepCopy(DataTemplate.Loadout)
+	DataController.Loadout       = _scope:Value(_realLoadout)
 	DataController.WeaponKills   = _scope:Value(_deepCopy(DataTemplate.WeaponKills))
 	DataController.Settings      = _scope:Value(_deepCopy(DataTemplate.Settings))
 	DataController.Rewards       = _scope:Value(_deepCopy(DataTemplate.Rewards))
 	DataController.LoginStreak   = _scope:Value(_deepCopy(DataTemplate.LoginStreak))
-	DataController.NewItemFlags  = _scope:Value(_deepCopy(DataTemplate.NewItemFlags))
 	DataController.DailyTasks    = _scope:Value(_deepCopy(DataTemplate.DailyTasks))
 	DataController.BattlePass    = _scope:Value(_deepCopy(DataTemplate.BattlePass))
 	DataController.Metadata      = _scope:Value(_deepCopy(DataTemplate.Metadata))
@@ -106,12 +147,12 @@ function DataController:Start(): ()
 		DataController.Stats:set(replica.Data.Stats)
 		DataController.Inventory:set(replica.Data.Inventory)
 		DataController.InventoryMeta:set(replica.Data.InventoryMeta)
-		DataController.Loadout:set(replica.Data.Loadout)
+		_realLoadout = replica.Data.Loadout
+		_publishLoadout()
 		DataController.WeaponKills:set(replica.Data.WeaponKills)
 		DataController.Settings:set(replica.Data.Settings)
 		DataController.Rewards:set(replica.Data.Rewards)
 		DataController.LoginStreak:set(replica.Data.LoginStreak)
-		DataController.NewItemFlags:set(replica.Data.NewItemFlags)
 		DataController.DailyTasks:set(replica.Data.DailyTasks)
 		DataController.BattlePass:set(replica.Data.BattlePass)
 		DataController.Metadata:set(replica.Data.Metadata)
@@ -133,7 +174,8 @@ function DataController:Start(): ()
 
 		replica:AddCleanupTask(
 			replica:ListenToChange({ "Loadout" }, function(newLoadout: any)
-				DataController.Loadout:set(newLoadout)
+				_realLoadout = newLoadout
+				_publishLoadout()
 			end)
 		)
 
@@ -164,12 +206,6 @@ function DataController:Start(): ()
 		replica:AddCleanupTask(
 			replica:ListenToChange({ "LoginStreak" }, function(newLoginStreak: any)
 				DataController.LoginStreak:set(newLoginStreak)
-			end)
-		)
-
-		replica:AddCleanupTask(
-			replica:ListenToChange({ "NewItemFlags" }, function(newNewItemFlags: any)
-				DataController.NewItemFlags:set(newNewItemFlags)
 			end)
 		)
 
@@ -208,6 +244,21 @@ end
 
 function DataController:WhenReady(): any
 	return _readyPromise
+end
+
+--- Loadout muestra `value` en `path` (relativo a Loadout) antes de que el servidor
+--- lo confirme. Se retira solo cuando la Replica trae ese mismo valor.
+function DataController:setLoadoutOverride(path: { string }, value: any)
+	_loadoutOverrides[table.concat(path, "/")] = { path = table.clone(path), value = value }
+	_publishLoadout()
+end
+
+function DataController:clearLoadoutOverride(path: { string })
+	local key = table.concat(path, "/")
+	if _loadoutOverrides[key] then
+		_loadoutOverrides[key] = nil
+		_publishLoadout()
+	end
 end
 
 return DataController

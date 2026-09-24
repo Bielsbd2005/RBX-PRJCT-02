@@ -1,7 +1,7 @@
 --!strict
 --[[
-	Arrastrar para girar el personaje del preview en la categoría Character: el ángulo
-	se pasa al dueño del maniquí (LobbyCharacterPreview) vía `onYawChanged`, que lo aplica.
+	Arrastrar para girar un preview del locker (el personaje en Character, el arma en
+	Arsenal): el ángulo se pasa al dueño del modelo vía `onYawChanged`, que lo aplica.
 
 	Ratón y táctil por el mismo camino (patrón de SliderController): solo mueve el
 	puntero que empezó el arrastre; un segundo dedo no se suma.
@@ -27,7 +27,7 @@ local Workspace = game:GetService("Workspace")
 local Packages = ReplicatedStorage:WaitForChild("Packages")
 local Janitor = require(Packages.janitor) :: any
 
-local GUI_NAME = "LockerCharacterRotate"
+local DEFAULT_NAME = "LockerCharacterRotate"
 
 -- Un arrastre de ancho de pantalla completo = una vuelta entera. Al normalizar
 -- por el viewport, el mismo gesto gira lo mismo en un móvil estrecho que en un
@@ -44,9 +44,9 @@ local RELEASE_RETURN_STYLE = Enum.EasingStyle.Back
 local SWITCH_RETURN_DURATION = 0.3
 local SWITCH_RETURN_STYLE = Enum.EasingStyle.Quad
 
-local RETURN_STEP_NAME = "LockerCharacterRotateReturn"
-
 export type CharacterRotateConfig = {
+	-- Nombre del ScreenGui y del render step: único por instancia.
+	name: string?,
 	playerGui: PlayerGui,
 	-- ScreenGui de la UI del locker: solo se usa para quedar un DisplayOrder por
 	-- debajo. Si falta, se asume 0.
@@ -68,9 +68,9 @@ local function wrapAngle(angle: number): number
 	return (angle + math.pi) % (math.pi * 2) - math.pi
 end
 
-local function buildSurface(playerGui: PlayerGui, uiGui: Instance?): (ScreenGui, Frame)
+local function buildSurface(name: string, playerGui: PlayerGui, uiGui: Instance?): (ScreenGui, Frame)
 	-- Hot reload / re-arranque del feature: fuera la superficie anterior.
-	local previous = playerGui:FindFirstChild(GUI_NAME)
+	local previous = playerGui:FindFirstChild(name)
 	if previous then
 		previous:Destroy()
 	end
@@ -81,7 +81,7 @@ local function buildSurface(playerGui: PlayerGui, uiGui: Instance?): (ScreenGui,
 	end
 
 	local screenGui = Instance.new("ScreenGui")
-	screenGui.Name = GUI_NAME
+	screenGui.Name = name
 	screenGui.ResetOnSpawn = false
 	screenGui.IgnoreGuiInset = true
 	screenGui.DisplayOrder = displayOrder - 1
@@ -114,8 +114,10 @@ function CharacterRotateController.new(config: CharacterRotateConfig): any
 	self._activeInput = nil :: InputObject?
 	self._lastX = 0
 	self._returnBound = false
+	local name = config.name or DEFAULT_NAME
+	self._returnStepName = name .. "Return"
 
-	local screenGui, surface = buildSurface(config.playerGui, config.uiGui)
+	local screenGui, surface = buildSurface(name, config.playerGui, config.uiGui)
 	self._gui = screenGui
 	self._janitor:Add(screenGui, "Destroy")
 
@@ -222,7 +224,7 @@ function CharacterRotateController:_stopReturn()
 		return
 	end
 	self._returnBound = false
-	RunService:UnbindFromRenderStep(RETURN_STEP_NAME)
+	RunService:UnbindFromRenderStep(self._returnStepName)
 end
 
 -- Vuelve a 0 desde el ángulo actual. Con Back el valor se pasa de largo (eased > 1)
@@ -236,7 +238,7 @@ function CharacterRotateController:_startReturn(style: Enum.EasingStyle, duratio
 	local from = self._yaw
 	local startedAt = os.clock()
 	self._returnBound = true
-	RunService:BindToRenderStep(RETURN_STEP_NAME, Enum.RenderPriority.Camera.Value - 1, function()
+	RunService:BindToRenderStep(self._returnStepName, Enum.RenderPriority.Camera.Value - 1, function()
 		local alpha = math.clamp((os.clock() - startedAt) / duration, 0, 1)
 		local eased = TweenService:GetValue(alpha, style, Enum.EasingDirection.Out)
 		self:_setYaw(from * (1 - eased))

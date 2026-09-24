@@ -9,6 +9,7 @@ local Packages = ReplicatedStorage:WaitForChild("Packages")
 
 local Janitor = require(Packages.janitor) :: any
 local WeaponWrapPreviewer = require(script.Parent.Previewers.WeaponWrapPreviewer)
+local LockerCatalog = require(script.Parent.LockerCatalog)
 local UITheme = require(script.Parent.Parent.Parent.core.ui.UITheme)
 local UIUtils = require(script.Parent.Parent.Parent.core.ui.UIUtils)
 local WeaponCategoryMod = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("WeaponCategory"))
@@ -17,33 +18,7 @@ local LockerCategory = require(game:GetService("ReplicatedStorage"):WaitForChild
 local AssetIds = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("AssetIds"))
 local Currency = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("Currency"))
 
-export type LockerCatalogItem = {
-	qualifiedId: string,
-	Category: string,
-	id: string,
-	Name: string,
-	Price: number,
-	Currency: string?,
-	LevelRequired: number,
-	Rarity: string,
-	Image: string,
-	CanPurchase: boolean,
-	-- Temporada del pase que lo dio (badge). Nil = sin badge.
-	Season: string?,
-	SeasonLabel: string?,
-	TextureID: string?,
-	BaseColor: Color3?,
-	Material: Enum.Material?,
-	isAnimated: boolean?,
-	StudsPerTile: number?,
-	PreviewWeaponCategory: string?,
-	PreviewWeaponId: string?,
-	PreviewWeaponDisplayName: string?,
-	KillGoal: number?,
-	KillProgress: number?,
-	-- Vista Maestry: desafío ya desbloqueado; muestra "UNLOCKED" en vez del progreso.
-	ChallengeUnlocked: boolean?,
-}
+export type LockerCatalogItem = LockerCatalog.LockerCatalogItem
 
 export type TemplateKey = "default" | "wraps"
 
@@ -65,7 +40,12 @@ type ItemGridCardRefs = {
 	itemBodyNode: GuiObject?,
 	nameNode: TextLabel?,
 	viewportNode: ViewportFrame?,
+	-- qualifiedId del wrap renderizado ahora en viewportNode: RefreshVisibleState corre
+	-- en cada cambio de Loadout y re-renderizar la escena 3D de cada card es caro.
+	renderedWrapId: string?,
 	statusValueNode: TextLabel?,
+	statusValueDefaultColor: Color3?,
+	equippedStrokeNode: UIStroke?,
 	statusIconNode: GuiObject?,
 	glowNode: GuiObject?,
 	rarityGradientNode: UIGradient?,
@@ -79,7 +59,8 @@ type LockerGridCallbacks = {
 	isItemOwned: (LockerCatalogItem) -> boolean,
 	isItemEquipped: (LockerCatalogItem) -> boolean,
 	getCurrentLevel: () -> number,
-	onSelectionChanged: (LockerCatalogItem?) -> (),
+	-- byUser: la eligió el jugador con un clic; si no, la fijó el grid al repoblar o refrescar.
+	onSelectionChanged: (item: LockerCatalogItem?, byUser: boolean?) -> (),
 	onOwnedItemActivated: (LockerCatalogItem) -> (),
 }
 
@@ -103,18 +84,21 @@ export type LockerGrid = {
 	_gridCardByButton: { [GuiButton]: GuiObject },
 	_gridButtonByQualifiedId: { [string]: GuiButton },
 	_cachedLevel: number,
+	_emptyCells: { Frame },
+	-- nil = grid vacía (Clear): sin celdas de relleno.
+	_itemCount: number?,
 	_janitor: any,
 	_populateJanitor: any,
 	Destroy: (self: LockerGrid) -> (),
 	Clear: (self: LockerGrid) -> (),
-	Populate: (self: LockerGrid, items: { LockerCatalogItem }, selectedQualifiedId: string?, templateKey: TemplateKey?) -> (),
+	Populate: (self: LockerGrid, items: { LockerCatalogItem }, selectedQualifiedId: string?, templateKey: TemplateKey?, allowEmptySelection: boolean?) -> (),
 	PlayStagger: (self: LockerGrid) -> (),
 	RefreshVisibleState: (self: LockerGrid, notifySelection: boolean?) -> (),
 	_buildGridCardRefs: (self: LockerGrid, card: GuiObject, templateKey: TemplateKey) -> ItemGridCardRefs,
 	_getGridCardRefs: (self: LockerGrid, card: GuiObject) -> ItemGridCardRefs,
 	_acquireGridCard: (self: LockerGrid, templateKey: TemplateKey) -> GuiObject,
 	_returnCardToPool: (self: LockerGrid, card: GuiObject) -> (),
-	_setSelectedButton: (self: LockerGrid, targetButton: GuiButton) -> (),
+	_setSelectedButton: (self: LockerGrid, targetButton: GuiButton, byUser: boolean?) -> (),
 	_updateGridCardVisual: (self: LockerGrid, button: GuiButton) -> (),
 	_getOrCreateGridButtonScale: (self: LockerGrid, button: GuiButton) -> UIScale,
 	_tweenGridButtonScale: (self: LockerGrid, button: GuiButton, targetScale: number, tweenInfo: TweenInfo) -> (),
@@ -125,6 +109,8 @@ export type LockerGrid = {
 	_syncWrapPreviewVisibility: (self: LockerGrid, card: GuiObject, item: LockerCatalogItem, isOwned: boolean) -> (),
 	_applyCatalogItemToCard: (self: LockerGrid, card: GuiObject, item: LockerCatalogItem, layoutOrder: number) -> (),
 	_resetTransientState: (self: LockerGrid, notifySelection: boolean) -> (),
+	_countGridColumns: (self: LockerGrid) -> number?,
+	_syncEmptyCells: (self: LockerGrid) -> (),
 }
 
 local GRID_BUTTON_HOVER_TWEEN_INFO = UITheme.HoverTweenInfo
@@ -134,6 +120,9 @@ local GRID_BUTTON_HOVER_SCALE = UITheme.ButtonHoverScale
 local GRID_BUTTON_CLICK_SCALE = UITheme.ButtonClickScale
 local GRID_ITEM_DEFAULT_COLOR = Color3.fromRGB(255, 255, 255)
 local GRID_ITEM_LOCKED_COLOR = Color3.fromRGB(24, 24, 24)
+local STATUS_EQUIPPED_TEXT_COLOR = Color3.fromRGB(124, 255, 0)
+-- Nombre del UIStroke de la card (en cualquier nivel) que se enciende al estar equipada.
+local EQUIPPED_STROKE_NAME = "Equiped"
 -- Wrap no poseído: se muestra en Item en vez del viewport 3D.
 local WRAP_LOCKED_PLACEHOLDER_IMAGE = AssetIds.Images.WrapLockedPlaceholder
 
@@ -183,10 +172,84 @@ function LockerGrid.new(
 	self._gridCardByButton = {}
 	self._gridButtonByQualifiedId = {}
 	self._cachedLevel = 0
+	self._emptyCells = {}
+	self._itemCount = nil
 	self._janitor = Janitor.new()
 	self._populateJanitor = Janitor.new()
 	self._janitor:Add(self._populateJanitor, "Destroy")
+
+	-- El nº de columnas depende del ancho: al redimensionar la pantalla cambia el relleno.
+	self._janitor:Add(itemGrid:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+		self:_syncEmptyCells()
+	end), "Disconnect")
+	local layout = itemGrid:FindFirstChildOfClass("UIGridLayout")
+	if layout then
+		self._janitor:Add(layout:GetPropertyChangedSignal("AbsoluteCellSize"):Connect(function()
+			self:_syncEmptyCells()
+		end), "Disconnect")
+	end
 	return self
+end
+
+-- Se calcula por geometría y no con AbsoluteCellCount, que va un frame por detrás
+-- del layout y con menos cards que columnas devuelve el nº de cards.
+function LockerGrid:_countGridColumns(): number?
+	local itemGrid = self._itemGrid
+	local layout = itemGrid:FindFirstChildOfClass("UIGridLayout")
+	if not layout or layout.FillDirection ~= Enum.FillDirection.Horizontal then
+		return nil
+	end
+
+	local canvasWidth = if itemGrid:IsA("ScrollingFrame") then itemGrid.AbsoluteCanvasSize.X else itemGrid.AbsoluteSize.X
+	local width = canvasWidth
+	local padding = itemGrid:FindFirstChildOfClass("UIPadding")
+	if padding then
+		width -= (padding.PaddingLeft.Scale + padding.PaddingRight.Scale) * canvasWidth
+			+ padding.PaddingLeft.Offset
+			+ padding.PaddingRight.Offset
+	end
+	if width <= 0 then
+		return nil
+	end
+
+	local cellWidth = layout.AbsoluteCellSize.X
+	if cellWidth <= 0 then
+		cellWidth = layout.CellSize.X.Scale * width + layout.CellSize.X.Offset
+	end
+	local gap = layout.CellPadding.X.Scale * width + layout.CellPadding.X.Offset
+	if cellWidth + gap <= 0 then
+		return nil
+	end
+
+	local columns = math.max(1, math.floor((width + gap) / (cellWidth + gap) + 1e-3))
+	if layout.FillDirectionMaxCells > 0 then
+		columns = math.min(columns, layout.FillDirectionMaxCells)
+	end
+	return columns
+end
+
+-- Completa la última fila y añade una fila vacía debajo con celdas transparentes.
+function LockerGrid:_syncEmptyCells()
+	local itemCount = self._itemCount
+	local needed = 0
+	local columns = if itemCount then self:_countGridColumns() else nil
+	if itemCount and columns then
+		needed = (columns - itemCount % columns) % columns + columns
+	end
+
+	for _ = #self._emptyCells + 1, needed do
+		local cell = Instance.new("Frame")
+		cell.Name = "Empty"
+		cell.BackgroundTransparency = 1
+		cell.BorderSizePixel = 0
+		cell.Parent = self._itemGrid
+		table.insert(self._emptyCells, cell)
+	end
+
+	for index, cell in self._emptyCells do
+		cell.Visible = index <= needed
+		cell.LayoutOrder = (itemCount or 0) + index
+	end
 end
 
 function LockerGrid:_buildGridCardRefs(card: GuiObject, templateKey: TemplateKey): ItemGridCardRefs
@@ -223,6 +286,16 @@ function LockerGrid:_buildGridCardRefs(card: GuiObject, templateKey: TemplateKey
 	local statusValueNode = if statusNode then statusNode:FindFirstChild("Value") else nil
 	local statusIconNode = if statusNode then statusNode:FindFirstChild("Icon") else nil
 
+	local equippedStrokeNode: UIStroke? = nil
+	if button then
+		for _, descendant in button:GetDescendants() do
+			if descendant.Name == EQUIPPED_STROKE_NAME and descendant:IsA("UIStroke") then
+				equippedStrokeNode = descendant
+				break
+			end
+		end
+	end
+
 	local glowNode = if button then button:FindFirstChild("Glow") else nil
 	local rarityGradient = if button then button:FindFirstChildOfClass("UIGradient") else nil
 
@@ -243,6 +316,8 @@ function LockerGrid:_buildGridCardRefs(card: GuiObject, templateKey: TemplateKey
 		nameNode = resolvedNameNode,
 		viewportNode = viewport,
 		statusValueNode = if statusValueNode and statusValueNode:IsA("TextLabel") then statusValueNode else nil,
+		statusValueDefaultColor = if statusValueNode and statusValueNode:IsA("TextLabel") then statusValueNode.TextColor3 else nil,
+		equippedStrokeNode = equippedStrokeNode,
 		statusIconNode = if statusIconNode and statusIconNode:IsA("GuiObject") then statusIconNode else nil,
 		glowNode = if glowNode and glowNode:IsA("GuiObject") then glowNode else nil,
 		rarityGradientNode = rarityGradient,
@@ -263,6 +338,7 @@ function LockerGrid:_clearCardViewportPreview(card: GuiObject)
 	end
 
 	local refs = self:_getGridCardRefs(card)
+	refs.renderedWrapId = nil
 	local viewportNode = refs.viewportNode
 	if not viewportNode then
 		return
@@ -286,6 +362,9 @@ function LockerGrid:_applyWeaponWrapViewportPreview(card: GuiObject, item: Locke
 	if not viewportNode then
 		return false
 	end
+	if refs.renderedWrapId == item.qualifiedId then
+		return true
+	end
 
 	self:_clearCardViewportPreview(card)
 
@@ -295,17 +374,10 @@ function LockerGrid:_applyWeaponWrapViewportPreview(card: GuiObject, item: Locke
 		self._cardPreviewJanitors[card] = previewJanitor
 	end
 
-	local previewItem = {
-		TextureID = item.TextureID,
-		BaseColor = item.BaseColor,
-		Material = item.Material,
-		isAnimated = item.isAnimated,
-		StudsPerTile = item.StudsPerTile,
-	}
-
-	local ok = WeaponWrapPreviewer.Render(viewportNode, previewItem, previewJanitor)
+	local ok = WeaponWrapPreviewer.Render(viewportNode, { WrapId = item.id }, previewJanitor)
 	if ok then
 		WeaponWrapPreviewer.reframeCentered(viewportNode)
+		refs.renderedWrapId = item.qualifiedId
 	end
 	return ok
 end
@@ -336,8 +408,8 @@ local function resolveItemImageNode(refs: ItemGridCardRefs, item: LockerCatalogI
 	return refs.itemNode
 end
 
-local function isKillChallengeItem(item: LockerCatalogItem): boolean
-	local goal = item.KillGoal
+local function isChallengeItem(item: LockerCatalogItem): boolean
+	local goal = item.ChallengeGoal
 	return goal ~= nil and goal > 0
 end
 
@@ -403,9 +475,16 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 	local isOwned = self._callbacks.isItemOwned(item)
 	local isEquipped = self._callbacks.isItemEquipped(item)
 
+	if refs.statusValueNode and refs.statusValueDefaultColor then
+		refs.statusValueNode.TextColor3 = if isEquipped then STATUS_EQUIPPED_TEXT_COLOR else refs.statusValueDefaultColor
+	end
+	if refs.equippedStrokeNode then
+		refs.equippedStrokeNode.Enabled = isEquipped
+	end
+
 	if refs.templateKey == "wraps" then
 		self:_syncWrapPreviewVisibility(card, item, isOwned)
-		local isChallenge = isKillChallengeItem(item) and not isOwned
+		local isChallenge = isChallengeItem(item) and not isOwned
 
 		local isWrapPurchasable = item.CanPurchase and item.Price > 0
 		applyStatusIcon(
@@ -417,8 +496,8 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 		)
 
 		if isChallenge then
-			local goal = math.max(1, item.KillGoal or 0)
-			local progress = math.clamp(item.KillProgress or 0, 0, goal)
+			local goal = math.max(1, item.ChallengeGoal or 0)
+			local progress = math.clamp(item.ChallengeProgress or 0, 0, goal)
 			if refs.statusValueNode then
 				refs.statusValueNode.Text = UIUtils.formatCountShort(progress) .. "/" .. UIUtils.formatCountShort(goal)
 			end
@@ -460,7 +539,7 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 	applyStatusIcon(refs.statusIconNode, resolveStatusIcon(item, isLevelLocked, isOwned))
 end
 
-function LockerGrid:_setSelectedButton(targetButton: GuiButton)
+function LockerGrid:_setSelectedButton(targetButton: GuiButton, byUser: boolean?)
 	local previousButton = self._selectedCatalogButton
 	self._selectedCatalogButton = targetButton
 	self._selectedCatalogItem = self._gridButtonItems[targetButton]
@@ -470,7 +549,7 @@ function LockerGrid:_setSelectedButton(targetButton: GuiButton)
 	end
 
 	self:_updateGridCardVisual(targetButton)
-	self._callbacks.onSelectionChanged(self._selectedCatalogItem)
+	self._callbacks.onSelectionChanged(self._selectedCatalogItem, byUser)
 end
 
 function LockerGrid:_getOrCreateGridButtonScale(button: GuiButton): UIScale
@@ -669,7 +748,7 @@ function LockerGrid:_applyCatalogItemToCard(card: GuiObject, item: LockerCatalog
 			return
 		end
 
-		self:_setSelectedButton(button)
+		self:_setSelectedButton(button, true)
 
 		if selectedItem and self._callbacks.isItemOwned(selectedItem) then
 			self._callbacks.onOwnedItemActivated(selectedItem)
@@ -752,9 +831,17 @@ function LockerGrid:Clear()
 	end
 
 	self._currentTemplateKey = nil
+	self._itemCount = nil
+	self:_syncEmptyCells()
 end
 
-function LockerGrid:Populate(items: { LockerCatalogItem }, selectedQualifiedId: string?, templateKey: TemplateKey?)
+-- `allowEmptySelection`: sin `selectedQualifiedId`, deja la grid sin selección en vez de elegir la primera card.
+function LockerGrid:Populate(
+	items: { LockerCatalogItem },
+	selectedQualifiedId: string?,
+	templateKey: TemplateKey?,
+	allowEmptySelection: boolean?
+)
 	local resolvedTemplateKey: TemplateKey = templateKey or "default"
 
 	self:_resetTransientState(false)
@@ -771,6 +858,10 @@ function LockerGrid:Populate(items: { LockerCatalogItem }, selectedQualifiedId: 
 	local generation = self._populateGeneration
 	local totalItems = #items
 	local syncItemCount = math.min(totalItems, POPULATE_SYNC_ITEM_COUNT)
+	-- Las celdas vacías van con LayoutOrder > totalItems: quedan al final aunque el resto
+	-- de cards llegue en lotes asíncronos.
+	self._itemCount = totalItems
+	self:_syncEmptyCells()
 
 	local function applyCatalogItem(layoutOrder: number)
 		local card = self._activeGridCards[layoutOrder]
@@ -838,7 +929,7 @@ function LockerGrid:Populate(items: { LockerCatalogItem }, selectedQualifiedId: 
 
 	if selectedQualifiedId then
 		selectedResolved = selectByQualifiedId(selectedQualifiedId)
-	elseif totalItems > 0 then
+	elseif totalItems > 0 and not allowEmptySelection then
 		selectedResolved = selectFirstVisibleItem()
 	else
 		self._callbacks.onSelectionChanged(nil)
@@ -911,6 +1002,22 @@ function LockerGrid:Destroy()
 		previewJanitor:Destroy()
 	end
 	table.clear(self._cardPreviewJanitors)
+	-- Las cards son clones bajo el ScrollingFrame de Studio: sin destruirlas, cada
+	-- rearranque del locker apilaría otro pool invisible encima.
+	for _, card in self._activeGridCards do
+		card:Destroy()
+	end
+	table.clear(self._activeGridCards)
+	for _, cell in self._emptyCells do
+		cell:Destroy()
+	end
+	table.clear(self._emptyCells)
+	for _, pool in self._gridCardPools do
+		for _, card in pool do
+			card:Destroy()
+		end
+		table.clear(pool)
+	end
 	for _, slot in self._activeGridScaleTweens do
 		Retween.cancel(slot)
 	end

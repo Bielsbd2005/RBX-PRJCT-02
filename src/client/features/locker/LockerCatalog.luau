@@ -3,8 +3,10 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local BattlePassConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("BattlePassConfig"))
 local LockerConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("LockerConfig"))
+local WrapMastery = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("data"):WaitForChild("WrapMastery"))
 
 local LockerMainCategory = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("LockerMainCategory"))
+local LockerCategory = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("LockerCategory"))
 
 type LockerCategoryKey = LockerMainCategory.LockerMainCategory
 
@@ -35,7 +37,12 @@ export type LockerCatalogItem = {
 	PreviewWeaponId: string?,
 	PreviewWeaponDisplayName: string?,
 	KillGoal: number?,
-	KillProgress: number?,
+	MasteryScope: string?,
+	-- Vista Maestry, desafío sin desbloquear: progreso/objetivo que muestra la card.
+	ChallengeProgress: number?,
+	ChallengeGoal: number?,
+	-- Vista Maestry: desafío ya desbloqueado; muestra "UNLOCKED" en vez del progreso.
+	ChallengeUnlocked: boolean?,
 }
 
 export type LockerCatalog = {
@@ -163,6 +170,7 @@ function LockerCatalog:_getTemplateItems(categoryKey: LockerCategoryKey, navKey:
 				isAnimated = definition.isAnimated == true,
 				StudsPerTile = tonumber(definition.StudsPerTile),
 				KillGoal = killGoalValue,
+				MasteryScope = WrapMastery.scopeOf(tostring(itemId)),
 			})
 		end
 	end
@@ -190,9 +198,12 @@ function LockerCatalog:GetItems(categoryKey: LockerCategoryKey, navKey: string):
 	-- Items exclusivos del Battle Pass o del VIP: ocultos hasta poseerlos. La invalidación
 	-- de _sortedCache vía InvalidateSorted() (al cambiar Inventory) reconstruye
 	-- la lista cuando un item BP entra al inventario.
+	-- Salvo en Wraps: su posesión depende del arma objetivo del momento y la clave de caché
+	-- no la incluye; LockerWrapsView.build ya filtra por lo que posee esa arma.
+	local isWrapsNav = categoryKey == LockerMainCategory.ARSENAL and navKey == LockerCategory.WEAPON_WRAPS
 	local catalogItems = {} :: { LockerCatalogItem }
 	for _, item in templateItems do
-		if (item.isBPExclusive or item.isVIPExclusive) and not self._isItemOwned(item) then
+		if not isWrapsNav and (item.isBPExclusive or item.isVIPExclusive) and not self._isItemOwned(item) then
 			continue
 		end
 		table.insert(catalogItems, item)
