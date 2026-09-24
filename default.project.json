@@ -14,7 +14,10 @@
         "$path": "src/shared"
       },
       "Packages": {
-        "$path": "Packages"
+        "$path": "Packages",
+        "bytenet": {
+          "$path": "vendor/bytenet"
+        }
       }
     },
     "ServerScriptService": {

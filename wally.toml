@@ -13,7 +13,8 @@ replicaservice = "brittonfischer/replicaservice@0.1.0"
 # Replicación selectiva de estado servidor → cliente.
 
 # --- NETWORKING (RENDIMIENTO EXTREMO) ---
-bytenet = "howmanysmall/bytenet@0.4.7"
+# ByteNet 0.4.7 está vendorizado en vendor/bytenet con parches propios
+# (git log -- vendor/bytenet). No añadirlo aquí: wally install los borraría.
 
 # --- UTILIDADES Y GESTIÓN DE MEMORIA ---
 janitor = "howmanysmall/janitor@1.18.3"
@@ -25,12 +26,3 @@ typed-promise = "howmanysmall/typed-promise@4.0.6"
 # --- INTERFAZ DE USUARIO ---
 fusion = "elttob/fusion@0.3.0"
 # UI reactiva para que tus menús e inventarios no consuman CPU innecesaria.
-
-
-
-ui-labs = "pepeeltoro41/ui-labs@2.4.2"
-
-# --- UTILIDADES DE TABLA INMUTABLE ---
-sift = "csqrl/sift@0.0.11"
-# Operaciones inmutables sobre tablas. Garantiza nuevas referencias en cada mutación,
-# lo que permite que ReplicaService detecte cambios y Fusion refresque la UI.
