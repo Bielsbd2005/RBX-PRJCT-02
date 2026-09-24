@@ -113,6 +113,8 @@ local MOTORS = { Enum.VibrationMotor.Small, Enum.VibrationMotor.Large }
 
 local _targets: { Target }? = nil
 local _generation = 0
+-- Motores del patrón que suena ahora; nil cuando ninguno está en el aire.
+local _activeTargets: { Target }? = nil
 local _activeUntil = 0
 local _activePriority = 0
 local _lastPlayedAt: { [string]: number } = {}
@@ -128,6 +130,15 @@ if not IS_SERVER then
 		_warnedUnavailable = false
 	end)
 	UserInputService.GamepadDisconnected:Connect(function()
+		local active = _activeTargets
+		_activeTargets = nil
+		if active then
+			pcall(function()
+				for _, target in active do
+					HapticService:SetMotor(target.inputType, target.motor, 0)
+				end
+			end)
+		end
 		_targets = nil
 	end)
 end
@@ -277,6 +288,27 @@ function Haptics.play(patternName: string, options: PlayOptions?)
 	_activeUntil = now + pattern.duration * pulses + gap * (pulses - 1)
 	_activePriority = pattern.priority
 
+	-- El patrón interrumpido sale sin tocar motores (para no cortar el pulso del nuevo),
+	-- así que los que él usaba y el nuevo no, se apagan aquí o vibrarían sin fin.
+	local previousTargets = _activeTargets
+	if previousTargets then
+		local orphaned: { Target } = {}
+		for _, old in previousTargets do
+			local shared = false
+			for _, new in targets do
+				if new.inputType == old.inputType and new.motor == old.motor then
+					shared = true
+					break
+				end
+			end
+			if not shared then
+				table.insert(orphaned, old)
+			end
+		end
+		setMotors(orphaned, 0)
+	end
+	_activeTargets = targets
+
 	_generation += 1
 	local generation = _generation
 
@@ -306,6 +338,7 @@ function Haptics.play(patternName: string, options: PlayOptions?)
 		if _generation == generation then
 			_activeUntil = 0
 			_activePriority = 0
+			_activeTargets = nil
 		end
 	end)
 end

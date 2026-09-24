@@ -284,6 +284,14 @@ function MobileControls:stopTouchFire()
 	self:_disconnectActiveFireInput()
 end
 
+-- Con la GUI desactivada los End no llegan: sin esto un botón quedaría ligado para
+-- siempre a un toque ya terminado y descartaría los nuevos.
+function MobileControls:resetTouchInputs()
+	self._activeAimInput = nil
+	self._activeReloadInput = nil
+	self._activeJumpInput = nil
+end
+
 function MobileControls:setJumpButtonsVisible(isVisible: boolean)
 	local visible = UserInputService.TouchEnabled and isVisible
 	if self.smallJumpButton then self.smallJumpButton.Visible = visible end

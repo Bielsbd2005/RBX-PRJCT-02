@@ -1,3 +1,4 @@
+--!strict
 -- HUD de racha de bajas SIN MORIR (cliente) en WeaponSystemInsets.Streak (con
 -- fallback a WeaponsSystemGui.Streak):
 --   • Streak.Value (texto): DOUBLE, TRIPLE, QUAD!, QUINTUPLE!!, "<N> KILLSTREAK!"
@@ -46,8 +47,7 @@ local _animating = false
 local _fadeToken = 0
 
 -- Se re-resuelve en cada uso (como PersonalKillFeed): la GUI se clona de forma
--- asíncrona y puede no existir al requerir. WeaponsSystemGui es el fallback del
--- asset antiguo.
+-- asíncrona y puede no existir al requerir. Se acepta cualquiera de los dos nombres.
 local HUD_GUI_NAMES = { "WeaponSystemInsets", "WeaponsSystemGui" }
 
 local function getStreakFrame(): GuiObject?

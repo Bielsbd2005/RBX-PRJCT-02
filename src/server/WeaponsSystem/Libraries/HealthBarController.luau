@@ -1,3 +1,4 @@
+--!strict
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local LocalPlayer = Players.LocalPlayer
@@ -44,6 +45,22 @@ local KILL_FLASH_OUT_INFO = TweenInfo.new(0.65, Enum.EasingStyle.Quad, Enum.Easi
 local DAMAGE_TRAIL_COLOR = Color3.fromRGB(200, 15, 15)
 local DAMAGE_TRAIL_INFO = TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out, 0, false, 0.15)
 
+-- Ancho mínimo del Fill/trail: por debajo la barra deja de leerse.
+local MIN_FILL_SCALE = 0.09
+
+-- La barra solo se ve con vida < máxima: entra desde abajo y sale por el borde inferior.
+local SLIDE_IN_INFO = TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+local SLIDE_OUT_INFO = TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+-- Pausa a vida llena antes de ocultar (se suma al fill de heal si lo hay).
+local HIDE_DELAY_SECONDS = 0.6
+local SLIDE_MARGIN_PX = 8
+-- Posición de Studio guardada en el propio HealthBar: sobrevive a respawns si la GUI persiste.
+local SHOWN_POSITION_ATTR = "ShownPosition"
+
+local healthBarFrame: GuiObject? = nil
+local healthBarShown = true
+local slideTween: Tween? = nil
+local slideGeneration = 0
 local fillBar: Frame? = nil
 local valueLabel: TextLabel? = nil
 local damageTrail: Frame? = nil
@@ -80,7 +97,12 @@ local function getHealthBarNodes(): (Frame?, TextLabel?)
 		healthBar = gui and gui:FindFirstChild("HealthBar")
 		if healthBar then break end
 	end
-	if not healthBar then return nil, nil end
+	if not (healthBar and healthBar:IsA("GuiObject")) then return nil, nil end
+
+	healthBarFrame = healthBar
+	if typeof(healthBar:GetAttribute(SHOWN_POSITION_ATTR)) ~= "UDim2" then
+		healthBar:SetAttribute(SHOWN_POSITION_ATTR, healthBar.Position)
+	end
 
 	local fill = healthBar:FindFirstChild("Fill")
 	local value = healthBar:FindFirstChildWhichIsA("TextLabel", true)
@@ -125,6 +147,81 @@ local function getDamageTrail(fill: Frame): Frame?
 	trail.Parent = parent
 	damageTrail = trail
 	return trail
+end
+
+local function getShownPosition(bar: GuiObject): UDim2
+	local shown = bar:GetAttribute(SHOWN_POSITION_ATTR)
+	return if typeof(shown) == "UDim2" then shown else bar.Position
+end
+
+-- Offset Y que deja la barra (y sus hijos, p. ej. el label) justo bajo el borde de la ScreenGui.
+-- Solo se tweenea Position.Y.Offset, así que la posición mostrada se deduce de la actual.
+local function getHiddenPosition(bar: GuiObject, shown: UDim2): UDim2
+	local shift = bar.Position.Y.Offset - shown.Y.Offset
+	local top = bar.AbsolutePosition.Y
+	for _, desc in bar:GetDescendants() do
+		if desc:IsA("GuiObject") and desc.Visible then
+			top = math.min(top, desc.AbsolutePosition.Y)
+		end
+	end
+	top -= shift
+
+	local gui = bar:FindFirstAncestorWhichIsA("LayerCollector")
+	local bottom = if gui then gui.AbsolutePosition.Y + gui.AbsoluteSize.Y else top + bar.AbsoluteSize.Y
+	local distance = math.max(bottom - top, bar.AbsoluteSize.Y) + SLIDE_MARGIN_PX
+	return shown + UDim2.fromOffset(0, distance)
+end
+
+local function cancelSlide()
+	slideGeneration += 1
+	if slideTween then
+		slideTween:Cancel()
+		slideTween = nil
+	end
+end
+
+local function showHealthBar()
+	local bar = healthBarFrame
+	if not bar or healthBarShown then return end
+	healthBarShown = true
+	cancelSlide()
+
+	local shown = getShownPosition(bar)
+	if not bar.Visible then
+		bar.Position = getHiddenPosition(bar, shown)
+		bar.Visible = true
+	end
+	slideTween = TweenService:Create(bar, SLIDE_IN_INFO, { Position = shown })
+	slideTween:Play()
+end
+
+local function hideHealthBar(delaySeconds: number?, instant: boolean?)
+	local bar = healthBarFrame
+	if not bar then return end
+	if not healthBarShown and not instant then return end
+	healthBarShown = false
+	cancelSlide()
+
+	if instant then
+		bar.Visible = false
+		bar.Position = getShownPosition(bar)
+		return
+	end
+
+	local myGen = slideGeneration
+	task.spawn(function()
+		if delaySeconds and delaySeconds > 0 then
+			task.wait(delaySeconds)
+			if slideGeneration ~= myGen or not bar.Parent then return end
+		end
+		local tween = TweenService:Create(bar, SLIDE_OUT_INFO, { Position = getHiddenPosition(bar, getShownPosition(bar)) })
+		slideTween = tween
+		tween:Play()
+		tween.Completed:Wait()
+		if slideGeneration ~= myGen then return end
+		slideTween = nil
+		bar.Visible = false
+	end)
 end
 
 local function ensureDriver(parent: Instance, name: string): NumberValue
@@ -294,7 +391,7 @@ local function showKillVignette()
 	end)
 end
 
-local function updateHealthBar(humanoid: Humanoid, animateUp: boolean?)
+local function updateHealthBar(humanoid: Humanoid, animateUp: boolean?, instantVisibility: boolean?)
 	local bar, value = getHealthBarNodes()
 
 	local maxHealth = math.max(humanoid.MaxHealth, 1)
@@ -306,7 +403,8 @@ local function updateHealthBar(humanoid: Humanoid, animateUp: boolean?)
 	end
 
 	if bar then
-		local targetSize = UDim2.new(ratio, 0, 1, 0)
+		local fillScale = math.max(ratio, MIN_FILL_SCALE)
+		local targetSize = UDim2.new(fillScale, 0, 1, 0)
 		local trail = getDamageTrail(bar)
 
 		if animateUp then
@@ -331,7 +429,7 @@ local function updateHealthBar(humanoid: Humanoid, animateUp: boolean?)
 					damageTrailTween:Cancel()
 					damageTrailTween = nil
 				end
-				if ratio >= trail.Size.X.Scale then
+				if fillScale >= trail.Size.X.Scale then
 					trail.Size = targetSize
 				else
 					damageTrailTween = TweenService:Create(trail, DAMAGE_TRAIL_INFO, {
@@ -341,6 +439,13 @@ local function updateHealthBar(humanoid: Humanoid, animateUp: boolean?)
 				end
 			end
 		end
+	end
+
+	if ratio >= 1 then
+		local delay = HIDE_DELAY_SECONDS + (if animateUp then HEAL_FILL_INFO.Time else 0)
+		hideHealthBar(delay, instantVisibility)
+	else
+		showHealthBar()
 	end
 
 	if value then
@@ -383,6 +488,7 @@ function HealthBarController.onCharacterAdded(character: Model)
 		killVignetteTween = nil
 	end
 	HealEffect.reset()
+	cancelSlide()
 	if damageTrailTween then
 		damageTrailTween:Cancel()
 		damageTrailTween = nil
@@ -404,6 +510,7 @@ function HealthBarController.onCharacterAdded(character: Model)
 		killAlphaDriver.Value = 0
 	end
 
+	healthBarFrame = nil
 	fillBar = nil
 	valueLabel = nil
 	damageTrail = nil
@@ -416,7 +523,13 @@ function HealthBarController.onCharacterAdded(character: Model)
 	local humanoid = character:WaitForChild("Humanoid", 5) :: Humanoid?
 	if not humanoid then return end
 
-	updateHealthBar(humanoid)
+	-- Estado de visibilidad desconocido tras respawn: se fuerza sin tween.
+	healthBarShown = true
+	updateHealthBar(humanoid, false, true)
+	if healthBarFrame and humanoid.Health < humanoid.MaxHealth then
+		healthBarFrame.Visible = true
+		healthBarFrame.Position = getShownPosition(healthBarFrame)
+	end
 	lastSeenHealth = humanoid.Health
 
 	healthConn = humanoid.HealthChanged:Connect(function(newHealth: number)

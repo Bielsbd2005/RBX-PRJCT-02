@@ -1,3 +1,4 @@
+--!strict
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 
@@ -14,6 +15,18 @@ type ActiveDI = {
 local _activeDIs: { ActiveDI } = {}
 local _diLoopConn: RBXScriptConnection? = nil
 
+-- Solo los clones (dieOnFade): el frame original se reutiliza y su escala debe quedarse.
+-- La entrada de originalScaleAmounts se borra aunque el frame ya no tenga Parent.
+local function _destroyClone(manager: any, diInfo: any)
+	if not diInfo.dieOnFade or not diInfo.frame then
+		return
+	end
+	manager.weaponsGui.originalScaleAmounts[diInfo.frame] = nil
+	if diInfo.frame.Parent then
+		diInfo.frame:Destroy()
+	end
+end
+
 local function _diLoopTick()
 	local i = 1
 	while i <= #_activeDIs do
@@ -23,9 +36,7 @@ local function _diLoopTick()
 		if not image or image.ImageTransparency >= 1 or not diInfo.frame.Parent then
 			if diInfo then
 				diInfo.active = false
-				if diInfo.dieOnFade and diInfo.frame and diInfo.frame.Parent then
-					diInfo.frame:Destroy()
-				end
+				_destroyClone(entry.manager, diInfo)
 			end
 			local n = #_activeDIs
 			_activeDIs[i] = _activeDIs[n]
@@ -132,9 +143,7 @@ function DirectionalIndicatorGuiManager:ActivateDirectionalIndicator(DIName, oth
 		-- el frame se oculta antes o el loop deja de correr, quedaría huérfano.
 		tween.Completed:Once(function()
 			diInfo.active = false
-			if diInfo.dieOnFade and diInfo.frame and diInfo.frame.Parent then
-				diInfo.frame:Destroy()
-			end
+			_destroyClone(self, diInfo)
 		end)
 		tween:Play()
 	end)()

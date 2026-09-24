@@ -33,9 +33,11 @@ export type ResolvedCashReward = {
 	locked: boolean,
 }
 
+local AssetIds = require(script.Parent:WaitForChild("AssetIds"))
+
 local ResultsRewards = {}
 
-ResultsRewards.CashIcon = "rbxassetid://113694528712529"
+ResultsRewards.CashIcon = AssetIds.Images.CashReward
 
 -- Remate visible, no la fuente principal de Cash (esa es el combate): solo se paga
 -- por ganar o ser el mejor, nunca por participar. Una entry con Cash = 0 el server

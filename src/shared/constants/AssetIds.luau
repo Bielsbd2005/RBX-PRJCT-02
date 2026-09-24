@@ -25,6 +25,9 @@ AssetIds.Images = table.freeze({
 	-- Placeholder del card de un wrap que el jugador aún no posee.
 	WrapLockedPlaceholder = asset(82849715642061),
 
+	-- Icono de recompensa en Cash (Resultados y tiers del pase).
+	CashReward = asset(113694528712529),
+
 	-- HUD de partida.
 	Skull = asset(130437553674754),
 	-- Placeholder compartido por los cinco tiers de badge (Kill…Godlike) hasta
@@ -33,6 +36,9 @@ AssetIds.Images = table.freeze({
 	-- Spritesheet de la racha: ver COLUMNS/FRAME_WIDTH en StreakDisplay.
 	StreakSheet = asset(79402287010899),
 	HealPlus = asset(117688967482768),
+	-- Fondo de los slots Item1/Item2 del hotbar de armas.
+	HotbarSlotSelected = asset(129313135866427), --MIGRADO
+	HotbarSlotIdle = asset(106733729660666), --MIGRADO
 
 	-- Selector de destinatario del regalo.
 	GiftRealPlayer = asset(91500847756674),

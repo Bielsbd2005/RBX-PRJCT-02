@@ -1,3 +1,4 @@
+--!strict
 local ContextActionService = game:GetService("ContextActionService")
 local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
@@ -52,10 +53,6 @@ end
 
 local function fromSCurveSpace(t)
 	return t/2 + 0.5
-end
-
-local function normalizedAngle(angle)
-	return math.atan2(math.sin(angle), math.cos(angle))
 end
 
 local function springAlpha(speed, dt)
@@ -192,6 +189,10 @@ function ShoulderCamera.new(weaponsSystem)
 	self.enabled = false
 	self.yaw = 0
 	self.pitch = 0
+	-- El SpawnYaw se aplica una vez por personaje. Al reactivar la cámara con el mismo
+	-- (p. ej. tras un emote) se sigue desde la cámara libre, no desde el spawn.
+	self._spawnYawCharacter = nil
+	self._resumeFromCamera = false
 	self.aimCFrame = CFrame.new()
 	self.currentCFrame = CFrame.new()
 	self.currentOffset = self.normalOffset
@@ -306,14 +307,14 @@ function ShoulderCamera:_setupCameraState()
 	-- con la orientación de la part de spawn (coherente con onCurrentCharacterChanged:
 	-- rotar la part controla hacia dónde mira el jugador). Si no, usar el look de la
 	-- cámara previa para una transición suave.
-	local spawnYaw = self:_yawFromSpawn(self.currentCharacter)
+	local spawnYaw = if self._resumeFromCamera then nil else self:_yawFromSpawn(self.currentCharacter)
 	if spawnYaw then
 		self.yaw = spawnYaw
 		self.pitch = 0
 	else
 		local cameraLook = self.currentCamera.CFrame.lookVector
 		self.yaw = math.atan2(-cameraLook.X, -cameraLook.Z)
-		self.pitch = math.asin(cameraLook.Y)
+		self.pitch = math.clamp(math.asin(cameraLook.Y), self.minPitch, self.maxPitch)
 	end
 	self.lastYaw = self.yaw
 	self.lastLookYaw = self.yaw
@@ -349,6 +350,8 @@ function ShoulderCamera:setEnabled(enabled)
 	self.enabled = enabled
 
 	if self.enabled then
+		local currentCharacter = LocalPlayer.Character
+		self._resumeFromCamera = currentCharacter ~= nil and currentCharacter == self._spawnYawCharacter
 		RunService:BindToRenderStep(CAMERA_RENDERSTEP_NAME, Enum.RenderPriority.Camera.Value - 1, function(dt) self:onRenderStep(dt) end)
 		ContextActionService:BindAction(ZOOM_ACTION_NAME, function(...) self:onZoomAction(...) end, false, unpack(self.zoomInputs))
 		ContextActionService:BindAction(SPRINT_ACTION_NAME, function(...) self:onSprintAction(...) end, false, unpack(self.sprintInputs))
@@ -402,6 +405,17 @@ function ShoulderCamera:setEnabled(enabled)
 			self.occlusionTweenObject = nil
 		end
 
+		-- Los InputEnded con la cámara desactivada no llegan (se desconectan abajo): sin
+		-- este reset, touchObj apuntaría a un toque ya terminado y bloquearía el giro
+		-- táctil y el aim assist, y la tecla de apuntar seguiría "pulsada" al reequipar.
+		self:handleTouchToolFiring()
+		self.touchObj = nil
+		self.applyingTouchPan = false
+		self.touchPanAccumulator = Vector2.new(0, 0)
+		self.gamepadPan = Vector2.new(0, 0)
+		self.movementPan = Vector2.new(0, 0)
+		self.zoomedFromInput = false
+
 		self:updateZoomState()
 
 		self.yaw = 0
@@ -438,46 +452,6 @@ function ShoulderCamera:setEnabled(enabled)
 		self.currentCamera = nil
 
 	end
-end
-
-function ShoulderCamera:isGrounded()
-	if not self.currentHumanoid then
-		return false
-	end
-
-	local humanoidState = self.currentHumanoid:GetState()
-	if humanoidState == Enum.HumanoidStateType.Running
-		or humanoidState == Enum.HumanoidStateType.RunningNoPhysics
-		or humanoidState == Enum.HumanoidStateType.Landed
-	then
-		return true
-	end
-
-	return self.currentHumanoid.FloorMaterial ~= Enum.Material.Air
-		and humanoidState ~= Enum.HumanoidStateType.Freefall
-		and humanoidState ~= Enum.HumanoidStateType.Jumping
-end
-
-function ShoulderCamera:updateDynamicMotion(dt)
-	if not self.currentRootPart or not self.currentHumanoid then
-		return self.normalOffset, CFrame.new(), 0, 0
-	end
-
-	local rootPartVelocity = self.currentRootPart.AssemblyLinearVelocity
-	local horizontalVelocity = Vector3.new(rootPartVelocity.X, 0, rootPartVelocity.Z)
-	local horizontalSpeed = math.min(horizontalVelocity.Magnitude, self.sprintingWalkSpeed)
-	local movementAlpha = math.clamp(horizontalSpeed / self.sprintingWalkSpeed, 0, 1)
-
-	local yawDelta = normalizedAngle(self.yaw - self.lastYaw)
-	local yawRate = yawDelta / math.max(dt, 1 / 240)
-	self.lastYaw = self.yaw
-	local turnAlpha = math.clamp(yawRate / 8, -1, 1)
-
-	return self.normalOffset, CFrame.new(), movementAlpha, math.abs(turnAlpha)
-end
-
-function ShoulderCamera:updateLookLag(dt)
-	return CFrame.new()
 end
 
 function ShoulderCamera:updateCameraShake(dt)
@@ -570,10 +544,8 @@ function ShoulderCamera:onRenderStep(dt)
 		self.isSprinting = false
 	end
 
-	local dynamicOffset, dynamicRotation, movementAlpha, turnIntensity = self:updateDynamicMotion(dt)
-	local lookLagCFrame = self:updateLookLag(dt)
 	local shakeCFrame, fovKick = self:updateCameraShake(dt)
-	self.currentOffset = dynamicOffset
+	self.currentOffset = self.normalOffset
 
 	if self.isSprinting then
 		self.desiredFieldOfView = self.sprintFOV + fovKick
@@ -743,7 +715,7 @@ function ShoulderCamera:onRenderStep(dt)
 
 	self.lastCameraCFrame = self.currentCamera.CFrame
 
-	self.currentCamera.CFrame = self.currentCFrame * dynamicRotation * lookLagCFrame * shakeCFrame
+	self.currentCamera.CFrame = self.currentCFrame * shakeCFrame
 	if self:isHumanoidControllable() and self.rotateCharacterWithCamera then
 		self.currentHumanoid.AutoRotate = false
 		self.currentRootPart.CFrame = CFrame.Angles(0, self.yaw, 0) + self.currentRootPart.Position -- rotate character to be upright and facing the same direction as camera
@@ -874,10 +846,11 @@ function ShoulderCamera:onCurrentCharacterChanged(character)
 		self.landingAlpha = 0
 		-- Orientar la cámara hacia el spawn al (re)aparecer: rotar la part de spawn en el mapa
 		-- controla hacia dónde mira el jugador, igual que los bots.
-		local spawnYaw = self:_yawFromSpawn(character)
+		local spawnYaw = if character == self._spawnYawCharacter then nil else self:_yawFromSpawn(character)
 		if spawnYaw then
 			self.yaw = spawnYaw
 			self.pitch = 0
+			self._spawnYawCharacter = character
 		end
 		self.lastYaw = self.yaw
 		self.lastLookYaw = self.yaw
@@ -1204,7 +1177,12 @@ function ShoulderCamera:setForceZoomed(zoomed)
 end
 
 function ShoulderCamera:setZoomedFromInput(zoomedFromInput)
-	if self.zoomedFromInput == zoomedFromInput or (self.currentHumanoid and self.currentHumanoid:GetState() == Enum.HumanoidStateType.Dead) then
+	if self.zoomedFromInput == zoomedFromInput then
+		return
+	end
+	-- Muerto solo se bloquea activar: soltar la tecla (o el Cancel de UnbindAction) debe
+	-- limpiar el estado para el siguiente personaje.
+	if zoomedFromInput and self.currentHumanoid and self.currentHumanoid:GetState() == Enum.HumanoidStateType.Dead then
 		return
 	end
 

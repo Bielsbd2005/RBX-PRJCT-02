@@ -1,10 +1,9 @@
 --!strict
 -- Gestiona la interfaz del hotbar (PC y Touchscreen) del sistema de armas.
 -- Estructura esperada por slot (Item1 / Item2), ambos idénticos:
---   Item.Image                    -> imagen del arma
---   Item.Footer.Value             -> munición "actual/cargador" en RichText
---   Item.UIAspectRatioConstraint  -> el slot seleccionado se ensancha
---   Item.UIStroke                 -> blanco si seleccionado, morado oscuro si no
+--   Item        (ImageButton) -> fondo del slot: imagen, ancho y degradado según selección
+--   Item.Image                -> imagen del arma
+--   Item.Value                -> munición "actual/cargador" en RichText
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -12,6 +11,7 @@ local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 
+local AssetIds = require(Shared.constants.AssetIds)
 local ItemsConfig = require(Shared.constants.ItemsConfig)
 local WeaponsConfig = require(Shared.constants.WeaponsConfig)
 
@@ -19,16 +19,17 @@ local WeaponsSystemFolder = script.Parent.Parent.Parent
 local WeaponData = WeaponsSystemFolder:WaitForChild("WeaponData")
 local Libraries = WeaponsSystemFolder:WaitForChild("Libraries")
 
--- Selección de slot: el tamaño lo manda el UIAspectRatioConstraint (el
--- seleccionado se ensancha) y el UIStroke pasa a blanco. El Back del aspect da el
--- "pop"; el stroke va con Quad porque un overshoot sobre un Color3 se sale de
--- rango y pega un fogonazo.
-local HOTBAR_ASPECT_SELECTED = 1.6
-local HOTBAR_ASPECT_IDLE = 1
-local HOTBAR_STROKE_SELECTED_COLOR = Color3.fromRGB(255, 255, 255)
-local HOTBAR_STROKE_IDLE_COLOR = Color3.fromRGB(58, 52, 67)
-local HOTBAR_ASPECT_TWEEN_INFO = TweenInfo.new(0.18, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
-local HOTBAR_STROKE_TWEEN_INFO = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+-- Selección de slot: el seleccionado se ensancha (el Back da el "pop") y cambia
+-- de fondo.
+local HOTBAR_SIZE_SELECTED = UDim2.new(0.104, 0, 1, 0)
+local HOTBAR_SIZE_IDLE = UDim2.new(0.073, 0, 1, 0)
+local HOTBAR_SIZE_TWEEN_INFO = TweenInfo.new(0.18, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+local HOTBAR_TRANSPARENCY_SELECTED = 0
+local HOTBAR_TRANSPARENCY_IDLE = 0.52
+-- Degradados del fondo: si el root del Hotbar trae UIGradients "Selected"/"NotSelected"
+-- en Studio se clonan esos; si no, se construyen con estos valores.
+local HOTBAR_GRADIENT_SELECTED_NAME = "Selected"
+local HOTBAR_GRADIENT_IDLE_NAME = "NotSelected"
 
 -- Un único layout para todos los dispositivos, colocado por el UIListLayout del
 -- root: en PC pegado a la derecha y en táctil centrado (entre los dos pulgares,
@@ -57,6 +58,39 @@ end
 
 local function isHotbarTextNode(node)
 	return node and (node:IsA("TextLabel") or node:IsA("TextButton"))
+end
+
+local function getSlotGradientTemplate(hotbarRoot: Instance, name: string): UIGradient
+	local template = hotbarRoot:FindFirstChild(name)
+	if template and template:IsA("UIGradient") then
+		-- En el root también degradaría el propio frame del Hotbar.
+		template.Enabled = false
+		return template
+	end
+
+	local gradient = Instance.new("UIGradient")
+	gradient.Name = name
+	if name == HOTBAR_GRADIENT_SELECTED_NAME then
+		gradient.Rotation = 270
+		gradient.Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0),
+			NumberSequenceKeypoint.new(1, 1),
+		})
+	else
+		gradient.Rotation = 90
+		gradient.Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0),
+			NumberSequenceKeypoint.new(0.813131, 1),
+			NumberSequenceKeypoint.new(1, 1),
+		})
+	end
+	return gradient
+end
+
+local function cloneGradient(template: UIGradient): UIGradient
+	local gradient = template:Clone()
+	gradient.Enabled = true
+	return gradient
 end
 
 local function toHexColor(color: Color3): string
@@ -129,19 +163,24 @@ function Hotbar:_captureSlot(hotbarRoot, itemName)
 	end
 
 	local imageNode = itemFrame:FindFirstChild("Image")
-	local footerNode = itemFrame:FindFirstChild("Footer")
-	local ammoValueNode = if footerNode then footerNode:FindFirstChild("Value") else nil
+	local ammoValueNode = itemFrame:FindFirstChild("Value")
+
+	-- Solo un degradado a la vez sobre el fondo: los que vengan de Studio se sustituyen.
+	for _, child in itemFrame:GetChildren() do
+		if child:IsA("UIGradient") then
+			child:Destroy()
+		end
+	end
 
 	return {
 		frame = itemFrame,
+		gradientSelected = cloneGradient(getSlotGradientTemplate(hotbarRoot, HOTBAR_GRADIENT_SELECTED_NAME)),
+		gradientIdle = cloneGradient(getSlotGradientTemplate(hotbarRoot, HOTBAR_GRADIENT_IDLE_NAME)),
 		image = if isHotbarImageNode(imageNode) then imageNode else nil,
-		aspect = itemFrame:FindFirstChildWhichIsA("UIAspectRatioConstraint"),
-		stroke = itemFrame:FindFirstChildWhichIsA("UIStroke"),
 		ammoValueNode = ammoValueNode,
 		ammoValueLabel = if isHotbarTextNode(ammoValueNode) then ammoValueNode else nil,
 		_selected = nil,
-		_aspectTween = nil,
-		_strokeTween = nil,
+		_sizeTween = nil,
 	}
 end
 
@@ -168,29 +207,23 @@ function Hotbar:_setSlotSelected(slotNode, isSelected)
 	end
 	slotNode._selected = isSelected
 
-	local aspect = slotNode.aspect
-	if aspect then
-		if slotNode._aspectTween then
-			slotNode._aspectTween:Cancel()
-		end
-		local tween = TweenService:Create(aspect, HOTBAR_ASPECT_TWEEN_INFO, {
-			AspectRatio = if isSelected then HOTBAR_ASPECT_SELECTED else HOTBAR_ASPECT_IDLE,
-		})
-		slotNode._aspectTween = tween
-		tween:Play()
+	local frame = slotNode.frame
+	if isHotbarImageNode(frame) then
+		frame.Image = if isSelected then AssetIds.Images.HotbarSlotSelected else AssetIds.Images.HotbarSlotIdle
+		frame.ScaleType = if isSelected then Enum.ScaleType.Stretch else Enum.ScaleType.Fit
+		frame.ImageTransparency = if isSelected then HOTBAR_TRANSPARENCY_SELECTED else HOTBAR_TRANSPARENCY_IDLE
 	end
+	slotNode.gradientSelected.Parent = if isSelected then frame else nil
+	slotNode.gradientIdle.Parent = if isSelected then nil else frame
 
-	local stroke = slotNode.stroke
-	if stroke then
-		if slotNode._strokeTween then
-			slotNode._strokeTween:Cancel()
-		end
-		local tween = TweenService:Create(stroke, HOTBAR_STROKE_TWEEN_INFO, {
-			Color = if isSelected then HOTBAR_STROKE_SELECTED_COLOR else HOTBAR_STROKE_IDLE_COLOR,
-		})
-		slotNode._strokeTween = tween
-		tween:Play()
+	if slotNode._sizeTween then
+		slotNode._sizeTween:Cancel()
 	end
+	local tween = TweenService:Create(frame, HOTBAR_SIZE_TWEEN_INFO, {
+		Size = if isSelected then HOTBAR_SIZE_SELECTED else HOTBAR_SIZE_IDLE,
+	})
+	slotNode._sizeTween = tween
+	tween:Play()
 end
 
 function Hotbar:_findMainSpecialTools()
@@ -520,13 +553,9 @@ function Hotbar:Destroy()
 	for _, layout in ipairs(self.layouts) do
 		for _, slotNode in { layout.item1, layout.item2 } do
 			if not slotNode then continue end
-			if slotNode._aspectTween then
-				slotNode._aspectTween:Cancel()
-				slotNode._aspectTween = nil
-			end
-			if slotNode._strokeTween then
-				slotNode._strokeTween:Cancel()
-				slotNode._strokeTween = nil
+			if slotNode._sizeTween then
+				slotNode._sizeTween:Cancel()
+				slotNode._sizeTween = nil
 			end
 		end
 	end

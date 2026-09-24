@@ -28,6 +28,7 @@ local MobileControls = require(GuiFolder:WaitForChild("MobileControls"))
 local HitFeedback = require(GuiFolder:WaitForChild("HitFeedback"))
 local Scope = require(GuiFolder:WaitForChild("Scope"))
 local DirectionalIndicators = require(GuiFolder:WaitForChild("DirectionalIndicators"))
+local Performance = require(GuiFolder:WaitForChild("Performance"))
 
 local RELOAD_PROGRESS_STYLE = {
 	FlipProgress = false,
@@ -130,13 +131,14 @@ function WeaponsGui.new(weaponsSystem: any)
 	self.hitFeedback = HitFeedback.new(self)
 	self.scope = Scope.new()
 	self.directionalIndicators = DirectionalIndicators.new(self)
+	self.performance = Performance.new()
 
 	coroutine.wrap(function()
 		self.scalingElementsFolder = self.gui:WaitForChild("ScalingElements")
 
 		self.crosshair:setup(self.scalingElementsFolder)
-		-- Hotbar_PC/_TouchScreen son del asset antiguo; setupLayout ignora los que
-		-- no existan.
+		-- La GUI puede traer un Hotbar único o Hotbar_PC/_TouchScreen; setupLayout
+		-- ignora los que no existan.
 		self.hotbar:setupLayout(self.gui:FindFirstChild("Hotbar"))
 		self.hotbar:setupLayout(self.gui:FindFirstChild("Hotbar_PC"))
 		self.hotbar:setupLayout(self.gui:FindFirstChild("Hotbar_TouchScreen"))
@@ -146,6 +148,7 @@ function WeaponsGui.new(weaponsSystem: any)
 		self.hitFeedback:setup(self.scalingElementsFolder)
 		self.scope:setup(self.gui)
 		self.directionalIndicators:setup(self.gui)
+		self.performance:setup(self.gui)
 
 		self.ammoDisplayNode = self.gui:FindFirstChild("AmmoDisplayNode")
 		local ammoFrame = self.scalingElementsFolder:FindFirstChild("Ammo")
@@ -232,8 +235,8 @@ function WeaponsGui:onScreenSizeChanged()
 		self.mobileControls.largeTouchscreen.Visible = UserInputService.TouchEnabled and not isSmallScreen
 	end
 
-	-- Hotbar único recolocado por dispositivo; Hotbar_PC/_TouchScreen son del
-	-- asset antiguo con dos layouts.
+	-- Hotbar único recolocado por dispositivo; con Hotbar_PC/_TouchScreen se
+	-- muestra el del dispositivo.
 	self.hotbar:applyDeviceAlignment()
 	local hotbarPC = self.gui:FindFirstChild("Hotbar_PC")
 	if hotbarPC then
@@ -290,6 +293,7 @@ end
 function WeaponsGui:setEnabled(enabled: boolean)
 	if self.enabled == enabled then return end
 	self.enabled = enabled
+	self.crosshair:refreshVisibility()
 
 	if self.enabled then
 		self:_setGuisEnabled(true)
@@ -341,6 +345,7 @@ function WeaponsGui:setEnabled(enabled: boolean)
 		self:setZoomed(false)
 		self:stopReloadProgressAnimation()
 		self.mobileControls:stopTouchFire()
+		self.mobileControls:resetTouchInputs()
 		self.mobileControls:setReloadButtonsPressed(false)
 		self.mobileControls:setJumpButtonsPressed(false)
 
@@ -356,6 +361,9 @@ function WeaponsGui:setEnabled(enabled: boolean)
 		end
 		table.clear(self.connections)
 		self:_disconnectToolConns()
+		-- Si no, al reequipar la MISMA Tool (fin de un emote) onRenderStepped no ve cambio
+		-- de arma y no reconecta tool.Activated.
+		self._lastWeaponInstance = nil
 	end
 end
 
@@ -396,8 +404,12 @@ function WeaponsGui:onRenderStepped(dt: number)
 	if tool ~= self._lastWeaponInstance then
 		self._lastWeaponInstance = tool
 		self._hotbarDirty = true
-		local isShotgun = tool and tool:GetAttribute("Shotgun") == true or false
-		self.crosshair:setVariant(isShotgun)
+		self.crosshair:setVariant(
+			w ~= nil and w:getConfigValue("IsShotgun") == true,
+			if w then w:getConfigValue("CrosshairSpread") else 0,
+			if w then w:getConfigValue("CrosshairAimSpread") else 0,
+			w ~= nil and w:getConfigValue("CrosshairHideTop") == true
+		)
 		self:_connectToolConns(tool)
 	end
 

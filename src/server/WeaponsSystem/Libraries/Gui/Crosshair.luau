@@ -58,10 +58,12 @@ function Crosshair.new(weaponsGui: any)
 	self.spreadBase = 30
 	self.spreadAim = 20
 	self.spreadFireKick = 3
+	-- CrosshairSpread / CrosshairAimSpread del arma (no escopeta).
+	self.gapSpread = 0
+	self.gapAimSpread = 0
 	-- spreadBase/spreadAim/spreadFireKick son píxeles a 1080 de alto; resize()
 	-- los adapta a la pantalla con este factor (ver SPREAD_REFERENCE_VIEWPORT_HEIGHT).
 	self.spreadScreenFactor = 1
-	self.shotgunDefaultOptimalRange = 30
 
 	self._kickCooldownEnd = 0
 	self._shotgunRangeLastTickAt = 0
@@ -81,6 +83,18 @@ function Crosshair:setup(scalingElementsFolder: Folder)
 		[self.left] = Vector2.new(self.left.Size.X.Scale, self.left.Size.Y.Scale),
 		[self.right] = Vector2.new(self.right.Size.X.Scale, self.right.Size.Y.Scale),
 		[self.top] = Vector2.new(self.top.Size.X.Scale, self.top.Size.Y.Scale),
+	}
+	self.origPositions = {
+		[self.bottom] = self.bottom.Position,
+		[self.left] = self.left.Position,
+		[self.right] = self.right.Position,
+		[self.top] = self.top.Position,
+	}
+	self.origAnchors = {
+		[self.bottom] = self.bottom.AnchorPoint,
+		[self.left] = self.left.AnchorPoint,
+		[self.right] = self.right.AnchorPoint,
+		[self.top] = self.top.AnchorPoint,
 	}
 	self.normalSize = self.frame.AbsoluteSize
 
@@ -106,7 +120,8 @@ function Crosshair:setEnabled(enabled: boolean)
 end
 
 function Crosshair:refreshVisibility()
-	local shouldShow = self.enabled and not self.weaponsGui._isReloadProgressAnimating
+	-- La GUI sigue visible sin arma (hotbar), pero el crosshair no.
+	local shouldShow = self.enabled and self.weaponsGui.enabled and not self.weaponsGui._isReloadProgressAnimating
 
 	if self.frame then
 		self.frame.Visible = shouldShow and not self.isShotgun
@@ -143,28 +158,79 @@ function Crosshair:setScale(scale: number)
 	SpringService:Target(self, self.dampingRatio, self.frequency, { scale = self.scaleTarget })
 end
 
-function Crosshair:setVariant(isShotgun: boolean)
+function Crosshair:setVariant(isShotgun: boolean, gapSpread: number, gapAimSpread: number, hideTop: boolean)
 	if debugCrosshair() then
 		local weapon = self.weaponsGui.weaponsSystem.currentWeapon
 		local tool = weapon and weapon.instance
 		warn(string.format(
-			"[Crosshair/OutOfRange] arma=%s atributo Shotgun=%s -> escopeta=%s",
+			"[Crosshair/OutOfRange] arma=%s -> escopeta=%s",
 			tool and tool.Name or "nil",
-			tostring(tool and tool:GetAttribute("Shotgun")),
 			tostring(isShotgun)
 		))
 		self._dbgLastRangeKey = nil
 	end
 	self.isShotgun = isShotgun
+	self.gapSpread = if isShotgun then 0 else gapSpread
+	self.gapAimSpread = if isShotgun then 0 else gapAimSpread
 	self.isOutOfRange = false
+	if self.top then
+		self.top.Visible = not hideTop
+	end
 	self:refreshVisibility()
 	if self.isShotgun then
 		self.weaponScale = 1
-		self.spreadTarget = if self.weaponsGui.isZoomed then self.spreadAim else self.spreadBase
-	else
-		self.spreadTarget = 0
 	end
+	self.spreadTarget = self:_restingSpread()
 	SpringService:Target(self, self.dampingRatio, self.frequency, { spread = self.spreadTarget })
+end
+
+-- Estado real de la cámara: con Q o L2 (ShoulderCamera.zoomInputs) se apunta sin
+-- pasar por WeaponsGui.isZoomed.
+function Crosshair:_isAiming(): boolean
+	local camera = self.weaponsGui.weaponsSystem.camera
+	if camera then
+		return camera:isZoomed()
+	end
+	return self.weaponsGui.isZoomed
+end
+
+function Crosshair:_restingSpread(): number
+	local zoomed = self:_isAiming()
+	if self.isShotgun then
+		return if zoomed then self.spreadAim else self.spreadBase
+	end
+	return if zoomed then self.gapAimSpread else self.gapSpread
+end
+
+-- Con CrosshairSpread > 0 cada brazo se coloca desde el centro del frame: la
+-- separación es la distancia real al centro y no depende de dónde estén en Studio.
+-- Sin él vuelven a su Position y AnchorPoint de Studio.
+function Crosshair:layoutArmsGap()
+	if self.gapSpread <= 0 then
+		if self._lastArmsGap == false then return end
+		self._lastArmsGap = false
+		for arm, position in self.origPositions do
+			arm.Position = position
+			arm.AnchorPoint = self.origAnchors[arm]
+		end
+		return
+	end
+
+	local s = math.round(self.spread * self.scale * self.weaponScale * self.spreadScreenFactor)
+	if s == self._lastArmsGap then return end
+	self._lastArmsGap = s
+	-- Size en Offset: lo fija resize() (que invalida _lastArmsGap al cambiarlo).
+	local halfLeft = self.left.Size.X.Offset / 2
+	local halfRight = self.right.Size.X.Offset / 2
+	local halfBottom = self.bottom.Size.Y.Offset / 2
+	local halfTop = self.top.Size.Y.Offset / 2
+	for arm in self.origPositions do
+		arm.AnchorPoint = CENTER_ANCHOR_V2
+	end
+	self.left.Position = UDim2.new(0.5, -math.round(s + halfLeft), 0.5, 0)
+	self.right.Position = UDim2.new(0.5, math.round(s + halfRight), 0.5, 0)
+	self.bottom.Position = UDim2.new(0.5, 0, 0.5, math.round(s + halfBottom))
+	self.top.Position = UDim2.new(0.5, 0, 0.5, -math.round(s + halfTop))
 end
 
 function Crosshair:layoutShotgunCorners()
@@ -196,7 +262,7 @@ function Crosshair:kickShotgunSpread()
 	SpringService:Target(self, 0.6, 5, { spread = self.spreadTarget })
 	self._kickCooldownEnd = os.clock() + 0.12
 	task.delay(0.06, function()
-		self.spreadTarget = if self.weaponsGui.isZoomed then self.spreadAim else self.spreadBase
+		self.spreadTarget = self:_restingSpread()
 		SpringService:Target(self, 0.85, 4, { spread = self.spreadTarget })
 	end)
 end
@@ -237,13 +303,8 @@ function Crosshair:updateShotgunRangeState()
 
 	local weapon = self.weaponsGui.weaponsSystem.currentWeapon
 	local tool = weapon and weapon.instance
-	local optimalRange = self.shotgunDefaultOptimalRange
-	if tool then
-		local attr = tool:GetAttribute("OptimalRange")
-		if type(attr) == "number" and attr > 0 then
-			optimalRange = attr
-		end
-	end
+	if not weapon then return end
+	local optimalRange = weapon:getConfigValue("OptimalRange")
 
 	local outOfRange = false
 	local distance: number? = nil
@@ -312,11 +373,10 @@ function Crosshair:updateShotgunRangeState()
 			self:_debugRange("sin-enemigo", "sin enemigo detectado (ni el rayo ni el autoaim)")
 		else
 			self:_debugRange(if outOfRange then "fuera" else "dentro", string.format(
-				"%s: distancia=%.1f OptimalRange=%s (atributo del Tool=%s) | frame.Visible=%s enabled=%s recargando=%s",
+				"%s: distancia=%.1f OptimalRange=%s | frame.Visible=%s enabled=%s recargando=%s",
 				if outOfRange then "FUERA de rango" else "dentro de rango",
 				distance,
 				tostring(optimalRange),
-				tostring(tool and tool:GetAttribute("OptimalRange")),
 				tostring(self.outOfRangeFrame.Visible),
 				tostring(self.enabled),
 				tostring(self.weaponsGui._isReloadProgressAnimating)
@@ -358,6 +418,7 @@ function Crosshair:resize(viewportSize: Vector2)
 	self.left.Size = UDim2.new(0, self.origScales[self.left].X * self.normalSize.X, 0, self.origScales[self.left].Y * self.normalSize.Y)
 	self.right.Size = UDim2.new(0, self.origScales[self.right].X * self.normalSize.X, 0, self.origScales[self.right].Y * self.normalSize.Y)
 	self.top.Size = UDim2.new(0, self.origScales[self.top].X * self.normalSize.X, 0, self.origScales[self.top].Y * self.normalSize.Y)
+	self._lastArmsGap = nil
 	
 	if self.shotgunFrame then
 		self:layoutShotgunCorners()
@@ -365,14 +426,14 @@ function Crosshair:resize(viewportSize: Vector2)
 end
 
 function Crosshair:update(dt: number)
-	if self.isShotgun then
-		if os.clock() >= self._kickCooldownEnd then
-			local want = if self.weaponsGui.isZoomed then self.spreadAim else self.spreadBase
-			if math.abs(self.spreadTarget - want) > 0.1 then
-				self.spreadTarget = want
-				SpringService:Target(self, self.dampingRatio, self.frequency, { spread = want })
-			end
+	if os.clock() >= self._kickCooldownEnd then
+		local want = self:_restingSpread()
+		if math.abs(self.spreadTarget - want) > 0.1 then
+			self.spreadTarget = want
+			SpringService:Target(self, self.dampingRatio, self.frequency, { spread = want })
 		end
+	end
+	if self.isShotgun then
 		if self.shotgunFrame and self.enabled then
 			local s = self.spread
 			local cs = self.scale
@@ -394,6 +455,7 @@ function Crosshair:update(dt: number)
 			if currentSize ~= targetSize then
 				self.frame.Size = targetSize
 			end
+			self:layoutArmsGap()
 		end
 	end
 end
