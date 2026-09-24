@@ -13,7 +13,7 @@
 	UI por slot (opcionales):
 	  PlayerN.Container.Kills.Value / Assists.Value / Deaths.Value
 	  PlayerN.NameRow.LevelBadge.Value / NameRow.Name
-	  PlayerN.MVP   (nombre antiguo MVPRow)
+	  PlayerN.MVP   (o MVPRow)
 ]]
 
 local Players = game:GetService("Players")

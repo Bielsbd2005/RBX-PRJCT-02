@@ -16,9 +16,11 @@ local Fusion = require(Packages.fusion)
 local GameConfig = require(Shared.GameConfig)
 local MatchSnapshot = require(Shared.MatchSnapshot)
 local Network = require(Shared.networking.Network)
+local VipTag = require(Shared.utils.VipTag)
 
 local IrisTransition = require(Client.core.ui.IrisTransition)
 local ScreenFade = require(Client.core.ui.ScreenFade)
+local Notify = require(Client.core.ui.NotificationController)
 
 local MatchState = require(script.MatchState)
 local MatchCamera = require(script.MatchCamera)
@@ -174,6 +176,14 @@ function MatchFeature.start(menuController: any): any
 	local fusionScope = Fusion.scoped(Fusion)
 
 	local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui") :: PlayerGui
+	-- ClientBootstrap solo espera a Menu: en un cliente lento UserInterface llega después
+	-- y, resuelto con FindFirstChild, la sesión entera quedaría sin muerte/Resultados/voto.
+	local userInterface = playerGui:WaitForChild("UserInterface", 10)
+	if userInterface then
+		for _, name in { "DeathScreen", "Results", "Voting" } do
+			userInterface:WaitForChild(name, 5)
+		end
+	end
 	local menuGui = menuController:getGui()
 	local votingFrame, votingCloseBtn = _resolveVotingFrame(playerGui)
 	local deathScreenGui = _resolveDeathScreen(playerGui)
@@ -239,12 +249,13 @@ function MatchFeature.start(menuController: any): any
 	DepthOfFieldController.setEnabled(true)
 	TouchControlsController.setEnabled(false)
 	-- En partida el reset NO mata: vuelve al menú como el botón Menu de la pantalla de
-	-- muerte (conectado más abajo). Matar contaría como muerte y pasaría por el cooldown.
+	-- muerte (conectado más abajo). Con un atacante reciente el servidor lo cuenta como
+	-- muerte (MatchService._onRequestReturnToMenu).
 	local resetCharacterEvent = Instance.new("BindableEvent")
 	janitor:Add(resetCharacterEvent, "Destroy")
 	setResetButtonCallback(false)
 
-	MatchState.setOnPhaseChanged(function(_prev, nextPhase)
+	MatchState.setOnPhaseChanged(function(prevPhase, nextPhase)
 		local inMenu = nextPhase == "Lobby" or nextPhase == "ReturningToMenu"
 		DepthOfFieldController.setEnabled(inMenu)
 		if inMenu then
@@ -256,6 +267,11 @@ function MatchFeature.start(menuController: any): any
 		-- El podio de Resultados vive en el mapa y el servidor lo desmonta con su propio
 		-- reloj: hay que copiarlo mientras se juega.
 		if nextPhase == "InMatch" then
+			-- Partida nueva (no un respawn): el snapshot del mapa anterior no vale, y si el
+			-- nuevo no tiene podio el podio se montaría en coordenadas de otro mapa.
+			if prevPhase ~= "Dying" then
+				ResultsScene.clear()
+			end
 			ResultsScene.captureWithRetries()
 		end
 
@@ -392,6 +408,12 @@ function MatchFeature.start(menuController: any): any
 
 	setPlayEnabled(false)
 
+	-- Cada intento de join / vuelta al menú invalida el timeout de recuperación del
+	-- anterior: un timer viejo que venciera durante un intento nuevo con la misma fase
+	-- lo abortaría (y su iris:open cancelaría el cierre en curso).
+	local joinAttempt = 0
+	local returnAttempt = 0
+
 	local function tryJoinMatchFromLobby()
 		if not playEnabled or MatchState.getPhase() ~= "Lobby" then
 			return
@@ -405,12 +427,14 @@ function MatchFeature.start(menuController: any): any
 
 		MatchState.setPhase("Joining")
 		matchMenu:enforceHidden()
+		joinAttempt += 1
+		local myAttempt = joinAttempt
 		iris:close(function()
 			if MatchState.getPhase() == "Joining" then
 				Network.Match.RequestJoinMatch.Send({})
 				task.delay(JOIN_CONFIRM_TIMEOUT, function()
 					if not featureAlive then return end
-					if MatchState.getPhase() ~= "Joining" then
+					if myAttempt ~= joinAttempt or MatchState.getPhase() ~= "Joining" then
 						return
 					end
 					MatchState.setPhase("Lobby")
@@ -433,18 +457,24 @@ function MatchFeature.start(menuController: any): any
 			return
 		end
 		MatchState.setPhase("ReturningToMenu")
+		returnAttempt += 1
+		local myAttempt = returnAttempt
 		iris:close(function()
 			if MatchState.getPhase() == "ReturningToMenu" then
 				Network.Match.RequestReturnToMenu.Send({})
 				task.delay(RETURN_TO_MENU_TIMEOUT, function()
 					if not featureAlive then return end
-					if MatchState.getPhase() == "ReturningToMenu" then
+					if myAttempt == returnAttempt and MatchState.getPhase() == "ReturningToMenu" then
 						MatchState.setPhase("Lobby")
 						matchMenu:forceShow()
 						iris:open()
 						warn("[MatchFeature] ReturnToMenu timeout — recuperando estado.")
 					end
 				end)
+			elseif MatchState.isActive() then
+				-- Otra transición cambió la fase durante el cierre: sin esto el iris
+				-- (DisplayOrder alto) se queda en negro sobre el gameplay.
+				iris:open()
 			end
 		end)
 	end
@@ -733,6 +763,21 @@ function MatchFeature.start(menuController: any): any
 		matchMenu:enforceHidden()
 	end), "Disconnect")
 
+	local JOIN_REJECTED_MESSAGES = {
+		TeamsFull = "Both teams are full. Try again in a moment.",
+		DataNotLoaded = "Your data is still loading. Try again in a moment.",
+	}
+	janitor:Add(Network.Match.JoinRejected.Listen(function(data: { reason: string })
+		if MatchState.getPhase() ~= "Joining" then
+			return
+		end
+		joinAttempt += 1
+		MatchState.setPhase("Lobby")
+		matchMenu:forceShow()
+		iris:open()
+		Notify.warning(JOIN_REJECTED_MESSAGES[data.reason] or "Couldn't join the match. Try again.")
+	end), true)
+
 	janitor:Add(Network.Match.JoinMatchSpawned.Listen(function(_: {})
 		MatchState.setPhase("InMatch")
 		killCam:stop()
@@ -838,6 +883,12 @@ function MatchFeature.start(menuController: any): any
 		if not deathView then
 			return
 		end
+		-- El jugador ya pidió volver al menú (Reset) y murió durante el cierre del iris:
+		-- se respeta, y el servidor (SpawnAtLobby + ReturnToMenuDone) completa la vuelta.
+		if MatchState.getPhase() == "ReturningToMenu" then
+			hud:setEnabled(false)
+			return
+		end
 
 		MatchState.setPhase("Dying")
 		respawnRequestSent = false
@@ -860,6 +911,7 @@ function MatchFeature.start(menuController: any): any
 				level = data.killerLevel,
 				bannerId = data.killerBanner,
 				character = _resolveKillerCharacter(data.killerUserId),
+				isVIP = VipTag.isVIP(Players:GetPlayerByUserId(tonumber(data.killerUserId) or 0)),
 			}
 			else nil
 		deathView:show(data.respawnCooldown, killer)
@@ -883,6 +935,18 @@ function MatchFeature.start(menuController: any): any
 	end), true)
 
 	janitor:Add(Network.Match.ReturnToMenuDone.Listen(function(_: {})
+		-- La ronda acabó mientras volvía al menú: RoundEnded ya pasó a Resultados, y es
+		-- onResultsFinished quien lleva al lobby y a la votación.
+		if MatchState.getPhase() == "ShowingResults" then
+			killCam:stop()
+			if deathView then
+				deathView:hide()
+			end
+			if deathScreenGui then
+				deathScreenGui.Visible = false
+			end
+			return
+		end
 		MatchState.setPhase("Lobby")
 		killCam:stop()
 		hud:resetMatchState()
@@ -900,10 +964,11 @@ function MatchFeature.start(menuController: any): any
 		iris:open()
 	end), true)
 
-	janitor:Add(Network.Match.RoundEnded.Listen(function(_data: {
+	janitor:Add(Network.Match.RoundEnded.Listen(function(data: {
 		winnerTeam: string,
 		scoreA: number,
 		scoreB: number,
+		roster: string,
 	})
 		local prevPhase = MatchState.getPhase()
 		local wasActive = prevPhase == "InMatch" or prevPhase == "Dying" or prevPhase == "ReturningToMenu"
@@ -925,7 +990,15 @@ function MatchFeature.start(menuController: any): any
 
 		-- ANTES de resetear: el servidor despawnea bots y manda a los jugadores al lobby
 		-- nada más acabar la ronda (el mapa sí se queda hasta el final de Resultados).
-		local localTeam, playerEntries = hud:captureEndResultsData()
+		local rosterSides: { [number]: string } = {}
+		for _, pair in string.split(data.roster, ",") do
+			local userIdStr, side = string.match(pair, "^(%d+):([AB])$")
+			local userId = tonumber(userIdStr)
+			if userId and side then
+				rosterSides[userId] = side
+			end
+		end
+		local localTeam, playerEntries = hud:captureEndResultsData(rosterSides)
 		hud:resetMatchState()
 
 		-- Fundido a negro → con la pantalla tapada se montan réplicas y cámara → reveal.

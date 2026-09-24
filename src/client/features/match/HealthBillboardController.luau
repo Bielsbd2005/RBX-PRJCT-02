@@ -10,6 +10,7 @@ local TweenService = game:GetService("TweenService")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Templates = ReplicatedStorage:WaitForChild("Templates")
 local TeamUtils = require(Shared.utils.TeamUtils)
+local MatchState = require(script.Parent.MatchState)
 local CollisionGroups = require(Shared.CollisionGroups)
 
 local localPlayer = Players.LocalPlayer
@@ -265,8 +266,9 @@ local function updateState(state: TrackState)
 	end
 
 	-- Color de equipo: barra y nombre comparten degradado.
-	local localChar = localPlayer.Character
-	local isAlly = localChar ~= nil and TeamUtils.isSameTeam(localChar, model)
+	-- Por bando local y no por isSameTeam(localChar): muerto, localChar es el cuerpo del
+	-- lobby sin Team y todos saldrían como enemigos.
+	local isAlly = MatchState.isLocalAlly(model)
 	if state.lastIsAlly ~= isAlly then
 		state.lastIsAlly = isAlly
 		local color = if isAlly then ALLY_GRADIENT else ENEMY_GRADIENT
@@ -595,11 +597,13 @@ function HealthBillboardController:Start(prescannedModels: { Model }?)
 		scheduleTrack(instance :: Model)
 	end))
 
-	table.insert(_moduleConns, localPlayer:GetPropertyChangedSignal("Team"):Connect(function()
+	local function refreshAllStates()
 		for _, state in tracked do
 			updateState(state)
 		end
-	end))
+	end
+	table.insert(_moduleConns, localPlayer:GetPropertyChangedSignal("Team"):Connect(refreshAllStates))
+	table.insert(_moduleConns, localPlayer:GetAttributeChangedSignal("MatchSide"):Connect(refreshAllStates))
 
 	-- Scan inicial; `prescannedModels` evita re-escanear (init.luau comparte un scan
 	-- con CharacterHighlight). Cubre el join mid-partida con combatientes aún replicando.

@@ -24,10 +24,7 @@ local _started = false
 -- En memoria: solo interesa el mejor valor del día, que va a Progress vía ReportBest.
 local _killStreakByUserId: { [number]: number } = {}
 
--- UTC: los servidores pueden estar en cualquier región y todos comparten el mismo "día".
-local function _todayKey(): string
-	return os.date("!%Y-%m-%d") :: string
-end
+local _todayKey = DailyTasks.TodayKey
 
 -- TODOS los Kind del pool: la rotación de mañana no debe heredar contadores viejos.
 local function _zeroedProgress(): { [string]: number }
@@ -40,14 +37,14 @@ end
 
 local function _resetForToday(player: Player, dateKey: string)
 	if not _dataService then return end
+	local claimed: { [string]: boolean } = {}
+	for _, slotId in DailyTasks.SlotIds do
+		claimed[slotId] = false
+	end
 	_dataService:BatchUpdate(player, {
 		{ path = { "DailyTasks", "DateKey" }, value = dateKey },
 		{ path = { "DailyTasks", "Progress" }, value = _zeroedProgress() },
-		{ path = { "DailyTasks", "Claimed" }, value = {
-			Task1 = false,
-			Task2 = false,
-			Task3 = false,
-		} },
+		{ path = { "DailyTasks", "Claimed" }, value = claimed },
 	})
 end
 
@@ -148,6 +145,15 @@ end
 function DailyTasksService:OnDeath(player: Player): ()
 	if not player then return end
 	_killStreakByUserId[player.UserId] = nil
+end
+
+-- La racha es de una vida en partida: salir al menú o acabar la ronda también la corta.
+function DailyTasksService:ResetStreak(player: Player): ()
+	_killStreakByUserId[player.UserId] = nil
+end
+
+function DailyTasksService:ResetAllStreaks(): ()
+	table.clear(_killStreakByUserId)
 end
 
 function DailyTasksService:OnMatchWon(player: Player): ()

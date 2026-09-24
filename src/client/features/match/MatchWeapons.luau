@@ -46,6 +46,23 @@ local function _deactivateRuntime()
 	weaponsSystem.resetClientRuntimeState()
 end
 
+-- Mientras está a true, desequipar no provoca que el hotbar re-equipe otra arma.
+function MatchWeapons.setHolstered(holstered: boolean)
+	local weaponsSystem = _getWeaponsSystemModule()
+	if weaponsSystem then
+		weaponsSystem.holstered = holstered
+	end
+end
+
+-- Equipa el slot del hotbar (1 = Main, 2 = Special) como las teclas 1/2.
+function MatchWeapons.equipSlot(slot: number)
+	local weaponsSystem = _getWeaponsSystemModule()
+	local gui = weaponsSystem and weaponsSystem.gui
+	if gui and gui.hotbar then
+		gui.hotbar:equipSlot(slot)
+	end
+end
+
 function MatchWeapons.clearGui(playerGui: PlayerGui)
 	for _, node in playerGui:GetChildren() do
 		if not node:IsA("ScreenGui") then

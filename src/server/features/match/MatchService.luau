@@ -18,11 +18,11 @@ local HealthPickupService = require(script.Parent:WaitForChild("HealthPickupServ
 local TeamAssignmentService = require(script.Parent:WaitForChild("TeamAssignmentService"))
 local VotingService = require(script.Parent:WaitForChild("VotingService"))
 local KillAttributionService = require(script.Parent:WaitForChild("KillAttributionService"))
+local KillRewardsService = require(script.Parent:WaitForChild("KillRewardsService"))
 local MatchResultsService = require(script.Parent:WaitForChild("MatchResultsService"))
 local KillEffectsRegistry = require(Shared.Locker.killEffects.KillEffectsRegistry)
 local CollisionGroups = require(Shared.CollisionGroups)
 local ItemsConfig = require(Shared.constants.ItemsConfig)
-local WeaponCategory = require(Shared.constants.WeaponCategory)
 local ItemDefaults = require(Shared.constants.ItemDefaults)
 local InventoryRepository = require(Shared.data.InventoryRepository)
 local ClientBootStage = require(Shared.constants.ClientBootStage)
@@ -31,7 +31,6 @@ local DailyTasksService = require(script.Parent.Parent.dailyTasks.DailyTasksServ
 local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
 local RewardService = require(script.Parent.Parent.Parent.core.RewardService)
 local TelemetryService = require(script.Parent.Parent.Parent.core.TelemetryService)
-local LastAttackerStore = require(ReplicatedStorage:WaitForChild("WeaponsSystem"):WaitForChild("Libraries"):WaitForChild("LastAttackerStore"))
 type DataService = DataServiceMod.DataServiceModule
 
 local MatchService = {}
@@ -54,9 +53,6 @@ local DEATH_BODY_TO_LOBBY_DELAY = 4.5
 -- Debounce mínimo entre reapariciones de lobby por jugador (anti-bucle infinito si
 -- una muerte en lobby vuelve a disparar el respawn de lobby de inmediato).
 local LOBBY_RESPAWN_DEBOUNCE = 2
-local MULTIKILL_WINDOW = 4
-local PICKUP_ELIGIBILITY_WINDOW = 15
-local PICKUP_ELIGIBILITY_MAX_QUEUED = 8
 -- Part de Workspace donde aparecen TODOS los mapas: el pivot del modelo del mapa
 -- se coloca en su CFrame al cargar. Sin ella, el mapa se queda donde se autoró.
 local MAP_ANCHOR_NAME = "MapAnchor"
@@ -75,7 +71,7 @@ local _dataService: DataService = nil :: any
 -- atómicamente en PlayerRemoving. Los campos de scope RONDA se resetean en bloque al
 -- desmontar la ronda (_resetSessionRoundState); el resto persiste toda la sesión.
 type PlayerSession = {
-	-- ── scope ronda ──
+	-- Scope ronda (hasta respawnDebounce, lo resetea _resetSessionRoundState).
 	team: ("A" | "B")?,
 	inMenu: boolean,
 	-- Join request en vuelo (de RequestJoinMatch hasta spawn/abort); también hace
@@ -83,7 +79,7 @@ type PlayerSession = {
 	pendingSpawn: boolean,
 	deathAt: number, -- 0 = vivo / sin muerte registrada
 	respawnDebounce: boolean,
-	-- ── scope sesión ──
+	-- Scope sesión desde aquí.
 	-- Respawn al mapa en curso (desde que se solicita hasta que termina). La
 	-- reubicación al lobby por inactividad lo consulta para no pisar un respawn.
 	respawning: boolean,
@@ -147,11 +143,7 @@ end
 -- Estado de ronda: objeto creado en _enterInRound y tirado entero al desmontar
 -- (_enterResults); la ronda nueva nace limpia por construcción.
 -- Las stats se indexan por userId e INCLUYEN bots (fakeUserIds negativos).
-type CombatStats = {
-	kills: number,
-	deaths: number,
-	assists: number,
-}
+type CombatStats = KillRewardsService.CombatStats
 
 type Round = {
 	-- Id de la partida, compartido por todas las series que la describen: MATCH_END,
@@ -247,17 +239,6 @@ local function _roundStats(userId: number): CombatStats?
 	return stats
 end
 
--- Acumula lo de esta ronda para los caps por moneda. El Cash es el BASE de ActionRewards,
--- no el cobrado: si el techo diario lo recorta, más kills no deben compensarlo.
-local function _trackRoundEarnings(userId: number, cashBase: number, xpGranted: number)
-	local round = _round
-	if not round then
-		return
-	end
-	round.cashEarnedByUserId[userId] = (round.cashEarnedByUserId[userId] or 0) + cashBase
-	round.xpEarnedByUserId[userId] = (round.xpEarnedByUserId[userId] or 0) + xpGranted
-end
-
 -- Entrada del jugador a la partida dentro de la ronda activa (spawn conseguido). La
 -- primera fija el arranque de su cap; todas abren un tramo de tiempo en partida.
 local function _markEnteredMatch(userId: number)
@@ -273,6 +254,13 @@ local function _markEnteredMatch(userId: number)
 		round.inMatchSinceByUserId[userId] = now
 		round.entriesByUserId[userId] = (round.entriesByUserId[userId] or 0) + 1
 	end
+end
+
+-- Contrato con MatchHud (cliente): atributo de Player "MatchSide" = bando mientras el
+-- jugador está EN PARTIDA, aunque esté muerto y con Team=nil (SpawnAtLobby). No usar
+-- "TeamName": TeamUtils.getSide lo lee y los bots apuntarían al cuerpo del lobby.
+local function _setMatchSide(player: Player, side: ("A" | "B")?)
+	player:SetAttribute("MatchSide", side)
 end
 
 -- Salida de la partida (vuelta al menú o desconexión): cierra el tramo abierto.
@@ -293,45 +281,6 @@ local function _inMatchSeconds(round: Round, userId: number): number
 	local since = round.inMatchSinceByUserId[userId]
 	local open = if since then math.max(0, os.time() - since) else 0
 	return (round.inMatchSecondsByUserId[userId] or 0) + open
-end
-
--- Empuja una kill como crédito de pickup consumible. Llamado en ambos paths de
--- kill (PvP y vs bot) sólo para jugadores humanos in-match.
-local function _recordPickupEligibility(userId: number)
-	local round = _round
-	if not round or userId <= 0 then
-		return
-	end
-	local queue = round.pickupCreditsByUserId[userId]
-	if not queue then
-		queue = {}
-		round.pickupCreditsByUserId[userId] = queue
-	end
-	table.insert(queue, time())
-	-- Cap defensivo: nunca acumular más de N créditos pendientes (evita que un
-	-- jugador que nunca se cura "ahorre" curaciones para más tarde).
-	while #queue > PICKUP_ELIGIBILITY_MAX_QUEUED do
-		table.remove(queue, 1)
-	end
-end
-
--- Consume (de existir) un crédito de pickup reciente. Devuelve true si había uno
--- dentro de la ventana. Poda timestamps caducados antes de decidir.
-local function _consumePickupEligibility(userId: number): boolean
-	local round = _round
-	local queue = if round then round.pickupCreditsByUserId[userId] else nil
-	if not queue then
-		return false
-	end
-	local now = time()
-	while #queue > 0 and (now - queue[1]) > PICKUP_ELIGIBILITY_WINDOW do
-		table.remove(queue, 1)
-	end
-	if #queue == 0 then
-		return false
-	end
-	table.remove(queue, 1)
-	return true
 end
 
 -- Máquina de fases, única fuente de verdad del flujo de partida:
@@ -407,8 +356,8 @@ local function _publishScore()
 	MatchSnapshot.set({ ScoreA = round.scoreA, ScoreB = round.scoreB })
 end
 
--- Delegan en KillAttributionService (broadcast de stats de combate con dedupe).
--- El nombre "Streak" es heredado: ya no hay lógica de rachas.
+-- Delegan en KillAttributionService (broadcast de stats de combate con dedupe). El
+-- packet se llama "Streak" pero lleva stats de combate, no rachas.
 local function _sendPlayerStreakToAll(userId: number)
 	KillAttributionService:SendStreakBroadcast(userId)
 end
@@ -502,28 +451,6 @@ local function _resolveBotKillerName(attackerUserId: number): string
 	return ""
 end
 
-local function _resolveWeaponItem(weaponId: string?): (string?, string?)
-	if type(weaponId) ~= "string" or weaponId == "" then
-		return nil, nil
-	end
-
-	for _, category in WeaponCategory.ALL do
-		local categoryConfig = ItemsConfig[category]
-		if type(categoryConfig) == "table" then
-			if type(categoryConfig[weaponId]) == "table" then
-				return category, weaponId
-			end
-			for itemId, definition in categoryConfig do
-				if type(definition) == "table" and definition.Name == weaponId then
-					return category, itemId
-				end
-			end
-		end
-	end
-
-	return nil, nil
-end
-
 --[[
 	Acciones diferidas (session.pendingProfileActions) hasta que cargue el profile:
 	sin esto, kills/deaths/XP antes de que esté listo se perderían (GetProfile
@@ -544,192 +471,6 @@ local function _deferUntilProfile(player: Player, fn: () -> ()): ()
 	table.insert(queue, fn)
 end
 
-local function _hasProfile(player: Player): boolean
-	return _dataService ~= nil and _dataService:GetProfile(player) ~= nil
-end
-
--- Cupo de recompensa disponible AHORA para `userId`. El cap de GameConfig es el de una
--- ronda COMPLETA y se devenga linealmente desde un colchón (MatchCapGraceFraction): con
--- un cap plano, las rondas cortadas por WinScoreLimit subirían el techo por hora. El
--- reloj es el del JUGADOR (su primera entrada), no el de la ronda, o entrar tarde daría
--- casi todo el cupo de golpe. Sin entrada registrada no hay cupo.
-local function _capAllowance(fullCap: number, userId: number): number
-	local round = _round
-	if not round then
-		return fullCap
-	end
-	local joinedAt = round.firstJoinAtByUserId[userId]
-	if not joinedAt then
-		return 0
-	end
-	local grace = GameConfig.MatchCapGraceFraction
-	local full = math.max(1, GameConfig.MaxRoundDuration)
-	local elapsed = math.clamp(os.time() - joinedAt, 0, full)
-	return fullCap * (grace + (1 - grace) * (elapsed / full))
-end
-
--- Caps de cash y XP INDEPENDIENTES: cada moneda se frena cuando ESA llega a su cap
--- (opts.skipCash/skipXP en RewardService.Award).
-local function _isCashCapReached(userId: number): boolean
-	local round = _round
-	local earned = if round then round.cashEarnedByUserId[userId] or 0 else 0
-	return earned >= _capAllowance(GameConfig.MatchCashCap, userId)
-end
-
-local function _isXPCapReached(userId: number): boolean
-	local round = _round
-	local earned = if round then round.xpEarnedByUserId[userId] or 0 else 0
-	return earned >= _capAllowance(GameConfig.MatchXPCap, userId)
-end
-
-local function _grantActionRewardsToAttacker(attacker: Player?, action: string, weaponId: string?)
-	if not _dataService or not attacker then
-		return
-	end
-
-	local skipCash = _isCashCapReached(attacker.UserId)
-	local skipXP = _isXPCapReached(attacker.UserId)
-	if skipCash and skipXP then
-		return
-	end
-
-	if not _hasProfile(attacker) then
-		_deferUntilProfile(attacker, function()
-			_grantActionRewardsToAttacker(attacker, action, weaponId)
-		end)
-		return
-	end
-
-	local ok, xpGranted, _cashGranted, cashBase =
-		RewardService.Award(attacker, action, nil, weaponId, { skipCash = skipCash, skipXP = skipXP, played = true })
-	if ok then
-		_trackRoundEarnings(attacker.UserId, cashBase, xpGranted)
-	end
-end
-
-local function _grantMasteryWrapsIfEligible(player: Player, weaponCategory: string, weaponId: string, newKillCount: number)
-	if not _dataService or newKillCount <= 0 then
-		return
-	end
-
-	local weaponWrapsConfig = ItemsConfig.WeaponWraps
-	if type(weaponWrapsConfig) ~= "table" then
-		return
-	end
-
-	local profile = _dataService:GetProfile(player)
-	if not profile or not profile.Data then
-		return
-	end
-
-	local inventory = profile.Data.Inventory
-	local byWeapon = if type(inventory) == "table" then inventory.WeaponWrapsByWeapon else nil
-	local categoryMap = if type(byWeapon) == "table" then byWeapon[weaponCategory] else nil
-	local weaponMap = if type(categoryMap) == "table" then categoryMap[weaponId] else nil
-
-	-- Todos los wraps elegibles en un solo BatchUpdate.
-	local updates: { { path: { string }, value: any } } = {}
-	for wrapKey, definition in weaponWrapsConfig do
-		if type(definition) == "table" then
-			local challenge = definition.KillChallenge
-			local kills: number? = nil
-			if challenge then
-				kills = tonumber(challenge.Kills)
-			end
-			if kills and kills > 0 and newKillCount >= kills then
-				local alreadyOwned = type(weaponMap) == "table" and weaponMap[wrapKey] == true
-				if not alreadyOwned then
-					table.insert(updates, {
-						path = { "Inventory", "WeaponWrapsByWeapon", weaponCategory, weaponId, wrapKey },
-						value = true,
-					})
-				end
-			end
-		end
-	end
-
-	if #updates == 0 then
-		return
-	end
-
-	local ok, err = pcall(function()
-		_dataService:BatchUpdate(player, updates)
-	end)
-	if not ok then
-		warn("[MatchService] Mastery wraps BatchUpdate error: " .. tostring(err))
-		return
-	end
-
-	for _, update in updates do
-		local wrapKey = update.path[5]
-		if type(wrapKey) == "string" then
-			TelemetryService.RecordItem(player, "MasteryWrap", weaponCategory .. "::" .. weaponId .. "::" .. wrapKey)
-		end
-	end
-end
-
-local function _registerWeaponKillForAttacker(attackerUserId: number?, weaponId: string?)
-	if not _dataService or not attackerUserId or attackerUserId <= 0 then
-		return
-	end
-
-	local attackerPlayer = Players:GetPlayerByUserId(attackerUserId)
-	if not attackerPlayer then
-		return
-	end
-
-	if not _hasProfile(attackerPlayer) then
-		_deferUntilProfile(attackerPlayer, function()
-			_registerWeaponKillForAttacker(attackerUserId, weaponId)
-		end)
-		return
-	end
-
-	local weaponCategory, resolvedWeaponId = _resolveWeaponItem(weaponId)
-	if not weaponCategory or not resolvedWeaponId then
-		return
-	end
-
-	local ok, success, newCount = pcall(_dataService.IncrementWeaponKills, _dataService, attackerPlayer, weaponCategory, resolvedWeaponId, 1)
-	if not ok then
-		warn("[MatchService] IncrementWeaponKills error: " .. tostring(success))
-		return
-	end
-
-	if success and type(newCount) == "number" then
-		_grantMasteryWrapsIfEligible(attackerPlayer, weaponCategory, resolvedWeaponId, newCount)
-	end
-end
-
---[[
-	Persiste Stats lifetime del atacante en UN BatchUpdate atómico (Kills y
-	Headshots). Stats.KillStreakBest no se escribe (ya no hay rachas; el campo se
-	conserva en los datos). Lo usan los paths PvP y PvE.
-]]
-local function _persistAttackerKillStats(attacker: Player, wasHeadshot: boolean)
-	if not _dataService then
-		return
-	end
-
-	if not _hasProfile(attacker) then
-		_deferUntilProfile(attacker, function()
-			_persistAttackerKillStats(attacker, wasHeadshot)
-		end)
-		return
-	end
-
-	local updates = {
-		{ path = { "Stats", "Kills" }, delta = 1 },
-	}
-	if wasHeadshot then
-		table.insert(updates, { path = { "Stats", "Headshots" }, delta = 1 })
-	end
-
-	pcall(function()
-		_dataService:BatchUpdate(attacker, updates)
-	end)
-end
-
 local function _resolveKillerName(attackerUserId: number?): string
 	if not attackerUserId then
 		return ""
@@ -740,136 +481,6 @@ local function _resolveKillerName(attackerUserId: number?): string
 	else
 		return _resolveBotKillerName(attackerUserId)
 	end
-end
-
---[[
-	Camino ÚNICO de acreditación de una kill al atacante — lo comparten el
-	path PvP (víctima jugador) y PvE (víctima bot):
-	  • bots atacantes: SOLO contador de HUD (sin rewards/persistencia)
-	  • humanos: stats de ronda, weapon kill (mastery), crédito de health
-	    pickup, rewards (Kill/Headshot), Stats lifetime, multikills y onboarding
-	    de primera kill.
-	No toca a la víctima ni resuelve la atribución — eso es del caller.
-
-	`victimIsBot` sólo se usa para telemetría: un K/D o win rate por arma que mezcle
-	bots con humanos no sirve para balancear.
-]]
-local function _creditKillToAttacker(
-	attackerUserId: number,
-	weaponId: string?,
-	wasHeadshot: boolean,
-	victimIsBot: boolean
-)
-	if attackerUserId < 0 then
-		local botStats = _roundStats(attackerUserId)
-		if botStats then
-			botStats.kills += 1
-		end
-		KillAttributionService:SendStreakBroadcast(attackerUserId)
-		return
-	end
-
-	local attacker = Players:GetPlayerByUserId(attackerUserId)
-	if not attacker then
-		return
-	end
-
-	local attackerStats = _roundStats(attackerUserId)
-	if not attackerStats then
-		return
-	end
-	attackerStats.kills += 1
-
-	if attackerStats.kills == 1 and MatchService.OnPlayerFirstKill then
-		pcall(MatchService.OnPlayerFirstKill, attacker)
-	end
-
-	KillAttributionService:SendStreakBroadcast(attackerUserId)
-	_registerWeaponKillForAttacker(attackerUserId, weaponId)
-
-	-- Telemetría de combate aquí y no en RewardService: las recompensas se cortan en
-	-- MatchCashCap/MatchXPCap y truncarían las kills de quien más mata.
-	local telemetryCategory, telemetryWeapon = _resolveWeaponItem(weaponId)
-	if telemetryCategory and telemetryWeapon then
-		TelemetryService.RecordCombat(attacker, telemetryCategory, telemetryWeapon, victimIsBot, wasHeadshot)
-	end
-	-- Una kill humana dropea un health pickup en cliente; este crédito valida el
-	-- RequestPickup correspondiente.
-	_recordPickupEligibility(attackerUserId)
-	_grantActionRewardsToAttacker(attacker, "Kill", weaponId)
-	if wasHeadshot then
-		_grantActionRewardsToAttacker(attacker, "Headshot", weaponId)
-	end
-
-	_persistAttackerKillStats(attacker, wasHeadshot)
-
-	-- Multikills: ventana corta de kills consecutivas → Stats lifetime.
-	local round = _round
-	if not round then
-		return
-	end
-	local now = time()
-	local timestamps = round.recentKillTimestampsByUserId[attackerUserId]
-	if not timestamps then
-		timestamps = {}
-		round.recentKillTimestampsByUserId[attackerUserId] = timestamps
-	end
-	table.insert(timestamps, now)
-	while #timestamps > 0 and (now - timestamps[1]) > MULTIKILL_WINDOW do
-		table.remove(timestamps, 1)
-	end
-	if _dataService and _hasProfile(attacker) then
-		local killsInWindow = #timestamps
-		if killsInWindow == 2 then
-			pcall(_dataService.Increment, _dataService, attacker, { "Stats", "DoubleKills" }, 1)
-		elseif killsInWindow == 3 then
-			pcall(_dataService.Increment, _dataService, attacker, { "Stats", "TripleKills" }, 1)
-		end
-	end
-end
-
-local function _registerKillEvent(deadPlayer: Player, attackerUserId: number?, attackerWeaponId: string?, attackerWasHeadshot: boolean?)
-	local killerName = _resolveKillerName(attackerUserId)
-	pcall(function()
-		Network.Combat.KillFeed.SendToAll({
-			killerName = killerName,
-			victimName = deadPlayer.Name,
-			weaponId = attackerWeaponId or "",
-		})
-	end)
-
-	local deadStats = _roundStats(deadPlayer.UserId)
-	if deadStats then
-		deadStats.deaths += 1
-	end
-	KillAttributionService:SendStreakBroadcast(deadPlayer.UserId)
-	-- Morir corta la racha de bajas que cuenta la tarea diaria de racha.
-	pcall(function()
-		DailyTasksService:OnDeath(deadPlayer)
-	end)
-
-	if _dataService then
-		if _hasProfile(deadPlayer) then
-			pcall(_dataService.Increment, _dataService, deadPlayer, { "Stats", "Deaths" }, 1)
-		else
-			_deferUntilProfile(deadPlayer, function()
-				pcall(_dataService.Increment, _dataService, deadPlayer, { "Stats", "Deaths" }, 1)
-			end)
-		end
-	end
-
-	if not attackerUserId or attackerUserId == deadPlayer.UserId then
-		return
-	end
-
-	-- Kills sobre jugadores solo se acreditan a HUMANOS in-match (los bots solo suman
-	-- contador al matar bots); la muerte cuenta igual.
-	if attackerUserId < 0 or _isPlayerInMenu(attackerUserId) then
-		return
-	end
-
-	-- Víctima jugador: PvP.
-	_creditKillToAttacker(attackerUserId, attackerWeaponId, attackerWasHeadshot == true, false)
 end
 
 local function _ensureTeams()
@@ -896,14 +507,6 @@ local function _ensureTeams()
 	_teamB = getOrCreateTeam(GameConfig.Teams.B.Name, GameConfig.Teams.B.Color)
 end
 
-local function _countActiveRealAssignments(): (number, number)
-	return TeamAssignmentService:CountActiveRealAssignments()
-end
-
-local function _pickBalancedTeam(userId: number): ("A" | "B")?
-	return TeamAssignmentService:PickBalancedTeam(userId)
-end
-
 -- Coalesce los rebalanceos del mismo frame: kill chains y joins/leaves simultáneos
 -- harían SetBotTargets + roster por evento.
 local _rebalancePending = false
@@ -914,7 +517,7 @@ local function _doRebalanceNow(reason: string)
 		return
 	end
 
-	local realA, realB = _countActiveRealAssignments()
+	local realA, realB = TeamAssignmentService:CountActiveRealAssignments()
 	local targetA = math.max(0, GameConfig.TeamSizeTarget - realA)
 	local targetB = math.max(0, GameConfig.TeamSizeTarget - realB)
 
@@ -998,6 +601,103 @@ local function _applyKillEffect(attackerUserId: number?, character: Model)
 	end
 end
 
+type InRoundDeath = {
+	attackerUserId: number?,
+	attackerPlayer: Player?,
+	attackerWeaponId: string,
+	killerName: string,
+}
+
+--[[
+	Contabiliza una muerte en ronda: kill y recompensas del atacante, stats de la víctima
+	y punto para el rival. La comparten el Died de ronda y el Reset estando vivo
+	(_onRequestReturnToMenu). Devuelve (nil, false) si el jugador no tiene equipo, y
+	roundEnded=true si esta muerte cerró la ronda (_enterResults ya corrió).
+]]
+local function _scoreInRoundDeath(
+	player: Player,
+	session: PlayerSession,
+	character: Model,
+	humanoid: Humanoid,
+	withKillEffect: boolean
+): (InRoundDeath?, boolean)
+	local deadSide = session.team
+	local round = _round
+	if deadSide == nil or not round then
+		return nil, false
+	end
+
+	session.deathAt = time()
+	session.respawnDebounce = false
+
+	local deathRoot = character:FindFirstChild("HumanoidRootPart")
+	if deathRoot and deathRoot:IsA("BasePart") then
+		local nearestSpawn = SpawnService.FindNearestSpawn(deathRoot.Position)
+		if nearestSpawn then
+			round.recentDeathBySpawn[nearestSpawn] = time()
+		end
+	end
+	local attackerUserId, attackerWeaponId, attackerWasHeadshot, attackerWeaponCategory = KillRewardsService:ResolveKillAttacker(humanoid)
+	local attackerPlayer = if attackerUserId then Players:GetPlayerByUserId(attackerUserId) else nil
+	local killerName: string
+	if attackerPlayer then
+		killerName = attackerPlayer.Name
+	elseif attackerUserId and attackerUserId < 0 then
+		killerName = _resolveBotKillerName(attackerUserId)
+	else
+		killerName = ""
+	end
+	KillRewardsService:RegisterPlayerDeath(player, attackerUserId, attackerWeaponId, attackerWasHeadshot, attackerWeaponCategory)
+
+	-- Ragdoll visible para todos.
+	if withKillEffect then
+		_applyKillEffect(attackerUserId, character)
+	end
+
+	if deadSide == "A" then
+		round.scoreB += 1
+	else
+		round.scoreA += 1
+	end
+
+	_publishScore()
+
+	local death: InRoundDeath = {
+		attackerUserId = attackerUserId,
+		attackerPlayer = attackerPlayer,
+		attackerWeaponId = attackerWeaponId,
+		killerName = killerName,
+	}
+	if round.scoreA >= GameConfig.WinScoreLimit then
+		_enterResults("A")
+		return death, true
+	elseif round.scoreB >= GameConfig.WinScoreLimit then
+		_enterResults("B")
+		return death, true
+	end
+	return death, false
+end
+
+-- Saca al jugador de la partida y lo deja en el menú del lobby. El cliente cierra la
+-- partida con ReturnToMenuDone (desde cualquier fase de juego).
+local function _sendToMenu(player: Player, session: PlayerSession, reason: string)
+	_markLeftMatch(player.UserId)
+	_setMatchSide(player, nil)
+	DailyTasksService:ResetStreak(player)
+	session.inMenu = true
+	session.respawnDebounce = false
+	session.pendingSpawn = false
+	_rebalanceBotsForCurrentRound(reason)
+	KillAttributionService:SendStreakBroadcast(player.UserId)
+
+	SpawnService.SpawnAtLobby(player)
+
+	if player.Parent == Players then
+		Network.Match.DeathScreenHide.SendTo({}, player)
+		Network.Match.ReturnToMenuDone.SendTo({}, player)
+	end
+end
+
 local function _registerDeathListener(player: Player, character: Model)
 	_disconnectDeathConnection(player.UserId)
 
@@ -1035,61 +735,21 @@ local function _registerDeathListener(player: Player, character: Model)
 			return
 		end
 
-		local deadSide = session.team
-		local round = _round
-		if deadSide == nil or not round then
+		local death, roundEnded = _scoreInRoundDeath(player, session, character, humanoid, true)
+		if not death or roundEnded then
 			return
 		end
+		local attackerUserId = death.attackerUserId
+		local attackerPlayer = death.attackerPlayer
+		local killerName = death.killerName
+		local attackerWeaponId = death.attackerWeaponId
 
-		session.deathAt = time()
-		session.respawnDebounce = false
-
-		local deathRoot = character:FindFirstChild("HumanoidRootPart")
-		if deathRoot and deathRoot:IsA("BasePart") then
-			local nearestSpawn = SpawnService.FindNearestSpawn(deathRoot.Position)
-			if nearestSpawn then
-				round.recentDeathBySpawn[nearestSpawn] = time()
+		-- Muerte sin asesino (vacío, entorno): la muerte cuenta igual (arriba), pero no hay
+		-- pantalla de muerte ni respawn: directo al menú.
+		if attackerUserId == nil then
+			if player.Parent == Players then
+				_sendToMenu(player, session, "death without killer")
 			end
-		end
-		local lastAttacker = LastAttackerStore.get(humanoid)
-		local attackerUserId = if lastAttacker then lastAttacker.UserId else nil
-		local attackerAt = if lastAttacker then lastAttacker.At else 0
-		local attackerWeaponId = if lastAttacker then lastAttacker.WeaponId else ""
-		local attackerWasHeadshot = if lastAttacker then lastAttacker.Headshot else false
-		if attackerAt > 0 and time() - attackerAt > GameConfig.KillAttributionWindow then
-			attackerUserId = nil
-		end
-		-- Atacante humano: descartar si no sigue in-match.
-		if attackerUserId and attackerUserId > 0 and _isPlayerInMenu(attackerUserId) then
-			attackerUserId = nil
-		end
-		local attackerPlayer = if attackerUserId then Players:GetPlayerByUserId(attackerUserId) else nil
-		local killerName: string
-		if attackerPlayer then
-			killerName = attackerPlayer.Name
-		elseif attackerUserId and attackerUserId < 0 then
-			killerName = _resolveBotKillerName(attackerUserId)
-		else
-			killerName = ""
-		end
-		_registerKillEvent(player, attackerUserId, attackerWeaponId, attackerWasHeadshot)
-
-		-- Aplicar kill effect del asesino (ragdoll visible para todos)
-		_applyKillEffect(attackerUserId, character)
-
-		if deadSide == "A" then
-			round.scoreB += 1
-		else
-			round.scoreA += 1
-		end
-
-		_publishScore()
-
-		if round.scoreA >= GameConfig.WinScoreLimit then
-			_enterResults("A")
-			return
-		elseif round.scoreB >= GameConfig.WinScoreLimit then
-			_enterResults("B")
 			return
 		end
 
@@ -1486,10 +1146,18 @@ function _enterResults(winnerTeam: string)
 		end
 	end
 
+	local rosterParts: { string } = {}
+	for userId in eligibleByUserId do
+		local side = teamOf(userId)
+		if userId > 0 and side then
+			table.insert(rosterParts, `{userId}:{side}`)
+		end
+	end
 	Network.Match.RoundEnded.SendToAll({
 		winnerTeam = winnerTeam,
 		scoreA = round.scoreA,
 		scoreB = round.scoreB,
+		roster = table.concat(rosterParts, ","),
 	})
 
 	-- Stats.MatchesPlayed para los elegibles + Wins/Losses y la daily WinMatches (el
@@ -1583,9 +1251,13 @@ function _enterResults(winnerTeam: string)
 		end
 		_resetSessionRoundState(session)
 	end
+	for _, player in Players:GetPlayers() do
+		_setMatchSide(player, nil)
+	end
 	_round = nil
 	-- Dedupe del broadcast de stats vive en KillAttributionService.
 	KillAttributionService:Clear()
+	DailyTasksService:ResetAllStreaks()
 	-- Snapshots de inicio de partida (nivel/tier BP) para los items de Resultados.
 	MatchResultsService:ClearSnapshots()
 	_lastBotRosterJsonBroadcast = nil
@@ -1611,16 +1283,7 @@ local function _handleBotDied(botTeam: string, _botName: string, botHumanoid: Hu
 		return
 	end
 
-	local lastAttacker = LastAttackerStore.get(botHumanoid)
-	local attackerUserId = if lastAttacker then lastAttacker.UserId else nil
-	local attackerAt = if lastAttacker then lastAttacker.At else 0
-	local attackerWeaponId = if lastAttacker then lastAttacker.WeaponId else ""
-	local attackerWasHeadshot = if lastAttacker then lastAttacker.Headshot else false
-	if attackerAt > 0 and time() - attackerAt > GameConfig.KillAttributionWindow then
-		attackerUserId = nil
-	end
-	-- No se descarta al atacante por estar en el menú: KillAttributionWindow ya filtra
-	-- daño viejo, y una kill con daño reciente es legítima.
+	local attackerUserId, attackerWeaponId, attackerWasHeadshot, attackerWeaponCategory = KillRewardsService:ResolveKillAttacker(botHumanoid)
 
 	local killerName = _resolveKillerName(attackerUserId)
 	-- Nombre ficticio del bot víctima (no su nombre crudo "Bot_B_08"). Fallback al
@@ -1639,7 +1302,7 @@ local function _handleBotDied(botTeam: string, _botName: string, botHumanoid: Hu
 
 	if attackerUserId and attackerUserId ~= botFakeUserId then
 		-- Víctima bot: PvE.
-		_creditKillToAttacker(attackerUserId, attackerWeaponId, attackerWasHeadshot, true)
+		KillRewardsService:CreditKill(attackerUserId, attackerWeaponId, attackerWasHeadshot, true, attackerWeaponCategory)
 	end
 
 	-- Los bots no usan streak: solo contabilizar kills/deaths para HUD.
@@ -1741,7 +1404,7 @@ end
 -- Sync inicial para un cliente recién cargado: estado event-driven (streaks de
 -- todos + roster de bots). El estado ambiental (fase/voto/score) viaja por
 -- MatchSnapshot y no necesita resync.
-local function _onRequestMatchSync(_: {}, player: Player)
+local function _onRequestMatchSync(_: Network.Empty, player: Player)
 	local session = _sessions[player.UserId]
 	if not session then
 		return
@@ -1763,7 +1426,7 @@ end
 -- cuerpo). Idempotente: el cliente reintenta hasta ver el ACK, que es el
 -- atributo replicado Player.JoinState = "Ready". Sin sesión (jugador ya fuera)
 -- se ignora.
-local function _onClientReady(_: {}, player: Player)
+local function _onClientReady(_: Network.Empty, player: Player)
 	local session = _sessions[player.UserId]
 	if not session or session.clientReady then
 		return
@@ -1829,19 +1492,28 @@ local function _initJoinedPlayerState(player: Player)
 	_bindCharacterTracking(player)
 end
 
-local function _onRequestJoinMatch(_: {}, player: Player)
+local function _onRequestJoinMatch(_: Network.Empty, player: Player)
 	if _phase ~= "InRound" or not _activeMapModel then
 		return
 	end
 
+	-- Solo desde el menú: estando en partida, un join sería un respawn con vida llena
+	-- y ForceField a demanda.
 	local session = _sessions[player.UserId]
-	if not session or session.pendingSpawn then
+	if not session or session.pendingSpawn or not session.inMenu then
 		return
 	end
 
-	local selectedSide = _pickBalancedTeam(player.UserId)
+	-- Sin perfil las armas no se pueden conceder (grantWeaponsWithRetry se rinde a los
+	-- 8 s) y el jugador jugaría desarmado. Se rechaza: el cliente vuelve al lobby.
+	if _dataService and not _dataService:GetProfile(player) then
+		Network.Match.JoinRejected.SendTo({ reason = "DataNotLoaded" }, player)
+		return
+	end
+
+	local selectedSide = TeamAssignmentService:PickBalancedTeam(player.UserId)
 	if not selectedSide then
-		session.inMenu = true
+		Network.Match.JoinRejected.SendTo({ reason = "TeamsFull" }, player)
 		return
 	end
 
@@ -1870,6 +1542,12 @@ local function _onRequestJoinMatch(_: {}, player: Player)
 			session.inMenu = true
 			session.pendingSpawn = false
 			_rebalanceBotsForCurrentRound("join aborted missing team")
+			Network.Match.JoinRejected.SendTo({ reason = "SpawnFailed" }, player)
+			return
+		end
+
+		-- Un ReturnToMenu del mismo frame (corre antes que este defer) ya lo mandó al lobby.
+		if session.inMenu then
 			return
 		end
 
@@ -1878,12 +1556,24 @@ local function _onRequestJoinMatch(_: {}, player: Player)
 			session.inMenu = true
 			session.pendingSpawn = false
 			_rebalanceBotsForCurrentRound("join spawn failed")
+			if player.Parent == Players then
+				Network.Match.JoinRejected.SendTo({ reason = "SpawnFailed" }, player)
+			end
+			return
+		end
+
+		-- SpawnOnAssignedTeam yielda en el lock de body-swap: un ReturnToMenu o el fin de
+		-- ronda pueden haber reubicado al jugador en el lobby ANTES de este LoadCharacter,
+		-- que lo ha devuelto al mapa. Se le vuelve a mandar al lobby.
+		if session.inMenu then
+			SpawnService.SpawnAtLobby(player)
 			return
 		end
 
 		session.pendingSpawn = false
 		session.deathAt = 0
 		_markEnteredMatch(player.UserId)
+		_setMatchSide(player, session.team)
 		Network.Match.DeathScreenHide.SendTo({}, player)
 
 		if player.Parent == Players then
@@ -1909,7 +1599,7 @@ local function _onRequestJoinMatch(_: {}, player: Player)
 	end)
 end
 
-local function _onRequestRespawn(_: {}, player: Player)
+local function _onRequestRespawn(_: Network.Empty, player: Player)
 	local session = _sessions[player.UserId]
 	if not session or not _isRoundActive() or session.inMenu then
 		return
@@ -1923,14 +1613,12 @@ local function _onRequestRespawn(_: {}, player: Player)
 		return
 	end
 
+	-- Solo tras una muerte registrada y con el cooldown cumplido: con deathAt == 0 el
+	-- jugador está vivo y un respawn le daría vida llena y ForceField sin morir. No se
+	-- mira Humanoid.Health: tras DEATH_BODY_TO_LOBBY_DELAY el muerto tiene un cuerpo vivo
+	-- en el lobby.
 	local deathAt = session.deathAt
-	-- Cooldown de respawn server-side (un cliente modificado podría saltarse la barra).
-	-- Sin momento de muerte conocido (deathAt == 0), floor anti-spam de 0.5s.
-	if deathAt > 0 then
-		if time() - deathAt < GameConfig.RespawnCooldown then
-			return
-		end
-	elseif time() - deathAt < 0.5 then
+	if deathAt <= 0 or time() - deathAt < GameConfig.RespawnCooldown then
 		return
 	end
 
@@ -1957,6 +1645,14 @@ local function _onRequestRespawn(_: {}, player: Player)
 
 		session.respawning = false
 
+		-- Mismo caso que en el join: menú o fin de ronda durante el yield del spawn.
+		if spawned and (session.inMenu or not _isRoundActive()) then
+			if player.Parent == Players then
+				SpawnService.SpawnAtLobby(player)
+			end
+			return
+		end
+
 		if spawned then
 			session.deathAt = 0
 			Network.Match.DeathScreenHide.SendTo({}, player)
@@ -1964,7 +1660,7 @@ local function _onRequestRespawn(_: {}, player: Player)
 	end)
 end
 
-local function _onRequestReturnToMenu(_: {}, player: Player)
+local function _onRequestReturnToMenu(_: Network.Empty, player: Player)
 	local session = _sessions[player.UserId]
 	if not session then
 		return
@@ -1977,46 +1673,38 @@ local function _onRequestReturnToMenu(_: {}, player: Player)
 	end
 	session.returnToMenuCooldownAt = now
 
-	_markLeftMatch(player.UserId)
-	session.inMenu = true
-	session.respawnDebounce = false
-	session.pendingSpawn = false
-	_rebalanceBotsForCurrentRound("return to menu")
-	KillAttributionService:SendStreakBroadcast(player.UserId)
-
-	SpawnService.SpawnAtLobby(player)
-
-	if player.Parent == Players then
+	-- Ya en el menú (p. ej. el fin de ronda lo mandó al lobby con la petición en vuelo):
+	-- solo confirmar, sin otro LoadCharacter ni rebalanceo.
+	if session.inMenu and not session.pendingSpawn and not session.respawning then
 		Network.Match.DeathScreenHide.SendTo({}, player)
 		Network.Match.ReturnToMenuDone.SendTo({}, player)
+		return
 	end
-end
 
---[[
-	Reserva `amount` de XP de pase en el cupo de la ronda (el mismo devengo que MatchXPCap,
-	con contador propio) y devuelve si cabía. Reservar y comprobar van juntos para que quien
-	concede el XP (ServerBootstrap, colgado de WeaponsSystem.Killed) no pueda olvidar apuntarlo.
-	Sin ronda activa no hay cupo.
-]]
-function MatchService:TryConsumeBattlePassXP(player: Player, amount: number): boolean
-	local round = _round
-	if not round or amount <= 0 then
-		return false
+	-- Reset/Menú estando vivo con un atacante reciente cuenta como muerte: si no, escapar
+	-- de una muerte segura negaría la kill y el punto al rival. Sin kill effect: el cuerpo
+	-- se reemplaza ahora mismo por el del lobby.
+	if _isRoundActive() and not session.inMenu and session.deathAt <= 0 then
+		local character = player.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		if character and humanoid and humanoid.Health > 0 and KillRewardsService:ResolveKillAttacker(humanoid) ~= nil then
+			-- El Died que pudiera llegar después no debe contarla otra vez.
+			_disconnectDeathConnection(player.UserId)
+			local _, roundEnded = _scoreInRoundDeath(player, session, character, humanoid, false)
+			if roundEnded then
+				-- _enterResults ya lo mandó al lobby; el cliente pasa a Resultados con RoundEnded.
+				return
+			end
+		end
 	end
-	local userId = player.UserId
-	local earned = round.bpXpEarnedByUserId[userId] or 0
-	if earned >= _capAllowance(GameConfig.MatchXPCap, userId) then
-		return false
-	end
-	round.bpXpEarnedByUserId[userId] = earned + amount
-	return true
+
+	_sendToMenu(player, session, "return to menu")
 end
 
 --[[
 	true si la kill ocurrió DENTRO de la partida: ronda activa, killer en partida y
-	víctima bot de la ronda o jugador en partida. Para quien cuelga de
-	WeaponsSystem.Killed (ServerBootstrap), que dispara con cualquier humanoid que
-	muera a tiros, también un cuerpo del lobby.
+	víctima bot de la ronda o jugador en partida. Lo usan las asistencias del
+	WeaponsSystem, que ven morir cualquier humanoid a tiros, también un cuerpo del lobby.
 ]]
 function MatchService:IsMatchKill(killer: Player, victimHumanoid: Humanoid): boolean
 	if not _isRoundActive() or _isPlayerInMenu(killer.UserId) then
@@ -2034,38 +1722,9 @@ function MatchService:IsMatchKill(killer: Player, victimHumanoid: Humanoid): boo
 	return victimCharacter:GetAttribute("BotTeam") ~= nil
 end
 
+-- Punto de entrada de las asistencias (WeaponsSystem.flushAssists).
 function MatchService:GrantCombatReward(player: Player, actionKey: string, extraUpdates: any?, itemSku: string?)
-	-- Caps por moneda independientes. Con ambas capadas solo se corta si no hay
-	-- extraUpdates (p. ej. Stats.Assists), que deben persistirse igualmente.
-	local skipCash = _isCashCapReached(player.UserId)
-	local skipXP = _isXPCapReached(player.UserId)
-	if skipCash and skipXP and extraUpdates == nil then
-		return false, 0, 0
-	end
-
-	local ok, xpGranted, cashGranted, cashBase = RewardService.Award(
-		player,
-		actionKey,
-		extraUpdates,
-		itemSku,
-		{ skipCash = skipCash, skipXP = skipXP, played = true }
-	)
-	if ok then
-		_trackRoundEarnings(player.UserId, cashBase, xpGranted)
-
-		-- Asistencias de la partida: las difundimos vía streak para Resultados.
-		if actionKey == "Assist" then
-			local stats = _roundStats(player.UserId)
-			if stats then
-				stats.assists += 1
-				KillAttributionService:SendStreakBroadcast(player.UserId)
-			end
-			pcall(function()
-				DailyTasksService:OnAssist(player)
-			end)
-		end
-	end
-	return ok, xpGranted, cashGranted
+	return KillRewardsService:GrantCombatReward(player, actionKey, extraUpdates, itemSku)
 end
 
 function MatchService:Start(dataService: DataService): ()
@@ -2074,6 +1733,21 @@ function MatchService:Start(dataService: DataService): ()
 	end
 
 	_dataService = dataService
+	KillRewardsService:Start({
+		dataService = dataService,
+		getRound = function()
+			return _round
+		end,
+		roundStats = _roundStats,
+		isPlayerInMenu = _isPlayerInMenu,
+		deferUntilProfile = _deferUntilProfile,
+		resolveKillerName = _resolveKillerName,
+		onFirstKill = function(player: Player)
+			if MatchService.OnPlayerFirstKill then
+				MatchService.OnPlayerFirstKill(player)
+			end
+		end,
+	})
 
 	_started = true
 
@@ -2244,9 +1918,9 @@ function MatchService:Start(dataService: DataService): ()
 	HealthPickupService:Start({
 		isRoundActive = _isRoundActive,
 		isPlayerInMenu = _isPlayerInMenu,
-		-- Consume un crédito de kill reciente por heal (ver _recordPickupEligibility).
+		-- Cada heal consume el crédito de una kill reciente (KillRewardsService).
 		consumePickupEligibility = function(userId: number): boolean
-			return _consumePickupEligibility(userId)
+			return KillRewardsService:ConsumePickupCredit(userId)
 		end,
 	})
 

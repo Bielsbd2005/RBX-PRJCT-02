@@ -700,21 +700,33 @@ function MatchHud:onPlayerRemoved(userId: number)
 	self:queuePlayerRowsUpdate()
 end
 
---- Llamar antes de resetear el roster.
-function MatchHud:captureEndResultsData(): (string, { EndResultsPlayerEntry })
-	-- Al acabar la ronda el Character puede no existir o no tener Team: se cae a
-	-- Player.Team, al atributo TeamName y por último al equipo cacheado en partida.
-	local function resolveSide(player: Player): string?
-		local side = TeamUtils.getSide(player.Character)
-		if not side and player.Team then
-			side = TeamUtils.normalize(player.Team.Name)
+-- Bando de un jugador real en partida. MatchSide (servidor, MatchService) cubre al muerto
+-- cuyo cuerpo ya está en el lobby con Team=nil.
+local function _resolvePlayerSide(player: Player): string?
+	local side = TeamUtils.getSide(player.Character)
+	if not side and player.Team then
+		side = TeamUtils.normalize(player.Team.Name)
+	end
+	if not side then
+		local attr = player:GetAttribute("MatchSide")
+		if typeof(attr) == "string" then
+			side = TeamUtils.normalize(attr)
 		end
-		if not side then
-			local attr = player:GetAttribute("TeamName")
-			if typeof(attr) == "string" then
-				side = TeamUtils.normalize(attr)
+	end
+	return side
+end
+
+--- Llamar antes de resetear el roster. `rosterSides` (userId → "A"/"B") llega en
+--- RoundEnded: al acabar la ronda Player.Team y MatchSide ya están a nil.
+function MatchHud:captureEndResultsData(rosterSides: { [number]: string }?): (string, { EndResultsPlayerEntry })
+	local function resolveSide(player: Player): string?
+		if rosterSides then
+			local side = rosterSides[player.UserId]
+			if side or player ~= Players.LocalPlayer then
+				return side
 			end
 		end
+		local side = _resolvePlayerSide(player)
 		if not side and player == Players.LocalPlayer then
 			side = self._lastKnownLocalSide
 		end
@@ -950,10 +962,7 @@ function MatchHud:_updatePlayerRows()
 	}
 
 	for _, p in Players:GetPlayers() do
-		local side = TeamUtils.getSide(p.Character)
-		if not side and p.Team then
-			side = TeamUtils.normalize(p.Team.Name)
-		end
+		local side = _resolvePlayerSide(p)
 		if side == "A" or side == "B" then
 			if p == Players.LocalPlayer then
 				self._lastKnownLocalSide = side

@@ -79,7 +79,6 @@ function ServerBootstrap.start(serverRoot: Script): ()
 
 	local DataService = require(serverRoot.core.data.DataService)
 	local RewardService = require(serverRoot.core.RewardService)
-	local BattlePassConfig = require(Shared:WaitForChild("constants"):WaitForChild("BattlePassConfig"))
 	local GamePassService = require(serverRoot.core.GamePassService)
 	local ShopService = require(serverRoot.features.shop.ShopService)
 	local SettingsService = require(serverRoot.features.settings.SettingsService)
@@ -89,10 +88,8 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	local DailyTasksService = require(serverRoot.features.dailyTasks.DailyTasksService)
 	local BattlePassService = require(serverRoot.features.battlepass.BattlePassService)
 	local GiftingService = require(serverRoot.features.gifting.GiftingService)
-	local LockerService = require(serverRoot.features.locker.LockerService)
 	local EmoteAssetService = require(serverRoot.features.locker.EmoteAssetService)
 	local ClearDataCommandService = require(serverRoot.features.testing.ClearDataCommandService)
-	local TrainingDummyService = require(serverRoot.features.testing.TrainingDummyService)
 
 	DataService:Start()
 
@@ -146,7 +143,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	--[[
 		Concede un pack de Robux y devuelve la decisión del receipt, o nil si el ProductId no
 		es de ningún pack (el dispatcher sigue probando handlers).
-		Contrato de durabilidad: idempotencia por PurchaseId + ForceSave confirmado ANTES de
+		Contrato de durabilidad: idempotencia por PurchaseId + SaveReceipt confirmado ANTES de
 		conceder, porque Roblox da por consumido el receipt al devolver PurchaseGranted.
 	]]
 	local function grantPackPurchase(receiptInfo: any): Enum.ProductPurchaseDecision?
@@ -164,7 +161,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 		-- memoria sin llegar a persistir.
 		local purchaseId = tostring(receiptInfo.PurchaseId)
 		if DataService:IsReceiptProcessed(buyer, purchaseId) then
-			if DataService:ForceSave(buyer) then
+			if DataService:SaveReceipt(buyer, purchaseId) then
 				return Enum.ProductPurchaseDecision.PurchaseGranted
 			end
 			return Enum.ProductPurchaseDecision.NotProcessedYet
@@ -189,7 +186,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 
 		-- Si el save falla, NotProcessedYet hace que Roblox reentregue el receipt (la
 		-- idempotencia de arriba evita el doble-grant).
-		if not DataService:ForceSave(buyer) then
+		if not DataService:SaveReceipt(buyer, purchaseId) then
 			return Enum.ProductPurchaseDecision.NotProcessedYet
 		end
 
@@ -257,8 +254,8 @@ function ServerBootstrap.start(serverRoot: Script): ()
 		-- al juego: el bootstrap es el único punto que sabe qué services existen.
 		if type(WeaponsSystem) == "table" then
 			-- killHook: síncrono, calcula el payload de PlayerEliminated (UI del killer en el mismo
-			-- frame). NO concede cash/XP (eso lo hace MatchService vía RewardService); solo replica
-			-- lo que se va a otorgar para que la UI no mienta.
+			-- frame). No concede nada: toda recompensa de una kill la paga
+			-- KillRewardsService:CreditKill; esto solo replica lo que se va a otorgar.
 			WeaponsSystem.killHook = function(_killer: Player, _victimHum: Humanoid, _weaponName: string, wasHeadshot: boolean)
 				local xpGained = ActionRewards.GetXP("Kill")
 				if wasHeadshot then
@@ -269,51 +266,14 @@ function ServerBootstrap.start(serverRoot: Script): ()
 					xpGained = xpGained,
 				}
 			end
-
-			-- Killed: notificaciones async para services con side-effects; los nuevos se
-			-- suscriben aquí sin tocar WeaponsSystem.luau.
-			if WeaponsSystem.Killed and WeaponsSystem.Killed.Event then
-				WeaponsSystem.Killed.Event:Connect(function(killer: Player, victimHum: Humanoid, _weaponName: string, wasHeadshot: boolean)
-					-- Killed dispara con CUALQUIER humanoid que muera a tiros, también un cuerpo del
-					-- lobby: aquí sólo cuentan las kills de partida. El pcall cubre un `killer` nil
-					-- (kill de entorno).
-					local okMatchKill, isMatchKill = pcall(function()
-						return MatchService:IsMatchKill(killer, victimHum)
-					end)
-					if not okMatchKill or not isMatchKill then
-						return
-					end
-
-					-- Las dailies no pasan por el cap de la ronda a propósito: su payout ya está acotado
-					-- por diseño. OnKill lleva dentro la racha de bajas; el headshot es su propia tarea.
-					if (DailyTasksService :: any).OnKill then
-						pcall(function() (DailyTasksService :: any):OnKill(killer) end)
-					end
-					if wasHeadshot and (DailyTasksService :: any).OnHeadshot then
-						pcall(function() (DailyTasksService :: any):OnHeadshot(killer) end)
-					end
-					-- El pase tiene su propio cupo por ronda, para que farmear kills no lo suba sin
-					-- límite. La reserva va DENTRO del pcall: `killer` puede llegar nil (kill de
-					-- entorno) y no debe tumbar el handler.
-					if (BattlePassService :: any).OnKill then
-						pcall(function()
-							if MatchService:TryConsumeBattlePassXP(killer, BattlePassConfig.XPRates.PerKill) then
-								(BattlePassService :: any):OnKill(killer)
-							end
-						end)
-					end
-				end)
-			end
 		end
 	else
 		warn("[ServerBootstrap] WeaponsSystem no encontrado tras 10s — kills no recompensarán cash")
 	end
 
 	MatchService:Start(DataService)
-	LockerService:Start(DataService)
 	EmoteAssetService:Start()
 	ClearDataCommandService:Start(DataService)
-	TrainingDummyService:Start()
 
 	-- Embudo de primera sesión (solo JoinCount == 1). Sin sessionId: corre una sola vez por
 	-- jugador, así que no hay intentos que desambiguar.

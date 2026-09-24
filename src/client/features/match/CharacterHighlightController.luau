@@ -3,11 +3,9 @@
 -- su relación con el LocalPlayer.
 
 local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 
-local Shared = ReplicatedStorage:WaitForChild("Shared")
-local TeamUtils = require(Shared.utils.TeamUtils)
+local MatchState = require(script.Parent.MatchState)
 
 local HIGHLIGHT_NAME = "CharacterHighlight"
 -- Debe coincidir con el literal del server (RagdollCleanup.fadeAndDestroy); valor =
@@ -79,8 +77,9 @@ local function _refreshColor(model: Model)
 		highlight.OutlineTransparency = OUTLINE_ALPHA
 		return
 	end
-	local localChar = localPlayer.Character
-	local isAlly = localChar ~= nil and TeamUtils.isSameTeam(localChar, model)
+	-- Por bando local y no por isSameTeam(localChar): muerto, localChar es el cuerpo del
+	-- lobby sin Team y todos saldrían como enemigos.
+	local isAlly = MatchState.isLocalAlly(model)
 	local color = if isAlly then COLOR_ALLY else COLOR_ENEMY
 	highlight.FillColor = color
 	highlight.OutlineColor = color
@@ -358,6 +357,7 @@ function CharacterHighlightController:Start(prescannedModels: { Model }?)
 	table.insert(_moduleConns, workspace.DescendantAdded:Connect(_onDescendantAdded))
 
 	table.insert(_moduleConns, localPlayer:GetPropertyChangedSignal("Team"):Connect(_refreshAll))
+	table.insert(_moduleConns, localPlayer:GetAttributeChangedSignal("MatchSide"):Connect(_refreshAll))
 
 	table.insert(_moduleConns, Players.PlayerAdded:Connect(_wirePlayer))
 	for _, p in Players:GetPlayers() do

@@ -13,6 +13,7 @@ local TweenService = game:GetService("TweenService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local TeamUtils = require(Shared.utils.TeamUtils)
+local MatchState = require(script.Parent.MatchState)
 
 local KillCamFollowController = {}
 KillCamFollowController.__index = KillCamFollowController
@@ -102,17 +103,9 @@ local function resolveKillerRoot(killerUserId: number?): (BasePart?, Vector3)
 end
 
 -- Bando SIN pasar por el personaje: en una caída al vacío el modelo ya está
--- destruido al llegar DeathScreenShow; Player.Team sobrevive a la muerte.
+-- destruido al llegar DeathScreenShow.
 local function localSide(): string?
-	local player = Players.LocalPlayer
-	if player.Team then
-		return TeamUtils.normalize(player.Team.Name)
-	end
-	local attr = player:GetAttribute("TeamName")
-	if type(attr) == "string" then
-		return TeamUtils.normalize(attr)
-	end
-	return nil
+	return MatchState.getLocalSide()
 end
 
 -- Root de un personaje VIVO, o nil. La comprobación de salud no sobra: un

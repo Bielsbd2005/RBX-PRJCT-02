@@ -36,6 +36,7 @@ export type KillerInfo = {
 	-- Id en ItemsConfig.Banners; nil/"Default" → banner por defecto.
 	bannerId: string?,
 	character: Model?,
+	isVIP: boolean?,
 }
 
 local function _resolvePcLabel(buttonNode: Instance?): TextLabel?
@@ -122,7 +123,7 @@ local function _populateCard(refs: Refs, killer: KillerInfo?)
 		return
 	end
 	if killer then
-		BannerCard.populate(refs.card, killer.name, killer.level, killer.bannerId)
+		BannerCard.populate(refs.card, killer.name, killer.level, killer.bannerId, killer.isVIP)
 	else
 		BannerCard.populate(refs.card, "", 0, nil)
 	end
@@ -153,10 +154,18 @@ local function _renderKillerInViewport(viewportFrame: ViewportFrame, characterMo
 		return nil
 	end
 
+	-- Los personajes de LoadCharacter tienen Archivable=false y Clone() devolvería nil.
+	local wasArchivable = characterModel.Archivable
+	characterModel.Archivable = true
+	local clone = characterModel:Clone()
+	characterModel.Archivable = wasArchivable
+	if not clone then
+		return nil
+	end
+
 	local worldModel = Instance.new("WorldModel")
 	worldModel.Parent = viewportFrame
 
-	local clone = characterModel:Clone()
 	_stripUnsafeDescendants(clone)
 	clone.Parent = worldModel
 	clone:PivotTo(clone:GetPivot() * CFrame.Angles(-0.4, math.rad(210), 0))
@@ -289,19 +298,6 @@ function DeathScreenView:show(respawnCooldown: number, killer: KillerInfo?)
 
 	_populateCard(self._refs, killer)
 
-	if self._viewportTrack then
-		pcall(function()
-			(self._viewportTrack :: AnimationTrack):Stop()
-		end)
-		self._viewportTrack = nil
-	end
-	if self._refs.viewportFrame then
-		self._viewportTrack = _renderKillerInViewport(
-			self._refs.viewportFrame,
-			if killer then killer.character else nil
-		)
-	end
-
 	-- El token cancela: show()/hide()/Destroy() lo incrementan y el task.delay
 	-- tardío no hace nada.
 	if self._countdownTween then
@@ -337,6 +333,23 @@ function DeathScreenView:show(respawnCooldown: number, killer: KillerInfo?)
 			self._respawnReady = true
 			_setButtonEnabled(self._refs.respawnButton, true)
 		end)
+	end
+
+	-- Después de la cuenta atrás y en pcall: un fallo cosmético no puede bloquear el respawn.
+	if self._viewportTrack then
+		pcall(function()
+			(self._viewportTrack :: AnimationTrack):Stop()
+		end)
+		self._viewportTrack = nil
+	end
+	local viewportFrame = self._refs.viewportFrame
+	if viewportFrame then
+		local ok, trackOrErr = pcall(_renderKillerInViewport, viewportFrame, if killer then killer.character else nil)
+		if ok then
+			self._viewportTrack = trackOrErr
+		else
+			warn("[DeathScreenView] render del killer falló:", trackOrErr)
+		end
 	end
 end
 

@@ -246,8 +246,11 @@ local function _teleportCharacterToSpawn(player: Player, spawnPoint: BasePart, k
 		return nil
 	end
 
+	-- LoadCharacter es síncrono: si al volver no hay Character es que falló (p. ej. el
+	-- jugador salió esperando el lock de body swap). Un CharacterAdded:Wait() aquí no
+	-- volvería nunca y colgaría a quien llama (el bucle de _enterResults).
 	LoadoutService.loadCharacterWithBody(player, _deps.dataService)
-	local character = player.Character or player.CharacterAdded:Wait()
+	local character = player.Character
 	if player.Parent ~= Players or not character or not character.Parent then
 		return nil
 	end

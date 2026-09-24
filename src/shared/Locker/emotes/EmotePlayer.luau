@@ -86,7 +86,8 @@ function EmotePlayer.stop(rig: Model, fadeTime: number?)
 end
 
 -- Reproduce el emote y devuelve su track (o nil si el rig no puede animarse).
-function EmotePlayer.play(rig: Model, emoteId: string?): AnimationTrack?
+-- `looped` fuerza el loop por encima del ítem (en partida se pasa false).
+function EmotePlayer.play(rig: Model, emoteId: string?, looped: boolean?): AnimationTrack?
 	local config = EmotePlayer.getConfig(emoteId)
 	local animationId = EmotePlayer.getAnimationId(emoteId)
 	if not animationId then
@@ -105,8 +106,10 @@ function EmotePlayer.play(rig: Model, emoteId: string?): AnimationTrack?
 	-- Action4: por encima de las animaciones de sostener el arma, que si no
 	-- se comen los brazos del emote.
 	track.Priority = Enum.AnimationPriority.Action4
-	-- Solo si el ítem lo fuerza: los de catálogo traen el loop en la animación.
-	if config.Looped ~= nil then
+	-- Solo si alguien lo fuerza: los de catálogo traen el loop en la animación.
+	if looped ~= nil then
+		track.Looped = looped
+	elseif config.Looped ~= nil then
 		track.Looped = config.Looped == true
 	end
 	track:Play(0.15)

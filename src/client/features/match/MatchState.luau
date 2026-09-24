@@ -13,7 +13,33 @@
 
 export type Phase = "Lobby" | "Joining" | "InMatch" | "Dying" | "ShowingResults" | "ReturningToMenu"
 
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local TeamUtils = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("utils"):WaitForChild("TeamUtils"))
+
 local MatchState = {}
+
+-- Bando del jugador local en partida. MatchSide (MatchService) lo mantiene mientras está
+-- muerto: a los 4.5 s el cuerpo pasa al lobby con Team=nil. Solo cliente; en el servidor
+-- los bots leen TeamUtils y no deben ver ese cuerpo como objetivo.
+function MatchState.getLocalSide(): string?
+	local player = Players.LocalPlayer
+	if player.Team then
+		return TeamUtils.normalize(player.Team.Name)
+	end
+	local attr = player:GetAttribute("MatchSide")
+	if type(attr) == "string" then
+		return TeamUtils.normalize(attr)
+	end
+	return nil
+end
+
+-- Aliado del jugador local (false si alguno de los dos no tiene bando).
+function MatchState.isLocalAlly(model: Model): boolean
+	local localSide = MatchState.getLocalSide()
+	return localSide ~= nil and TeamUtils.getSide(model) == localSide
+end
 
 local _phase: Phase = "Lobby"
 local _onPhaseChanged: ((Phase, Phase) -> ())? = nil

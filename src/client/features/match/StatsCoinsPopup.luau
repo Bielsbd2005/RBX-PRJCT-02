@@ -131,6 +131,8 @@ function StatsCoinsPopup.new(matchStatsGui: ScreenGui?): any
 	local self = setmetatable({}, StatsCoinsPopup)
 	self._gui = matchStatsGui
 	self._destroyed = false
+	-- hideImmediate/destroy lo suben: los hilos de monedas en vuelo se dan por cancelados.
+	self._generation = 0
 	self._janitor = Janitor.new()
 	self._refs = nil :: PopupRefs?
 	self._originalPosition = nil :: UDim2?
@@ -268,18 +270,20 @@ function StatsCoinsPopup:_deliver(delta: number, total: number, spawnNode: Image
 	self._pendingCoins += count
 	self:_startHideWatch()
 
+	local generation = self._generation
 	task.spawn(function()
 		self:_slideIn()
-		if self._destroyed then
+		if self._destroyed or self._generation ~= generation then
 			return
 		end
-		self:_spawnCoins(count, gained, template)
+		self:_spawnCoins(count, gained, template, generation)
 	end)
 
 	return _flightDuration(count, needsSlideIn)
 end
 
 function StatsCoinsPopup:hideImmediate()
+	self._generation += 1
 	self._janitor:Cleanup()
 	self._pendingCoins = 0
 	self._hideAt = 0
@@ -428,22 +432,22 @@ function StatsCoinsPopup:_onCoinLanded(share: number, landed: boolean?)
 	end
 end
 
-function StatsCoinsPopup:_spawnCoins(count: number, gained: number, template: ImageLabel)
+function StatsCoinsPopup:_spawnCoins(count: number, gained: number, template: ImageLabel, generation: number)
 	for index = 1, count do
 		local share = _coinShare(gained, count, index)
 		task.spawn(function()
 			if index > 1 then
 				task.wait(COIN_STAGGER_SECONDS * (index - 1))
 			end
-			if self._destroyed then
+			if self._destroyed or self._generation ~= generation then
 				return
 			end
-			self:_launchCoin(share, template)
+			self:_launchCoin(share, template, generation)
 		end)
 	end
 end
 
-function StatsCoinsPopup:_launchCoin(share: number, template: ImageLabel)
+function StatsCoinsPopup:_launchCoin(share: number, template: ImageLabel, generation: number)
 	local refs = self._refs
 	if not refs or self._destroyed or not template.Parent then
 		self:_onCoinLanded(share)
@@ -485,7 +489,10 @@ function StatsCoinsPopup:_launchCoin(share: number, template: ImageLabel)
 	-- vuelo la señal no es fiable y el hilo quedaría colgado.
 	task.wait(COIN_BURST_TWEEN_INFO.Time)
 
-	if self._destroyed or coin.Parent == nil then
+	if self._destroyed or self._generation ~= generation then
+		return
+	end
+	if coin.Parent == nil then
 		self:_onCoinLanded(share)
 		return
 	end
@@ -501,12 +508,15 @@ function StatsCoinsPopup:_launchCoin(share: number, template: ImageLabel)
 	fly:Play()
 	task.wait(COIN_FLY_TWEEN_INFO.Time)
 
-	if self._destroyed then
+	-- Cancelada (hideImmediate ya cuadró el contador) o destruida en vuelo: sin sonido.
+	if self._destroyed or self._generation ~= generation then
 		return
 	end
-	if coin.Parent ~= nil then
-		self._janitor:Remove(coin)
+	if coin.Parent == nil then
+		self:_onCoinLanded(share)
+		return
 	end
+	self._janitor:Remove(coin)
 	self:_onCoinLanded(share, true)
 end
 
