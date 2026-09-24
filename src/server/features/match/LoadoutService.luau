@@ -144,6 +144,9 @@ local function _grantMatchLoadoutTools(
 		end
 
 		local backpackClone = template:Clone()
+		-- Las Tools se autoran en Studio con el default true: soltarla (el motor replica el
+		-- drop del cliente) dejaría que otro jugador la recogiera.
+		backpackClone.CanBeDropped = false
 		CosmeticsTemplates.applyWeaponWrapToTool(backpackClone, wrapId)
 		backpackClone:SetAttribute(MATCH_LOADOUT_TOOL_ATTRIBUTE, true)
 		-- El nombre de la Tool (weaponId) no basta: "Default" existe en los dos catálogos.
