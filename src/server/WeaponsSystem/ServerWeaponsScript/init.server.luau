@@ -9,7 +9,16 @@ local weaponsSystemInitialized = false
 
 local function initializeWeaponsSystemAssets()
 	if not weaponsSystemInitialized then
-		local effectsFolder = weaponsSystemFolder.Assets.Effects
+		-- Assets solo existe en Studio. Si esto reventara, el clon no llegaría a
+		-- ReplicatedStorage y los WaitForChild sin timeout de KillRewardsService y AI
+		-- colgarían el bootstrap antes de DataService:Start (sin perfiles ni compras).
+		local assets = weaponsSystemFolder:FindFirstChild("Assets")
+		local effectsFolder = assets and assets:FindFirstChild("Effects")
+		if not effectsFolder then
+			warn("[ServerWeaponsScript] Falta WeaponsSystem.Assets.Effects: efectos sin inicializar.")
+			weaponsSystemInitialized = true
+			return
+		end
 		local partNonZeroTransparencyValues = {
 			["BulletHole"] = 1, ["Explosion"] = 1, ["Pellet"] = 1, ["Scorch"] = 1,
 			["Bullet"] = 1, ["Plasma"] = 1, ["Railgun"] = 1,
