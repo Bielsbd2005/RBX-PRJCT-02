@@ -3,21 +3,23 @@
 Cada punto es una PR independiente que necesita prueba en Studio. Antes de empezar uno,
 comprobar en el código que sigue aplicando.
 
-## MatchService: extraer el tracking de kills
+## MatchService: subsistemas separables
 
-Recompensas y estadísticas del atacante siguen en `MatchService`: `_registerKillEvent`,
-`_grantActionRewardsToAttacker`, `_grantMasteryWrapsIfEligible`, `_persistAttackerKillStats`.
-Candidato a un servicio propio, como ya se hizo con `VotingService`, `TeamAssignmentService`
-y `KillAttributionService`. Riesgo alto: es el flujo de persistencia de XP/Cash; probar
-kill/death/XP/cash en Studio antes de mergear.
+El pago de las kills ya vive en `KillRewardsService`. Quedan en `MatchService`: la tarjeta
+de muerte (`_registerDeathListener`, `_resolveEquippedBanner`, `_applyKillEffect`), el reparto
+de resultados (el bloque de `_enterResults` que calcula MVP y persiste partidas; encaja en
+`MatchResultsService`) y el puente de roster con AI (`_broadcastBotRoster`, `_doRebalanceNow`).
 
-`_pickBalancedTeam` también sigue en `MatchService` y encajaría en `TeamAssignmentService`.
+## WeaponsSystem
 
-## Locker: partir `LockerFeature.start`
-
-`client/features/locker/init.luau` es casi entero una función `start`. Subsistemas separables:
-población de tabs, action frame (equip/buy/preview), dummies de kill effects y flujo de compra.
-Los helpers de tweens/conexiones duplicados con `WeaponPreviewController` irían a un util común.
+- Los 23 archivos que pasaron a `--!strict` sin un type checker a mano (casi todo el
+  WeaponsSystem, más `LoadingScreen.client`) tendrán errores en el Script Analysis de Studio.
+  No afectan a la ejecución; corregirlos archivo a archivo, empezando por `NetworkingCallbacks`
+  y `WeaponSecurity` (tipar `fireInfo`/`hitInfo` como `export type`).
+- Archivos gigantes: `BulletWeapon` (pool de balas, simulador de proyectil, marcas de impacto,
+  view kick, y la parte de servidor `onHit`/daño/explosión/FireZone), `ShoulderCamera`
+  (oclusión, shake/recoil, input táctil/gamepad, transparencia; y la rama de sprint, que no
+  activa nadie), `BotAI` (targeting, disparo, rig; el FSM de `Start` partido por estado).
 
 ## Tipar `dataService` en match
 
@@ -30,6 +32,8 @@ type DataService = DataServiceMod.DataServiceModule
 
 ## Menores
 
+- Ítems con `Image = "rbxassetid://0"` siguen con `CanPurchase = true` (se cobran y no se
+  ven). Decidir si se ocultan hasta tener arte y validarlo al cargar `ItemsConfig`.
 - `TeamUtils` acepta cinco atributos de equipo (`Team`, `TeamSide`, `BotTeam`, `Side`,
   `TeamAffinity`): unificar en uno.
 - `KillEffectsRegistry` registra los efectos a mano; podría descubrirlos por los hijos de la carpeta.

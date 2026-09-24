@@ -1,3 +1,4 @@
+--!strict
 local MIN_HORZ_SPEED = 0.01 --The minimum X and Z velocity for a physical-launch parabola to be considered vertical, helps avoid numerical instability
 -- Cast lineal único por defecto: cada sample es un raycast por bala por frame.
 -- BulletWeapon fija setNumSamples justo después de new().

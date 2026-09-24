@@ -1,3 +1,4 @@
+--!strict
 local CollectionService = game:GetService("CollectionService")
 
 local function ancestorHasTag(instance, tag)

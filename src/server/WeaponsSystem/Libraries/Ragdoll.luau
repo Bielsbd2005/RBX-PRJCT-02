@@ -1,3 +1,4 @@
+--!strict
 local RunService = game:GetService("RunService")
 
 local JOINT_INFO = {

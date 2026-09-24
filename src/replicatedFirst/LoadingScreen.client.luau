@@ -1,3 +1,4 @@
+--!strict
 --[[
 	Anima ReplicatedFirst.LoadingScreenGui de Studio (Background + Logo +
 	LoadingDots/Dot1..N) sin crear elementos visibles.

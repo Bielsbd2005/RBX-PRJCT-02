@@ -1,3 +1,4 @@
+--!strict
 --[[
 	Client-side auto-aim and auto-fire system.
 	Detects enemy players near the center of the screen and automatically fires.

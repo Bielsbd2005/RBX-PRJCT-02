@@ -1,3 +1,4 @@
+--!strict
 local TweenService 		= game:GetService("TweenService")
 local CollectionService = game:GetService("CollectionService")
 local RunService 		= game:GetService("RunService")

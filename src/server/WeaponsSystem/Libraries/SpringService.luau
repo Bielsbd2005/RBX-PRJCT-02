@@ -1,3 +1,4 @@
+--!strict
 -- Binds properties to spring simulations
 -- @author Parker Stebbins <pstebbins@roblox.com>
 

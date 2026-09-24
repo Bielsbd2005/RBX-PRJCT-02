@@ -1,3 +1,4 @@
+--!strict
 -- "+" verdes que suben desde las esquinas inferiores al ganar salud (lo dispara
 -- HealthBarController). El tinte verde de bordes es el Vignette de WeaponsSystemGui
 -- (HealAlphaDriver); aquí solo las partículas, parentadas a WeaponsSystemGui. Cada
