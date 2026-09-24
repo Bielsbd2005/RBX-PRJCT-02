@@ -19,6 +19,7 @@ export type ItemConfig = {
 	ScrollSpeedU: number?,
 	ScrollSpeedV: number?,
 	KillChallenge: { Kills: number }?,
+	MasteryScope: string?,  -- WeaponWraps: "Weapon" | "Category" | "All" (Shared.data.WrapMastery)
 	AnimationId: string?,   -- Emotes: animación R15 que reproduce EmotePlayer.
 	Looped: boolean?,       -- Emotes: fuerza el loop del track (nil = el que traiga la animación).
 	CatalogEmoteId: number?, -- Emotes: id del catálogo; la animación la resuelve EmoteAssetService.
@@ -56,8 +57,10 @@ Main = {
     AK      = { Name = "AK",      Price = 2000,  LevelRequired = 13,  Rarity = "Rare",    Image = asset(85172441741101), CanPurchase = true },
     Groza   = { Name = "Groza",   Price = 300,   LevelRequired = 0,  Rarity = "Common",  Image = asset(73116397796109), CanPurchase = true },
     Tommy   = { Name = "Tommy",   Price = 5000,  LevelRequired = 23,  Rarity = "Rare",      Image = asset(116729825128346), CanPurchase = true },
-    Sniper  = { Name = "Sniper",  Price = 20000, LevelRequired = 50,  Rarity = "Epic",      Image = asset(71831101535350),  CanPurchase = true },
-    Large   = { Name = "Large",   Price = 65000, LevelRequired = 93,  Rarity = "Legendary",      Image = asset(120566462075583),  CanPurchase = true },
+    -- Escopeta: one-shot a bocajarro y nula pasada ~35 studs. Epic desde el 2026-09-24 (era Legendary a 65.000).
+    Large   = { Name = "Large",   Price = 20000, LevelRequired = 50,  Rarity = "Epic",      Image = asset(120566462075583),  CanPurchase = true },
+    -- Rifle de precisión sin mira (sustituye al Sniper): one-shot, el apex de Main. Legendary desde el 2026-09-24 (era Epic a 20.000). TODO: Image real.
+    Marksman = { Name = "Marksman", Price = 65000, LevelRequired = 93, Rarity = "Legendary",      Image = "rbxassetid://0", CanPurchase = true },
     -- RESERVADO: la definición (Definitions/<Category>/<Id>.luau) ya existe; falta el Tool ServerStorage.WeaponTools.<Category>.<Id>.
     -- Descomentar con la Image real cuando esté el Tool (sin él se compraría y no haría nada); precio, nivel y rareza ya son los de la escalera.
     -- LMG = { Name = "LMG", Price = 50000, LevelRequired = 82, Rarity = "Legendary", Image = "rbxassetid://0", CanPurchase = true },
@@ -70,8 +73,8 @@ Special = {
     UZI     = { Name = "UZI",     Price = 300, LevelRequired = 0,  Rarity = "Common",         Image = asset(73440329120716), CanPurchase = true },
     Laser   = { Name = "Laser",   Price = 40000, LevelRequired = 73,  Rarity = "Epic",      Image = asset(104390588207353),  CanPurchase = true },
     RPG     = { Name = "RPG",     Price = 100000, LevelRequired = 117,  Rarity = "Legendary",      Image = asset(135425656083964), CanPurchase = true },
-    -- TODO: entrada temporal para probar la Flare; precio, nivel, rareza e Image reales según la escalera de economía.
-    Flare   = { Name = "Flare",   Price = 100, LevelRequired = 0,  Rarity = "Epic",      Image = "rbxassetid://0", CanPurchase = true },
+    -- Arma de apoyo (zona de fuego): precio de escalera, no de TTK. TODO: Image real.
+    Flare   = { Name = "Flare",   Price = 10000, LevelRequired = 34,  Rarity = "Epic",      Image = "rbxassetid://0", CanPurchase = true },
     -- RESERVADO: la definición (Definitions/<Category>/<Id>.luau) ya existe; falta el Tool ServerStorage.WeaponTools.<Category>.<Id>.
     -- Descomentar con la Image real cuando esté el Tool (sin él se compraría y no haría nada); precio, nivel y rareza ya son los de la escalera.
     -- Revolver = { Name = "Revolver", Price = 6500, LevelRequired = 27, Rarity = "Rare", Image = "rbxassetid://0", CanPurchase = true },
@@ -210,7 +213,7 @@ Special = {
 			Season = "S1",
 			SeasonTier = 32,
 		},
-		-- Los wraps NO se venden: sólo se consiguen por maestría (KillChallenge) o en el pase.
+		-- Los wraps NO se venden: sólo se consiguen por maestría (KillChallenge, MasteryScope) o en el pase.
 		-- En reserva para un pase futuro (sólo datos):
 		-- Wrap_White  = { Name = "Arctic",       Rarity = "Common",    BaseColor = Color3.fromRGB(235, 240, 245) },
 		-- Wrap_Blue   = { Name = "Blue Wrap",    Rarity = "Common",    BaseColor = Color3.fromRGB(57, 110, 207) },
@@ -253,6 +256,44 @@ Special = {
 			StudsPerTile = 3,
 			KillChallenge = { Kills = 10000 },
 		},
+		-- TODO: Damascus y Galaxy piden textura propia (Galaxy animada); de momento color y material.
+		Mastery_Gold = {
+			Name = "Gold Mastery",
+			Price = 0,
+			LevelRequired = 0,
+			Rarity = "Legendary",
+			CanPurchase = false,
+			BaseColor = Color3.fromRGB(255, 196, 45),
+			Material = Enum.Material.Foil,
+			isAnimated = false,
+			StudsPerTile = 3,
+			MasteryScope = "Weapon",
+		},
+		Mastery_Damascus = {
+			Name = "Damascus Mastery",
+			Price = 0,
+			LevelRequired = 0,
+			Rarity = "Legendary",
+			CanPurchase = false,
+			BaseColor = Color3.fromRGB(105, 108, 120),
+			Material = Enum.Material.Metal,
+			isAnimated = false,
+			StudsPerTile = 3,
+			MasteryScope = "Category",
+		},
+		Mastery_Galaxy = {
+			Name = "Galaxy Mastery",
+			Price = 0,
+			LevelRequired = 0,
+			Rarity = "Legendary",
+			TextureID = asset(359691440),
+			CanPurchase = false,
+			BaseColor = Color3.fromRGB(180, 126, 197),
+			Material = Enum.Material.Neon,
+			isAnimated = true,
+			StudsPerTile = 0.5,
+			MasteryScope = "All",
+		},
 	},
 
 	KillEffects = {
@@ -272,34 +313,33 @@ Special = {
 		-- Orbes sólo cosméticos (no dan XP). Arte OPCIONAL en ReplicatedStorage.Xp o
 		-- Templates.Xp (con Xp.BillboardGui.Image). Precio y nivel PROVISIONALES.
 		XpOrbs    = { Name = "XP Drop",       Price = 25000, LevelRequired = 28, Rarity = "Epic",   Image = "rbxassetid://130437553674754", CanPurchase = true },
-		-- PROVISIONALES: entradas reales con nombre e Image de relleno; sustituir por el efecto
+		-- Sin arte (confeti procedural). Sonido OPCIONAL en SoundService.Audio.Gameplay.Confetti.
+		Confetti  = { Name = "Party Popper",  Price = 6500,  LevelRequired = 13, Rarity = "Rare",   Image = "rbxassetid://130437553674754", CanPurchase = true },
+		-- Suelo de la categoría (sin nivel). Sonido OPCIONAL en ReplicatedStorage.Templates.Oof.
+		Oof       = { Name = "Oof",           Price = 2500,  LevelRequired = 0,  Rarity = "Rare",   Image = "rbxassetid://130437553674754", CanPurchase = true },
+		-- Sonido OPCIONAL en ReplicatedStorage.Templates.Noobify.
+		Noobify   = { Name = "Noobified",     Price = 20000, LevelRequired = 25, Rarity = "Epic",   Image = "rbxassetid://130437553674754", CanPurchase = true },
+		-- Sonido OPCIONAL en ReplicatedStorage.Templates.Bobblehead.
+		Bobblehead = { Name = "Bobblehead",   Price = 65000, LevelRequired = 46, Rarity = "Legendary", Image = "rbxassetid://130437553674754", CanPurchase = true },
+		-- Arte en ReplicatedStorage.Templates.Flattened (Part con SurfaceGui.ViewportFrame).
+		Flattened = { Name = "Pancake",       Price = 12500, LevelRequired = 19, Rarity = "Epic",   Image = "rbxassetid://130437553674754", CanPurchase = true },
+		-- Plantilla OPCIONAL ReplicatedStorage.Templates.Block (sin ella, cajas del color de cada pieza).
+		BlockBlast = { Name = "Blocked Out",  Price = 40000, LevelRequired = 36, Rarity = "Epic",   Image = "rbxassetid://130437553674754", CanPurchase = true },
+		-- Arte OPCIONAL en ReplicatedStorage.Templates.Electrocution (emitters que se ponen en el torso).
+		Electrocution = { Name = "Electrocution", Price = 100000, LevelRequired = 58, Rarity = "Legendary", Image = "rbxassetid://130437553674754", CanPurchase = true },
+		-- Arte en ReplicatedStorage.Templates.GumDrop (sin él, cae al Default). Precio y nivel PROVISIONALES.
+		GumDrop   = { Name = "Gum Drop!",     Price = 25000, LevelRequired = 28, Rarity = "Epic",   Image = "rbxassetid://130437553674754", CanPurchase = true },
+		-- PROVISIONAL: entrada real con nombre e Image de relleno; sustituir por el efecto
 		-- definitivo (mismo precio, nivel y rareza). Sin módulo en KillEffectsRegistry cae al
-		-- Default. KE_P01 es el suelo de la categoría (sin nivel); KE_P12, su trofeo.
-		KE_P01   = { Name = "Kill P01",  Price = 2500,   LevelRequired = 0,   Rarity = "Rare",      Image = "rbxassetid://0", CanPurchase = true },
-		KE_P02   = { Name = "Kill P02",  Price = 4000,   LevelRequired = 10,  Rarity = "Rare",      Image = "rbxassetid://0", CanPurchase = true },
-		KE_P03   = { Name = "Kill P03",  Price = 5000,   LevelRequired = 11,  Rarity = "Rare",      Image = "rbxassetid://0", CanPurchase = true },
-		KE_P04   = { Name = "Kill P04",  Price = 6500,   LevelRequired = 13,  Rarity = "Rare",      Image = "rbxassetid://0", CanPurchase = true },
-		KE_P05   = { Name = "Kill P05",  Price = 10000,  LevelRequired = 17,  Rarity = "Epic",      Image = "rbxassetid://0", CanPurchase = true },
-		KE_P06   = { Name = "Kill P06",  Price = 12500,  LevelRequired = 19,  Rarity = "Epic",      Image = "rbxassetid://0", CanPurchase = true },
-		KE_P07   = { Name = "Kill P07",  Price = 20000,  LevelRequired = 25,  Rarity = "Epic",      Image = "rbxassetid://0", CanPurchase = true },
-		KE_P08   = { Name = "Kill P08",  Price = 25000,  LevelRequired = 28,  Rarity = "Epic",      Image = "rbxassetid://0", CanPurchase = true },
-		KE_P09   = { Name = "Kill P09",  Price = 40000,  LevelRequired = 36,  Rarity = "Epic",      Image = "rbxassetid://0", CanPurchase = true },
-		KE_P10   = { Name = "Kill P10",  Price = 65000,  LevelRequired = 46,  Rarity = "Legendary", Image = "rbxassetid://0", CanPurchase = true },
-		KE_P11   = { Name = "Kill P11",  Price = 100000, LevelRequired = 58, Rarity = "Legendary", Image = "rbxassetid://0", CanPurchase = true },
+		-- Default. Es el trofeo de la categoría.
 		KE_P12   = { Name = "Kill P12",  Price = 300000, LevelRequired = 102, Rarity = "Legendary", Image = "rbxassetid://0", CanPurchase = true },
 	},
 
 	Emotes = {
-		-- Animaciones stock de Roblox (R15, públicas: sirven en cualquier juego).
 		-- Se reproducen en partida con la tecla E. Sin Image: el Locker cae en su
-		-- thumbnail por defecto hasta que haya iconos propios.
+		-- thumbnail por defecto hasta que haya iconos propios. Default es la animación
+		-- stock de Roblox (R15, pública); el resto son del catálogo.
 		Default = { Name = "Wave",    Price = 0,    LevelRequired = 0,  Rarity = "Common",   CanPurchase = false, AnimationId = asset(507770239), Looped = false },
-		Point   = { Name = "Point",   Price = 65,   LevelRequired = 1,  Rarity = "Common",   CanPurchase = true,  AnimationId = asset(507770453), Looped = false },
-		Cheer   = { Name = "Cheer",   Price = 200,  LevelRequired = 3,  Rarity = "Common",   CanPurchase = true,  AnimationId = asset(507770677), Looped = false },
-		Laugh   = { Name = "Laugh",   Price = 250,  LevelRequired = 4,  Rarity = "Common",   CanPurchase = true,  AnimationId = asset(507770818), Looped = false },
-		Dance   = { Name = "Dance",   Price = 400,  LevelRequired = 6,  Rarity = "Rare",     CanPurchase = true,  AnimationId = asset(507771019), Looped = true },
-		Groove  = { Name = "Groove",  Price = 1000, LevelRequired = 10, Rarity = "Epic",     CanPurchase = true,  AnimationId = asset(507776043), Looped = true },
-		Shuffle = { Name = "Shuffle", Price = 2000, LevelRequired = 16, Rarity = "Epic",     CanPurchase = true,  AnimationId = asset(507777268), Looped = true },
 
 		-- ── Emotes del catálogo de Roblox (creador: Roblox) ──
 		-- CatalogEmoteId es el id de la página del catálogo, NO el de la animación:
@@ -307,69 +347,26 @@ Special = {
 		-- (permitido para assets creados por Roblox) y la publica en
 		-- ReplicatedStorage.EmoteAnimations. Solo emotes genéricos: los de
 		-- colaboraciones (KSI, Twenty One Pilots, Royal Blood...) quedan fuera.
-		Salute        = { Name = "Salute", Price = 30, LevelRequired = 0, Rarity = "Common", CanPurchase = true, CatalogEmoteId = 3360689775 },
-		Hello         = { Name = "Hello", Price = 50, LevelRequired = 1, Rarity = "Common", CanPurchase = true, CatalogEmoteId = 3576686446 },
-		Applaud       = { Name = "Applaud", Price = 65, LevelRequired = 1, Rarity = "Common", CanPurchase = true, CatalogEmoteId = 5915779043 },
-		Shrug         = { Name = "Shrug", Price = 65, LevelRequired = 1, Rarity = "Common", CanPurchase = true, CatalogEmoteId = 3576968026 },
-		Agree         = { Name = "Agree", Price = 100, LevelRequired = 1, Rarity = "Common", CanPurchase = true, CatalogEmoteId = 4849487550 },
-		Disagree      = { Name = "Disagree", Price = 100, LevelRequired = 1, Rarity = "Common", CanPurchase = true, CatalogEmoteId = 4849495710 },
-		Tilt          = { Name = "Tilt", Price = 100, LevelRequired = 1, Rarity = "Common", CanPurchase = true, CatalogEmoteId = 3360692915 },
-		Stadium       = { Name = "Stadium", Price = 125, LevelRequired = 2, Rarity = "Common", CanPurchase = true, CatalogEmoteId = 3360686498 },
-		Sad           = { Name = "Sad", Price = 125, LevelRequired = 2, Rarity = "Common", CanPurchase = true, CatalogEmoteId = 4849502101 },
-		Happy         = { Name = "Happy", Price = 125, LevelRequired = 2, Rarity = "Common", CanPurchase = true, CatalogEmoteId = 4849499887 },
-		Celebrate     = { Name = "Celebrate", Price = 200, LevelRequired = 3, Rarity = "Common", CanPurchase = true, CatalogEmoteId = 3994127840 },
-		Curtsy        = { Name = "Curtsy", Price = 200, LevelRequired = 3, Rarity = "Common", CanPurchase = true, CatalogEmoteId = 4646306583 },
-		Shy           = { Name = "Shy", Price = 200, LevelRequired = 3, Rarity = "Common", CanPurchase = true, CatalogEmoteId = 3576717965 },
-		Bored         = { Name = "Bored", Price = 200, LevelRequired = 3, Rarity = "Common", CanPurchase = true, CatalogEmoteId = 5230661597 },
-		Sleep         = { Name = "Sleep", Price = 200, LevelRequired = 3, Rarity = "Common", CanPurchase = true, CatalogEmoteId = 4689362868 },
-		HighWave      = { Name = "High Wave", Price = 200, LevelRequired = 3, Rarity = "Common", CanPurchase = true, CatalogEmoteId = 5915776835 },
-		Beckon        = { Name = "Beckon", Price = 250, LevelRequired = 4, Rarity = "Common", CanPurchase = true, CatalogEmoteId = 5230615437 },
-		Confused      = { Name = "Confused", Price = 250, LevelRequired = 4, Rarity = "Common", CanPurchase = true, CatalogEmoteId = 4940592718 },
-		Cower         = { Name = "Cower", Price = 250, LevelRequired = 4, Rarity = "Common", CanPurchase = true, CatalogEmoteId = 4940597758 },
-		Haha          = { Name = "Haha", Price = 250, LevelRequired = 4, Rarity = "Common", CanPurchase = true, CatalogEmoteId = 4102315500 },
-		JumpingWave   = { Name = "Jumping Wave", Price = 250, LevelRequired = 4, Rarity = "Common", CanPurchase = true, CatalogEmoteId = 4940602656 },
-		JumpingCheer  = { Name = "Jumping Cheer", Price = 250, LevelRequired = 4, Rarity = "Common", CanPurchase = true, CatalogEmoteId = 5895009708 },
-		Monkey        = { Name = "Monkey", Price = 400, LevelRequired = 6, Rarity = "Rare", CanPurchase = true, CatalogEmoteId = 3716636630 },
-		Greatest      = { Name = "Greatest", Price = 400, LevelRequired = 6, Rarity = "Rare", CanPurchase = true, CatalogEmoteId = 3762654854 },
-		RockOn        = { Name = "Rock On", Price = 400, LevelRequired = 6, Rarity = "Rare", CanPurchase = true, CatalogEmoteId = 5915782672 },
-		Tantrum       = { Name = "Tantrum", Price = 400, LevelRequired = 6, Rarity = "Rare", CanPurchase = true, CatalogEmoteId = 5104374556 },
-		GetOut        = { Name = "Get Out", Price = 400, LevelRequired = 6, Rarity = "Rare", CanPurchase = true, CatalogEmoteId = 3934984583 },
-		Fishing       = { Name = "Fishing", Price = 400, LevelRequired = 6, Rarity = "Rare", CanPurchase = true, CatalogEmoteId = 3994129128 },
-		KeepingTime   = { Name = "Keeping Time", Price = 400, LevelRequired = 6, Rarity = "Rare", CanPurchase = true, CatalogEmoteId = 4646306072 },
-		Tree          = { Name = "Tree", Price = 400, LevelRequired = 6, Rarity = "Rare", CanPurchase = true, CatalogEmoteId = 4049634387 },
-		Y             = { Name = "Y", Price = 400, LevelRequired = 6, Rarity = "Rare", CanPurchase = true, CatalogEmoteId = 4391211308 },
-		HeroLanding   = { Name = "Hero Landing", Price = 500, LevelRequired = 7, Rarity = "Rare", CanPurchase = true, CatalogEmoteId = 5104377791 },
-		FlossDance    = { Name = "Floss Dance", Price = 500, LevelRequired = 7, Rarity = "Rare", CanPurchase = true, CatalogEmoteId = 5917570207 },
-		FastHands     = { Name = "Fast Hands", Price = 500, LevelRequired = 7, Rarity = "Rare", CanPurchase = true, CatalogEmoteId = 4272351660 },
-		Zombie        = { Name = "Zombie", Price = 500, LevelRequired = 7, Rarity = "Rare", CanPurchase = true, CatalogEmoteId = 4212496830 },
-		BabyDance     = { Name = "Baby Dance", Price = 500, LevelRequired = 7, Rarity = "Rare", CanPurchase = true, CatalogEmoteId = 4272484885 },
-		DolphinDance  = { Name = "Dolphin Dance", Price = 500, LevelRequired = 7, Rarity = "Rare", CanPurchase = true, CatalogEmoteId = 5938365243 },
-		SideToSide    = { Name = "Side to Side", Price = 500, LevelRequired = 7, Rarity = "Rare", CanPurchase = true, CatalogEmoteId = 3762641826 },
-		Samba         = { Name = "Samba", Price = 500, LevelRequired = 7, Rarity = "Rare", CanPurchase = true, CatalogEmoteId = 6869813008 },
-		BreakDance    = { Name = "Break Dance", Price = 500, LevelRequired = 7, Rarity = "Rare", CanPurchase = true, CatalogEmoteId = 5915773992 },
-		ChaCha        = { Name = "Cha Cha", Price = 500, LevelRequired = 7, Rarity = "Rare", CanPurchase = true, CatalogEmoteId = 6865013133 },
-		Godlike       = { Name = "Godlike", Price = 1000, LevelRequired = 10, Rarity = "Epic", CanPurchase = true, CatalogEmoteId = 3823158750 },
-		PowerBlast    = { Name = "Power Blast", Price = 1000, LevelRequired = 10, Rarity = "Epic", CanPurchase = true, CatalogEmoteId = 4849497510 },
-		LineDance     = { Name = "Line Dance", Price = 1000, LevelRequired = 10, Rarity = "Epic", CanPurchase = true, CatalogEmoteId = 4049646104 },
-		BlockPartier  = { Name = "Block Partier", Price = 1000, LevelRequired = 10, Rarity = "Epic", CanPurchase = true, CatalogEmoteId = 6865011755 },
-		AirDance      = { Name = "Air Dance", Price = 1000, LevelRequired = 10, Rarity = "Epic", CanPurchase = true, CatalogEmoteId = 4646302011 },
-		QuietWaves    = { Name = "Quiet Waves", Price = 1250, LevelRequired = 12, Rarity = "Epic", CanPurchase = true, CatalogEmoteId = 7466046574 },
-		FlowingBreeze = { Name = "Flowing Breeze", Price = 1250, LevelRequired = 12, Rarity = "Epic", CanPurchase = true, CatalogEmoteId = 7466047578 },
-		SwanDance     = { Name = "Swan Dance", Price = 1250, LevelRequired = 12, Rarity = "Epic", CanPurchase = true, CatalogEmoteId = 7466048475 },
-		Dizzy         = { Name = "Dizzy", Price = 1250, LevelRequired = 12, Rarity = "Epic", CanPurchase = true, CatalogEmoteId = 3934986896 },
-		Bodybuilder   = { Name = "Bodybuilder", Price = 2000, LevelRequired = 16, Rarity = "Epic", CanPurchase = true, CatalogEmoteId = 3994130516 },
-		DorkyDance    = { Name = "Dorky Dance", Price = 2000, LevelRequired = 16, Rarity = "Epic", CanPurchase = true, CatalogEmoteId = 4212499637 },
-		Jacks         = { Name = "Jacks", Price = 2000, LevelRequired = 16, Rarity = "Epic", CanPurchase = true, CatalogEmoteId = 3570649048 },
-		Twirl         = { Name = "Twirl", Price = 2000, LevelRequired = 16, Rarity = "Epic", CanPurchase = true, CatalogEmoteId = 3716633898 },
-		Robot         = { Name = "Robot", Price = 2000, LevelRequired = 16, Rarity = "Epic", CanPurchase = true, CatalogEmoteId = 3576721660 },
-		Louder        = { Name = "Louder", Price = 2000, LevelRequired = 16, Rarity = "Epic", CanPurchase = true, CatalogEmoteId = 3576751796 },
-		Idol          = { Name = "Idol", Price = 4000, LevelRequired = 24, Rarity = "Legendary", CanPurchase = true, CatalogEmoteId = 4102317848 },
-		Sneaky        = { Name = "Sneaky", Price = 4000, LevelRequired = 24, Rarity = "Legendary", CanPurchase = true, CatalogEmoteId = 3576754235 },
-		FancyFeet     = { Name = "Fancy Feet", Price = 4000, LevelRequired = 24, Rarity = "Legendary", CanPurchase = true, CatalogEmoteId = 3934988903 },
-		TopRock       = { Name = "Top Rock", Price = 6500, LevelRequired = 32, Rarity = "Legendary", CanPurchase = true, CatalogEmoteId = 3570535774 },
-		Fashionable   = { Name = "Fashionable", Price = 6500, LevelRequired = 32, Rarity = "Legendary", CanPurchase = true, CatalogEmoteId = 3576745472 },
-		Swish         = { Name = "Swish", Price = 6500, LevelRequired = 32, Rarity = "Legendary", CanPurchase = true, CatalogEmoteId = 3821527813 },
-		AroundTown    = { Name = "Around Town", Price = 6500, LevelRequired = 32, Rarity = "Legendary", CanPurchase = true, CatalogEmoteId = 3576747102 },
+		Salute        = { Name = "Salute", Price = 300, LevelRequired = 0, Rarity = "Common", CanPurchase = true, CatalogEmoteId = 3360689775 },
+		Agree         = { Name = "Agree", Price = 400, LevelRequired = 2, Rarity = "Common", CanPurchase = true, CatalogEmoteId = 4849487550 },
+		Celebrate     = { Name = "Celebrate", Price = 500, LevelRequired = 2, Rarity = "Common", CanPurchase = true, CatalogEmoteId = 3994127840 },
+		Bored         = { Name = "Bored", Price = 650, LevelRequired = 3, Rarity = "Common", CanPurchase = true, CatalogEmoteId = 5230661597 },
+		Beckon        = { Name = "Beckon", Price = 1000, LevelRequired = 4, Rarity = "Common", CanPurchase = true, CatalogEmoteId = 5230615437 },
+		Haha          = { Name = "Haha", Price = 1250, LevelRequired = 5, Rarity = "Common", CanPurchase = true, CatalogEmoteId = 4102315500 },
+		KeepingTime   = { Name = "Keeping Time", Price = 2000, LevelRequired = 6, Rarity = "Rare", CanPurchase = true, CatalogEmoteId = 4646306072 },
+		Greatest      = { Name = "Greatest", Price = 2500, LevelRequired = 7, Rarity = "Rare", CanPurchase = true, CatalogEmoteId = 3762654854 },
+		Monkey        = { Name = "Monkey", Price = 4000, LevelRequired = 10, Rarity = "Rare", CanPurchase = true, CatalogEmoteId = 3716636630 },
+		HeroLanding   = { Name = "Hero Landing", Price = 5000, LevelRequired = 11, Rarity = "Rare", CanPurchase = true, CatalogEmoteId = 5104377791 },
+		FlossDance    = { Name = "Floss Dance", Price = 6500, LevelRequired = 13, Rarity = "Rare", CanPurchase = true, CatalogEmoteId = 5917570207 },
+		LineDance     = { Name = "Line Dance", Price = 10000, LevelRequired = 17, Rarity = "Epic", CanPurchase = true, CatalogEmoteId = 4049646104 },
+		Godlike       = { Name = "Godlike", Price = 12500, LevelRequired = 19, Rarity = "Epic", CanPurchase = true, CatalogEmoteId = 3823158750 },
+		QuietWaves    = { Name = "Quiet Waves", Price = 20000, LevelRequired = 25, Rarity = "Epic", CanPurchase = true, CatalogEmoteId = 7466046574 },
+		DorkyDance    = { Name = "Dorky Dance", Price = 25000, LevelRequired = 28, Rarity = "Epic", CanPurchase = true, CatalogEmoteId = 4212499637 },
+		Bodybuilder   = { Name = "Bodybuilder", Price = 40000, LevelRequired = 36, Rarity = "Epic", CanPurchase = true, CatalogEmoteId = 3994130516 },
+		Idol          = { Name = "Idol", Price = 50000, LevelRequired = 41, Rarity = "Legendary", CanPurchase = true, CatalogEmoteId = 4102317848 },
+		FancyFeet     = { Name = "Fancy Feet", Price = 65000, LevelRequired = 46, Rarity = "Legendary", CanPurchase = true, CatalogEmoteId = 3934988903 },
+		TopRock       = { Name = "Top Rock", Price = 100000, LevelRequired = 58, Rarity = "Legendary", CanPurchase = true, CatalogEmoteId = 3570535774 },
+		AroundTown    = { Name = "Around Town", Price = 125000, LevelRequired = 65, Rarity = "Legendary", CanPurchase = true, CatalogEmoteId = 3576747102 },
 	},
 
 	Faces = {
@@ -389,14 +386,10 @@ Special = {
 		Chomper    = { Name = "Chomper",    Price = 200000, LevelRequired = 83, Rarity = "Legendary", Image = "rbxassetid://139252772271446", CanPurchase = true },
 		-- PROVISIONALES: entradas reales con nombre e Image de relleno; sustituir por el ítem
 		-- definitivo (mismo precio, nivel y rareza). Con Image 0 la cara se aplica en blanco.
-		Face_P01 = { Name = "Face P01",  Price = 500,    LevelRequired = 2,   Rarity = "Common",    Image = "rbxassetid://0", CanPurchase = true },
-		Face_P02 = { Name = "Face P02",  Price = 1000,   LevelRequired = 4,   Rarity = "Common",    Image = "rbxassetid://0", CanPurchase = true },
 		Face_P03 = { Name = "Face P03",  Price = 2000,   LevelRequired = 6,  Rarity = "Rare",      Image = "rbxassetid://0", CanPurchase = true },
 		Face_P04 = { Name = "Face P04",  Price = 2500,   LevelRequired = 7,  Rarity = "Rare",      Image = "rbxassetid://0", CanPurchase = true },
-		Face_P05 = { Name = "Face P05",  Price = 4000,   LevelRequired = 10,  Rarity = "Rare",      Image = "rbxassetid://0", CanPurchase = true },
 		Face_P06 = { Name = "Face P06",  Price = 5000,   LevelRequired = 11,  Rarity = "Rare",      Image = "rbxassetid://0", CanPurchase = true },
 		Face_P07 = { Name = "Face P07",  Price = 6500,   LevelRequired = 13,  Rarity = "Rare",      Image = "rbxassetid://0", CanPurchase = true },
-		Face_P08 = { Name = "Face P08",  Price = 12500,  LevelRequired = 19,  Rarity = "Epic",      Image = "rbxassetid://0", CanPurchase = true },
 		Face_P09 = { Name = "Face P09",  Price = 20000,  LevelRequired = 25,  Rarity = "Epic",      Image = "rbxassetid://0", CanPurchase = true },
 		Face_P10 = { Name = "Face P10",  Price = 40000,  LevelRequired = 36,  Rarity = "Epic",      Image = "rbxassetid://0", CanPurchase = true },
 		Face_P11 = { Name = "Face P11",  Price = 65000,  LevelRequired = 46,  Rarity = "Legendary", Image = "rbxassetid://0", CanPurchase = true },
@@ -435,15 +428,10 @@ Special = {
 		-- definitivo (mismo precio, nivel y rareza). Sin Accessory en Shared/Locker/Hats el
 		-- sombrero se equipa en datos pero no se dibuja.
 		Hat_P01  = { Name = "Hat P01",   Price = 1250,   LevelRequired = 5,   Rarity = "Common",    Image = "rbxassetid://0", CanPurchase = true },
-		Hat_P02  = { Name = "Hat P02",   Price = 2000,   LevelRequired = 6,  Rarity = "Rare",      Image = "rbxassetid://0", CanPurchase = true },
-		Hat_P03  = { Name = "Hat P03",   Price = 4000,   LevelRequired = 10,  Rarity = "Rare",      Image = "rbxassetid://0", CanPurchase = true },
-		Hat_P04  = { Name = "Hat P04",   Price = 6500,   LevelRequired = 13,  Rarity = "Rare",      Image = "rbxassetid://0", CanPurchase = true },
 		Hat_P05  = { Name = "Hat P05",   Price = 10000,  LevelRequired = 17,  Rarity = "Epic",      Image = "rbxassetid://0", CanPurchase = true },
 		Hat_P06  = { Name = "Hat P06",   Price = 12500,  LevelRequired = 19,  Rarity = "Epic",      Image = "rbxassetid://0", CanPurchase = true },
-		Hat_P07  = { Name = "Hat P07",   Price = 12500,  LevelRequired = 19,  Rarity = "Epic",      Image = "rbxassetid://0", CanPurchase = true },
 		Hat_P08  = { Name = "Hat P08",   Price = 20000,  LevelRequired = 25,  Rarity = "Epic",      Image = "rbxassetid://0", CanPurchase = true },
 		Hat_P09  = { Name = "Hat P09",   Price = 25000,  LevelRequired = 28,  Rarity = "Epic",      Image = "rbxassetid://0", CanPurchase = true },
-		Hat_P10  = { Name = "Hat P10",   Price = 25000,  LevelRequired = 28,  Rarity = "Epic",      Image = "rbxassetid://0", CanPurchase = true },
 		Hat_P11  = { Name = "Hat P11",   Price = 65000,  LevelRequired = 46,  Rarity = "Legendary", Image = "rbxassetid://0", CanPurchase = true },
 		Hat_P12  = { Name = "Hat P12",   Price = 100000, LevelRequired = 58, Rarity = "Legendary", Image = "rbxassetid://0", CanPurchase = true },
 		Hat_P13  = { Name = "Hat P13",   Price = 125000, LevelRequired = 65, Rarity = "Legendary", Image = "rbxassetid://0", CanPurchase = true },
