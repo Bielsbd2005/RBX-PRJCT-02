@@ -55,7 +55,9 @@ local StaggerReveal = require(Client.core.ui.animators.StaggerReveal)
 type StoreProductDefinition = StoreProducts.StoreProductDefinition
 
 local AVATAR_THUMB_FORMAT = "rbxthumb://type=AvatarHeadShot&id=%d&w=48&h=48"
-local RESPONSE_TIMEOUT = 5
+-- Por encima del peor caso del servidor (ViewProfileAsync acotado a 10 s): liberar antes
+-- permitiría un segundo envío con el primero aún en vuelo.
+local RESPONSE_TIMEOUT = 12
 local DELIVERY_TIMEOUT = 15
 
 local REAL_BUTTON_COLOR = Color3.fromRGB(64, 169, 74)
@@ -257,15 +259,19 @@ function GiftFlow.new(config: GiftFlowConfig, janitor: any)
 		end
 	end), true)
 
-	janitor:Add(Network.Gifting.GiftDelivered.Listen(function(_data: any)
+	janitor:Add(Network.Gifting.GiftDelivered.Listen(function(data: any)
 		if not self._awaitingPurchase then
 			Notify.success("Your gift was delivered!")
 			return
 		end
 		self._awaitingPurchase = false
 		self._pendingToken += 1
+		-- El receptor real lo dice el servidor; self._receiver es la selección actual de la UI.
 		local receiver = self._receiver
-		local name = if receiver then receiver.name else "your friend"
+		local deliveredTo = Players:GetPlayerByUserId(tonumber(data.receiverUserId) or 0)
+		local name = if deliveredTo then deliveredTo.Name
+			elseif receiver and tostring(receiver.userId) == data.receiverUserId then receiver.name
+			else "your friend"
 		Notify.success(`Gift sent to {name}!`)
 		if frame.Visible then
 			self:close()

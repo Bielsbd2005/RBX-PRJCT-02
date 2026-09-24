@@ -2,7 +2,7 @@
 --[[
 	Perfiles con ProfileStore (session locking), replicados con ReplicaService.
 
-	Toda mutación crea una nueva referencia de tabla en su sección (vía Sift): sin
+	Toda mutación crea una nueva referencia de tabla en su sección: sin
 	eso ReplicaService no detecta el cambio ni Fusion dispara observers en el cliente.
 ]]
 
@@ -17,7 +17,6 @@ local ProfileStore    = require(Packages.profilestore)   :: any
 local ReplicaService  = require(Packages.replicaservice) :: any
 local Janitor         = require(Packages.janitor)        :: any
 local Promise         = require(Packages["typed-promise"]) :: any
-local Sift            = require(Packages.sift)           :: any
 
 local DataTemplateModule = require(Shared.constants.DataTemplate)
 local WeaponCategory = require(Shared.constants.WeaponCategory)
@@ -41,6 +40,9 @@ export type ProfileSignal = {
 	Fire: (self: ProfileSignal, player: Player) -> (),
 }
 
+-- Arma que recibe un wrap: la posesión de wraps es por arma (Inventory.WeaponWrapsByWeapon).
+export type WrapTarget = { category: string, weaponId: string }
+
 -- `value` o `delta`, no ambos.
 export type BatchUpdateEntry = {
 	path: { string },
@@ -61,9 +63,12 @@ export type DataServiceModule = {
 	IsReceiptProcessed: (self: DataServiceModule, player: Player, purchaseId: string) -> boolean,
 	MarkReceiptProcessed: (self: DataServiceModule, player: Player, purchaseId: string) -> boolean,
 	GrantItem: (self: DataServiceModule, player: Player, category: string, itemId: string, source: string) -> boolean,
-	MarkItemSeen: (self: DataServiceModule, player: Player, category: string, itemId: string) -> boolean,
+	GrantItemUpdates: (self: DataServiceModule, category: string, itemId: string, source: string) -> { BatchUpdateEntry },
+	GrantWeaponWrapUpdates: (self: DataServiceModule, wrapId: string, targets: { WrapTarget }, source: string) -> { BatchUpdateEntry },
 	ResetProfile: (self: DataServiceModule, player: Player) -> boolean,
 	ForceSave: (self: DataServiceModule, player: Player) -> boolean,
+	SaveAndConfirm: (self: DataServiceModule, player: Player, isPersisted: (lastSavedData: any) -> boolean, timeoutSeconds: number?) -> boolean,
+	SaveReceipt: (self: DataServiceModule, player: Player, purchaseId: string) -> boolean,
 	MessageProfile: (self: DataServiceModule, userId: number, message: any, timeoutSeconds: number?) -> boolean,
 	ViewProfileAsync: (self: DataServiceModule, userId: number, timeoutSeconds: number?) -> (any, boolean),
 	Destroy: (self: DataServiceModule) -> (),
@@ -105,7 +110,8 @@ local _ProfileToken = ReplicaService.NewClassToken("PlayerProfile")
 local _profiles: { [number]: any } = {}
 local _replicas:  { [number]: any } = {}
 local _janitors:  { [number]: any } = {}
-local _dirtyProfiles: { [number]: boolean } = {}
+-- userId → os.clock() de la primera marca desde el último guardado.
+local _dirtyProfiles: { [number]: number } = {}
 -- Para acumular TimePlayedSeconds también en BindToClose.
 local _sessionStartByUserId: { [number]: number } = {}
 local _loadTokens: { [number]: number } = {}
@@ -170,17 +176,24 @@ local _profileUnloadingSignal = _newProfileSignal("ProfileUnloading")
 ]]
 local MAX_PATH_DEPTH = 32
 
+-- Copia superficial: la nueva referencia es lo que ReplicaService y Fusion usan para detectar cambios.
+local function _setKey(tbl: { [string]: any }, key: string, value: any): { [string]: any }
+	local copy = table.clone(tbl)
+	copy[key] = value
+	return copy
+end
+
 local function _immutableUpdate(tbl: { [string]: any }, path: { string }, depth: number, value: any): { [string]: any }
 	if depth > MAX_PATH_DEPTH then
 		error(("[DataService] _immutableUpdate path depth excede %d (probable bug)"):format(MAX_PATH_DEPTH))
 	end
 	local key = path[depth]
 	if depth == #path then
-		return Sift.Dictionary.set(tbl, key, value)
+		return _setKey(tbl, key, value)
 	else
 		local child: { [string]: any } = tbl[key] or {}
 		local newChild = _immutableUpdate(child, path, depth + 1, value)
-		return Sift.Dictionary.set(tbl, key, newChild)
+		return _setKey(tbl, key, newChild)
 	end
 end
 
@@ -225,7 +238,9 @@ local function _isLoadStillValid(player: Player, loadToken: number, generation: 
 end
 
 local function _markDirty(userId: number): ()
-	_dirtyProfiles[userId] = true
+	if _dirtyProfiles[userId] == nil then
+		_dirtyProfiles[userId] = os.clock()
+	end
 end
 
 local function _autoSaveDirtyProfiles(generation: number): ()
@@ -240,40 +255,30 @@ local function _autoSaveDirtyProfiles(generation: number): ()
 			continue
 		end
 
+		-- Los más antiguos primero: el orden de iteración del hash no rota, y con más de
+		-- MAX_SAVES_PER_CYCLE jugadores activos siempre saldrían los mismos.
 		local toSave: { number } = {}
 		for userId in _dirtyProfiles do
 			table.insert(toSave, userId)
-			if #toSave >= MAX_SAVES_PER_CYCLE then
-				break
-			end
 		end
+		table.sort(toSave, function(a, b)
+			return _dirtyProfiles[a] < _dirtyProfiles[b]
+		end)
 
-		-- En paralelo: cada Save yielda esperando al DataStore.
-		local pending = #toSave
-		for _, userId in toSave do
-			task.spawn(function()
-				local profile = _profiles[userId]
-				if profile ~= nil and profile:IsActive() then
-					local ok = pcall(function()
-						profile:Save()
-					end)
-					if ok then
-						_dirtyProfiles[userId] = nil
-					end
-				else
-					_dirtyProfiles[userId] = nil
+		-- Profile:Save() no yieldea: lanza el write en segundo plano. Se limpia antes
+		-- para que lo que cambie a partir de aquí vuelva a marcar el perfil.
+		for i = 1, math.min(#toSave, MAX_SAVES_PER_CYCLE) do
+			local userId = toSave[i]
+			_dirtyProfiles[userId] = nil
+			local profile = _profiles[userId]
+			if profile ~= nil and profile:IsActive() then
+				local ok, err = pcall(function()
+					profile:Save()
+				end)
+				if not ok then
+					warn(("[DataService] Autosave falló para user %d: %s"):format(userId, tostring(err)))
 				end
-				pending -= 1
-			end)
-		end
-
-		-- Deadline duro para que un Save colgado no bloquee el loop.
-		local deadline = os.clock() + (AUTO_SAVE_INTERVAL_SECONDS - 5)
-		while pending > 0 and _isGenerationActive(generation) and os.clock() < deadline do
-			task.wait(0.1)
-		end
-		if pending > 0 then
-			warn(("[DataService] Autosave: %d saves no completaron en %ds"):format(pending, AUTO_SAVE_INTERVAL_SECONDS - 5))
+			end
 		end
 	end
 end
@@ -349,6 +354,18 @@ local function _loadPlayer(player: Player): ()
 				end
 			else
 				(profile.Data :: any).ClaimedGifts = {}
+			end
+
+			-- Mismo horizonte que ProcessedReceipts: son marcas de receipts aún reintentables.
+			if type((profile.Data :: any).GiftDeliveries) == "table" then
+				local cutoff = os.time() - (7 * 24 * 3600)
+				for purchaseId, delivery in (profile.Data :: any).GiftDeliveries do
+					if type(delivery) ~= "table" or type(delivery.At) ~= "number" or delivery.At < cutoff then
+						(profile.Data :: any).GiftDeliveries[purchaseId] = nil
+					end
+				end
+			else
+				(profile.Data :: any).GiftDeliveries = {}
 			end
 
 			-- GDPR.
@@ -456,8 +473,12 @@ local function _loadPlayer(player: Player): ()
 			_janitors[userId] = janitor
 			_markDirty(userId)
 
-			-- Otro servidor tomó la sesión: kick para evitar estado corrupto.
+			-- Otro servidor tomó la sesión: kick para evitar estado corrupto. En el cierre del
+			-- servidor también se dispara (EndSession de BindToClose) y no es ese caso.
 			local connection = profile.OnSessionEnd:Connect(function()
+				if ProfileStore.IsClosing or not _started or player.Parent ~= Players then
+					return
+				end
 				player:Kick(
 					"Tu sesión de datos fue terminada externamente. "
 						.. "Por favor, vuelve a conectarte."
@@ -931,7 +952,37 @@ function DataService:MarkReceiptProcessed(player: Player, purchaseId: string): b
 	return self:SetValue(player, { "ProcessedReceipts", purchaseId }, os.time())
 end
 
+-- Entries de GrantItem, para componerlas en el mismo BatchUpdate que otra escritura
+-- (p. ej. marcar un tier reclamado): así el grant y su marca no pueden quedar a medias.
 -- source: etiqueta para analytics ("Shop", "Reward", "Default", "Code", "Gift"…).
+function DataService:GrantItemUpdates(category: string, itemId: string, source: string): { BatchUpdateEntry }
+	local effectiveSource = if type(source) == "string" and source ~= "" then source else "Unknown"
+	return {
+		{ path = { "Inventory", category, itemId }, value = true },
+		{ path = { "InventoryMeta", category, itemId }, value = {
+			AcquiredAt = os.time(),
+			Source = effectiveSource,
+		} },
+	}
+end
+
+-- Único escritor de wraps concedidos (tienda, pase, maestría): posesión en cada arma
+-- de `targets` más metadatos, que son por wrap.
+function DataService:GrantWeaponWrapUpdates(wrapId: string, targets: { WrapTarget }, source: string): { BatchUpdateEntry }
+	local updates: { BatchUpdateEntry } = {}
+	for _, target in targets do
+		table.insert(updates, {
+			path = { "Inventory", "WeaponWrapsByWeapon", target.category, target.weaponId, wrapId },
+			value = true,
+		})
+	end
+	table.insert(updates, { path = { "InventoryMeta", "WeaponWraps", wrapId }, value = {
+		AcquiredAt = os.time(),
+		Source = if type(source) == "string" and source ~= "" then source else "Unknown",
+	} })
+	return updates
+end
+
 function DataService:GrantItem(player: Player, category: string, itemId: string, source: string): boolean
 	if type(category) ~= "string" or category == "" then
 		return false
@@ -939,43 +990,7 @@ function DataService:GrantItem(player: Player, category: string, itemId: string,
 	if type(itemId) ~= "string" or itemId == "" then
 		return false
 	end
-	local effectiveSource = if type(source) == "string" and source ~= "" then source else "Unknown"
-
-	return self:BatchUpdate(player, {
-		{ path = { "Inventory", category, itemId }, value = true },
-		{ path = { "InventoryMeta", category, itemId }, value = {
-			AcquiredAt = os.time(),
-			Source = effectiveSource,
-		} },
-		{ path = { "NewItemFlags", category, itemId }, value = true },
-	})
-end
-
---[[
-	Idempotente. SetValue al leaf con nil (Sift.Dictionary.set borra la clave) en vez
-	de reescribir el padre, que pisaría limpiezas concurrentes de la misma categoría.
-]]
-function DataService:MarkItemSeen(player: Player, category: string, itemId: string): boolean
-	if type(category) ~= "string" or category == "" then
-		return false
-	end
-	if type(itemId) ~= "string" or itemId == "" then
-		return false
-	end
-	local profile = _profiles[player.UserId]
-	if not profile then
-		return false
-	end
-	local flags = profile.Data.NewItemFlags
-	if type(flags) ~= "table" then
-		return true
-	end
-	local categoryFlags = flags[category]
-	if type(categoryFlags) ~= "table" or categoryFlags[itemId] == nil then
-		return true
-	end
-
-	return self:SetValue(player, { "NewItemFlags", category, itemId }, nil)
+	return self:BatchUpdate(player, self:GrantItemUpdates(category, itemId, source))
 end
 
 --[[
@@ -1010,13 +1025,8 @@ function DataService:ResetProfile(player: Player): boolean
 	return allOk
 end
 
---[[
-	Bloquea hasta que ProfileStore termina el Save. Para ProcessReceipt: Roblox da el
-	receipt por CONSUMIDO al devolver PurchaseGranted, sin esperar al DataStore.
-	Patrón: conceder → ForceSave → PurchaseGranted solo si devolvió true; si no,
-	NotProcessedYet (ProcessedReceipts evita el doble grant). :Save() no expone el
-	éxito del write al backend, pero cierra casi toda la ventana de crash.
-]]
+-- Pide un Save sin esperarlo: `Profile:Save()` no yieldea ni expone si el write llegó
+-- al DataStore. Para ProcessReceipt usar SaveReceipt.
 function DataService:ForceSave(player: Player): boolean
 	local profile = _profiles[player.UserId]
 	if not profile or not profile:IsActive() then
@@ -1033,6 +1043,77 @@ function DataService:ForceSave(player: Player): boolean
 
 	-- Dirty sin limpiar a propósito: el autosave es una segunda red de seguridad.
 	return true
+end
+
+local SAVE_CONFIRM_TIMEOUT = 15
+
+--[[
+	Guarda y espera a que el DataStore confirme que `isPersisted(LastSavedData)` se cumple.
+	Un Save que no es de fin de sesión NO se reintenta si falla, así que solo cuenta lo
+	que llega en OnAfterSave; se mira el dato y no la señal porque puede llegar antes el
+	de un Save que ya estaba en vuelo sin nuestros cambios. Si el jugador sale mientras
+	espera, el EndSession (que sí reintenta) también dispara OnAfterSave.
+]]
+function DataService:SaveAndConfirm(player: Player, isPersisted: (lastSavedData: any) -> boolean, timeoutSeconds: number?): boolean
+	local profile = _profiles[player.UserId]
+	if not profile then
+		return false
+	end
+
+	local function check(lastSaved: any): boolean
+		if type(lastSaved) ~= "table" then
+			return false
+		end
+		local ok, result = pcall(isPersisted, lastSaved)
+		return ok and result == true
+	end
+
+	if check(profile.LastSavedData) then
+		return true
+	end
+	if not profile:IsActive() then
+		return false
+	end
+
+	local confirmed = false
+	local conn = profile.OnAfterSave:Connect(function(lastSaved: any)
+		if check(lastSaved) then
+			confirmed = true
+		end
+	end)
+
+	local ok, err = pcall(function()
+		profile:Save()
+	end)
+	if not ok then
+		conn:Disconnect()
+		warn(("[DataService] SaveAndConfirm: Save falló para user %d: %s"):format(player.UserId, tostring(err)))
+		return false
+	end
+
+	local deadline = os.clock() + (timeoutSeconds or SAVE_CONFIRM_TIMEOUT)
+	while not confirmed and os.clock() < deadline do
+		task.wait()
+	end
+	conn:Disconnect()
+
+	if not confirmed then
+		warn(("[DataService] SaveAndConfirm: sin confirmación del DataStore para user %d"):format(player.UserId))
+	end
+	return confirmed
+end
+
+--[[
+	Durabilidad de ProcessReceipt: Roblox da el receipt por CONSUMIDO al devolver
+	PurchaseGranted. Patrón: conceder + ProcessedReceipts[purchaseId] → SaveReceipt →
+	PurchaseGranted solo si devolvió true; si no, NotProcessedYet (la idempotencia por
+	ProcessedReceipts evita el doble grant en la reentrega).
+]]
+function DataService:SaveReceipt(player: Player, purchaseId: string): boolean
+	return self:SaveAndConfirm(player, function(lastSaved: any): boolean
+		local processed = lastSaved.ProcessedReceipts
+		return type(processed) == "table" and processed[purchaseId] ~= nil
+	end)
 end
 
 --[[
@@ -1080,8 +1161,8 @@ end
 
 --[[
 	READ-ONLY, para usuarios sin sesión en este servidor. apiOk=false = timeout o error.
-	OJO: para un perfil que NUNCA existió GetAsync no devuelve nil sino una vista del
-	template con view.SessionLoadCount == 0.
+	Una key inexistente devuelve nil (también con ProfileStore cerrando); una key con solo
+	messages (MessageAsync) devuelve una vista con SessionLoadCount == 0.
 ]]
 function DataService:ViewProfileAsync(userId: number, timeoutSeconds: number?): (any, boolean)
 	local finished, ok, view = _runBounded(timeoutSeconds or 10, function()

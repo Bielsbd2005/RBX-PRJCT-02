@@ -62,6 +62,12 @@ function GiftingFeature.start(menuController: any): any
 	subtitleLabel.RichText = true
 
 	alertFrame.Visible = false
+	-- Como panel, la música lo trata como panel abierto en lobby (amortiguada) y no como
+	-- partida (silencio). Las comprobaciones propias pasan `alertFrame` para excluirse.
+	menuController:registerPanel(alertFrame)
+	janitor:Add(function()
+		menuController:unregisterPanel(alertFrame)
+	end, true)
 
 	local menuGui = menuController:getGui() :: ScreenGui
 	local dataReady = false
@@ -147,7 +153,7 @@ function GiftingFeature.start(menuController: any): any
 	local function releaseMenu()
 		if presenting then
 			presenting = false
-			if not MatchState.shouldKeepMenuHidden() and not menuController:hasOpenPanel() then
+			if not MatchState.shouldKeepMenuHidden() and not menuController:hasOpenPanel(alertFrame) then
 				menuController:show()
 			end
 		end
@@ -167,7 +173,7 @@ function GiftingFeature.start(menuController: any): any
 		-- respuesta se procesa igual), o el alert queda encima al entrar en partida.
 		local blocked = (not loadingDone)
 			or MatchState.shouldKeepMenuHidden()
-			or menuController:hasOpenPanel()
+			or menuController:hasOpenPanel(alertFrame)
 
 		if blocked then
 			retract()

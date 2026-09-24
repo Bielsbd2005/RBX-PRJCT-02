@@ -66,7 +66,7 @@ export type MenuController = {
 	isHidden: (self: MenuController) -> boolean,
 	registerPanel: (self: MenuController, panel: Instance) -> (),
 	unregisterPanel: (self: MenuController, panel: Instance) -> (),
-	hasOpenPanel: (self: MenuController) -> boolean,
+	hasOpenPanel: (self: MenuController, except: Instance?) -> boolean,
 	onStateChanged: (self: MenuController, callback: () -> ()) -> (() -> ()),
 	Destroy: (self: MenuController) -> (),
 }
@@ -382,7 +382,8 @@ function MenuController.new(): MenuController
 						task.wait(3600)
 					else
 						local remaining = season.EndsAt - os.time()
-						local pollInterval = if remaining > 3600 then 3600 else 60
+						-- Con menos de un día el texto muestra minutos (UIUtils.formatTimeLeft).
+						local pollInterval = if remaining > 86400 then 3600 else 60
 						task.wait(pollInterval)
 					end
 				end
@@ -476,8 +477,12 @@ function MenuController:unregisterPanel(panel: Instance): ()
 	self:_fireStateChanged()
 end
 
-function MenuController:hasOpenPanel(): boolean
+-- `except`: el panel que pregunta no se cuenta a sí mismo (GiftAlert al decidir si mostrarse).
+function MenuController:hasOpenPanel(except: Instance?): boolean
 	for panel in self._openPanels do
+		if panel == except then
+			continue
+		end
 		if panel:IsA("ScreenGui") and panel.Enabled then
 			return true
 		elseif panel:IsA("GuiObject") and panel.Visible then

@@ -19,8 +19,10 @@
 	    re-entregar aunque la intención haya expirado o se haya limpiado entre
 	    reintentos; si no, un reintento tardío caería al handler de cash y la compra
 	    pagaría dos veces.
-	  • Con GiftIntent activa para ese ProductId, el cash NO va al comprador:
-	    - receptor en este server → _depositGift a su PendingGifts (+ForceSave);
+	  • Con GiftIntent activa para ese ProductId, el cash NO va al comprador. Antes de
+	    entregar se persiste GiftDeliveries[PurchaseId]: los reintentos van al mismo
+	    receptor aunque la intención caduque o cambie.
+	    - receptor en este server → _depositGift a su PendingGifts (save confirmado);
 	    - offline / otro server / cola llena → ProfileStore MessageAsync
 	      (persistente; lo consume el MessageHandler al cargar su perfil).
 	  • Toda entrega pasa por _depositGift: dedup por PurchaseId + ledger
@@ -49,6 +51,7 @@ local StoreProducts = require(Shared.constants.StoreProducts)
 
 local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
 local TelemetryService = require(script.Parent.Parent.Parent.core.TelemetryService)
+local RateLimiter = require(script.Parent.Parent.Parent.utils.RateLimiter)
 type DataService = DataServiceMod.DataServiceModule
 
 local M = NetGuards.MAX
@@ -75,18 +78,12 @@ local GiftingService = {}
 
 local _dataService: DataService = nil :: any
 local _started = false
-local _sendCooldowns: { [number]: number } = {}
-local _claimCooldowns: { [number]: number } = {}
+local _sendLimiter = RateLimiter.new(SEND_COOLDOWN)
+local _claimLimiter = RateLimiter.new(CLAIM_COOLDOWN)
 local _receiverChecks: { [number]: { at: number, accepts: boolean, reason: string } } = {}
-
-local function _checkCooldown(map: { [number]: number }, player: Player, cooldown: number): boolean
-	local last = map[player.UserId] or 0
-	if time() - last < cooldown then
-		return false
-	end
-	map[player.UserId] = time()
-	return true
-end
+-- Último SendGift por jugador: un envío que sale del yield ya superado no escribe su
+-- intención (pisaría la del envío nuevo y el pago iría al receptor equivocado).
+local _sendSeqByUserId: { [number]: number } = {}
 
 local function _respondSend(player: Player, success: boolean, message: string): ()
 	Network.Gifting.SendResponse.SendTo({
@@ -135,9 +132,9 @@ end
 	¿El receptor puede recibir regalos? Devuelve (accepts, reason).
 
 	Online en este server → perfil en memoria (gratis). Si no → snapshot read-only
-	cacheado RECEIVER_CHECK_TTL. Un perfil que NUNCA existió llega con
-	SessionLoadCount == 0: ese regalo no se podría entregar, así que se corta ANTES de
-	cobrar Robux. Con la API caída (apiOk=false) se falla abierto.
+	cacheado RECEIVER_CHECK_TTL. Sin perfil (vista nil) o con uno que solo tiene
+	messages (SessionLoadCount == 0) nunca ha jugado: se corta ANTES de cobrar Robux.
+	Con la API caída (apiOk=false) se falla abierto.
 	TOCTOU asumido: si el receptor desactiva los regalos entre el prompt y el receipt,
 	la entrega sigue (el Robux ya se pagó y el opt-out es anti-spam, no una barrera).
 ]]
@@ -160,8 +157,8 @@ local function _receiverAcceptsGifts(receiverUserId: number): (boolean, string)
 
 	local view, apiOk = _dataService:ViewProfileAsync(receiverUserId)
 	local accepts, reason = true, ""
-	if apiOk and view ~= nil then
-		if (tonumber(view.SessionLoadCount) or 0) <= 0 then
+	if apiOk then
+		if view == nil or (tonumber(view.SessionLoadCount) or 0) <= 0 then
 			accepts, reason = false, "That player hasn't played this game yet."
 		else
 			local settings = view.Data and view.Data.Settings
@@ -187,7 +184,10 @@ local function _receiverAcceptsGifts(receiverUserId: number): (boolean, string)
 end
 
 -- Corre en thread propio (yielda: view offline).
-function GiftingService:_handleSendGift(player: Player, data: { receiverUserId: string, productId: number }): ()
+function GiftingService:_handleSendGift(player: Player, data: Network.SendGiftPayload): ()
+	local seq = (_sendSeqByUserId[player.UserId] or 0) + 1
+	_sendSeqByUserId[player.UserId] = seq
+
 	local product = StoreProducts.Cash.ByProductId[data.productId]
 	if not product or product.ProductId <= 0 then
 		_respondSend(player, false, "That item can't be gifted.")
@@ -210,8 +210,8 @@ function GiftingService:_handleSendGift(player: Player, data: { receiverUserId: 
 		return
 	end
 
-	-- El jugador pudo irse durante el yield de arriba.
-	if player.Parent ~= Players then
+	-- El jugador pudo irse, o mandar otro SendGift, durante el yield de arriba.
+	if player.Parent ~= Players or _sendSeqByUserId[player.UserId] ~= seq then
 		return
 	end
 
@@ -290,31 +290,59 @@ function GiftingService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchaseDe
 	-- jamás re-entrega ni re-concede.
 	local purchaseId = tostring(receiptInfo.PurchaseId)
 	if _dataService:IsReceiptProcessed(buyer, purchaseId) then
-		if _dataService:ForceSave(buyer) then
+		if _dataService:SaveReceipt(buyer, purchaseId) then
 			return Enum.ProductPurchaseDecision.PurchaseGranted
 		end
 		return Enum.ProductPurchaseDecision.NotProcessedYet
 	end
 
-	local intent = (profile.Data :: any).GiftIntent
-	local hasIntent = type(intent) == "table" and (tonumber(intent.ReceiverUserId) or 0) > 0
-	if not hasIntent
-		or intent.ProductId ~= receiptInfo.ProductId
-		or os.time() - (tonumber(intent.CreatedAt) or 0) > INTENT_TTL
-	then
-		-- Intención para ESTE producto pero caducada: el regalo pasa a compra normal; warn
-		-- para no perderlo en silencio.
-		if hasIntent and intent.ProductId == receiptInfo.ProductId then
-			warn(("[GiftingService] Intent de regalo para product %s caducó (edad %ds > %ds); receipt tratado como compra normal.")
-				:format(tostring(receiptInfo.ProductId), os.time() - (tonumber(intent.CreatedAt) or 0), INTENT_TTL))
+	-- Un intento anterior ya empezó a entregar este receipt: se reentrega al MISMO
+	-- receptor sin mirar GiftIntent. Si cayera a compra normal por TTL, el comprador
+	-- cobraría el cash y el receptor también (el MessageAsync de ese intento completa tarde).
+	local deliveries = (profile.Data :: any).GiftDeliveries
+	local prior = if type(deliveries) == "table" then deliveries[purchaseId] else nil
+	local receiverUserId: number
+	if type(prior) == "table" and (tonumber(prior.ReceiverUserId) or 0) > 0 then
+		receiverUserId = math.floor(tonumber(prior.ReceiverUserId) :: number)
+	else
+		local intent = (profile.Data :: any).GiftIntent
+		local hasIntent = type(intent) == "table" and (tonumber(intent.ReceiverUserId) or 0) > 0
+		if not hasIntent
+			or intent.ProductId ~= receiptInfo.ProductId
+			or os.time() - (tonumber(intent.CreatedAt) or 0) > INTENT_TTL
+		then
+			-- Intención para ESTE producto pero caducada: el regalo pasa a compra normal; warn
+			-- para no perderlo en silencio.
+			if hasIntent and intent.ProductId == receiptInfo.ProductId then
+				warn(("[GiftingService] Intent de regalo para product %s caducó (edad %ds > %ds); receipt tratado como compra normal.")
+					:format(tostring(receiptInfo.ProductId), os.time() - (tonumber(intent.CreatedAt) or 0), INTENT_TTL))
+			end
+			-- Sin intención activa y sin entrega intentada: compra normal. Trade-off asumido:
+			-- preferible a una intención eterna que desvíe compras normales futuras del mismo pack.
+			return nil
 		end
-		-- Sin intención activa: compra normal. Trade-off asumido: si la entrega fallara en
-		-- bucle más de INTENT_TTL, el comprador recibe el cash él mismo, preferible a una
-		-- intención eterna que desvíe compras normales futuras del mismo pack.
-		return nil
+		receiverUserId = math.floor(tonumber(intent.ReceiverUserId) :: number)
+		if not _dataService:BatchUpdate(buyer, {
+			{ path = { "GiftDeliveries", purchaseId }, value = {
+				ReceiverUserId = receiverUserId,
+				ProductId = product.ProductId,
+				At = os.time(),
+			} },
+		}) then
+			return Enum.ProductPurchaseDecision.NotProcessedYet
+		end
 	end
 
-	local receiverUserId = math.floor(tonumber(intent.ReceiverUserId) :: number)
+	-- La marca debe estar en disco antes del primer intento de entrega: si el server cae
+	-- con la entrega hecha y la marca solo en memoria, el reintento no la vería.
+	local markPersisted = _dataService:SaveAndConfirm(buyer, function(lastSaved: any): boolean
+		local saved = lastSaved.GiftDeliveries
+		return type(saved) == "table" and saved[purchaseId] ~= nil
+	end)
+	if not markPersisted then
+		return Enum.ProductPurchaseDecision.NotProcessedYet
+	end
+
 	local gift = {
 		SenderUserId = buyer.UserId,
 		SenderName = buyer.Name,
@@ -333,13 +361,14 @@ function GiftingService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchaseDe
 		local status = self:_depositGift(receiver, purchaseId, gift)
 		if status == "full" then
 			delivered = _dataService:MessageProfile(receiverUserId, _giftMessagePayload(purchaseId, gift))
-		else
-			delivered = status ~= "error"
-			if status == "deposited" then
-				-- Adelanta el write del receptor (Save es fire-and-forget; el
-				-- autosave de ≤30s es la red de seguridad real).
-				_dataService:ForceSave(receiver)
-			end
+		elseif status ~= "error" then
+			-- En memoria no basta: el receipt del comprador se consume al conceder.
+			delivered = _dataService:SaveAndConfirm(receiver, function(lastSaved: any): boolean
+				local pending = lastSaved.PendingGifts
+				local claimed = lastSaved.ClaimedGifts
+				return (type(pending) == "table" and pending[purchaseId] ~= nil)
+					or (type(claimed) == "table" and claimed[purchaseId] ~= nil)
+			end)
 		end
 	else
 		delivered = _dataService:MessageProfile(receiverUserId, _giftMessagePayload(purchaseId, gift))
@@ -349,20 +378,25 @@ function GiftingService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchaseDe
 		return Enum.ProductPurchaseDecision.NotProcessedYet -- Roblox reintenta
 	end
 
-	-- Bookkeeping del comprador: receipt + Robux gastados + intención consumida,
-	-- atómico y con save adelantado ANTES de conceder (Roblox consume el receipt
-	-- al devolver PurchaseGranted). Si aun así el server muriera antes de
-	-- persistir, el reintento re-entrega — y el ledger ClaimedGifts del receptor
-	-- evita que ese regalo se cobre dos veces.
+	-- Bookkeeping del comprador: receipt + Robux gastados, atómico y confirmado en disco
+	-- ANTES de conceder. Si el server muriera antes, el reintento re-entrega por
+	-- GiftDeliveries y el ledger ClaimedGifts del receptor evita el doble cobro.
 	local updates: { any } = {
 		{ path = { "Stats", "TotalRobuxSpent" }, delta = product.RobuxPrice },
 		{ path = { "ProcessedReceipts", purchaseId }, value = os.time() },
 	}
-	for _, entry in _intentClearEntries() do
-		table.insert(updates, entry)
+	-- Solo si la intención sigue siendo la de este regalo: un SendGift posterior no se pisa.
+	local currentIntent = (profile.Data :: any).GiftIntent
+	if type(currentIntent) == "table"
+		and currentIntent.ProductId == product.ProductId
+		and tonumber(currentIntent.ReceiverUserId) == receiverUserId
+	then
+		for _, entry in _intentClearEntries() do
+			table.insert(updates, entry)
+		end
 	end
 	local ok = _dataService:BatchUpdate(buyer, updates)
-	if not ok or not _dataService:ForceSave(buyer) then
+	if not ok or not _dataService:SaveReceipt(buyer, purchaseId) then
 		return Enum.ProductPurchaseDecision.NotProcessedYet
 	end
 
@@ -416,8 +450,8 @@ function GiftingService:_ingestGiftMessage(player: Player, message: any, process
 	-- "error" → sin processed(): perfil descargándose o write fallido.
 end
 
--- Síncrono de punta a punta (sin yields entre leer y borrar el regalo) — el
--- dispatcher de ByteNet procesa un packet a la vez, así que no hay doble-claim.
+-- Sin yields entre leer y borrar el regalo: ByteNet corre cada packet en su propio
+-- hilo, y un yield aquí dejaría que dos ClaimGift del mismo regalo cobraran ambos.
 function GiftingService:_handleClaimGift(player: Player, giftId: string): ()
 	local profile = _dataService:GetProfile(player)
 	if not profile then
@@ -470,11 +504,6 @@ function GiftingService:Start(dataService: DataService): ()
 	_started = true
 	_dataService = dataService
 
-	Players.PlayerRemoving:Connect(function(player: Player)
-		_sendCooldowns[player.UserId] = nil
-		_claimCooldowns[player.UserId] = nil
-	end)
-
 	-- Consumidor de messages de ProfileStore: regalos enviados mientras el
 	-- receptor estaba offline o en otro servidor. Se registra por sesión; los
 	-- messages encolados se entregan al cargar y los nuevos van llegando en
@@ -493,27 +522,26 @@ function GiftingService:Start(dataService: DataService): ()
 		end)
 	end)
 
-	Network.Gifting.SendGift.Listen(function(data: any, player: Player)
+	Network.Gifting.SendGift.Listen(function(data: Network.SendGiftPayload, player: Player)
 		if not NetGuards.validate(data, {
 			receiverUserId = M.UserIdString,
 			productId = { kind = "number", integer = true, min = 1 },
 		}) then
 			return
 		end
-		if not _checkCooldown(_sendCooldowns, player, SEND_COOLDOWN) then
+		if not _sendLimiter:tryConsume(player) then
 			return
 		end
-		-- Yielda (view offline): thread aparte para no congelar el dispatcher de ByteNet.
 		task.spawn(function()
 			GiftingService:_handleSendGift(player, data)
 		end)
 	end)
 
-	Network.Gifting.ClaimGift.Listen(function(data: any, player: Player)
+	Network.Gifting.ClaimGift.Listen(function(data: Network.ClaimGiftPayload, player: Player)
 		if not NetGuards.validate(data, { giftId = M.GiftId }) then
 			return
 		end
-		if not _checkCooldown(_claimCooldowns, player, CLAIM_COOLDOWN) then
+		if not _claimLimiter:tryConsume(player) then
 			return
 		end
 		GiftingService:_handleClaimGift(player, data.giftId)
@@ -524,6 +552,10 @@ function GiftingService:Start(dataService: DataService): ()
 	-- ProcessReceipt (limpiar aquí perdería la carrera contra el receipt). Residual
 	-- asumido: si un regalo ya comprado sigue reintentando y el jugador cancela un prompt
 	-- normal del mismo pack, ese receipt pasa a compra normal (cash al comprador).
+	Players.PlayerRemoving:Connect(function(player: Player)
+		_sendSeqByUserId[player.UserId] = nil
+	end)
+
 	MarketplaceService.PromptProductPurchaseFinished:Connect(function(userId: number, productId: number, purchased: boolean)
 		if purchased then
 			return
