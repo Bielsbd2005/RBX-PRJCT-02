@@ -1,11 +1,9 @@
 --!strict
 --[[
-	Parte COSMÉTICA del kill effect Abduction (Shared.Locker.killEffects.Abduction).
-	El servidor convierte el cadáver en ragdoll, tira de él con física hacia la panza
-	del OVNI y lo marca con `Abduction.TAG`; aquí se monta un OVNI ligero, se trae
-	volando, se abre el rayo tractor y se le pone todo el jugo. Cubre igual las
-	muertes en partida (tag replicado) que el preview del Locker y del pase (tag
-	puesto en local).
+	Kill effect Abduction, parte de cliente: el servidor convierte el cadáver en
+	ragdoll y tira de él con física hacia la panza del OVNI; aquí se monta un OVNI
+	ligero, se trae volando, se abre el rayo tractor y se le pone todo el jugo. El OVNI
+	no se ata al contexto: si el cadáver se destruye, termina de irse igual.
 
 	El vuelo sale de AbductionFlight, el mismo que simula el servidor para saber
 	hacia dónde tirar del cuerpo: se pinta interpolando entre pasos fijos, así que
@@ -39,13 +37,13 @@
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local CollectionService = game:GetService("CollectionService")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 
 local killEffects = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Locker"):WaitForChild("killEffects")
 local Abduction = require(killEffects:WaitForChild("Abduction"))
 local AbductionFlight = require(killEffects:WaitForChild("AbductionFlight"))
+local Types = require(script.Parent.Parent.KillEffectTypes)
 
 local ATTR = Abduction.ATTR
 local TIMING = Abduction.TIMING
@@ -146,7 +144,6 @@ type Abduct = {
 
 local AbductionVisuals = {}
 
-local _addedConn: RBXScriptConnection? = nil
 local _renderConn: RBXScriptConnection? = nil
 local _active: { [Model]: Abduct } = {}
 local _folder: Folder? = nil
@@ -685,11 +682,10 @@ local function captureBody(abd: Abduct)
 	end
 end
 
-local function track(instance: Instance)
-	if not instance:IsA("Model") or _active[instance :: Model] then
+function AbductionVisuals.play(char: Model, _ctx: Types.Ctx)
+	if _active[char] then
 		return
 	end
-	local char = instance :: Model
 	local startedAt = char:GetAttribute(ATTR.STARTED_AT)
 	local origin = char:GetAttribute(ATTR.ORIGIN)
 	if type(startedAt) ~= "number" or typeof(origin) ~= "CFrame" then
@@ -810,28 +806,7 @@ local function track(instance: Instance)
 	end
 end
 
-function AbductionVisuals.start()
-	if _addedConn then
-		return
-	end
-	for _, instance in CollectionService:GetTagged(Abduction.TAG) do
-		track(instance)
-	end
-	-- Sin untrack al quitar el tag: si el cadáver se destruye, el OVNI termina de
-	-- irse igual (vive en la carpeta local, no dentro del cuerpo).
-	_addedConn = CollectionService:GetInstanceAddedSignal(Abduction.TAG):Connect(function(instance)
-		local ok, err = pcall(track, instance)
-		if not ok then
-			debugWarn(tostring(err))
-		end
-	end)
-end
-
 function AbductionVisuals.stop()
-	if _addedConn then
-		_addedConn:Disconnect()
-		_addedConn = nil
-	end
 	for char in table.clone(_active) do
 		finish(char)
 	end

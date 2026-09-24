@@ -16,10 +16,12 @@ local CONFIG = {
 
 local rng = Random.new()
 
-function RagdollModule.apply(char: Model): boolean
+-- Ragdoll sin lanzamiento ni calmRagdoll, para efectos que mueven el cuerpo a su manera.
+-- Devuelve las partes del cuerpo por nombre, o nil si el rig no es R15.
+function RagdollModule.ragdoll(char: Model): { [string]: BasePart }?
 	local hum = char:FindFirstChildWhichIsA("Humanoid", true)
 	if not hum or hum.RigType ~= Enum.HumanoidRigType.R15 then
-		return false
+		return nil
 	end
 
 	hum.BreakJointsOnDeath = false
@@ -62,6 +64,15 @@ function RagdollModule.apply(char: Model): boolean
 		if part.Name ~= "HumanoidRootPart" then
 			part.CanCollide = true
 		end
+	end
+
+	return parts
+end
+
+function RagdollModule.apply(char: Model): boolean
+	local parts = RagdollModule.ragdoll(char)
+	if not parts then
+		return false
 	end
 
 	local impulsePart = parts.LowerTorso or parts.Torso or parts.HumanoidRootPart

@@ -81,7 +81,7 @@ type LayerDef = {
 	key: string,
 	attribute: string,
 	pattern: string,
-	-- Atributo antiguo que sigue encendiendo la capa (solo Center).
+	-- Segundo atributo que también enciende la capa (solo Center).
 	legacy: string?,
 	-- Si la capa arrastra el blur de fondo mientras está encendida.
 	blur: boolean,
@@ -529,9 +529,12 @@ function ShadeController.start(_menuController: any?): any
 	for _, descendant in playerGui:GetDescendants() do
 		track(descendant)
 	end
+	-- Solo refresca si el nodo pide alguna capa: el confeti y los fuegos artificiales
+	-- parentan cientos de piezas sueltas a la ScreenGui y cada una es "panel host".
+	-- Un nodo que gana el atributo después ya refresca por su AttributeChanged.
 	janitor:Add(playerGui.DescendantAdded:Connect(function(descendant: Instance)
 		track(descendant)
-		if trackedConns[descendant] then
+		if trackedConns[descendant] and declaresAnyLayer(descendant) then
 			refresh()
 		end
 	end), "Disconnect")
@@ -539,8 +542,11 @@ function ShadeController.start(_menuController: any?): any
 	-- mano o un panel destruido dejaría su capa encendida para siempre.
 	janitor:Add(playerGui.DescendantRemoving:Connect(function(descendant: Instance)
 		if trackedConns[descendant] then
+			local declared = declaresAnyLayer(descendant)
 			untrack(descendant)
-			refresh()
+			if declared then
+				refresh()
+			end
 		end
 	end), "Disconnect")
 

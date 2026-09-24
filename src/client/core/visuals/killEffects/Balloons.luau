@@ -1,9 +1,9 @@
 --!strict
 --[[
-	Parte COSMÉTICA del kill effect Balloons (Shared.Locker.killEffects.Balloons).
-	El servidor sólo simula la física y marca cada globo con `Balloons.TAG` y sus
-	atributos (ATTR); aquí se infla y se revienta. Cubre igual la partida (globos
-	replicados) que los previews del Locker y del pase (globos locales).
+	Kill effect Balloons, parte de cliente. El servidor sólo simula la física y marca
+	cada GLOBO (no el cadáver) con `Balloons.TAG` y sus atributos (ATTR); aquí se infla
+	y se revienta. Por eso no usa `play`: KillEffectVisuals solo llama a start/stop y
+	este módulo escucha su propio tag.
 
 	Flashes y trozos son partes ANCLADAS de un pool con tope movidas analíticamente;
 	al agotarse el pool se omiten, nunca se crean de más.
@@ -19,7 +19,7 @@ local UserInputService = game:GetService("UserInputService")
 local Balloons = require(
 	ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Locker"):WaitForChild("killEffects"):WaitForChild("Balloons")
 )
-local GameSounds = require(script.Parent.Parent.ui.GameSounds)
+local GameSounds = require(script.Parent.Parent.Parent.ui.GameSounds)
 
 local ATTR = Balloons.ATTR
 

@@ -1,7 +1,7 @@
 --!strict
 
 -- Kill effect "Piece by Piece": ragdoll de Default y se quitan por grupos (brazos,
--- piernas, torso, cabeza) con sus accesorios.
+-- piernas, torso, cabeza) con la ropa y los accesorios que cuelgan de cada uno.
 --
 -- El TORSO no se destruye, se oculta y ancla: RagdollCleanup usa LowerTorso/Torso para
 -- saber cuándo se asentó el cadáver de un bot, y sin él el modelo quedaría para siempre.
@@ -14,6 +14,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Debris = game:GetService("Debris")
 
 local DefaultKillEffect = require(script.Parent.Default)
+local Utils = require(script.Parent.Utils)
 
 local CONFIG = {
 	START_DELAY = 0.35, -- s de ragdoll antes de quitar el primer grupo
@@ -40,50 +41,59 @@ local GROUPS: { Group } = {
 	{ parts = { "Head" } },
 }
 
--- Acepta AccessoryWeld o RigidConstraint.
-local function accessoryBodyPart(accessory: Accessory): BasePart?
-	local handle = accessory:FindFirstChild("Handle")
-	if not (handle and handle:IsA("BasePart")) then
-		return nil
-	end
-	for _, child in handle:GetChildren() do
-		if child:IsA("JointInstance") then
-			local other = if child.Part0 == handle then child.Part1 else child.Part0
-			if other then
-				return other
-			end
-		elseif child:IsA("RigidConstraint") then
-			local att = if child.Attachment0 and child.Attachment0.Parent ~= handle then child.Attachment0 else child.Attachment1
-			local other = if att then att.Parent else nil
-			if other and other:IsA("BasePart") and other ~= handle then
-				return other
-			end
-		end
-	end
-	return nil
-end
+type Collected = { parts: { BasePart }, accessories: { Accessory }, extras: { BasePart } }
 
--- Se resuelve antes de que nada se destruya; un accesorio sin soldadura reconocible
--- se va con el último grupo.
-local function collectGroups(char: Model): { { parts: { BasePart }, accessories: { Accessory } } }
+-- Se resuelve antes de que nada se destruya. Todo lo que no es cuerpo (accesorios y
+-- prendas del outfit sueltas) se va con la parte de la que cuelga; lo que no se
+-- reconoce, con el último grupo.
+local function collectGroups(char: Model): { Collected }
 	local groupOfPart: { [BasePart]: number } = {}
-	local result = {}
+	local isBody: { [BasePart]: boolean } = {}
+	local bodyParts: { BasePart } = {}
+	local result: { Collected } = {}
 	for i, group in GROUPS do
 		local parts: { BasePart } = {}
 		for _, name in group.parts do
 			local part = char:FindFirstChild(name)
 			if part and part:IsA("BasePart") then
 				table.insert(parts, part)
+				table.insert(bodyParts, part)
 				groupOfPart[part] = i
+				isBody[part] = true
 			end
 		end
-		table.insert(result, { parts = parts, accessories = {} })
+		table.insert(result, { parts = parts, accessories = {}, extras = {} })
 	end
-	for _, child in char:GetChildren() do
-		if child:IsA("Accessory") then
-			local bodyPart = accessoryBodyPart(child)
-			local index = if bodyPart then groupOfPart[bodyPart] else nil
-			table.insert(result[index or #GROUPS].accessories, child)
+
+	local function groupFor(part: BasePart): Collected
+		local owner = Utils.ownerBodyPart(part, isBody, bodyParts)
+		local index = if owner then groupOfPart[owner] else nil
+		return result[index or #GROUPS]
+	end
+
+	for _, desc in char:GetDescendants() do
+		if desc:IsA("Accessory") then
+			local handle = desc:FindFirstChild("Handle")
+			local group = if handle and handle:IsA("BasePart") then groupFor(handle) else result[#GROUPS]
+			table.insert(group.accessories, desc)
+		elseif
+			desc:IsA("BasePart")
+			and not isBody[desc]
+			and desc.Name ~= "HumanoidRootPart"
+			and not desc:FindFirstAncestorWhichIsA("Accessory")
+		then
+			local group = groupFor(desc)
+			-- Las que cuelgan DENTRO de una parte del cuerpo (cajas del ragdoll) se van con ella.
+			local inside = false
+			for _, part in group.parts do
+				if desc:IsDescendantOf(part) then
+					inside = true
+					break
+				end
+			end
+			if not inside then
+				table.insert(group.extras, desc)
+			end
 		end
 	end
 	return result
@@ -146,10 +156,14 @@ local function playSoundAt(position: Vector3, step: number)
 	Debris:AddItem(emitter, CONFIG.SOUND_LIFETIME)
 end
 
-local function removeGroup(parts: { BasePart }, accessories: { Accessory }, hide: boolean)
-	for _, accessory in accessories do
+local function removeGroup(group: Collected, hide: boolean)
+	for _, accessory in group.accessories do
 		accessory:Destroy()
 	end
+	for _, extra in group.extras do
+		extra:Destroy()
+	end
+	local parts = group.parts
 	for _, part in parts do
 		if part.Parent then
 			if hide then
@@ -161,17 +175,17 @@ local function removeGroup(parts: { BasePart }, accessories: { Accessory }, hide
 	end
 end
 
-local function disassemble(char: Model, groups: { { parts: { BasePart }, accessories: { Accessory } } })
+local function disassemble(char: Model, groups: { Collected })
 	task.wait(CONFIG.START_DELAY)
 	local step = 0
 	for i, group in groups do
 		if char.Parent == nil then
 			return
 		end
-		if #group.parts > 0 or #group.accessories > 0 then
+		if #group.parts > 0 or #group.accessories > 0 or #group.extras > 0 then
 			step += 1
 			local position = centroid(group.parts)
-			removeGroup(group.parts, group.accessories, GROUPS[i].hide == true)
+			removeGroup(group, GROUPS[i].hide == true)
 			if position then
 				playSoundAt(position, step)
 			end

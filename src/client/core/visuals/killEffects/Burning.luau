@@ -1,23 +1,21 @@
 --!strict
 --[[
-	Parte cosmética del kill effect Burning (Shared.Locker.killEffects.Burning). El
-	servidor ragdollea y marca el cadáver con `Burning.TAG`; aquí se clona la
-	plantilla del place y se suelda a las extremidades. Sirve igual para partida
-	(tag replicado) que para el preview del Locker y del pase (tag puesto en local).
+	Kill effect Burning, parte de cliente (Shared.Locker.killEffects.Burning solo hace
+	el ragdoll): se clona la plantilla del place y se suelda a las extremidades.
 
 	El fuego se apaga (cierre completo) cuando el cadáver se destruye, empieza a
 	fundirse (KillEffectFadeOut) o se marca Burning.ATTR.ENDED. La plantilla vive
-	fuera del cadáver para que las partículas del cierre no se corten.
+	fuera del cadáver y fuera del contexto: las partículas del cierre no se cortan.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local CollectionService = game:GetService("CollectionService")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 
 local Burning = require(
 	ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Locker"):WaitForChild("killEffects"):WaitForChild("Burning")
 )
+local Types = require(script.Parent.Parent.KillEffectTypes)
 
 local ATTR = Burning.ATTR
 
@@ -62,7 +60,6 @@ type Burn = {
 
 local BurningVisuals = {}
 
-local _addedConn: RBXScriptConnection? = nil
 local _burns: { [Instance]: Burn } = {}
 local _folder: Folder? = nil
 local _warnedMissing = false
@@ -340,13 +337,8 @@ local function begin(char: Model, startedAt: number)
 	burn.igniteThread = task.spawn(igniteSequence, burn, startedAt)
 end
 
-local function track(instance: Instance)
-	if not instance:IsA("Model") or _burns[instance] or not instance.Parent then
-		return
-	end
-	local char = instance :: Model
-	local startedAt = char:GetAttribute(ATTR.STARTED_AT)
-	if type(startedAt) ~= "number" then
+function BurningVisuals.play(char: Model, ctx: Types.Ctx)
+	if _burns[char] then
 		return
 	end
 	-- Llega tarde a un fuego que ya se estaba apagando: no pintar solo el final.
@@ -359,28 +351,14 @@ local function track(instance: Instance)
 		return
 	end
 
-	local ok, err = pcall(begin, char, startedAt)
+	local ok, err = pcall(begin, char, ctx.startedAt)
 	if not ok then
 		debugWarn(tostring(err))
 		finish(char)
 	end
 end
 
-function BurningVisuals.start()
-	if _addedConn then
-		return
-	end
-	for _, instance in CollectionService:GetTagged(Burning.TAG) do
-		track(instance)
-	end
-	_addedConn = CollectionService:GetInstanceAddedSignal(Burning.TAG):Connect(track)
-end
-
 function BurningVisuals.stop()
-	if _addedConn then
-		_addedConn:Disconnect()
-		_addedConn = nil
-	end
 	for instance in table.clone(_burns) do
 		finish(instance)
 	end

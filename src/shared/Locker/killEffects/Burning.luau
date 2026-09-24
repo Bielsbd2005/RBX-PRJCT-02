@@ -4,9 +4,9 @@
 -- (o empezar a fundirse) el fuego se apaga con su cierre; las partículas terminan su vida
 -- aunque el cuerpo ya no esté.
 --
--- Reparto (como Balloons): este módulo sólo hace el ragdoll y marca el cadáver con
--- `Burning.TAG` y la hora de inicio. Todo el fuego lo pinta cada cliente en
--- BurningVisuals a partir de la plantilla del place (arte, Rojo no la sincroniza).
+-- Reparto: este módulo sólo hace el ragdoll. Todo el fuego lo pinta cada cliente en
+-- visuals/killEffects/Burning a partir de la plantilla del place (arte, Rojo no la
+-- sincroniza).
 -- Tiene que ser así: `ParticleEmitter:Emit()` desde el servidor no se replica, y
 -- los tweens del Highlight y la PointLight a 20 Hz por red se verían a saltos.
 --
@@ -30,10 +30,8 @@ local DefaultKillEffect = require(script.Parent.Default)
 
 local Burning = {}
 
--- Contrato con el cliente (BurningVisuals). Cambiar aquí, no en literales.
-Burning.TAG = "KillEffectBurning"
+-- Contrato con el cliente (visuals/killEffects/Burning). Cambiar aquí, no en literales.
 Burning.ATTR = table.freeze({
-	STARTED_AT = "BurningStartedAt", -- GetServerTimeNow() al morir: sincroniza a quien llega tarde
 	ENDED = "BurningEnded", -- true = apagar ya con el cierre, aunque el cuerpo siga
 })
 Burning.TEMPLATE_NAME = "Burning"
@@ -60,8 +58,6 @@ end
 function Burning.apply(char: Model): boolean
 	-- Default devuelve false en rigs no R15 (no los ragdollea); arden igual.
 	DefaultKillEffect.apply(char)
-	char:SetAttribute(Burning.ATTR.STARTED_AT, workspace:GetServerTimeNow())
-	char:AddTag(Burning.TAG)
 	if RunService:IsClient() then
 		task.delay(Burning.PREVIEW_BURN_TIME, function()
 			if char.Parent then

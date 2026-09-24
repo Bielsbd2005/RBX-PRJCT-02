@@ -1,9 +1,8 @@
 --!strict
 --[[
-	Parte COSMÉTICA del kill effect XpOrbs (Shared.Locker.killEffects.XpOrbs). El
-	servidor oculta el cuerpo y marca el cadáver con `XpOrbs.TAG`; aquí salen los orbes
-	y se recogen. Cubre igual las muertes en partida (tag replicado)
-	que el preview del Locker y del pase (tag puesto en local).
+	Kill effect XpOrbs, parte de cliente: el servidor oculta el cuerpo y deja en el
+	cadáver los atributos de XpOrbs.ATTR; aquí salen los orbes y se recogen. Los orbes
+	no se atan al contexto: sobreviven al cadáver (el jugador respawnea antes).
 
 	Vida de cada orbe:
 	  muerte + i·STAGGER  nace en el torso con un pop (Back Out) y sale disparado en
@@ -37,7 +36,6 @@
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local CollectionService = game:GetService("CollectionService")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
@@ -45,7 +43,8 @@ local TweenService = game:GetService("TweenService")
 local killEffects = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Locker"):WaitForChild("killEffects")
 local XpOrbs = require(killEffects:WaitForChild("XpOrbs"))
 local AbductionFlight = require(killEffects:WaitForChild("AbductionFlight"))
-local GameSounds = require(script.Parent.Parent.ui.GameSounds)
+local GameSounds = require(script.Parent.Parent.Parent.ui.GameSounds)
+local Types = require(script.Parent.Parent.KillEffectTypes)
 
 local ATTR = XpOrbs.ATTR
 
@@ -168,10 +167,8 @@ type SoundSlot = {
 
 local XpOrbsVisuals = {}
 
-local _addedConn: RBXScriptConnection? = nil
 local _stepConn: RBXScriptConnection? = nil
 local _holder: Part? = nil
-local _seen: { [Instance]: boolean } = setmetatable({}, { __mode = "k" }) :: any
 
 local _orbs: { Orb } = {}
 local _freeSlots: { Slot } = {}
@@ -693,13 +690,13 @@ local function rollSize(rng: Random): number
 	return CONFIG.SIZES[1][1]
 end
 
-local function burst(char: Model)
-	local startedAt = char:GetAttribute(ATTR.STARTED_AT)
+function XpOrbsVisuals.play(char: Model, ctx: Types.Ctx)
+	local startedAt = ctx.startedAt
 	local origin = char:GetAttribute(ATTR.ORIGIN)
 	local scaleAttr = char:GetAttribute(ATTR.SCALE)
 	local seed = char:GetAttribute(ATTR.SEED)
 	local lifetimeAttr = char:GetAttribute(ATTR.LIFETIME)
-	if type(startedAt) ~= "number" or typeof(origin) ~= "Vector3" or type(seed) ~= "number" then
+	if typeof(origin) ~= "Vector3" or type(seed) ~= "number" then
 		return
 	end
 	local scale = if type(scaleAttr) == "number" then scaleAttr else 1
@@ -794,29 +791,7 @@ local function burst(char: Model)
 	ensureStep()
 end
 
-local function track(instance: Instance)
-	if not instance:IsA("Model") or _seen[instance] then
-		return
-	end
-	_seen[instance] = true
-	burst(instance)
-end
-
-function XpOrbsVisuals.start()
-	if _addedConn then
-		return
-	end
-	for _, instance in CollectionService:GetTagged(XpOrbs.TAG) do
-		track(instance)
-	end
-	_addedConn = CollectionService:GetInstanceAddedSignal(XpOrbs.TAG):Connect(track)
-end
-
 function XpOrbsVisuals.stop()
-	if _addedConn then
-		_addedConn:Disconnect()
-		_addedConn = nil
-	end
 	if _stepConn then
 		_stepConn:Disconnect()
 		_stepConn = nil

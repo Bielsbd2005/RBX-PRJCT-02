@@ -2,7 +2,7 @@
 
 -- Vuelo del OVNI del kill effect Abduction, compartido: el servidor (Abduction)
 -- lo simula para saber hacia dónde tirar del cuerpo y cada cliente
--- (AbductionVisuals) lo pinta. Mismo motor que UFOController, PetController y
+-- (visuals/killEffects/Abduction) lo pinta. Mismo motor que UFOController, PetController y
 -- BodySpinner del juego del OVNI. Se integra a paso FIJO con la semilla y el suelo
 -- del servidor: todos sacan la misma trayectoria a cualquier fps, y quien llega
 -- tarde se pone al día simulando los pasos perdidos.

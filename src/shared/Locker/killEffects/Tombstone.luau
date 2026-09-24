@@ -26,8 +26,6 @@ local CONFIG = {
 	TEMPLATE_NAME = "Lapida",
 	NAME_LABEL_PATH = { "TextPart", "Gui", "Name" },
 	SINK = 0.15, -- studs que queda hundida en reposo para que no parezca flotar
-	RAY_LENGTH = 1000, -- studs máx de búsqueda de suelo bajo el punto de muerte
-	RAY_MAX_SKIPS = 8, -- personajes/cadáveres que el raycast puede saltarse
 
 	DROP_HEIGHT = 45, -- studs sobre el suelo desde los que empieza a caer
 	FALL_TIME = 0.42, -- s de caída
@@ -72,54 +70,10 @@ local function ease(alpha: number, style: Enum.EasingStyle, direction: Enum.Easi
 	return TweenService:GetValue(math.clamp(alpha, 0, 1), style, direction)
 end
 
-local function characterModelOf(part: BasePart): Model?
-	local model = part:FindFirstAncestorOfClass("Model")
-	while model do
-		if model:FindFirstChildOfClass("Humanoid") then
-			return model
-		end
-		model = model:FindFirstAncestorOfClass("Model")
-	end
-	return nil
-end
-
 local function debugWarn(message: string)
 	if RunService:IsStudio() then
 		warn("[Tombstone] " .. message)
 	end
-end
-
--- Ignora agua, partes sin colisión y cualquier personaje vivo o cadáver.
-local function findGround(origin: Vector3, char: Model): RaycastResult?
-	local exclude: { Instance } = { char }
-	for _, player in Players:GetPlayers() do
-		if player.Character then
-			table.insert(exclude, player.Character)
-		end
-	end
-
-	local params = RaycastParams.new()
-	params.FilterType = Enum.RaycastFilterType.Exclude
-	params.IgnoreWater = true
-	params.RespectCanCollide = true
-
-	local direction = Vector3.new(0, -CONFIG.RAY_LENGTH, 0)
-	for _ = 1, CONFIG.RAY_MAX_SKIPS do
-		params.FilterDescendantsInstances = exclude
-		local result = workspace:Raycast(origin, direction, params)
-		if not result then
-			return nil
-		end
-		-- Se excluye el personaje ENTERO: parte a parte se agotarían los RAY_MAX_SKIPS.
-		local hit = result.Instance
-		local characterModel = if hit:IsA("BasePart") then characterModelOf(hit) else nil
-		if characterModel then
-			table.insert(exclude, characterModel)
-		else
-			return result
-		end
-	end
-	return nil
 end
 
 local function dustColor(result: RaycastResult): Color3
@@ -140,55 +94,12 @@ local function dustColor(result: RaycastResult): Color3
 	return base:Lerp(Color3.new(1, 1, 1), 0.2)
 end
 
--- Para apoyar la base en el suelo sea cual sea el pivot u orientación de autor.
-local function lowestWorldY(root: Instance): number?
-	local minY: number? = nil
-	local function consider(part: BasePart)
-		local cf = part.CFrame
-		local half = part.Size / 2
-		local extentY = math.abs(cf.RightVector.Y) * half.X
-			+ math.abs(cf.UpVector.Y) * half.Y
-			+ math.abs(cf.LookVector.Y) * half.Z
-		local y = cf.Position.Y - extentY
-		if minY == nil or y < (minY :: number) then
-			minY = y
-		end
-	end
-	if root:IsA("BasePart") then
-		consider(root)
-	end
-	for _, desc in root:GetDescendants() do
-		if desc:IsA("BasePart") then
-			consider(desc)
-		end
-	end
-	return minY
-end
-
 local function footprint(tombstone: PVInstance): number
 	local size = if tombstone:IsA("Model")
 		then tombstone:GetExtentsSize()
 		elseif tombstone:IsA("BasePart") then tombstone.Size
 		else Vector3.one * 2
 	return math.max(size.X, size.Z, 2)
-end
-
-local function makeCosmetic(root: Instance)
-	local function apply(part: BasePart)
-		part.Anchored = true
-		part.CanCollide = false
-		part.CanQuery = false
-		part.CanTouch = false
-		part.Massless = true
-	end
-	if root:IsA("BasePart") then
-		apply(root)
-	end
-	for _, desc in root:GetDescendants() do
-		if desc:IsA("BasePart") then
-			apply(desc)
-		end
-	end
 end
 
 local function makeVfxPart(parent: Instance, color: Color3, transparency: number): Part
@@ -342,7 +253,7 @@ local function dropTombstone(char: Model, deathPivot: CFrame, name: string)
 		return
 	end
 
-	local hit = findGround(deathPivot.Position, char)
+	local hit = Utils.findGround(deathPivot.Position, char)
 	if not hit then
 		debugWarn("sin suelo bajo " .. tostring(deathPivot.Position) .. " (" .. char:GetFullName() .. ")")
 		return
@@ -350,7 +261,7 @@ local function dropTombstone(char: Model, deathPivot: CFrame, name: string)
 	local ground = hit.Position
 
 	local tombstone = template:Clone() :: PVInstance
-	makeCosmetic(tombstone)
+	Utils.makeCosmetic(tombstone)
 	applyName(tombstone, char, name)
 
 	local look = deathPivot.LookVector * Vector3.new(1, 0, 1)
@@ -358,7 +269,7 @@ local function dropTombstone(char: Model, deathPivot: CFrame, name: string)
 	local upright = CFrame.new(ground) * yaw * template:GetPivot().Rotation
 
 	tombstone:PivotTo(upright)
-	local bottomY = lowestWorldY(tombstone) or ground.Y
+	local bottomY = Utils.lowestWorldY(tombstone) or ground.Y
 	local landed = upright + Vector3.new(0, ground.Y - bottomY - CONFIG.SINK, 0)
 	local width = footprint(tombstone)
 
@@ -457,60 +368,13 @@ local function dropTombstone(char: Model, deathPivot: CFrame, name: string)
 	end)
 end
 
--- NO char:GetPivot(): en el doble del Locker (sin PrimaryPart) el WorldPivot sigue
--- donde estaba la plantilla de Shared.Bodies.
-local function deathCFrame(char: Model): CFrame
-	for _, name in { "HumanoidRootPart", "LowerTorso", "Torso", "UpperTorso" } do
-		local part = char:FindFirstChild(name)
-		if part and part:IsA("BasePart") then
-			return part.CFrame
-		end
-	end
-	return char:GetPivot()
-end
-
-local function hideCharacter(char: Model)
-	local humanoid = char:FindFirstChildWhichIsA("Humanoid", true)
-	if humanoid then
-		humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
-		humanoid.HealthDisplayType = Enum.HumanoidHealthDisplayType.AlwaysOff
-	end
-	for _, d in char:GetDescendants() do
-		if d:IsA("BasePart") then
-			d.Anchored = true
-			d.CanCollide = false
-			d.CanQuery = false
-			d.CanTouch = false
-			d.Transparency = 1
-		elseif d:IsA("Decal") then -- Texture hereda de Decal
-			d.Transparency = 1
-		elseif
-			d:IsA("ParticleEmitter")
-			or d:IsA("Trail")
-			or d:IsA("Beam")
-			or d:IsA("Light")
-			or d:IsA("Fire")
-			or d:IsA("Smoke")
-			or d:IsA("Sparkles")
-			or d:IsA("LayerCollector")
-			or d:IsA("Highlight")
-		then
-			(d :: any).Enabled = false
-		end
-	end
-
-	-- Necesario además de lo anterior: una parte que replique tarde (un accesorio)
-	-- nacería en Characters y con query, parando balas.
-	Utils.makeCorpseInert(char)
-end
-
 local Tombstone = {}
 
 function Tombstone.apply(char: Model): boolean
 	-- ANTES de ocultar.
-	local deathPivot = deathCFrame(char)
+	local deathPivot = Utils.deathCFrame(char)
 	local name = victimName(char)
-	hideCharacter(char)
+	Utils.hideCharacter(char)
 	dropTombstone(char, deathPivot, name)
 	return true
 end

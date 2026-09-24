@@ -21,6 +21,9 @@ CollisionGroups.CHARACTERS = "Characters"
 CollisionGroups.BOTS = "Bots"
 CollisionGroups.RAGDOLL = "RagdollBodyParts"
 CollisionGroups.RAGDOLL_INNER = "RagdollInner"
+-- Escombros cosméticos de kill effects (bloques…): chocan con el mapa y entre sí, no
+-- con personajes, bots ni cadáveres.
+CollisionGroups.DEBRIS = "KillEffectDebris"
 
 local _registeredOnServer = false
 local _serverReady = false
@@ -48,6 +51,9 @@ local function _registerOnServer()
 	pcall(function()
 		PhysicsService:RegisterCollisionGroup(CollisionGroups.RAGDOLL_INNER)
 	end)
+	pcall(function()
+		PhysicsService:RegisterCollisionGroup(CollisionGroups.DEBRIS)
+	end)
 
 	pcall(function()
 		PhysicsService:CollisionGroupSetCollidable(CollisionGroups.RAGDOLL, CollisionGroups.CHARACTERS, false)
@@ -67,6 +73,12 @@ local function _registerOnServer()
 	pcall(function()
 		PhysicsService:CollisionGroupSetCollidable(CollisionGroups.RAGDOLL_INNER, CollisionGroups.RAGDOLL_INNER, true)
 	end)
+
+	for _, other in { CollisionGroups.CHARACTERS, CollisionGroups.BOTS, CollisionGroups.RAGDOLL, CollisionGroups.RAGDOLL_INNER } do
+		pcall(function()
+			PhysicsService:CollisionGroupSetCollidable(CollisionGroups.DEBRIS, other, false)
+		end)
+	end
 
 	pcall(function()
 		PhysicsService:CollisionGroupSetCollidable(CollisionGroups.BOTS, CollisionGroups.BOTS, false)

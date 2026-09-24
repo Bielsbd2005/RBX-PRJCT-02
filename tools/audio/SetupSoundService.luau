@@ -16,7 +16,7 @@
 	    ├─ Audio (Folder)             ← ÚNICO sitio donde autorar sonidos
 	    │   ├─ Music/     Lobby
 	    │   ├─ UI/        Click · Open · Close · Error · Purchase · Coin
-	    │   └─ Gameplay/  Hit · Headshot · Elimination · Health · BalloonPop · XpOrb
+	    │   └─ Gameplay/  Hit · Headshot · Elimination · Health · BalloonPop · XpOrb · Confetti · Electrocution · Explosion
 	    └─ Runtime (Folder)           ← clones que crea el juego; no tocar
 
 	El juego usa `Sound` + `SoundGroup`, no el API nuevo de audio
@@ -151,6 +151,16 @@ local LAYOUT = {
 			{ name = "XpOrb",       role = 0.30, gain = 1.00,
 			  legacy = {},
 			  players = { "XpOrb" } },
+			{ name = "Confetti",    role = 0.40, gain = 1.00,
+			  legacy = {},
+			  players = { "Confetti" } },
+			{ name = "Electrocution", role = 0.40, gain = 1.00,
+			  legacy = {},
+			  players = { "Electrocution" } },
+			-- 3D en el punto de impacto (NetworkingCallbacks.PlayExplosionVFX).
+			{ name = "Explosion",   role = 0.55, gain = 1.00,
+			  legacy = {},
+			  players = { "Explosion" } },
 		},
 	},
 }

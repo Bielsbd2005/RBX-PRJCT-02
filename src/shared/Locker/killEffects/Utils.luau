@@ -1,6 +1,7 @@
 --!strict
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 
 local CollisionGroups = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("CollisionGroups"))
@@ -117,6 +118,67 @@ function KillEffectUtils.stripWeapons(char: Model)
 			child:Destroy()
 		end
 	end
+end
+
+-- Partes unidas rígidamente a `part` (soldaduras de cualquier tipo; no ragdoll).
+local function rigidPeers(part: BasePart): { BasePart }
+	local peers: { BasePart } = {}
+	local function add(other: Instance?)
+		if other and other ~= part and other:IsA("BasePart") then
+			table.insert(peers, other)
+		end
+	end
+	for _, joint in part:GetJoints() do
+		if joint:IsA("JointInstance") or joint:IsA("WeldConstraint") then
+			add((joint :: any).Part0)
+			add((joint :: any).Part1)
+		elseif joint:IsA("RigidConstraint") then
+			add(if joint.Attachment0 then joint.Attachment0.Parent else nil)
+			add(if joint.Attachment1 then joint.Attachment1.Parent else nil)
+		end
+	end
+	return peers
+end
+
+-- Parte del cuerpo de la que cuelga `part` (ropa, accesorio, pieza suelta del outfit):
+-- la que lo contiene, la primera que se alcanza siguiendo sus soldaduras o, si no se
+-- reconoce, la más cercana. nil solo si `bodyParts` está vacío.
+function KillEffectUtils.ownerBodyPart(part: BasePart, isBody: { [BasePart]: boolean }, bodyParts: { BasePart }): BasePart?
+	local node: Instance? = part.Parent
+	while node do
+		if node:IsA("BasePart") and isBody[node] then
+			return node
+		end
+		node = node.Parent
+	end
+
+	local visited: { [BasePart]: boolean } = { [part] = true }
+	local queue = { part }
+	local head = 1
+	while head <= #queue do
+		local current = queue[head]
+		head += 1
+		for _, peer in rigidPeers(current) do
+			if isBody[peer] then
+				return peer
+			end
+			if not visited[peer] then
+				visited[peer] = true
+				table.insert(queue, peer)
+			end
+		end
+	end
+
+	local best: BasePart? = nil
+	local bestDist = math.huge
+	for _, bodyPart in bodyParts do
+		local dist = (bodyPart.Position - part.Position).Magnitude
+		if dist < bestDist then
+			best = bodyPart
+			bestDist = dist
+		end
+	end
+	return best
 end
 
 -- CanQuery = false es imprescindible: `Roblox.penetrateCast` solo atraviesa partes
@@ -459,6 +521,182 @@ function KillEffectUtils.buildRagdoll(parts: { [string]: BasePart }, headAsJoint
 	for _, weldData in KillEffectUtils.R15_WELDS do
 		KillEffectUtils.createWeld(parts[weldData.Part0], parts[weldData.Part1])
 	end
+end
+
+local GROUND_RAY_LENGTH = 1000 -- studs máx de búsqueda de suelo bajo el punto de muerte
+local GROUND_RAY_MAX_SKIPS = 8 -- personajes/cadáveres que el raycast puede saltarse
+
+local function characterModelOf(part: BasePart): Model?
+	local model = part:FindFirstAncestorOfClass("Model")
+	while model do
+		if model:FindFirstChildOfClass("Humanoid") then
+			return model
+		end
+		model = model:FindFirstAncestorOfClass("Model")
+	end
+	return nil
+end
+
+-- Ignora agua, partes sin colisión y cualquier personaje vivo o cadáver.
+function KillEffectUtils.findGround(origin: Vector3, char: Model): RaycastResult?
+	local exclude: { Instance } = { char }
+	for _, player in Players:GetPlayers() do
+		if player.Character then
+			table.insert(exclude, player.Character)
+		end
+	end
+
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.IgnoreWater = true
+	params.RespectCanCollide = true
+
+	local direction = Vector3.new(0, -GROUND_RAY_LENGTH, 0)
+	for _ = 1, GROUND_RAY_MAX_SKIPS do
+		params.FilterDescendantsInstances = exclude
+		local result = workspace:Raycast(origin, direction, params)
+		if not result then
+			return nil
+		end
+		-- Se excluye el personaje ENTERO: parte a parte se agotarían los GROUND_RAY_MAX_SKIPS.
+		local hit = result.Instance
+		local characterModel = if hit:IsA("BasePart") then characterModelOf(hit) else nil
+		if characterModel then
+			table.insert(exclude, characterModel)
+		else
+			return result
+		end
+	end
+	return nil
+end
+
+-- Para apoyar la base en el suelo sea cual sea el pivot u orientación de autor.
+function KillEffectUtils.lowestWorldY(root: Instance): number?
+	local minY: number? = nil
+	local function consider(part: BasePart)
+		local cf = part.CFrame
+		local half = part.Size / 2
+		local extentY = math.abs(cf.RightVector.Y) * half.X
+			+ math.abs(cf.UpVector.Y) * half.Y
+			+ math.abs(cf.LookVector.Y) * half.Z
+		local y = cf.Position.Y - extentY
+		if minY == nil or y < (minY :: number) then
+			minY = y
+		end
+	end
+	if root:IsA("BasePart") then
+		consider(root)
+	end
+	for _, desc in root:GetDescendants() do
+		if desc:IsA("BasePart") then
+			consider(desc)
+		end
+	end
+	return minY
+end
+
+-- Props de efecto (lápida, pato): anclados y sin colisión, query ni touch.
+function KillEffectUtils.makeCosmetic(root: Instance)
+	local function apply(part: BasePart)
+		part.Anchored = true
+		part.CanCollide = false
+		part.CanQuery = false
+		part.CanTouch = false
+		part.Massless = true
+	end
+	if root:IsA("BasePart") then
+		apply(root)
+	end
+	for _, desc in root:GetDescendants() do
+		if desc:IsA("BasePart") then
+			apply(desc)
+		end
+	end
+end
+
+-- NO char:GetPivot(): en el doble del Locker (sin PrimaryPart) el WorldPivot sigue
+-- donde estaba la plantilla de Shared.Bodies.
+function KillEffectUtils.deathCFrame(char: Model): CFrame
+	for _, name in { "HumanoidRootPart", "LowerTorso", "Torso", "UpperTorso" } do
+		local part = char:FindFirstChild(name)
+		if part and part:IsA("BasePart") then
+			return part.CFrame
+		end
+	end
+	return char:GetPivot()
+end
+
+-- Centro del torso (mismo motivo que deathCFrame para no usar GetPivot).
+function KillEffectUtils.bodyCenter(char: Model): Vector3
+	for _, name in { "UpperTorso", "Torso", "HumanoidRootPart", "LowerTorso" } do
+		local part = char:FindFirstChild(name)
+		if part and part:IsA("BasePart") then
+			return part.Position
+		end
+	end
+	return char:GetPivot().Position
+end
+
+-- 1 para un personaje normal (HRP de 2 studs de alto); ScenePreview escala el maniquí.
+function KillEffectUtils.bodyScale(char: Model): number
+	local root = char:FindFirstChild("HumanoidRootPart")
+	if root and root:IsA("BasePart") then
+		return math.max(root.Size.Y / 2, 0.5)
+	end
+	return 1
+end
+
+-- Para efectos que lo pintan todo en el cliente con una copia del cuerpo: anclado
+-- tal cual (joints incluidos: sin ellos la ropa se descolocaría en los clientes),
+-- muerto e inerte, y SIN ocultar, porque el cliente lo copia visible y lo oculta él.
+function KillEffectUtils.freezeCorpse(char: Model)
+	for _, desc in char:GetDescendants() do
+		if desc:IsA("BasePart") then
+			desc.Anchored = true
+		end
+	end
+	local hum = char:FindFirstChildWhichIsA("Humanoid", true)
+	if hum then
+		KillEffectUtils.releaseHumanoid(hum)
+	end
+	KillEffectUtils.makeCorpseInert(char)
+end
+
+-- Oculta el cuerpo sin destruirlo: sus dueños (MatchService, AIService, Locker,
+-- ScenePreview) lo destruyen, y la cámara de muerte sigue mirando su HumanoidRootPart.
+function KillEffectUtils.hideCharacter(char: Model)
+	local humanoid = char:FindFirstChildWhichIsA("Humanoid", true)
+	if humanoid then
+		humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+		humanoid.HealthDisplayType = Enum.HumanoidHealthDisplayType.AlwaysOff
+	end
+	for _, d in char:GetDescendants() do
+		if d:IsA("BasePart") then
+			d.Anchored = true
+			d.CanCollide = false
+			d.CanQuery = false
+			d.CanTouch = false
+			d.Transparency = 1
+		elseif d:IsA("Decal") then -- Texture hereda de Decal
+			d.Transparency = 1
+		elseif
+			d:IsA("ParticleEmitter")
+			or d:IsA("Trail")
+			or d:IsA("Beam")
+			or d:IsA("Light")
+			or d:IsA("Fire")
+			or d:IsA("Smoke")
+			or d:IsA("Sparkles")
+			or d:IsA("LayerCollector")
+			or d:IsA("Highlight")
+		then
+			(d :: any).Enabled = false
+		end
+	end
+
+	-- Necesario además de lo anterior: una parte que replique tarde (un accesorio)
+	-- nacería en Characters y con query, parando balas.
+	KillEffectUtils.makeCorpseInert(char)
 end
 
 return KillEffectUtils

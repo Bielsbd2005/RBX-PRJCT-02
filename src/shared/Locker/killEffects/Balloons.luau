@@ -4,7 +4,7 @@
 --
 -- Aquí solo va lo que debe ser igual para todos (ragdoll y física de los globos);
 -- lo cosmético (inflado, estallido, sonido) lo pinta cada cliente en
--- BalloonPopVisuals a partir del tag y los atributos.
+-- visuals/killEffects/Balloons a partir del tag y los atributos.
 --
 -- Todo cuelga dentro del cadáver, así que se limpia con él. La cadena debe acabar
 -- antes de 2 s: el preview del Locker borra el cuerpo a los 2 s.
@@ -52,7 +52,7 @@ local COLORS = {
 
 local Balloons = {}
 
--- Contrato con el cliente (BalloonPopVisuals). Cambiar aquí, no en literales.
+-- Contrato con el cliente (visuals/killEffects/Balloons). Cambiar aquí, no en literales.
 Balloons.TAG = "KillEffectBalloon"
 Balloons.ATTR = table.freeze({
 	SPAWNED_AT = "BalloonSpawnedAt", -- GetServerTimeNow() al crearlo: sincroniza el inflado

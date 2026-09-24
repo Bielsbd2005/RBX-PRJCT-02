@@ -3,8 +3,8 @@
 -- Kill effect "XP Drop": el cuerpo desaparece y salen orbes que, si alguien vivo se
 -- acerca, vuelan hacia él y se recogen con sonido. No dan XP real.
 --
--- Aquí solo se oculta el cuerpo y se marca con `XpOrbs.TAG` + atributos; orbes,
--- atracción y sonido son de XpOrbsVisuals (cliente). Nada viaja por red: el abanico
+-- Aquí solo se oculta el cuerpo y se marcan los atributos de abajo; orbes, atracción y
+-- sonido son de visuals/killEffects/XpOrbs (cliente). Nada viaja por red: el abanico
 -- sale de la semilla y cada cliente simula la recogida.
 --
 -- Los orbes NO cuelgan del cadáver: el jugador respawnea antes de que se apaguen.
@@ -23,10 +23,8 @@ local Utils = require(script.Parent.Utils)
 
 local XpOrbs = {}
 
--- Contrato con el cliente (XpOrbsVisuals). Cambiar aquí, no en literales.
-XpOrbs.TAG = "KillEffectXpOrbs"
+-- Contrato con el cliente (visuals/killEffects/XpOrbs). Cambiar aquí, no en literales.
 XpOrbs.ATTR = table.freeze({
-	STARTED_AT = "XpOrbsStartedAt", -- GetServerTimeNow() al morir: sincroniza a quien llega tarde
 	ORIGIN = "XpOrbsOrigin", -- Vector3 del centro del torso al morir
 	SCALE = "XpOrbsScale", -- 1 = cuerpo normal (ScenePreview escala el maniquí)
 	SEED = "XpOrbsSeed", -- abanico de salida, igual para todos
@@ -60,27 +58,6 @@ function XpOrbs.findTemplate(): BillboardGui?
 		return direct
 	end
 	return holder:FindFirstChildWhichIsA("BillboardGui", true) :: BillboardGui?
-end
-
--- Centro del torso al morir (no char:GetPivot(), que en el doble del Locker se queda
--- donde estaba la plantilla).
-local function bodyCenter(char: Model): Vector3
-	for _, name in { "UpperTorso", "Torso", "HumanoidRootPart", "LowerTorso" } do
-		local part = char:FindFirstChild(name)
-		if part and part:IsA("BasePart") then
-			return part.Position
-		end
-	end
-	return char:GetPivot().Position
-end
-
--- 1 para un personaje normal (HRP de 2 studs de alto).
-local function bodyScale(char: Model): number
-	local root = char:FindFirstChild("HumanoidRootPart")
-	if root and root:IsA("BasePart") then
-		return math.max(root.Size.Y / 2, 0.5)
-	end
-	return 1
 end
 
 -- No basta con apagar CanCollide: un Humanoid vivo lo re-enciende cada step y el
@@ -135,20 +112,18 @@ local rng = Random.new()
 
 function XpOrbs.apply(char: Model): boolean
 	-- ANTES de ocultar: dónde estaba el cuerpo y de qué tamaño era.
-	local origin = bodyCenter(char)
-	local scale = bodyScale(char)
+	local origin = Utils.bodyCenter(char)
+	local scale = Utils.bodyScale(char)
 	local isPreview = RunService:IsClient()
 
 	hideCharacter(char)
 
-	-- Atributos antes que el tag: llegan juntos al cliente y track() los lee ya.
+	-- KillEffectsRegistry pone el tag después: llegan juntos y el cliente los lee ya.
 	char:SetAttribute(XpOrbs.ATTR.ORIGIN, origin)
 	char:SetAttribute(XpOrbs.ATTR.SCALE, scale)
 	char:SetAttribute(XpOrbs.ATTR.SEED, rng:NextInteger(1, 2 ^ 30))
 	char:SetAttribute(XpOrbs.ATTR.LIFETIME, if isPreview then XpOrbs.PREVIEW_LIFETIME else XpOrbs.MATCH_LIFETIME)
 	char:SetAttribute(XpOrbs.ATTR.PICKUP, not isPreview)
-	char:SetAttribute(XpOrbs.ATTR.STARTED_AT, workspace:GetServerTimeNow())
-	char:AddTag(XpOrbs.TAG)
 	return true
 end
 

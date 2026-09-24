@@ -32,7 +32,10 @@ SoundService
 │       ├─ Elimination
 │       ├─ Health
 │       ├─ BalloonPop
-│       └─ XpOrb
+│       ├─ XpOrb
+│       ├─ Confetti
+│       ├─ Electrocution
+│       └─ Explosion
 └─ Runtime (Folder)           ← clones del juego; no autorar aquí
 ```
 
@@ -65,8 +68,11 @@ aplicando y hay que ajustar los tres buses por separado.
 | `Gameplay/Headshot` | Impacto a la cabeza | `DamageBillboardHandler` |
 | `Gameplay/Elimination` | Matas o asistes a un jugador | `NetworkingCallbacks` |
 | `Gameplay/Health` | Recoges el orbe de vida | `PickupDropEffect` |
-| `Gameplay/BalloonPop` | Revienta cada globo del kill effect Balloons (3D, tono ascendente por globo) | `BalloonPopVisuals` |
-| `Gameplay/XpOrb` | Recoges un orbe del kill effect XpOrbs (3D, tono aleatorio, uno tras otro) | `XpOrbsVisuals` |
+| `Gameplay/BalloonPop` | Revienta cada globo del kill effect Balloons (3D, tono ascendente por globo) | `visuals/killEffects/Balloons` |
+| `Gameplay/XpOrb` | Recoges un orbe del kill effect XpOrbs (3D, tono aleatorio, uno tras otro) | `visuals/killEffects/XpOrbs` |
+| `Gameplay/Confetti` | Muere alguien con el kill effect Confetti (3D en el punto de muerte, tono aleatorio) | `visuals/killEffects/Confetti` |
+| `Gameplay/Electrocution` | Muere alguien con el kill effect Electrocution (3D en el cadáver, tono aleatorio) | `visuals/killEffects/Electrocution` |
+| `Gameplay/Explosion` | Impacto de un proyectil explosivo, p. ej. el RPG (3D en el punto de impacto) | `NetworkingCallbacks` |
 | `Music/Lobby` | Música del lobby (loop, con EQ de muffle) | `features/music` |
 
 Los botones llamados `CloseBtn` **no** reproducen `Click`: el panel que cierran

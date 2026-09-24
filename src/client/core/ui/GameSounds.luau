@@ -48,10 +48,11 @@ local SPECS: { [string]: SoundSpec } = {
 	Headshot = { folder = "Gameplay", name = "Headshot" },
 	Elimination = { folder = "Gameplay", name = "Elimination" },
 	Health = { folder = "Gameplay", name = "Health" },
-	-- BalloonPop y XpOrb los reproducen BalloonPopVisuals/XpOrbsVisuals en 3D con su
-	-- propio pool y tono variable (no pasan por `play`).
+	-- Los de kill effects los reproducen visuals/killEffects/* en 3D (no pasan por `play`).
 	BalloonPop = { folder = "Gameplay", name = "BalloonPop" },
 	XpOrb = { folder = "Gameplay", name = "XpOrb" },
+	Confetti = { folder = "Gameplay", name = "Confetti" },
+	Electrocution = { folder = "Gameplay", name = "Electrocution" },
 	LobbyMusic = { folder = "Music", name = "Lobby", looped = true },
 }
 
@@ -75,6 +76,8 @@ GameSounds.Elimination = "Elimination"
 GameSounds.Health = "Health"
 GameSounds.BalloonPop = "BalloonPop"
 GameSounds.XpOrb = "XpOrb"
+GameSounds.Confetti = "Confetti"
+GameSounds.Electrocution = "Electrocution"
 GameSounds.LobbyMusic = "LobbyMusic"
 
 local _warned: { [string]: boolean } = {}
@@ -130,6 +133,22 @@ function GameSounds.play(key: string)
 		return
 	end
 	SoundService:PlayLocalSound(sound)
+end
+
+--- Clona `key` dentro de `parent` y lo reproduce: 3D si `parent` es una parte o un
+--- Attachment, y se va con él. Para sonidos de mundo (kill effects); no-op sin SoundId.
+function GameSounds.playAt(key: string, parent: Instance, playbackSpeed: number?): Sound?
+	local template = GameSounds.resolve(key)
+	if not template or template.SoundId == "" then
+		return nil
+	end
+	local sound = template:Clone()
+	if playbackSpeed then
+		sound.PlaybackSpeed = playbackSpeed
+	end
+	sound.Parent = parent
+	sound:Play()
+	return sound
 end
 
 --- Nivel autorado de `key` (atributo MixVolume de la tabla de mezcla), no el Volume

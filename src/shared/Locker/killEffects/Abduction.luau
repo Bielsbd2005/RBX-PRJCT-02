@@ -7,7 +7,7 @@
 --   · Aquí (servidor, o el cliente en los previews): ragdoll + tractor FÍSICO
 --     (AlignPosition/AlignOrientation en el torso, antigravedad parcial por parte y
 --     arrastre de extremidades). Propiedad de red del servidor, como el resto de ragdolls.
---   · AbductionVisuals (cliente): el OVNI, el rayo y los efectos.
+--   · visuals/killEffects/Abduction (cliente): el OVNI, el rayo y los efectos.
 --   · Los dos simulan el MISMO vuelo (AbductionFlight: paso fijo + `ATTR.SEED` +
 --     `ATTR.GROUND_Y`), así el servidor sabe dónde está la panza sin replicar el OVNI.
 --
@@ -24,10 +24,11 @@ local AbductionFlight = require(script.Parent.AbductionFlight)
 
 local Abduction = {}
 
--- Contrato con el cliente (AbductionVisuals). Cambiar aquí, no en literales.
-Abduction.TAG = "KillEffectAbduction"
+-- Contrato con el cliente (visuals/killEffects/Abduction). Cambiar aquí, no en literales.
 Abduction.ATTR = table.freeze({
-	STARTED_AT = "AbductionStartedAt", -- GetServerTimeNow() al morir: sincroniza a quien llega tarde
+	-- Hora EXACTA con la que el servidor simula el vuelo (no la del registry, que se
+	-- toma después): el cliente debe volar el mismo AbductionFlight.
+	STARTED_AT = "AbductionStartedAt",
 	ORIGIN = "AbductionOrigin", -- CFrame del HumanoidRootPart al morir
 	SCALE = "AbductionScale", -- 1 = cuerpo normal (ScenePreview escala el maniquí)
 	SEED = "AbductionSeed", -- dirección de llegada/salida, igual para todos
@@ -107,27 +108,6 @@ end
 
 local function ease(alpha: number, style: Enum.EasingStyle, direction: Enum.EasingDirection): number
 	return TweenService:GetValue(math.clamp(alpha, 0, 1), style, direction)
-end
-
--- Dónde y hacia dónde miraba al morir (mismo criterio que Tombstone: no
--- char:GetPivot(), que en el doble del Locker se queda donde estaba la plantilla).
-local function deathCFrame(char: Model): CFrame
-	for _, name in { "HumanoidRootPart", "LowerTorso", "Torso", "UpperTorso" } do
-		local part = char:FindFirstChild(name)
-		if part and part:IsA("BasePart") then
-			return part.CFrame
-		end
-	end
-	return char:GetPivot()
-end
-
--- 1 para un personaje normal (HRP de 2 studs de alto).
-local function bodyScale(char: Model): number
-	local root = char:FindFirstChild("HumanoidRootPart")
-	if root and root:IsA("BasePart") then
-		return math.max(root.Size.Y / 2, 0.5)
-	end
-	return 1
 end
 
 -- Todo transparente y apagado, en su sitio (mismo criterio que Tombstone).
@@ -421,21 +401,20 @@ function Abduction.apply(char: Model): boolean
 	hum.HealthDisplayType = Enum.HumanoidHealthDisplayType.AlwaysOff
 
 	-- ANTES del ragdoll: dónde estaba el cuerpo al morir.
-	local origin = deathCFrame(char)
-	local scale = bodyScale(char)
+	local origin = Utils.deathCFrame(char)
+	local scale = Utils.bodyScale(char)
 	local groundY = AbductionFlight.findGroundY(origin.Position, char) or (origin.Position.Y - 3 * scale)
 	local seed = rng:NextInteger(1, 2 ^ 30)
 	local startedAt = workspace:GetServerTimeNow()
 
 	local body = ragdoll(char, hum)
 
-	-- Atributos antes que el tag: llegan juntos al cliente y track() los lee ya.
+	-- KillEffectsRegistry pone el tag después: llegan juntos y el cliente los lee ya.
 	char:SetAttribute(Abduction.ATTR.ORIGIN, origin)
 	char:SetAttribute(Abduction.ATTR.SCALE, scale)
 	char:SetAttribute(Abduction.ATTR.SEED, seed)
 	char:SetAttribute(Abduction.ATTR.GROUND_Y, groundY)
 	char:SetAttribute(Abduction.ATTR.STARTED_AT, startedAt)
-	char:AddTag(Abduction.TAG)
 
 	runTractor(
 		char,
