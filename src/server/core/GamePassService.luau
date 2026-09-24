@@ -21,21 +21,20 @@ local RunService = game:GetService("RunService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local StoreProducts = require(Shared.constants.StoreProducts)
+local DebugFlags = require(Shared.utils.DebugFlags)
 
 local TelemetryService = require(script.Parent.TelemetryService)
 
 --[[
-	Override SÓLO de Studio (en un local server nadie posee nada ni se puede comprar):
-	  true  → todos poseen todos los passes.
-	  false → nadie posee nada.
-	  nil   → comportamiento real.
-	Fuera de Studio se ignora (ver _override).
+	En Studio no se pregunta a Roblox (el creador posee sus passes y en un local
+	server nadie posee nada): todos los passes desbloqueados, salvo que el
+	BoolValue ReplicatedStorage.Debug.NoGamePasses esté marcado, que los bloquea
+	todos. Se lee en vivo; la tienda del cliente lee el mismo flag.
 ]]
-local STUDIO_OWNERSHIP_OVERRIDE: boolean? = true
+local IS_STUDIO = RunService:IsStudio()
+local noGamePasses = DebugFlags.bind(ReplicatedStorage, "NoGamePasses")
 
 local GamePassService = {}
-
-local _override: boolean? = if RunService:IsStudio() then STUDIO_OWNERSHIP_OVERRIDE else nil
 
 local _started = false
 
@@ -76,8 +75,8 @@ local function _store(player: Player, passId: number, owns: boolean)
 end
 
 local function _resolve(player: Player, passId: number)
-	-- Con override, la llamada web fallaría con los userId falsos de un local server.
-	if _override ~= nil or passId <= 0 then
+	-- En Studio la llamada web fallaría con los userId falsos de un local server.
+	if IS_STUDIO or passId <= 0 then
 		return
 	end
 
@@ -148,8 +147,8 @@ end
 -- del resultado debe suscribirse con `OnOwnershipGained`.
 function GamePassService.Owns(player: Player, passId: number): boolean
 	-- Antes del chequeo de id: así también desbloquea passes aún sin id.
-	if _override ~= nil then
-		return _override
+	if IS_STUDIO then
+		return not noGamePasses()
 	end
 
 	if passId <= 0 then
@@ -172,8 +171,8 @@ end
 -- Como Owns pero sin lanzar fetch y distinguiendo "sin resolver" (nil) de "no lo
 -- posee": para retirar un beneficio persistido hace falta un "no" confirmado.
 function GamePassService.Peek(player: Player, passId: number): boolean?
-	if _override ~= nil then
-		return _override
+	if IS_STUDIO then
+		return not noGamePasses()
 	end
 	if passId <= 0 then
 		return false
@@ -182,8 +181,8 @@ function GamePassService.Peek(player: Player, passId: number): boolean?
 	return if owned then owned[passId] else nil
 end
 
--- Cada resolución (prefetch, compra), sea sí o no; thread propio. Con el override
--- de Studio no se dispara nunca: usar Peek.
+-- Cada resolución (prefetch, compra), sea sí o no; thread propio. En Studio no
+-- se dispara nunca: usar Peek.
 function GamePassService.OnOwnershipResolved(listener: (player: Player, passId: number, owns: boolean) -> ())
 	table.insert(_resolvedListeners, listener)
 end
@@ -200,10 +199,10 @@ function GamePassService.Start()
 	end
 	_started = true
 
-	if _override ~= nil then
+	if IS_STUDIO then
 		warn(string.format(
-			"[GamePassService] Override de Studio ACTIVO: todos los gamepasses %s. En producción no se aplica.",
-			if _override then "desbloqueados" else "bloqueados"
+			"[GamePassService] Studio: todos los gamepasses %s (Debug.NoGamePasses). En producción no se aplica.",
+			if noGamePasses() then "bloqueados" else "desbloqueados"
 		))
 	end
 

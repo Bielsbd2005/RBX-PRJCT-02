@@ -5,9 +5,12 @@
 	Escenas: Workspace.Locker.Banner y Workspace.BattlePass.Banner.
 ]]
 
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
 local BannerCard = require(script.Parent.Parent.Parent.Parent.core.ui.BannerCard)
+local VipTag = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("utils"):WaitForChild("VipTag"))
 
 -- Vaivén: amplitudes en studs y velocidades en rad/s. El segundo seno, de periodo
 -- no múltiplo, rompe la regularidad del primero.
@@ -86,9 +89,10 @@ function BannerPreviewer:setVisible(visible: boolean)
 	end
 end
 
+-- Siempre es la tarjeta del jugador local: con su tag VIP, como la ven sus víctimas.
 function BannerPreviewer:setContent(name: string, level: number, bannerId: string?)
 	if self._refs then
-		BannerCard.populate(self._refs, name, level, bannerId)
+		BannerCard.populate(self._refs, name, level, bannerId, VipTag.isVIP(Players.LocalPlayer))
 	end
 end
 

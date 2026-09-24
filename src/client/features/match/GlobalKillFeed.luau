@@ -14,6 +14,7 @@ local TweenService = game:GetService("TweenService")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ItemsConfig = require(Shared.constants.ItemsConfig)
 local TeamUtils = require(Shared.utils.TeamUtils)
+local VipTag = require(Shared.utils.VipTag)
 local AssetIds = require(Shared.constants.AssetIds)
 
 local GlobalKillFeed = {}
@@ -174,7 +175,7 @@ function GlobalKillFeed:pushKill(killerName: string, victimName: string, weaponI
 
 	-- Eliminador (oculto en suicidios/caídas; el arma muestra la calavera)
 	if killerLabel then
-		killerLabel.Text = hasKiller and killerName or ""
+		VipTag.apply(killerLabel, if hasKiller then killerName else "", VipTag.isVIPName(killerName))
 		killerLabel.TextColor3 = killerColor
 		killerLabel.Visible = hasKiller
 	end
@@ -185,7 +186,7 @@ function GlobalKillFeed:pushKill(killerName: string, victimName: string, weaponI
 	end
 
 	if victimLabel then
-		victimLabel.Text = victimName
+		VipTag.apply(victimLabel, victimName, VipTag.isVIPName(victimName))
 		victimLabel.TextColor3 = victimColor
 		victimLabel.Visible = true
 	end

@@ -13,7 +13,9 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local ItemsConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("ItemsConfig"))
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local ItemsConfig = require(Shared:WaitForChild("constants"):WaitForChild("ItemsConfig"))
+local VipTag = require(Shared:WaitForChild("utils"):WaitForChild("VipTag"))
 
 local BannerCard = {}
 
@@ -70,13 +72,13 @@ function BannerCard.getImage(bannerId: string?): string
 	return definition.Image or ""
 end
 
-function BannerCard.populate(refs: Refs, name: string, level: number, bannerId: string?)
+function BannerCard.populate(refs: Refs, name: string, level: number, bannerId: string?, isVIP: boolean?)
 	local image: any = refs.image
 	if image then
 		image.Image = BannerCard.getImage(bannerId)
 	end
 	if refs.name then
-		refs.name.Text = name
+		VipTag.apply(refs.name, name, isVIP == true)
 	end
 	if refs.level then
 		refs.level.Text = `Lv. {level}`

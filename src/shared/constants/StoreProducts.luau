@@ -21,9 +21,8 @@
 
 local DEFAULT_ROW = "Row1"
 
--- El espacio inicial es la separación con el icono de Robux que la GUI dibuja
--- a la izquierda del label.
-local PRICE_TEXT_FORMAT = " %d"
+-- U+E002 es un codepoint privado que las fuentes de Roblox pintan como el icono de Robux.
+local PRICE_TEXT_FORMAT = "\u{E002} %d"
 
 -- Campos comunes a todo pack, sea de la moneda que sea: es lo único que
 -- necesita el binder del cliente para localizar y cablear un botón.
@@ -66,6 +65,8 @@ export type GamePassDefinition = {
 	RobuxPrice: number,
 	-- Precio ya formateado para el label (derivado de RobuxPrice).
 	PriceText: string,
+	-- Gems que se conceden una sola vez al poseerlo (VIPItemsService); un refund no las retira.
+	WelcomeGems: number?,
 }
 
 -- Orden estable explícito: `ByName` es un diccionario y recorrerlo pintaría la fila
@@ -108,8 +109,8 @@ local GEM_PACKS = {
 -- En el orden en que se pintan. `RobuxPrice` debe coincidir con el precio del panel
 -- de Roblox o el botón mentirá.
 local GAME_PASS_LIST = {
-	-- Bonus de cash de fin de partida: el bonus "VIP" de ResultsRewards.
-	{ Name = "VIP", ButtonName = "VIP", PassId = 1962133164, RobuxPrice = 100 },
+	-- Bonus "VIP" de ResultsRewards, ítems isVIPExclusive, Gems de bienvenida y tag VIP (VIPItemsService).
+	{ Name = "VIP", ButtonName = "VIP", PassId = 1962133164, RobuxPrice = 299, WelcomeGems = 100 },
 	-- Cuelga de la espalda el arma que no llevas en la mano (BackWeaponService).
 	{ Name = "BackWeapon", ButtonName = "BackWeapon", PassId = 1964587184, RobuxPrice = 200 },
 }

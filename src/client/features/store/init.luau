@@ -30,6 +30,7 @@
 local MarketplaceService = game:GetService("MarketplaceService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 
 local Client = script.Parent.Parent
@@ -47,8 +48,13 @@ local UIUtils = require(Client.core.ui.UIUtils)
 local UITheme = require(Client.core.ui.UITheme)
 local GiftFlow = require(Client.features.gifting.GiftFlow)
 local StoreProducts = require(Shared.constants.StoreProducts)
+local DebugFlags = require(Shared.utils.DebugFlags)
 
 local BLUR_KEY = "Store"
+
+-- En Studio la posesión no se pregunta a Roblox: mismo flag que GamePassService.
+local IS_STUDIO = RunService:IsStudio()
+local noGamePasses = DebugFlags.bind(ReplicatedStorage, "NoGamePasses")
 
 local CASH_ROW_NAME = "CoinsRow"
 local GEMS_ROW_NAME = "GemsRow"
@@ -299,8 +305,17 @@ function StoreFeature.start(menuController: any): any
 		refreshOwnedByPassId[pass.PassId] = setOwned
 
 		-- Una consulta por pass al arrancar la feature (llamada web): el estado solo cambia por
-		-- una compra, que ya avisa por PromptGamePassPurchaseFinished.
+		-- una compra, que ya avisa por PromptGamePassPurchaseFinished. En Studio, el flag.
 		task.spawn(function()
+			if IS_STUDIO then
+				-- Hasta Loaded la carpeta Debug puede no haber replicado y el flag daría false.
+				if not game:IsLoaded() then
+					game.Loaded:Wait()
+				end
+				setOwned(not noGamePasses())
+				return
+			end
+
 			local ok, result = pcall(function()
 				return MarketplaceService:UserOwnsGamePassAsync(player.UserId, pass.PassId)
 			end)
