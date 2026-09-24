@@ -4,20 +4,33 @@
 	migración (Reconcile() lo rellena); renombrar, cambiar forma o mover datos sí.
 
 	Para añadir una: función en MIGRATIONS indexada por la versión de DESTINO que muta
-	`data` in-place y es idempotente; subir CURRENT_VERSION y Metadata.Version de
-	DataTemplate al mismo número.
+	`data` in-place y es idempotente, y subir `Metadata.Version` de DataTemplate.
 
 	Si una falla, Version no avanza y se reintenta en el siguiente login. Corren antes
 	de crear la Replica, así que mutar in-place es seguro.
 ]]
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local DataTemplate = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("DataTemplate"))
+
 local DataMigrations = {}
 
--- Debe coincidir con `Metadata.Version` del DataTemplate.
-DataMigrations.CURRENT_VERSION = 2
+DataMigrations.CURRENT_VERSION = DataTemplate.Metadata.Version
 
 local MIGRATIONS: { [number]: (any) -> () } = {
 	-- v2 es la baseline.
+	[3] = function(data)
+		data.NewItemFlags = nil
+		if type(data.Settings) == "table" then
+			data.Settings.ColorblindMode = nil
+			data.Settings.Language = nil
+			data.Settings.CrosshairColor = nil
+		end
+		if type(data.Rewards) == "table" then
+			data.Rewards.NotificationsClaimed = nil
+		end
+	end,
 }
 
 DataMigrations.migrations = MIGRATIONS

@@ -29,7 +29,6 @@ ActionRewards.Amounts = {
 	DailyWinMatches = { XP = 0, Cash = 200 },
 
 	ClaimLikeJoin = { XP = 0, Cash = 50 },
-	ClaimNotifications = { XP = 0, Cash = 50 },
 
 	-- Código nuevo: añadir la entrada aquí y mapearla en RewardsService.CODE_TO_ACTION.
 	CodeWelcome = { XP = 0, Cash = 50 },

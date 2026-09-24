@@ -1,6 +1,5 @@
 --!strict
 
-local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
@@ -11,6 +10,7 @@ local NetGuards = require(Shared.networking.NetGuards)
 local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
 type DataService = DataServiceMod.DataServiceModule
 local RewardService = require(script.Parent.Parent.Parent.core.RewardService)
+local RateLimiter = require(script.Parent.Parent.Parent.utils.RateLimiter)
 local ActionRewards = require(Shared:WaitForChild("constants"):WaitForChild("ActionRewards"))
 
 local M = NetGuards.MAX
@@ -32,7 +32,7 @@ local CODE_TO_ACTION: { [string]: string } = {
 -- Tope contra un valor inflado por error en ActionRewards.
 local MAX_CODE_REWARD = 10000
 
-local _cooldowns: { [number]: { [string]: number } } = {}
+local _limiter = RateLimiter.new(COOLDOWN)
 
 local function _currentGroupId(): number
 	if game.CreatorType == Enum.CreatorType.Group then
@@ -56,19 +56,7 @@ local function _isPlayerInGameGroup(player: Player): boolean
 end
 
 local function _checkCooldown(player: Player, action: string): boolean
-	local playerCooldowns = _cooldowns[player.UserId]
-	if not playerCooldowns then
-		playerCooldowns = {}
-		_cooldowns[player.UserId] = playerCooldowns
-	end
-
-	local last = playerCooldowns[action] or 0
-	if time() - last < COOLDOWN then
-		return false
-	end
-
-	playerCooldowns[action] = time()
-	return true
+	return _limiter:tryConsume(player, action)
 end
 
 local function _trim(value: string): string
@@ -84,9 +72,8 @@ local function _send(player: Player, success: boolean, message: string, claimTyp
 	}, player)
 end
 
--- Roblox no expone si el jugador dio Like: solo se verifica el grupo. Los campos
--- LikeState/LikePendingSessionToken de DataTemplate son legacy y no se usan.
-local function _onClaimLikeJoin(_: {}, player: Player): ()
+-- Roblox no expone si el jugador dio Like: solo se verifica el grupo.
+local function _onClaimLikeJoin(_: Network.Empty, player: Player): ()
 	if not _checkCooldown(player, "likeJoin") then
 		_send(player, false, "Too many requests. Slow down.", "LikeJoin", 0)
 		return
@@ -108,6 +95,12 @@ local function _onClaimLikeJoin(_: {}, player: Player): ()
 		return
 	end
 
+	-- IsInGroup yielda (web) y ByteNet corre cada packet en su propio hilo: otro claim
+	-- del mismo jugador puede haber cobrado mientras tanto.
+	if profile.Data.Rewards.GroupClaimed == true or _dataService:GetProfile(player) ~= profile then
+		return
+	end
+
 	local ok, _xp, rewardCash = RewardService.Award(player, "ClaimLikeJoin", {
 		{ path = { "Rewards", "GroupClaimed" }, value = true },
 	}, "LikeJoin")
@@ -119,35 +112,7 @@ local function _onClaimLikeJoin(_: {}, player: Player): ()
 	end
 end
 
-local function _onClaimNotifications(_: {}, player: Player): ()
-	if not _checkCooldown(player, "notifications") then
-		_send(player, false, "Too many requests. Slow down.", "Notifications", 0)
-		return
-	end
-
-	local profile = _dataService:GetProfile(player)
-	if not profile then
-		_send(player, false, "Your data isn't loaded yet.", "Notifications", 0)
-		return
-	end
-
-	if profile.Data.Rewards.NotificationsClaimed then
-		_send(player, false, "Notifications reward already claimed.", "Notifications", 0)
-		return
-	end
-
-	local ok, _xp, rewardCash = RewardService.Award(player, "ClaimNotifications", {
-		{ path = { "Rewards", "NotificationsClaimed" }, value = true },
-	}, "Notifications")
-
-	if ok then
-		_send(player, true, "Notifications reward claimed. +" .. tostring(rewardCash) .. " Cash.", "Notifications", rewardCash)
-	else
-		_send(player, false, "Couldn't complete the claim. Try again.", "Notifications", 0)
-	end
-end
-
-local function _onRedeemCode(data: { code: string }, player: Player): ()
+local function _onRedeemCode(data: Network.RedeemCodePayload, player: Player): ()
 	-- Validar longitud antes de gsub/upper: un code enorme costaría O(n) al server.
 	if not NetGuards.validate(data, { code = M.Code }) then
 		_send(player, false, "That code isn't valid.", "Code", 0)
@@ -209,12 +174,8 @@ function RewardsService:Start(dataService: DataService): ()
 	_started = true
 	_dataService = dataService
 
-	Players.PlayerRemoving:Connect(function(player: Player)
-		_cooldowns[player.UserId] = nil
-	end)
 
 	Network.Rewards.ClaimLikeJoin.Listen(_onClaimLikeJoin)
-	Network.Rewards.ClaimNotifications.Listen(_onClaimNotifications)
 	Network.Rewards.RedeemCode.Listen(_onRedeemCode)
 end
 

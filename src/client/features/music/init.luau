@@ -55,22 +55,11 @@ local function ensureEqualizer(sound: Sound): EqualizerSoundEffect
 	return eq
 end
 
--- Borra la reverb "CaveReverb" que añadía una versión anterior. Solo por Name exacto,
--- para no tocar una reverb añadida a mano en Studio.
-local function removeLegacyCaveReverb(sound: Sound)
-	for _, child in sound:GetChildren() do
-		if child:IsA("ReverbSoundEffect") and child.Name == "CaveReverb" then
-			child:Destroy()
-		end
-	end
-end
-
 local LobbyMusicFeature = {}
 
 function LobbyMusicFeature.start(menuController: any): any
 	local janitor = Janitor.new()
 	local sound = ensureSound()
-	removeLegacyCaveReverb(sound)
 	local equalizer = ensureEqualizer(sound)
 
 	-- Arranca silencioso; applyState() abajo hace el primer tween al estado real.

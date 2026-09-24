@@ -5,8 +5,6 @@
 	Whitelist por handler:
 	  • UpdateSlider  → claves en NUMERIC_SETTINGS, value clamped a [0,1].
 	  • UpdateToggle  → claves en BOOLEAN_SETTINGS, value bool.
-	  • UpdateChoice  → claves en CHOICE_SETTINGS, value string en su set.
-	  • UpdateColor   → claves en COLOR_SETTINGS, RGB clamped a [0,1].
 
 	Añadir un setting nuevo:
 	  1. Añadir el campo al DataTemplate.Settings con default sensato.
@@ -17,12 +15,13 @@
 	que intenten escribir secciones arbitrarias del perfil.
 ]]
 
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 
 local Network   = require(Shared.networking.Network)
 local NetGuards = require(Shared.networking.NetGuards)
+local RateLimiter = require(script.Parent.Parent.Parent.utils.RateLimiter)
 
 local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
 type DataService = DataServiceMod.DataServiceModule
@@ -34,9 +33,6 @@ SettingsService.__index = SettingsService
 
 local _dataService: DataService = nil :: any
 local _started = false
--- Cooldown global por player (no por clave) para que rotar claves no sirva de spam;
--- dos cambios distintos dentro de RATE_LIMIT_SECONDS descartan el segundo.
-local _cooldowns: { [number]: number } = {}
 
 local RATE_LIMIT_SECONDS = 0.1
 
@@ -57,31 +53,47 @@ local BOOLEAN_SETTINGS = {
 	GiftsEnabled = true,
 }
 
-local CHOICE_SETTINGS: { [string]: { [string]: boolean } } = {
-	ColorblindMode = {
-		None = true,
-		Protanopia = true,
-		Deuteranopia = true,
-		Tritanopia = true,
-	},
-	Language = {
-		en = true, es = true, fr = true, pt = true, de = true,
-		it = true, ja = true, ko = true, zh = true, ru = true,
-	},
-}
+-- Por clave, y solo tras validarla contra la whitelist (así rotar claves no abre más
+-- que ~10 claves × 1/RATE_LIMIT_SECONDS): uno global descartaba en silencio un cambio
+-- legítimo de otra clave y el perfil se quedaba con el valor anterior.
+local _limiter = RateLimiter.new(RATE_LIMIT_SECONDS)
 
-local COLOR_SETTINGS = {
-	CrosshairColor = true,
-}
+-- userId → clave → último valor recibido dentro del cooldown.
+local _deferredByUserId: { [number]: { [string]: any } } = {}
 
-local function _checkCooldown(player: Player): boolean
-	local last = _cooldowns[player.UserId] or 0
-	if time() - last < RATE_LIMIT_SECONDS then
-		return false
+-- Un cambio dentro del cooldown no se descarta: se guarda el último y se aplica al
+-- vencer. Si no, dos toques rápidos al mismo toggle dejaban el perfil en el valor
+-- intermedio mientras la UI mostraba el final.
+local function _applySetting(player: Player, key: string, value: any): ()
+	if _limiter:tryConsume(player, key) then
+		_dataService:SetValue(player, { "Settings", key }, value)
+		return
 	end
 
-	_cooldowns[player.UserId] = time()
-	return true
+	local userId = player.UserId
+	local deferred = _deferredByUserId[userId]
+	if not deferred then
+		deferred = {}
+		_deferredByUserId[userId] = deferred
+	end
+	local alreadyScheduled = deferred[key] ~= nil
+	deferred[key] = value
+	if alreadyScheduled then
+		return
+	end
+	task.delay(RATE_LIMIT_SECONDS, function()
+		local pending = _deferredByUserId[userId]
+		local latest = if pending then pending[key] else nil
+		if latest == nil then
+			return
+		end
+		pending[key] = nil
+		if player.Parent ~= Players then
+			return
+		end
+		_limiter:mark(player, key)
+		_dataService:SetValue(player, { "Settings", key }, latest)
+	end)
 end
 
 local function _canUpdate(player: Player, key: string): boolean
@@ -98,7 +110,7 @@ local function _canUpdate(player: Player, key: string): boolean
 	return false
 end
 
-local function _onUpdateSlider(data: { key: string, value: number }, player: Player): ()
+local function _onUpdateSlider(data: Network.SliderPayload, player: Player): ()
 	if not NetGuards.validate(data, { key = M.SettingKey }) then
 		return
 	end
@@ -106,19 +118,14 @@ local function _onUpdateSlider(data: { key: string, value: number }, player: Pla
 		return
 	end
 
-	if not _checkCooldown(player) then
-		return
-	end
-
 	if not NUMERIC_SETTINGS[data.key] or not _canUpdate(player, data.key) then
 		return
 	end
 
-	local value = math.clamp(data.value, 0, 1)
-	_dataService:SetValue(player, { "Settings", data.key }, value)
+	_applySetting(player, data.key, math.clamp(data.value, 0, 1))
 end
 
-local function _onUpdateToggle(data: { key: string, value: boolean }, player: Player): ()
+local function _onUpdateToggle(data: Network.TogglePayload, player: Player): ()
 	if not NetGuards.validate(data, { key = M.SettingKey }) then
 		return
 	end
@@ -126,64 +133,11 @@ local function _onUpdateToggle(data: { key: string, value: boolean }, player: Pl
 		return
 	end
 
-	if not _checkCooldown(player) then
-		return
-	end
-
 	if not BOOLEAN_SETTINGS[data.key] or not _canUpdate(player, data.key) then
 		return
 	end
 
-	_dataService:SetValue(player, { "Settings", data.key }, data.value)
-end
-
-local function _onUpdateChoice(data: { key: string, value: string }, player: Player): ()
-	if not NetGuards.validate(data, { key = M.SettingKey, value = M.SettingChoice }) then
-		return
-	end
-
-	if not _checkCooldown(player) then
-		return
-	end
-
-	local validValues = CHOICE_SETTINGS[data.key]
-	if not validValues or not validValues[data.value] then
-		warn(`[SettingsService] Choice inválida {data.key}={data.value}`)
-		return
-	end
-
-	if not _canUpdate(player, data.key) then
-		return
-	end
-
-	_dataService:SetValue(player, { "Settings", data.key }, data.value)
-end
-
-local function _onUpdateColor(data: { key: string, r: number, g: number, b: number }, player: Player): ()
-	if not NetGuards.validate(data, { key = M.SettingKey }) then
-		return
-	end
-	if type(data.r) ~= "number" or type(data.g) ~= "number" or type(data.b) ~= "number" then
-		return
-	end
-	if data.r ~= data.r or data.g ~= data.g or data.b ~= data.b then
-		return
-	end
-
-	if not _checkCooldown(player) then
-		return
-	end
-
-	if not COLOR_SETTINGS[data.key] or not _canUpdate(player, data.key) then
-		return
-	end
-
-	local color = {
-		R = math.clamp(data.r, 0, 1),
-		G = math.clamp(data.g, 0, 1),
-		B = math.clamp(data.b, 0, 1),
-	}
-	_dataService:SetValue(player, { "Settings", data.key }, color)
+	_applySetting(player, data.key, data.value)
 end
 
 function SettingsService:Start(dataService: DataService): ()
@@ -194,14 +148,12 @@ function SettingsService:Start(dataService: DataService): ()
 	_started = true
 	_dataService = dataService
 
-	Players.PlayerRemoving:Connect(function(player: Player)
-		_cooldowns[player.UserId] = nil
-	end)
 
 	Network.Settings.UpdateSlider.Listen(_onUpdateSlider)
 	Network.Settings.UpdateToggle.Listen(_onUpdateToggle)
-	Network.Settings.UpdateChoice.Listen(_onUpdateChoice)
-	Network.Settings.UpdateColor.Listen(_onUpdateColor)
+	Players.PlayerRemoving:Connect(function(player: Player)
+		_deferredByUserId[player.UserId] = nil
+	end)
 end
 
 return SettingsService

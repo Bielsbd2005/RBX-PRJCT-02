@@ -98,7 +98,7 @@ export type WeaponKills = {
 
 --[[
 	Whitelist de claves en SettingsService: un cambio de tipo aquí requiere tocar
-	su handler (UpdateSlider/UpdateToggle/UpdateChoice).
+	su handler (UpdateSlider/UpdateToggle).
 ]]
 export type Settings = {
 	-- Sliders 0..1
@@ -112,19 +112,12 @@ export type Settings = {
 	AutoShoot: boolean,
 	ShowDamageNumbers: boolean,
 	GiftsEnabled: boolean, -- acepta recibir regalos
-	ColorblindMode: string, -- "None" | "Protanopia" | "Deuteranopia" | "Tritanopia"
-	Language: string, -- ISO 639-1
-	-- RGB 0..1.
-	CrosshairColor: { R: number, G: number, B: number },
 }
 
 export type Rewards = {
-	LikeState: string,
-	LikePendingSessionToken: string,
 	GroupClaimed: boolean,
-	NotificationsClaimed: boolean,
 	ClaimedCodes: { [string]: boolean },
-	FirstPurchaseClaimed: boolean,
+	VIPWelcomeClaimed: boolean, -- Gems de bienvenida del VIP ya concedidas (VIPItemsService)
 }
 
 -- DataService la actualiza al cargar comparando LastLoginDateKey con el día UTC.
@@ -140,10 +133,6 @@ export type PlayedCash = {
 	DateKey: string, -- "YYYY-MM-DD" UTC
 	Amount: number,
 }
-
--- Marcadores "NEW!" del Locker: category → itemId → true (presencia = no visto).
--- El server los pone al conceder; el cliente los limpia con Locker.MarkItemSeen.
-export type NewItemFlags = { [string]: { [string]: boolean } }
 
 export type Metadata = {
 	CreatedAt: number,
@@ -192,6 +181,18 @@ export type GiftIntent = {
 	CreatedAt: number,
 }
 
+--[[
+	PurchaseId → entrega de regalo YA intentada (en el perfil del comprador). Se escribe
+	antes de depositar/enviar el message: un reintento del receipt vuelve a entregar al
+	mismo receptor aunque GiftIntent haya caducado o cambiado. DataService la poda al cargar.
+]]
+export type GiftDelivery = {
+	ReceiverUserId: number,
+	ProductId: number,
+	At: number,
+}
+export type GiftDeliveries = { [string]: GiftDelivery }
+
 -- Definición de tareas en shared/constants/DailyTasks.luau.
 --   DateKey: "YYYY-MM-DD" UTC del último reset.
 --   Claimed: por slot; evita pagar dos veces aunque el contador siga subiendo.
@@ -235,7 +236,6 @@ export type PlayerProfile = {
 	Rewards: Rewards,
 	LoginStreak: LoginStreak,
 	PlayedCash: PlayedCash,
-	NewItemFlags: NewItemFlags,
 	DailyTasks: DailyTasksState,
 	BattlePass: BattlePassState,
 	Metadata: Metadata,
@@ -243,6 +243,7 @@ export type PlayerProfile = {
 	PendingGifts: PendingGifts,
 	ClaimedGifts: ClaimedGifts,
 	GiftIntent: GiftIntent,
+	GiftDeliveries: GiftDeliveries,
 }
 
 -- Reconcile() rellena claves faltantes en perfiles existentes, pero no borra las que sobran.
@@ -337,18 +338,12 @@ local DEFAULT: PlayerProfile = {
 		AutoShoot = true,
 		ShowDamageNumbers = true,
 		GiftsEnabled = true,
-		ColorblindMode = "None",
-		Language = "en",
-		CrosshairColor = { R = 1, G = 1, B = 1 },
 	},
 
 	Rewards = {
-		LikeState = "None",
-		LikePendingSessionToken = "",
 		GroupClaimed = false,
-		NotificationsClaimed = false,
 		ClaimedCodes = {},
-		FirstPurchaseClaimed = false,
+		VIPWelcomeClaimed = false,
 	},
 
 	LoginStreak = {
@@ -362,7 +357,6 @@ local DEFAULT: PlayerProfile = {
 		Amount = 0,
 	},
 
-	NewItemFlags = {},
 
 	DailyTasks = {
 		DateKey = "",
@@ -395,7 +389,7 @@ local DEFAULT: PlayerProfile = {
 		LastSeen = 0,
 		-- Bumpear CURRENT_VERSION en DataMigrations solo para migraciones destructivas;
 		-- los campos nuevos los rellena Reconcile.
-		Version = 2,
+		Version = 3,
 		JoinCount = 0,
 		FirstSessionVersion = "",
 		LastClientVersion = "",
@@ -413,6 +407,8 @@ local DEFAULT: PlayerProfile = {
 		ProductId = 0,
 		CreatedAt = 0,
 	},
+
+	GiftDeliveries = {},
 }
 
 -- ProfileStore hace deep-copy al crear un perfil.
