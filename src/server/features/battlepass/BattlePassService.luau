@@ -18,8 +18,8 @@
 	  • PromptPremium(player): compra del Premium con GEMS: chequeo de saldo, cobro y
 	    grant en un único BatchUpdate atómico sobre Stats.Gems. Sin receipt.
 	  • ProcessReceipt(receiptInfo): developer products Robux. Skips de +1 y +5
-	    niveles (el cliente lanza el prompt) y el Premium LEGACY, dormido con
-	    PremiumProductId = 0. Idempotente vía DataService:IsReceiptProcessed.
+	    niveles (el cliente lanza el prompt) y el Premium por Robux, desactivado
+	    con PremiumProductId = 0. Idempotente vía DataService:IsReceiptProcessed.
 ]]
 
 local Players = game:GetService("Players")
@@ -27,6 +27,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Network   = require(Shared.networking.Network)
+local NetGuards = require(Shared.networking.NetGuards)
+local RateLimiter = require(script.Parent.Parent.Parent.utils.RateLimiter)
 local BattlePassConfig = require(Shared.constants.BattlePassConfig)
 local Currency = require(Shared.constants.Currency)
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
@@ -39,23 +41,10 @@ local MAX_LEVELUP_ITERATIONS = 200 -- guard contra loops infinitos por XP descom
 
 -- Rate-limit anti-spam para los handlers C→S. La lógica es idempotente, pero spammear
 -- ClaimTier fuerza trabajo costoso (season + GetProfile + BatchUpdate) o prompts en bucle.
-local ACTION_COOLDOWN = 0.3
-local _cooldowns: { [number]: { [string]: number } } = {}
+local _actionLimiter = RateLimiter.new(0.3)
 
 local function _checkActionCooldown(player: Player, action: string): boolean
-	local playerCooldowns = _cooldowns[player.UserId]
-	if not playerCooldowns then
-		playerCooldowns = {}
-		_cooldowns[player.UserId] = playerCooldowns
-	end
-
-	local last = playerCooldowns[action] or 0
-	if time() - last < ACTION_COOLDOWN then
-		return false
-	end
-
-	playerCooldowns[action] = time()
-	return true
+	return _actionLimiter:tryConsume(player, action)
 end
 
 local BattlePassService = {}
@@ -151,22 +140,11 @@ local function _ensureSeason(player: Player): boolean
 	return true
 end
 
--- Otorga un WeaponWrap a TODAS las armas (Main + Special) en un BatchUpdate atómico.
--- Cobertura = catálogo ItemsConfig.<cat> ∪ Inventory.<cat>, así se cubren armas nuevas
--- del catálogo y armas que están en el inventario pero no en el catálogo ("Default").
--- Idempotente; el gate de Claimed impide invocarlo dos veces para el mismo tier.
-local function _grantGlobalWeaponWrap(player: Player, wrapId: string): boolean
-	if not _dataService then return false end
-
-	local profile = _dataService:GetProfile(player)
-	if not profile or not profile.Data then return false end
-
-	local updates: { any } = {
-		{ path = { "InventoryMeta", "WeaponWraps", wrapId },
-			value = { AcquiredAt = os.time(), Source = "BattlePass" } },
-		{ path = { "NewItemFlags", "WeaponWraps", wrapId }, value = true },
-	}
-
+-- Un wrap global del pase va a TODAS las armas: catálogo ItemsConfig.<cat> ∪
+-- Inventory.<cat>, así se cubren armas nuevas del catálogo y armas que están en el
+-- inventario pero no en el catálogo ("Default").
+local function _allWeaponTargets(profile: any): { DataServiceMod.WrapTarget }
+	local targets: { DataServiceMod.WrapTarget } = {}
 	local inventory = profile.Data.Inventory
 	for _, category in { "Main", "Special" } do
 		local seen: { [string]: boolean } = {}
@@ -183,38 +161,14 @@ local function _grantGlobalWeaponWrap(player: Player, wrapId: string): boolean
 			end
 		end
 		for weaponId in seen do
-			table.insert(updates, {
-				path = { "Inventory", "WeaponWrapsByWeapon", category, weaponId, wrapId },
-				value = true,
-			})
+			table.insert(targets, { category = category, weaponId = weaponId })
 		end
 	end
-
-	return _dataService:BatchUpdate(player, updates)
+	return targets
 end
 
--- Otorga un WeaponWrap a UN arma específica (per-weapon). Mismo set de paths
--- que el flujo de Shop para WeaponWraps comprados, así InventoryRepository y
--- el resto de consumidores leen el wrap exactamente igual que uno comprado.
-local function _grantWeaponSpecificWrap(
-	player: Player,
-	wrapId: string,
-	weaponCategory: string,
-	weaponId: string
-): boolean
-	if not _dataService then return false end
-
-	return _dataService:BatchUpdate(player, {
-		{ path = { "InventoryMeta", "WeaponWraps", wrapId },
-			value = { AcquiredAt = os.time(), Source = "BattlePass" } },
-		{ path = { "NewItemFlags", "WeaponWraps", wrapId }, value = true },
-		{ path = { "Inventory", "WeaponWrapsByWeapon", weaponCategory, weaponId, wrapId },
-			value = true },
-	})
-end
-
--- Op de BatchUpdate para recompensas Cash/Gems. Item devuelve nil: se concede fuera vía
--- DataService:GrantItem (crea Inventory + InventoryMeta + NewItemFlags).
+-- Op de BatchUpdate para recompensas Cash/Gems. Item devuelve nil: sus entries salen de
+-- _itemRewardUpdates.
 local function _rewardToOp(reward: BattlePassConfig.Reward): { path: { string }, delta: number }?
 	if reward.Kind == "Cash" then
 		return { path = { "Stats", "Cash" }, delta = math.max(0, math.floor(reward.Amount or 0)) }
@@ -420,28 +374,27 @@ function BattlePassService:ClaimTier(player: Player, tierLevel: number): ()
 	-- Antes del grant, mientras aún se distingue lo comprado de lo concedido.
 	local refund = _refundForOwnedReward(profile.Data, reward)
 
-	-- Para items: granteamos ANTES de marcar claimed (GrantItem idempotente).
-	if reward.Kind == "Item" and reward.Category and reward.ItemId then
-		local grantOk: boolean
-		if reward.Category == "WeaponWraps" and reward.Global == true then
-			grantOk = _grantGlobalWeaponWrap(player, reward.ItemId)
-		elseif reward.Category == "WeaponWraps"
-			and reward.WeaponCategory and reward.WeaponId
-		then
-			grantOk = _grantWeaponSpecificWrap(player, reward.ItemId, reward.WeaponCategory, reward.WeaponId)
-		else
-			grantOk = _dataService:GrantItem(player, reward.Category, reward.ItemId, "BattlePass")
-		end
-		if not grantOk then
-			_respond(player, false, "SaveFailed", tierLevel)
-			return
-		end
-	end
-
-	-- Marcar claimed + grant Cash en un único BatchUpdate.
+	-- Grant del ítem, marca de claimed y moneda en un único BatchUpdate: si el ítem
+	-- quedara concedido sin el claimed, el reintento lo vería "ya poseído" y pagaría
+	-- además su precio (_refundForOwnedReward).
 	local updates: { any } = {
 		{ path = { "BattlePass", "Claimed", levelKey }, value = true },
 	}
+	if reward.Kind == "Item" and reward.Category and reward.ItemId then
+		local itemUpdates: { any }
+		if reward.Category == "WeaponWraps" and reward.Global == true then
+			itemUpdates = _dataService:GrantWeaponWrapUpdates(reward.ItemId, _allWeaponTargets(profile), "BattlePass")
+		elseif reward.Category == "WeaponWraps"
+			and reward.WeaponCategory and reward.WeaponId
+		then
+			itemUpdates = _dataService:GrantWeaponWrapUpdates(reward.ItemId, {
+				{ category = reward.WeaponCategory, weaponId = reward.WeaponId },
+			}, "BattlePass")
+		else
+			itemUpdates = _dataService:GrantItemUpdates(reward.Category, reward.ItemId, "BattlePass")
+		end
+		table.move(itemUpdates, 1, #itemUpdates, #updates + 1, updates)
+	end
 	local rewardOp = _rewardToOp(reward)
 	if rewardOp then
 		table.insert(updates, rewardOp)
@@ -663,7 +616,7 @@ function BattlePassService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchas
 	if _dataService:IsReceiptProcessed(player, purchaseId) then
 		-- Ya concedido en memoria; confirmar que está persistido antes de
 		-- conceder (Roblox consume el receipt al devolver PurchaseGranted).
-		if _dataService:ForceSave(player) then
+		if _dataService:SaveReceipt(player, purchaseId) then
 			return Enum.ProductPurchaseDecision.PurchaseGranted
 		end
 		return Enum.ProductPurchaseDecision.NotProcessedYet
@@ -692,11 +645,11 @@ function BattlePassService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchas
 		end
 		-- Durabilidad del receipt: persistir confirmado antes de conceder
 		-- (Roblox no espera a nuestro write tras PurchaseGranted).
-		if not _dataService:ForceSave(player) then
+		if not _dataService:SaveReceipt(player, purchaseId) then
 			return Enum.ProductPurchaseDecision.NotProcessedYet
 		end
-		-- Paso 2 = "Purchased" (el embudo es de 2 pasos desde la compra en Gems;
-		-- este path legacy reporta el mismo paso final para no romper la serie).
+		-- Paso 2 = "Purchased": el embudo es de 2 pasos desde la compra en Gems y la
+		-- compra por Robux reporta el mismo paso final.
 		local sessionId = _bpFunnelSessionByUserId[player.UserId]
 		_bpPremiumStep(player, 2, sessionId)
 		_bpFunnelSessionByUserId[player.UserId] = nil
@@ -729,7 +682,7 @@ function BattlePassService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchas
 	-- Durabilidad del receipt: persistir el skip (GrantedSkips + ProcessedReceipts
 	-- + tier) confirmado antes de conceder. Si falla, NotProcessedYet → Roblox
 	-- reentrega y la idempotencia de GrantedSkips evita un segundo tier-up.
-	if not _dataService:ForceSave(player) then
+	if not _dataService:SaveReceipt(player, purchaseId) then
 		return Enum.ProductPurchaseDecision.NotProcessedYet
 	end
 
@@ -781,17 +734,17 @@ function BattlePassService:Start(dataService: DataService): ()
 	end
 
 	Players.PlayerRemoving:Connect(function(player: Player)
-		_cooldowns[player.UserId] = nil
 		_bpFunnelSessionByUserId[player.UserId] = nil
 	end)
 
 	-- Listeners de red. ACTION_COOLDOWN: rate-limit por player+acción (anti-spam).
-	Network.BattlePass.ClaimTier.Listen(function(data: any, player: Player)
+	Network.BattlePass.ClaimTier.Listen(function(data: Network.ClaimTierPayload, player: Player)
 		if not _checkActionCooldown(player, "claim") then return end
+		if not NetGuards.validate(data, { tier = { kind = "number", integer = true, min = 1 } }) then return end
 		BattlePassService:ClaimTier(player, data.tier)
 	end)
 
-	Network.BattlePass.BuyPremium.Listen(function(_data: any, player: Player)
+	Network.BattlePass.BuyPremium.Listen(function(_data: Network.Empty, player: Player)
 		if not _checkActionCooldown(player, "premium") then return end
 		BattlePassService:PromptPremium(player)
 	end)

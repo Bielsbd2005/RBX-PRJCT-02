@@ -5,7 +5,7 @@
 	modelo, no sus pies:
 	  · HeadSpawn  → clon de ReplicatedStorage.Templates.HeadTemplate (hats y faces).
 	  · WrapSpawn  → arma de Shared.Locker.weapons.<categoría> vestida con
-	    WeaponWrapPreviewer.applyAppearance, igual que en la card del slot.
+	    WeaponWrapPainter, igual que en la card del slot y en partida.
 	  · DummySpawn → maniquí de Shared.Bodies: el body, o KillEffectDummy con el
 	    kill effect en bucle.
 	  · PileSpawn  → Templates.CoinPile (Cash) / GemPile (Gems), cantidad en
@@ -34,6 +34,7 @@ local BannerPreviewer = require(Client.features.locker.Previewers.BannerPreviewe
 local HatApplier = require(Client.features.locker.Appliers.HatApplier)
 local FaceApplier = require(Client.features.locker.Appliers.FaceApplier)
 local WeaponWrapPreviewer = require(Client.features.locker.Previewers.WeaponWrapPreviewer)
+local WeaponWrapPainter = require(Shared.Locker.WeaponWrapPainter)
 local LockerUtils = require(Client.features.locker.LockerUtils)
 local UIUtils = require(Client.core.ui.UIUtils)
 local BattlePassConfig = require(Shared.constants.BattlePassConfig)
@@ -386,7 +387,6 @@ export type ScenePreview = typeof(setmetatable(
 		_stands: { Stand },
 		_hats: any,
 		_face: any,
-		_wrapJanitor: any,
 		_headKey: string?,
 		_pileKey: string?,
 		-- Divisa del montón clonado: mientras no cambie, cambiar de cantidad solo
@@ -419,7 +419,6 @@ function ScenePreview.new(): ScenePreview
 	self._stands = { self._head, self._weapon, self._dummy, self._pile }
 	self._hats = nil
 	self._face = nil
-	self._wrapJanitor = nil
 	self._headKey = nil
 	self._pileKey = nil
 	self._pileKind = nil
@@ -512,35 +511,13 @@ function ScenePreview:_buildWeapon(target: RewardTarget): Model?
 	return holder
 end
 
--- El janitor del wrap anterior se destruye SIEMPRE: dentro vive el loop de
--- texturas animadas, que seguiría escribiendo sobre el modelo ya destruido.
+-- Se pinta sobre el modelo YA escalado: el tile escala con él o saldrían más tiles
+-- que en la card del slot.
 function ScenePreview:_dressWeapon(model: Model?, wrapId: string?)
-	if self._wrapJanitor then
-		self._wrapJanitor:Destroy()
-		self._wrapJanitor = nil
-	end
 	if not (model and wrapId) then
 		return
 	end
-
-	local catalog = ItemsConfig.WeaponWraps
-	local wrapDef = if type(catalog) == "table" then catalog[wrapId] else nil
-	if type(wrapDef) ~= "table" then
-		return
-	end
-
-	-- El wrap se pinta sobre el modelo YA escalado: el tamaño de tile debe escalar
-	-- con él o saldrían más tiles que en la card del slot.
-	local studsPerTile = (tonumber(wrapDef.StudsPerTile) or WeaponWrapPreviewer.DEFAULT_STUDS_PER_TILE) * WEAPON_SCALE
-
-	self._wrapJanitor = Janitor.new()
-	WeaponWrapPreviewer.applyAppearance(model, {
-		TextureID = wrapDef.TextureID,
-		BaseColor = wrapDef.BaseColor,
-		Material = wrapDef.Material,
-		isAnimated = wrapDef.isAnimated,
-		StudsPerTile = studsPerTile,
-	}, self._wrapJanitor)
+	WeaponWrapPainter.paint(model, WeaponWrapPainter.getDefinition(wrapId), WEAPON_SCALE)
 end
 
 function ScenePreview:_setWeapon(target: RewardTarget, instant: boolean)

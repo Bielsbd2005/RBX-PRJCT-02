@@ -46,7 +46,7 @@ export type Season = {
 	EndsAt: number,             -- Unix timestamp del fin de season (fuente del timer del HUD). 0 = sin contador.
 	-- Descontado de Stats.Gems en un BatchUpdate atómico. 0 = no comprable.
 	PremiumGemPrice: number,
-	-- Flujo Robux directo antiguo, dormido con ProductId = 0; se conserva por si vuelve en una promo.
+	-- Compra directa con Robux. 0 la desactiva.
 	PremiumProductId: number,
 	PremiumRobuxPrice: number,
 	Tiers: { Tier },            -- contiguos, Level == índice
@@ -61,6 +61,7 @@ export type Products = {
 }
 
 local ActionRewards = require(script.Parent:WaitForChild("ActionRewards"))
+local AssetIds = require(script.Parent:WaitForChild("AssetIds"))
 local BattlePassSeasons = require(script.Parent:WaitForChild("BattlePassSeasons")) :: any
 
 local BattlePassConfig = {}
@@ -71,7 +72,7 @@ BattlePassConfig.XPRates = {
 }
 
 BattlePassConfig.RewardIcons = {
-	Cash = "rbxassetid://113694528712529",
+	Cash = AssetIds.Images.CashReward,
 	-- TODO: subir el icono de Gems. Vacío a propósito: sin icono la UI caería al de
 	-- Cash y confundiría las monedas.
 	Gems = "",
@@ -258,7 +259,7 @@ end
 
 -- Exclusivo = aparece en algún tier (de cualquier season, incluidos borradores y
 -- pasadas) y no se consigue de otra forma. Un ítem comprable (CanPurchase) o de
--- KillChallenge que también esté en el pase no es exclusivo: marcarlo lo volvería
+-- maestría (KillChallenge, MasteryScope) que también esté en el pase no es exclusivo: marcarlo lo volvería
 -- incomprable en ShopService e invisible en LockerCatalog.
 local _bpExclusiveCache: { [string]: { [string]: boolean } }? = nil
 local function _buildBPExclusiveCache(): { [string]: { [string]: boolean } }
@@ -271,7 +272,7 @@ local function _buildBPExclusiveCache(): { [string]: { [string]: boolean } }
 				local catalog = ItemsConfig[reward.Category]
 				local def = if type(catalog) == "table" then catalog[reward.ItemId] else nil
 				local obtainableElsewhere = type(def) == "table"
-					and (def.CanPurchase == true or def.KillChallenge ~= nil)
+					and (def.CanPurchase == true or def.KillChallenge ~= nil or def.MasteryScope ~= nil)
 				if not obtainableElsewhere then
 					local cat = set[reward.Category]
 					if not cat then
