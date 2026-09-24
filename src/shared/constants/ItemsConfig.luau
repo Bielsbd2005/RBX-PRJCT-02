@@ -450,12 +450,11 @@ Special = {
 		Ducky   = { Name = "Ducky",          Price = 0, LevelRequired = 0, Rarity = "Legendary",     Image = "rbxassetid://131931384520146", CanPurchase = false, isBPExclusive = true, Season = "S1", SeasonTier = 40 },
 		Tourist = { Name = "Tourist",        Price = 100,  LevelRequired = 0,  Rarity = "Common", Image = "rbxassetid://120382636547205", CanPurchase = true, Currency = "Gems" },
 		Casual  = { Name = "Casual Dad",         Price = 1000, LevelRequired = 0, Rarity = "Epic",     Image = "rbxassetid://138309329239258", CanPurchase = true, Currency = "Gems" },
-		Jungle  = { Name = "Jorge",         Price = 2500, LevelRequired = 0, Rarity = "Legendary",     Image = "rbxassetid://137785541624765", CanPurchase = true, Currency = "Gems" },
+		-- Gancho de primera compra: su precio lo cierran las Gems gratis del pase más el pack de 99 R$
+		-- (temporadas-y-assets.md, en Telemetry). Revisarlo si cambian las Gems del pase o los packs.
+		Jungle  = { Name = "Jorge",         Price = 400, LevelRequired = 0, Rarity = "Rare",     Image = "rbxassetid://137785541624765", CanPurchase = true, Currency = "Gems" },
 		Agent  = { Name = "007",         Price = 2500, LevelRequired = 0, Rarity = "Legendary",     Image = "rbxassetid://81380638175638", CanPurchase = true, Currency = "Gems" },
 		Armored  = { Name = "Fridge",         Price = 2500, LevelRequired = 0, Rarity = "Legendary",     Image = "rbxassetid://130012491007709", CanPurchase = true, Currency = "Gems" },
-		-- PROVISIONAL: el Rare de Gems que faltaba entre Tourist (100) y Casual Dad (1.000): a él apuntan las 300 Gems
-		-- del pase o el pack de 250 más el pase. Sin modelo de cuerpo en Shared se equipa en datos y viste el Default.
-		Outfit_P01 = { Name = "Outfit P01", Price = 400, LevelRequired = 0, Rarity = "Rare", Image = "rbxassetid://0", CanPurchase = true, Currency = "Gems" },
 	},
 
 	Banners = {
