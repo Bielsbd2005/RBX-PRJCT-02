@@ -1,21 +1,16 @@
 --!strict
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ItemDefaults = require(Shared:WaitForChild("constants"):WaitForChild("ItemDefaults"))
-local WeaponWrapParts = require(Shared:WaitForChild("Locker"):WaitForChild("WeaponWrapParts"))
+local WeaponWrapPainter = require(Shared:WaitForChild("Locker"):WaitForChild("WeaponWrapPainter"))
 local wrapPreviewTemplate = ReplicatedStorage:WaitForChild("Templates"):WaitForChild("Wrap")
 local sharedWeaponAssets = Shared:WaitForChild("Locker"):WaitForChild("weapons")
 
+-- WrapId se pinta con la definición de ItemsConfig, la misma que usa la partida.
 export type WeaponWrapPreviewItem = {
-    TextureID: string?,
-    BaseColor: Color3?,
-    Material: Enum.Material?,
-    isAnimated: boolean?,
-    StudsPerTile: number?,
+    WrapId: string?,
     PreviewWeaponCategory: string?,
     PreviewWeaponId: string?,
     PreviewWeaponDisplayName: string?,
@@ -23,8 +18,6 @@ export type WeaponWrapPreviewItem = {
 
 local WeaponWrapPreviewer = {}
 
-local DEFAULT_WRAP_STUDS_PER_TILE = 3
-local WRAP_TEXTURE_SCROLL_SPEED_U = 1
 local FOV_IDEAL = 27
 local DISTANCIA_MULTIPLIER = 0.52
 -- Valores de la propiedad Orientation tal cual en Studio: fromEulerAnglesYXZ usa
@@ -40,33 +33,6 @@ local orientacionFija = CFrame.fromEulerAnglesYXZ(
 -- Este yaw de la cámara es lo que descentra el arma en la card.
 local CAMARA_ROTACION_Y = 4
 local orientacionCamara = CFrame.fromEulerAnglesYXZ(0, math.rad(CAMARA_ROTACION_Y), 0)
-
-local WEAPON_WRAP_TEXTURE_FACE_BY_NAME = {
-    ScrollTexture_Back = Enum.NormalId.Back,
-    ScrollTexture_Bottom = Enum.NormalId.Bottom,
-    ScrollTexture_Left = Enum.NormalId.Left,
-    ScrollTexture_Right = Enum.NormalId.Right,
-    ScrollTexture_Front = Enum.NormalId.Front,
-    ScrollTexture_Top = Enum.NormalId.Top,
-} :: { [string]: Enum.NormalId }
-
-local WEAPON_WRAP_TEXTURE_ORDER = {
-    "ScrollTexture_Back",
-    "ScrollTexture_Bottom",
-    "ScrollTexture_Left",
-    "ScrollTexture_Right",
-    "ScrollTexture_Front",
-    "ScrollTexture_Top",
-} :: { string }
-
-type AnimatedWrapEntry = { tileU: number }
-local activeAnimatedWrapTextures = {} :: { [Texture]: AnimatedWrapEntry }
-local activeAnimatedWrapConnection: RBXScriptConnection? = nil
-
--- En táctil el scroll avanza a 30 Hz (como WeaponWrapAnimator) por coste en móvil.
-local _isMobile = UserInputService.TouchEnabled
-local _THROTTLE_INTERVAL = if _isMobile then 1 / 30 else 0
-local _throttleAccum = 0
 
 -- Copias ya ancladas de cada template: Render solo clona (Clone conserva
 -- Anchored) en vez de recorrer descendientes en cada card.
@@ -88,59 +54,6 @@ local function _getPreparedTemplate(template: Instance): Instance
 	end
 	_preparedTemplateCache[template] = prepared
 	return prepared
-end
-
-local function stopActiveAnimatedWrapLoopIfIdle(): ()
-    if next(activeAnimatedWrapTextures) ~= nil then
-        return
-    end
-
-    if activeAnimatedWrapConnection then
-        activeAnimatedWrapConnection:Disconnect()
-        activeAnimatedWrapConnection = nil
-    end
-end
-
-local function ensureActiveAnimatedWrapLoop(): ()
-    if activeAnimatedWrapConnection then
-        return
-    end
-
-    activeAnimatedWrapConnection = RunService.Heartbeat:Connect(function(dt)
-        if _THROTTLE_INTERVAL > 0 then
-            _throttleAccum += dt
-            if _throttleAccum < _THROTTLE_INTERVAL then
-                return
-            end
-            dt = _throttleAccum
-            _throttleAccum = 0
-        end
-
-        for texture, entry in activeAnimatedWrapTextures do
-            if texture.Parent == nil then
-                activeAnimatedWrapTextures[texture] = nil
-            else
-                texture.OffsetStudsU = (texture.OffsetStudsU + WRAP_TEXTURE_SCROLL_SPEED_U * dt) % entry.tileU
-            end
-        end
-
-        stopActiveAnimatedWrapLoopIfIdle()
-    end)
-end
-
-local function registerAnimatedWrapTextures(previewJanitor: any, textures: { Texture }, studsPerTile: number): ()
-    for _, texture in textures do
-        activeAnimatedWrapTextures[texture] = { tileU = studsPerTile }
-    end
-
-    ensureActiveAnimatedWrapLoop()
-
-    previewJanitor:Add(function()
-        for _, texture in textures do
-            activeAnimatedWrapTextures[texture] = nil
-        end
-        stopActiveAnimatedWrapLoopIfIdle()
-    end, true)
 end
 
 local function resolveWeaponTemplate(item: WeaponWrapPreviewItem): Instance?
@@ -167,88 +80,6 @@ local function resolveWeaponTemplate(item: WeaponWrapPreviewItem): Instance?
         or (if displayName then categoryFolder:FindFirstChild(displayName) else nil)
         -- El modelo fallback en Locker.weapons.* debe llamarse igual que ItemDefaults.ITEM_ID.
         or categoryFolder:FindFirstChild(ItemDefaults.ITEM_ID)
-end
-
-local function getWrapPreviewPrimaryPart(previewInstance: Instance): BasePart?
-    if previewInstance:IsA("Model") then
-        local primaryPart = previewInstance.PrimaryPart
-        if primaryPart then
-            return primaryPart
-        end
-
-        local namedPrimary = previewInstance:FindFirstChild("primaryPart", true)
-        if namedPrimary and namedPrimary:IsA("BasePart") then
-            return namedPrimary
-        end
-
-        -- "Main" es el nombre de una BasePart del modelo, no la WeaponCategory.
-        local mainPart = previewInstance:FindFirstChild("Main", true)
-        if mainPart and mainPart:IsA("BasePart") then
-            return mainPart
-        end
-
-        return previewInstance:FindFirstChildWhichIsA("BasePart", true)
-    end
-
-    if previewInstance:IsA("BasePart") then
-        return previewInstance
-    end
-
-    return nil
-end
-
-local function applyWrapAppearance(parts: { BasePart }, item: WeaponWrapPreviewItem, previewJanitor: any): ()
-    local textureId = if type(item.TextureID) == "string" and item.TextureID ~= "" then item.TextureID else nil
-    local baseColor = item.BaseColor
-    local material = if typeof(item.Material) == "EnumItem" and item.Material.EnumType == Enum.Material then item.Material else nil
-    local animated = item.isAnimated == true
-    local studsPerTile = math.max(0.01, tonumber(item.StudsPerTile) or DEFAULT_WRAP_STUDS_PER_TILE)
-    local animatedTextures = {} :: { Texture }
-
-    for _, part in parts do
-        if not textureId and typeof(baseColor) == "Color3" then
-            part.Color = baseColor
-        end
-
-        if material then
-            part.Material = material
-        end
-
-        for _, child in part:GetChildren() do
-            if child:IsA("Texture") and string.sub(child.Name, 1, 14) == "ScrollTexture_" then
-                if not textureId then
-                    child:Destroy()
-                end
-            end
-        end
-
-        if textureId then
-            for _, textureName in WEAPON_WRAP_TEXTURE_ORDER do
-                local existingTexture = part:FindFirstChild(textureName)
-                local texture: Texture
-                if existingTexture and existingTexture:IsA("Texture") then
-                    texture = existingTexture
-                else
-                    texture = Instance.new("Texture")
-                    texture.Name = textureName
-                    texture.Face = WEAPON_WRAP_TEXTURE_FACE_BY_NAME[textureName]
-                    texture.Parent = part
-                end
-
-                texture.Texture = textureId
-                texture.Transparency = 0
-                texture.StudsPerTileU = studsPerTile
-                texture.StudsPerTileV = studsPerTile
-                texture.OffsetStudsU = 0
-                texture.OffsetStudsV = 0
-                table.insert(animatedTextures, texture)
-            end
-        end
-    end
-
-    if textureId and animated and #animatedTextures > 0 then
-        registerAnimatedWrapTextures(previewJanitor, animatedTextures, studsPerTile)
-    end
 end
 
 -- Encuadre para el template genérico `Wrap` (el de Render es el de las cards de arma).
@@ -305,23 +136,11 @@ function WeaponWrapPreviewer.reframeCentered(vp: ViewportFrame): ()
     )
 end
 
--- Quien pinte un wrap sobre un modelo escalado debe multiplicarlo por la escala.
-WeaponWrapPreviewer.DEFAULT_STUDS_PER_TILE = DEFAULT_WRAP_STUDS_PER_TILE
-
 -- Devuelve el template sin clonar.
 function WeaponWrapPreviewer.resolveWeaponTemplate(item: WeaponWrapPreviewItem): Instance?
     return resolveWeaponTemplate(item)
 end
 
--- Mismo camino que Render, para que un wrap en el mundo se vea igual que en la card.
-function WeaponWrapPreviewer.applyAppearance(instance: Instance, item: WeaponWrapPreviewItem, previewJanitor: any): boolean
-    local primaryPart = getWrapPreviewPrimaryPart(instance)
-    if not primaryPart then
-        return false
-    end
-    applyWrapAppearance(WeaponWrapParts.get(instance, primaryPart), item, previewJanitor)
-    return true
-end
 
 -- Devuelve (ok, usedWeaponTemplate). Si usedWeaponTemplate es false se pintó el
 -- bloque genérico `Wrap` y el caller debe llamar después a `reframeCentered`.
@@ -338,12 +157,9 @@ function WeaponWrapPreviewer.Render(viewportNode: ViewportFrame, item: WeaponWra
     clonedWrap.Parent = worldModel
     previewJanitor:Add(clonedWrap, "Destroy")
 
-    local previewPrimaryPart = getWrapPreviewPrimaryPart(clonedWrap)
-    if not previewPrimaryPart then
+    if not WeaponWrapPainter.paint(clonedWrap, WeaponWrapPainter.getDefinition(item.WrapId)) then
         return false, usedWeaponTemplate
     end
-
-    applyWrapAppearance(WeaponWrapParts.get(clonedWrap, previewPrimaryPart), item, previewJanitor)
 
     local modelCenter: CFrame
     local updatedSize: Vector3

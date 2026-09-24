@@ -21,6 +21,7 @@ local Confetti = require(script.Parent.Parent.Parent.core.ui.Confetti)
 local GameSounds = require(script.Parent.Parent.Parent.core.ui.GameSounds)
 local Fireworks = require(script.Parent.Parent.Parent.core.ui.Fireworks)
 local UIUtils = require(script.Parent.Parent.Parent.core.ui.UIUtils)
+local UIFade = require(script.Parent.Parent.Parent.core.ui.UIFade)
 local WeaponWrapPreviewer = require(script.Parent.Parent.locker.Previewers.WeaponWrapPreviewer)
 local Janitor = require(ReplicatedStorage:WaitForChild("Packages").janitor) :: any
 
@@ -31,11 +32,7 @@ export type MasteryProgress = {
 	name: string,
 	isComplete: boolean?,
 	-- Wrap del preview 3D: siguiente tier o el recién ganado.
-	textureID: string?,
-	baseColor: Color3?,
-	material: Enum.Material?,
-	animated: boolean?,
-	studsPerTile: number?,
+	wrapId: string?,
 }
 
 -- Solo se notifica con `isComplete`; `rewardCash` vuela en monedas hacia Stats.
@@ -158,13 +155,7 @@ local function _renderWrapPreview(itemViewport: ViewportFrame, wrap: any): any
 	end
 
 	local previewJanitor = Janitor.new()
-	local ok = WeaponWrapPreviewer.Render(itemViewport, {
-		TextureID = wrap.textureID,
-		BaseColor = wrap.baseColor,
-		Material = wrap.material,
-		isAnimated = wrap.animated,
-		StudsPerTile = wrap.studsPerTile,
-	}, previewJanitor)
+	local ok = WeaponWrapPreviewer.Render(itemViewport, { WrapId = wrap.wrapId }, previewJanitor)
 	if ok then
 		WeaponWrapPreviewer.reframeCentered(itemViewport)
 	end
@@ -187,55 +178,6 @@ local function _findNamed(root: Instance, name: string, className: string): Inst
 		end
 	end
 	return nil
-end
-
-type FadeTarget = {
-	object: Instance,
-	property: string,
-	original: number,
-}
-
--- Guarda las transparencias de Studio para hacer fade sin asumir que todo estaba a 0.
-local function _collectFadeTargets(root: GuiObject): { FadeTarget }
-	local targets: { FadeTarget } = {}
-	local function add(object: Instance, property: string)
-		table.insert(targets, { object = object, property = property, original = (object :: any)[property] })
-	end
-
-	if root:IsA("CanvasGroup") then
-		add(root, "GroupTransparency")
-		return targets
-	end
-
-	add(root, "BackgroundTransparency")
-	for _, descendant in root:GetDescendants() do
-		if descendant:IsA("GuiObject") then
-			add(descendant, "BackgroundTransparency")
-		end
-		if descendant:IsA("TextLabel") or descendant:IsA("TextButton") then
-			add(descendant, "TextTransparency")
-			add(descendant, "TextStrokeTransparency")
-		elseif descendant:IsA("ImageLabel") or descendant:IsA("ImageButton") then
-			add(descendant, "ImageTransparency")
-		elseif descendant:IsA("UIStroke") then
-			add(descendant, "Transparency")
-		end
-	end
-	return targets
-end
-
-local function _setFade(targets: { FadeTarget }, hidden: boolean)
-	for _, target in targets do
-		(target.object :: any)[target.property] = if hidden then 1 else target.original
-	end
-end
-
-local function _tweenFade(targets: { FadeTarget }, info: TweenInfo, hidden: boolean)
-	for _, target in targets do
-		TweenService:Create(target.object, info, {
-			[target.property] = if hidden then 1 else target.original,
-		}):Play()
-	end
 end
 
 -- En altos de imagen, positivo = por debajo.
@@ -331,7 +273,7 @@ function MatchNotificationsQueue.new(matchHudGui: ScreenGui?): any
 	self._notifying = false
 	self._onNotifyingChanged = nil :: ((notifying: boolean) -> ())?
 	-- Valores de Studio cacheados en el primer play (LevelUp es compartido por cuenta y pase).
-	self._levelUpFadeTargets = nil :: { FadeTarget }?
+	self._levelUpFadeTargets = nil :: { UIFade.FadeTarget }?
 	self._levelUpArrowPosition = nil :: UDim2?
 	self._levelUpPop = nil :: ScalePop?
 	self._framePops = {} :: { [GuiObject]: ScalePop }
@@ -502,7 +444,7 @@ function MatchNotificationsQueue:_playLevelUpFrame(
 
 		-- Se cachean en el primer play, antes de que el fade o la subida las toquen.
 		if not self._levelUpFadeTargets then
-			self._levelUpFadeTargets = _collectFadeTargets(frame)
+			self._levelUpFadeTargets = UIFade.collect(frame)
 		end
 		local fadeTargets = self._levelUpFadeTargets
 		local arrowInst = frame:FindFirstChild("Image")
@@ -515,17 +457,17 @@ function MatchNotificationsQueue:_playLevelUpFrame(
 		end
 		local pop: ScalePop = self._levelUpPop
 
-		_setFade(fadeTargets, true)
+		UIFade.set(fadeTargets, true)
 		pop.node.Scale = pop.designed * LEVEL_UP_POP_FROM
 		frame.Visible = true
 		local stopArrow = if arrow then _playArrowRise(arrow, self._levelUpArrowPosition) else nil
-		_tweenFade(fadeTargets, LEVEL_UP_FADE_IN_INFO, false)
+		UIFade.tween(fadeTargets, LEVEL_UP_FADE_IN_INFO, false)
 		TweenService:Create(pop.node, LEVEL_UP_POP_IN_INFO, { Scale = pop.designed }):Play()
 		Fireworks.Burst(self._gui)
 		self:_rainConfetti(palette)
 
 		task.wait(LEVEL_UP_ARROW_ENTER_SECONDS + LEVEL_UP_ARROW_PAUSE_SECONDS)
-		_tweenFade(fadeTargets, LEVEL_UP_FADE_OUT_INFO, true)
+		UIFade.tween(fadeTargets, LEVEL_UP_FADE_OUT_INFO, true)
 		TweenService:Create(pop.node, LEVEL_UP_FADE_OUT_INFO, { Scale = pop.designed * LEVEL_UP_POP_EXIT }):Play()
 		task.wait(LEVEL_UP_ARROW_EXIT_SECONDS)
 
@@ -533,7 +475,7 @@ function MatchNotificationsQueue:_playLevelUpFrame(
 			stopArrow()
 		end
 		frame.Visible = false
-		_setFade(fadeTargets, false)
+		UIFade.set(fadeTargets, false)
 		pop.node.Scale = pop.designed
 
 		onDone()

@@ -1,160 +1,66 @@
 --!strict
+-- Hat de los previews (lobby, Locker, Resultados, pase). Busca y suelda con
+-- CosmeticsTemplates, la misma regla que la partida.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local CosmeticsTemplates = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Locker"):WaitForChild("CosmeticsTemplates"))
 
 local HatApplier = {}
 HatApplier.__index = HatApplier
 
+-- Marca los hats puestos por el applier, para quitarlos sin tocar accesorios del rig.
+local COSMETIC_HAT_ATTRIBUTE = "CosmeticHat"
+
 type HatApplier = {
 	_model: Model,
 	_itemsConfig: any,
-	_hatsFolder: Folder?,
-	GetHatsFolder: (self: HatApplier) -> Folder?,
 	Clear: (self: HatApplier) -> (),
 	Apply: (self: HatApplier, itemData: any) -> (),
 	ApplyItemId: (self: HatApplier, itemId: string?) -> (),
 	Reset: (self: HatApplier) -> (),
 }
 
-local function resolveHatsFolder(): Folder?
-	local shared = ReplicatedStorage:FindFirstChild("Shared")
-	if not shared then
-		return nil
-	end
-
-	local locker = shared:FindFirstChild("Locker")
-	if locker and locker:IsA("Folder") then
-		local hats = locker:FindFirstChild("Hats")
-		if hats and hats:IsA("Folder") then
-			return hats
-		end
-	end
-
-	return nil
-end
-
-local function getHatAttachmentFromHandle(handle: BasePart): Attachment?
-	for _, child in handle:GetChildren() do
-		if child:IsA("Attachment") then
-			return child
-		end
-	end
-
-	return nil
-end
-
 function HatApplier.new(model: Model, itemsConfig: any): HatApplier
 	local self = setmetatable({}, HatApplier) :: any
 	self._model = model
 	self._itemsConfig = itemsConfig
-	self._hatsFolder = resolveHatsFolder()
 	return self
-end
-
-function HatApplier:GetHatsFolder(): Folder?
-	if self._hatsFolder and self._hatsFolder.Parent then
-		return self._hatsFolder
-	end
-
-	self._hatsFolder = resolveHatsFolder()
-	return self._hatsFolder
 end
 
 function HatApplier:Clear()
 	for _, child in self._model:GetChildren() do
-		if child:IsA("Accessory") and child:GetAttribute("CosmeticHat") == true then
+		if child:IsA("Accessory") and child:GetAttribute(COSMETIC_HAT_ATTRIBUTE) == true then
 			child:Destroy()
 		end
 	end
 end
 
+-- itemData: entrada de catálogo con `id` (y `Name`, que findHatTemplate ya resuelve).
 function HatApplier:Apply(itemData: any)
-	local head = self._model:FindFirstChild("Head")
-	if not head or not head:IsA("BasePart") then
-		return
-	end
-
-	local hatsFolder = self:GetHatsFolder()
-	if not hatsFolder then
-		warn("[HatApplier] No se encontro la carpeta Hats en ReplicatedStorage.Shared")
-		return
-	end
-
 	self:Clear()
-
-	if type(itemData) ~= "table" then
+	if type(itemData) ~= "table" or type(itemData.id) ~= "string" or itemData.id == "" then
 		return
 	end
 
-	local itemName = if type(itemData.Name) == "string" then itemData.Name else nil
-	local itemId = if type(itemData.id) == "string" then itemData.id else nil
-	local hatTemplate = nil :: Instance?
-
-	if itemName then
-		hatTemplate = hatsFolder:FindFirstChild(itemName)
-	end
-
-	if not hatTemplate and itemId then
-		hatTemplate = hatsFolder:FindFirstChild(itemId)
-	end
-
-	if not hatTemplate or not hatTemplate:IsA("Accessory") then
-		warn("[HatApplier] No se encontro el sombrero:", itemName or itemId or "<sin nombre>")
+	local template = CosmeticsTemplates.findHatTemplate(itemData.id)
+	if not template then
+		warn("[HatApplier] No se encontró el sombrero:", itemData.Name or itemData.id)
 		return
 	end
 
-	local newHat = hatTemplate:Clone()
-	local handle = newHat:FindFirstChild("Handle")
-	if not handle or not handle:IsA("BasePart") then
-		newHat:Destroy()
-		return
-	end
-
-	newHat:SetAttribute("CosmeticHat", true)
-	local hatAttachment = getHatAttachmentFromHandle(handle)
-	local headAttachment = if hatAttachment
-		then head:FindFirstChild(hatAttachment.Name)
-		else head:FindFirstChild("HatAttachment")
-
-	if headAttachment and headAttachment:IsA("Attachment") then
-		handle.CFrame = headAttachment.WorldCFrame * (if hatAttachment then hatAttachment.CFrame:Inverse() else CFrame.new())
-	else
-		-- Asset sin el attachment esperado: sin esto el WeldConstraint congela la
-		-- CFrame por defecto del clone (cerca del origen del mundo).
-		handle.CFrame = head.CFrame * CFrame.new(0, head.Size.Y * 0.5, 0)
-	end
-
-	local weld = Instance.new("WeldConstraint")
-	weld.Name = "AccessoryWeld"
-	weld.Part0 = handle
-	weld.Part1 = head
-	weld.Parent = handle
-
-	newHat.Parent = self._model
+	local hat = template:Clone()
+	hat:SetAttribute(COSMETIC_HAT_ATTRIBUTE, true)
+	CosmeticsTemplates.attachHatToCharacter(self._model, hat)
 end
 
 function HatApplier:ApplyItemId(itemId: string?)
-	if type(itemId) ~= "string" or itemId == "" then
-		self:Reset()
-		return
-	end
-
 	local hatsCategory = self._itemsConfig.Hats
-	if type(hatsCategory) ~= "table" then
+	if type(itemId) ~= "string" or itemId == "" or type(hatsCategory) ~= "table" or type(hatsCategory[itemId]) ~= "table" then
 		self:Reset()
 		return
 	end
-
-	local itemConfig = hatsCategory[itemId]
-	if type(itemConfig) ~= "table" then
-		self:Reset()
-		return
-	end
-
-	self:Apply({
-		id = itemId,
-		Name = itemConfig.Name,
-	})
+	self:Apply({ id = itemId })
 end
 
 function HatApplier:Reset()

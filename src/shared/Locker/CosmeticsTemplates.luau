@@ -1,103 +1,23 @@
 --!strict
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local CollectionService = game:GetService("CollectionService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ItemsConfig = require(Shared.constants.ItemsConfig)
 local ItemDefaults = require(Shared.constants.ItemDefaults)
 local WeaponWrapParts = require(script.Parent.WeaponWrapParts)
+local WeaponWrapPainter = require(script.Parent.WeaponWrapPainter)
 
 local CosmeticsTemplates = {}
 
 local WEAPONS_ROOT_NAME = "weapons"
 local WEAPON_MODEL_NODE_NAME = "WeaponModel"
 
-local DEFAULT_WRAP_STUDS_PER_TILE = 3
-local DEFAULT_WRAP_SCROLL_SPEED_U = 1
-local DEFAULT_WRAP_SCROLL_SPEED_V = 0
-local ANIMATED_WRAP_TEXTURE_TAG = "AnimatedWeaponWrapTexture"
-
-local WEAPON_WRAP_TEXTURE_FACE_BY_NAME: { [string]: Enum.NormalId } = {
-	ScrollTexture_Top = Enum.NormalId.Top,
-	ScrollTexture_Bottom = Enum.NormalId.Bottom,
-	ScrollTexture_Left = Enum.NormalId.Left,
-	ScrollTexture_Right = Enum.NormalId.Right,
-	ScrollTexture_Front = Enum.NormalId.Front,
-	ScrollTexture_Back = Enum.NormalId.Back,
-}
-
-local WEAPON_WRAP_TEXTURE_ORDER = {
-	"ScrollTexture_Top",
-	"ScrollTexture_Bottom",
-	"ScrollTexture_Left",
-	"ScrollTexture_Right",
-	"ScrollTexture_Front",
-	"ScrollTexture_Back",
-}
-
-local WRAP_ORIGINAL_MATERIAL_ATTR = "WrapOriginalMaterial"
-
 local function _getOptionalString(value: any): string?
 	if type(value) == "string" and value ~= "" then
 		return value
 	end
 	return nil
-end
-
-local function _getOptionalMaterial(value: any): Enum.Material?
-	if typeof(value) == "EnumItem" and value.EnumType == Enum.Material then
-		return value :: Enum.Material
-	end
-	return nil
-end
-
--- Guarda el material original la primera vez para restaurarlo cuando una skin no
--- define Material: cambiar de skin nunca deja pegado el material anterior.
-local function _applyMaterialToPart(part: BasePart, material: Enum.Material?)
-	if part:GetAttribute(WRAP_ORIGINAL_MATERIAL_ATTR) == nil then
-		part:SetAttribute(WRAP_ORIGINAL_MATERIAL_ATTR, part.Material.Name)
-	end
-
-	if material then
-		part.Material = material
-		return
-	end
-
-	local originalName = part:GetAttribute(WRAP_ORIGINAL_MATERIAL_ATTR)
-	if type(originalName) == "string" then
-		local restored = (Enum.Material :: any)[originalName]
-		if restored then
-			part.Material = restored
-		end
-	end
-end
-
--- Mismo orden de resolución que WeaponPreviewController.getWeaponPreviewPrimaryPart
--- y WeaponWrapPreviewer: no todos los modelos de display traen PrimaryPart.
-local function _resolveWeaponPrimaryPart(root: Instance): BasePart?
-	if root:IsA("BasePart") then
-		return root :: BasePart
-	end
-	if not root:IsA("Model") then
-		return nil
-	end
-
-	local model = root :: Model
-	if model.PrimaryPart then
-		return model.PrimaryPart
-	end
-
-	-- "Main" aquí es un nombre de BasePart dentro del modelo 3D del arma; nada
-	-- que ver con WeaponCategory.MAIN.
-	for _, candidateName in { "primaryPart", "Main" } do
-		local node = model:FindFirstChild(candidateName, true)
-		if node and node:IsA("BasePart") then
-			return node :: BasePart
-		end
-	end
-
-	return model:FindFirstChildWhichIsA("BasePart", true)
 end
 
 local function _getHatsRoot(): Folder?
@@ -113,7 +33,7 @@ local function _getHatsRoot(): Folder?
 end
 
 -- Los assets de Studio se nombran por el `Name` del catálogo ("Bunny"), no por el
--- id ("Hat1"): se busca por Name y luego por id, como HatApplier. El nodo puede
+-- id ("Hat1"): se busca por Name y luego por id. El nodo puede
 -- ser el propio Accessory o un Model que lo contenga.
 function CosmeticsTemplates.findHatTemplate(hatId: string): Accessory?
 	if hatId == "" then
@@ -147,110 +67,52 @@ function CosmeticsTemplates.findHatTemplate(hatId: string): Accessory?
 	return nil
 end
 
--- Parentear un Accessory solo lo suelda si su Attachment tiene gemelo en el rig
--- (normalmente Head.HatAttachment) y no todos los bodies lo traen. Sin gemelo se
--- coloca sobre la cabeza y se suelda a mano, como HatApplier.
+-- Una sola regla para partida, bots y previews. El hat se coloca a mano: alineando
+-- su Attachment con el gemelo de la cabeza (normalmente Head.HatAttachment) o, si
+-- el rig no lo trae, encima de la cabeza. Solo se suelda si al parentearlo Roblox no
+-- lo ha soldado ya (lo hace un Humanoid cuando hay gemelo); sin Humanoid, como en la
+-- cabeza del pase, nunca lo hace.
 function CosmeticsTemplates.attachHatToCharacter(character: Model, accessory: Accessory)
-	accessory.Parent = character
-
 	local handleNode = accessory:FindFirstChild("Handle")
-	if not (handleNode and handleNode:IsA("BasePart")) then
+	local headNode = character:FindFirstChild("Head")
+	if not (handleNode and handleNode:IsA("BasePart") and headNode and headNode:IsA("BasePart")) then
+		accessory.Parent = character
 		return
 	end
 	local handle = handleNode :: BasePart
-
-	local hatAttachment: Attachment? = nil
-	for _, child in handle:GetChildren() do
-		if child:IsA("Attachment") then
-			hatAttachment = child
-			break
-		end
-	end
-
-	-- Con gemelo en el rig, Roblox ya ha soldado el accessory al parentearlo: no
-	-- se toca nada (un segundo weld pelearía con el suyo).
-	if hatAttachment then
-		local twin = character:FindFirstChild(hatAttachment.Name, true)
-		if twin and twin:IsA("Attachment") then
-			return
-		end
-	end
-
-	local headNode = character:FindFirstChild("Head")
-	if not (headNode and headNode:IsA("BasePart")) then
-		return
-	end
 	local head = headNode :: BasePart
 
-	handle.CFrame = head.CFrame * CFrame.new(0, head.Size.Y * 0.5, 0)
+	local hatAttachment = handle:FindFirstChildWhichIsA("Attachment")
+	-- Se busca antes de parentear: después, la búsqueda encontraría el propio
+	-- Attachment del hat.
+	local twinNode = if hatAttachment then character:FindFirstChild(hatAttachment.Name, true) else head:FindFirstChild("HatAttachment")
+	local twin = if twinNode and twinNode:IsA("Attachment") then twinNode else nil
+
+	if twin then
+		handle.CFrame = twin.WorldCFrame * (if hatAttachment then hatAttachment.CFrame:Inverse() else CFrame.identity)
+	else
+		handle.CFrame = head.CFrame * CFrame.new(0, head.Size.Y * 0.5, 0)
+	end
 	handle.CanCollide = false
 	handle.Massless = true
+
+	accessory.Parent = character
+
+	-- Solo cuenta un weld hacia el rig: el asset puede traer uno viejo de Studio.
+	for _, joint in handle:GetChildren() do
+		if joint:IsA("JointInstance") or joint:IsA("WeldConstraint") then
+			local other = if (joint :: any).Part0 == handle then (joint :: any).Part1 else (joint :: any).Part0
+			if typeof(other) == "Instance" and other:IsDescendantOf(character) and not other:IsDescendantOf(accessory) then
+				return
+			end
+		end
+	end
 
 	local weld = Instance.new("WeldConstraint")
 	weld.Name = "AccessoryWeld"
 	weld.Part0 = handle
-	weld.Part1 = head
+	weld.Part1 = if twin and twin.Parent and twin.Parent:IsA("BasePart") then twin.Parent else head
 	weld.Parent = handle
-end
-
-local function _applyWrapToPart(primaryPart: BasePart, wrapId: string)
-	local wrapsConfig = ItemsConfig.WeaponWraps
-	local wrapDefinition = if type(wrapsConfig) == "table" then wrapsConfig[wrapId] else nil
-	local validDefinition = type(wrapDefinition) == "table"
-	local textureId = if validDefinition then _getOptionalString(wrapDefinition.TextureID) else nil
-	local baseColor = if validDefinition and typeof(wrapDefinition.BaseColor) == "Color3"
-		then wrapDefinition.BaseColor
-		else nil
-	local material = if validDefinition then _getOptionalMaterial(wrapDefinition.Material) else nil
-	local studsPerTile = if validDefinition
-		then math.max(0.01, tonumber(wrapDefinition.StudsPerTile) or DEFAULT_WRAP_STUDS_PER_TILE)
-		else DEFAULT_WRAP_STUDS_PER_TILE
-	local animated = validDefinition and wrapDefinition.isAnimated == true
-	local scrollSpeedU = if validDefinition then tonumber(wrapDefinition.ScrollSpeedU) or DEFAULT_WRAP_SCROLL_SPEED_U else DEFAULT_WRAP_SCROLL_SPEED_U
-	local scrollSpeedV = if validDefinition then tonumber(wrapDefinition.ScrollSpeedV) or DEFAULT_WRAP_SCROLL_SPEED_V else DEFAULT_WRAP_SCROLL_SPEED_V
-
-	for _, child in primaryPart:GetChildren() do
-		if child:IsA("Texture") and string.sub(child.Name, 1, 14) == "ScrollTexture_" then
-			if not textureId then
-				child:Destroy()
-			end
-		end
-	end
-
-	if textureId then
-		for _, textureName in WEAPON_WRAP_TEXTURE_ORDER do
-			local existingTexture = primaryPart:FindFirstChild(textureName)
-			local texture: Texture
-			if existingTexture and existingTexture:IsA("Texture") then
-				texture = existingTexture
-			else
-				texture = Instance.new("Texture")
-				texture.Name = textureName
-				texture.Face = WEAPON_WRAP_TEXTURE_FACE_BY_NAME[textureName]
-				texture.Parent = primaryPart
-			end
-
-			texture.Texture = textureId
-			texture.Transparency = 0
-			texture.StudsPerTileU = studsPerTile
-			texture.StudsPerTileV = studsPerTile
-			texture.OffsetStudsU = 0
-			texture.OffsetStudsV = 0
-			texture:SetAttribute("WrapAnimated", animated)
-			texture:SetAttribute("WrapScrollSpeedU", scrollSpeedU)
-			texture:SetAttribute("WrapScrollSpeedV", scrollSpeedV)
-
-			if animated then
-				CollectionService:AddTag(texture, ANIMATED_WRAP_TEXTURE_TAG)
-			else
-				CollectionService:RemoveTag(texture, ANIMATED_WRAP_TEXTURE_TAG)
-			end
-		end
-	elseif baseColor then
-		primaryPart.Color = baseColor
-	end
-
-	_applyMaterialToPart(primaryPart, material)
 end
 
 -- Contrato de la Tool real (ServerStorage.WeaponTools): un Model descendiente
@@ -266,22 +128,12 @@ function CosmeticsTemplates.applyWeaponWrapToTool(tool: Tool, wrapId: string)
 		return
 	end
 
-	for _, part in WeaponWrapParts.get(tool, primaryPart) do
-		_applyWrapToPart(part, wrapId)
-	end
+	WeaponWrapPainter.paintParts(WeaponWrapParts.get(tool, primaryPart), WeaponWrapPainter.getDefinition(wrapId))
 end
 
--- Para modelos de display (Shared.Locker.weapons.*), que no siempre traen
--- PrimaryPart. Las textures quedan tagueadas igual y WeaponWrapAnimator las anima.
+-- Para modelos de display (Shared.Locker.weapons.*), que no siempre traen PrimaryPart.
 function CosmeticsTemplates.applyWeaponWrapToModel(weaponModel: Instance, wrapId: string)
-	local primaryPart = _resolveWeaponPrimaryPart(weaponModel)
-	if not primaryPart then
-		return
-	end
-
-	for _, part in WeaponWrapParts.get(weaponModel, primaryPart) do
-		_applyWrapToPart(part, wrapId)
-	end
+	WeaponWrapPainter.paint(weaponModel, WeaponWrapPainter.getDefinition(wrapId))
 end
 
 --[[

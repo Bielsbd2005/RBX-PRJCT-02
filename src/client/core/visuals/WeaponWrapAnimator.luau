@@ -9,9 +9,11 @@ local RunService = game:GetService("RunService")
 local CollectionService = game:GetService("CollectionService")
 local UserInputService = game:GetService("UserInputService")
 
+local WeaponWrapPainter = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("Locker"):WaitForChild("WeaponWrapPainter"))
+
 local WeaponWrapAnimator = {}
 
-local ANIMATED_WRAP_TEXTURE_TAG = "AnimatedWeaponWrapTexture"
+local ANIMATED_WRAP_TEXTURE_TAG = WeaponWrapPainter.ANIMATED_TEXTURE_TAG
 local DEFAULT_WRAP_SCROLL_SPEED_U = 1
 local DEFAULT_WRAP_SCROLL_SPEED_V = 0
 

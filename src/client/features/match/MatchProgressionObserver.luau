@@ -14,6 +14,7 @@ local Fusion = require(Packages.fusion)
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
 local DailyTasks = require(Shared.constants.DailyTasks)
 local ActionRewards = require(Shared.constants.ActionRewards)
+local WrapMastery = require(Shared.data.WrapMastery)
 
 local DataController = require(script.Parent.Parent.Parent.core.data.DataController)
 
@@ -79,11 +80,7 @@ end
 local function _masteryRewardFields(wrapKey: string, def: any): any
 	return {
 		name = if type(def.Name) == "string" and def.Name ~= "" then def.Name else wrapKey,
-		textureID = if type(def.TextureID) == "string" then def.TextureID else nil,
-		baseColor = if typeof(def.BaseColor) == "Color3" then def.BaseColor else nil,
-		material = if typeof(def.Material) == "EnumItem" and def.Material.EnumType == Enum.Material then def.Material else nil,
-		animated = def.isAnimated == true,
-		studsPerTile = tonumber(def.StudsPerTile),
+		wrapId = wrapKey,
 	}
 end
 
@@ -94,7 +91,7 @@ type AttachDeps = {
 	janitor: any,
 }
 
-local function _isKillChallengeWrap(wrapKey: string): (boolean, any)
+local function _isMasteryWrap(wrapKey: string): (boolean, any)
 	local weaponWraps = ItemsConfig.WeaponWraps
 	if type(weaponWraps) ~= "table" then
 		return false, nil
@@ -107,7 +104,7 @@ local function _isKillChallengeWrap(wrapKey: string): (boolean, any)
 	if type(challenge) == "table" and tonumber(challenge.Kills) and challenge.Kills > 0 then
 		return true, def
 	end
-	return false, nil
+	return WrapMastery.scopeOf(wrapKey) ~= nil, def
 end
 
 local function _snapshotWrapsOwned(inventory: any): { [string]: { [string]: { [string]: boolean } } }
@@ -149,7 +146,8 @@ function MatchProgressionObserver.attach(deps: AttachDeps)
 			hud:updateCashLevel(stats)
 
 			local currentLevel = if stats and type(stats.Level) == "number" then math.max(0, math.floor(stats.Level)) else 0
-			if lastSeenLevel ~= nil and currentLevel > lastSeenLevel then
+			-- Con el HUD apagado (fin de ronda, lobby) sonaría y lanzaría confeti sin verse.
+			if lastSeenLevel ~= nil and currentLevel > lastSeenLevel and matchHudGui and matchHudGui.Enabled then
 				hud:playLevelUpAnimation(currentLevel)
 			end
 			lastSeenLevel = currentLevel
@@ -165,7 +163,7 @@ function MatchProgressionObserver.attach(deps: AttachDeps)
 			local bp = Fusion.peek(DataController.BattlePass) :: any
 			if type(bp) ~= "table" then return end
 			local currentTier = if type(bp.CurrentTier) == "number" then math.max(1, math.floor(bp.CurrentTier)) else 1
-			if lastSeenBPTier ~= nil and currentTier > lastSeenBPTier then
+			if lastSeenBPTier ~= nil and currentTier > lastSeenBPTier and matchHudGui and matchHudGui.Enabled then
 				local displayLevel = math.max(0, currentTier - 1)
 				hud:playBattlePassLevelUpAnimation(displayLevel)
 			end
@@ -183,18 +181,20 @@ function MatchProgressionObserver.attach(deps: AttachDeps)
 			local current = _snapshotWrapsOwned(inventory)
 
 			if wrapsSeeded then
+				-- Damascus/Galaxy llegan a varias armas a la vez: una tarjeta por wrap.
+				local celebrated: { [string]: boolean } = {}
 				for category, weaponMap in current do
 					local prevCat = previousByWeapon[category] or {}
 					for weaponId, wrapMap in weaponMap do
 						local prevWraps = prevCat[weaponId] or {}
 						for wrapKey, _ in wrapMap do
-							if not prevWraps[wrapKey] then
-								local isChallenge, def = _isKillChallengeWrap(wrapKey)
-								if isChallenge then
-									local threshold = math.max(1, tonumber(def.KillChallenge.Kills) or 0)
+							if not prevWraps[wrapKey] and not celebrated[wrapKey] then
+								local isMastery, def = _isMasteryWrap(wrapKey)
+								if isMastery then
+									celebrated[wrapKey] = true
 									local fields = _masteryRewardFields(wrapKey, def)
-									fields.current = threshold
-									fields.target = threshold
+									fields.current = 1
+									fields.target = 1
 									fields.isComplete = true
 									hud:playMasteryAnimation(fields)
 								end

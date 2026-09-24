@@ -7,6 +7,7 @@ local StarterPlayer = game:GetService("StarterPlayer")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local InventoryRepository = require(Shared.data.InventoryRepository)
+local LoadoutWraps = require(Shared.data.LoadoutWraps)
 local WeaponCategory = require(Shared.constants.WeaponCategory)
 local ItemDefaults = require(Shared.constants.ItemDefaults)
 local WeaponsConfig = require(Shared.constants.WeaponsConfig)
@@ -74,27 +75,10 @@ local function _clearMatchLoadoutHat(character: Model)
 	end
 end
 
--- Sin fallback a `wrapsTable.Default`: es el slot del arma con id "Default", no un
--- default global. Equipar wraps es estrictamente por arma.
 local function _resolveWeaponWrapForLoadout(profileData: any, loadoutCategory: WeaponCategory.WeaponCategory, weaponId: string): string
-	local loadout = profileData.Loadout
-	if type(loadout) ~= "table" then
-		return ItemDefaults.ITEM_ID
-	end
-
-	local wrapsTableKey = if loadoutCategory == WeaponCategory.MAIN then "MainWeaponWraps" else "SpecialWeaponWraps"
-	local wrapsTableAny = loadout[wrapsTableKey]
-	if type(wrapsTableAny) ~= "table" then
-		return ItemDefaults.ITEM_ID
-	end
-
-	local wrapsTable = wrapsTableAny :: { [string]: any }
-	local resolvedByWeapon = _getOptionalString(wrapsTable[weaponId])
-	if resolvedByWeapon and _ownsWeaponWrap(profileData, loadoutCategory, weaponId, resolvedByWeapon) then
-		return resolvedByWeapon
-	end
-
-	return ItemDefaults.ITEM_ID
+	return LoadoutWraps.resolveEquipped(profileData.Loadout, loadoutCategory, weaponId, function(category, id, wrapId)
+		return _ownsWeaponWrap(profileData, category :: WeaponCategory.WeaponCategory, id, wrapId)
+	end)
 end
 
 local function _clearMatchLoadoutTools(player: Player)

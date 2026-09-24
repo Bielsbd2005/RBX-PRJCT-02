@@ -2,11 +2,11 @@
 --[[
 	Partes de un arma que reciben el wrap: el PrimaryPart y las piezas móviles separadas
 	de él (Studio: BasePart con el nombre exacto de EXTRA_PART_NAMES, en cualquier nivel).
-	Lo usan CosmeticsTemplates (partida), WeaponPreviewController y WeaponWrapPreviewer
-	(Locker): los tres deben pintar las mismas partes.
+	Lo usa WeaponWrapPainter.
 ]]
 
 local EXTRA_PART_NAMES: { [string]: true } = {
+	Barrel = true,
 	Pump = true,
 }
 
