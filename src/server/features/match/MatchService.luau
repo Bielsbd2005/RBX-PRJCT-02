@@ -1063,10 +1063,12 @@ end
 
 -- Jugadores que estaban en la ronda al terminar (elegibles para recompensas y
 -- vuelta al lobby). Devuelve un set local — solo lo consume _enterResults.
+-- Un join aún sin spawnear no cuenta: no jugó, y su tarea de join lo devuelve al lobby.
 local function _captureRoundEndEligiblePlayers(): { [number]: true }
 	local eligible: { [number]: true } = {}
 	for _, player in Players:GetPlayers() do
-		if not _isPlayerInMenu(player.UserId) then
+		local session = _sessions[player.UserId]
+		if session and not session.inMenu and not session.pendingSpawn then
 			eligible[player.UserId] = true
 		end
 	end
@@ -1596,8 +1598,11 @@ local function _onRequestJoinMatch(_: Network.Empty, player: Player)
 
 		-- SpawnOnAssignedTeam yielda en el lock de body-swap: un ReturnToMenu o el fin de
 		-- ronda pueden haber reubicado al jugador en el lobby ANTES de este LoadCharacter,
-		-- que lo ha devuelto al mapa. Se le vuelve a mandar al lobby.
-		if session.inMenu then
+		-- que lo ha devuelto al mapa. Se le vuelve a mandar al lobby. Sin mirar la fase, un
+		-- JoinMatchSpawned tras RoundEnded dejaba al cliente con el HUD de partida en el lobby.
+		if session.inMenu or not _isRoundActive() then
+			session.inMenu = true
+			session.pendingSpawn = false
 			SpawnService.SpawnAtLobby(player)
 			return
 		end
