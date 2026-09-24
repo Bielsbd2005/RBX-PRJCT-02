@@ -448,18 +448,25 @@ function NetworkingCallbacks.listenClientInput()
 	-- cercanos: sin límite, un cliente modificado lo spamea en bucle. Solo se limita la
 	-- recarga (el cancel exige una recarga previa) y por arma, para no descartar la de
 	-- otra arma tras un cambio rápido. Muy por debajo de cualquier ReloadTime.
-	local lastReloadRequestAt: { [Instance]: number } = setmetatable({}, { __mode = "k" }) :: any
+	-- Por jugador además de por arma: la Tool equipada replica a todos y, indexado solo
+	-- por ella, otro cliente gastaba el cupo y la recarga real del dueño se descartaba.
+	local lastReloadRequestAt: { [Player]: { [Instance]: number } } = setmetatable({}, { __mode = "k" }) :: any
 	Network.Weapons.WeaponReloadRequest.Listen(function(data: Network.WeaponPayload, player: Player)
 		local weapon = data.weapon
 		if not weapon then
 			return
 		end
+		local byWeapon = lastReloadRequestAt[player]
+		if not byWeapon then
+			byWeapon = setmetatable({}, { __mode = "k" }) :: any
+			lastReloadRequestAt[player] = byWeapon
+		end
 		local now = os.clock()
-		local last = lastReloadRequestAt[weapon]
+		local last = byWeapon[weapon]
 		if last and now - last < RELOAD_REQUEST_MIN_INTERVAL then
 			return
 		end
-		lastReloadRequestAt[weapon] = now
+		byWeapon[weapon] = now
 		NetworkingCallbacks.WeaponReloadRequest(player, weapon)
 	end)
 
