@@ -484,7 +484,7 @@ function GiftingService:_handleClaimGift(player: Player, giftId: string): ()
 		{ path = { "Stats", "TotalCashPurchased" }, delta = amount },
 		-- Ledger anti doble-claim: si este giftId (PurchaseId) volviera a
 		-- entregarse (receipt/message re-entregado tras un crash), _depositGift
-		-- lo rechaza. DataService lo poda por edad al cargar el perfil.
+		-- lo rechaza. DataService lo acota por número al cargar el perfil.
 		{ path = { "ClaimedGifts", giftId }, value = os.time() },
 	})
 	if not ok then

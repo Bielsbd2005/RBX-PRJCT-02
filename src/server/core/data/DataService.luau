@@ -197,6 +197,33 @@ local function _immutableUpdate(tbl: { [string]: any }, path: { string }, depth:
 	end
 end
 
+--[[
+	Ledgers de idempotencia (ProcessedReceipts, GiftDeliveries, ClaimedGifts). Roblox no
+	caduca los receipts sin resolver: podar por edad dejaría conceder dos veces una compra
+	que se resuelve tarde. Solo se recortan por número, las marcas más antiguas primero.
+]]
+local MAX_LEDGER_ENTRIES = 1000
+
+local function _capLedger(ledger: { [string]: any }, stampOf: (entry: any) -> any)
+	local keys: { string } = {}
+	for key in ledger do
+		table.insert(keys, key)
+	end
+	if #keys <= MAX_LEDGER_ENTRIES then
+		return
+	end
+	local function stamp(key: string): number
+		local value = stampOf(ledger[key])
+		return if type(value) == "number" then value else 0
+	end
+	table.sort(keys, function(a, b)
+		return stamp(a) < stamp(b)
+	end)
+	for i = 1, #keys - MAX_LEDGER_ENTRIES do
+		ledger[keys[i]] = nil
+	end
+end
+
 local function _deepCopy(value: any): any
 	if type(value) ~= "table" then
 		return value
@@ -332,40 +359,23 @@ local function _loadPlayer(player: Player): ()
 			-- ⚠ Hasta crear la Replica se puede mutar `profile.Data` in-place. Después comparte
 			-- referencia con replica.Data y toda mutación DEBE ir por SetValue/BatchUpdate.
 
-			-- Roblox reintenta receipts ~3 días; se guardan 7 por margen.
-			if type(profile.Data.ProcessedReceipts) == "table" then
-				local cutoff = os.time() - (7 * 24 * 3600)
-				for purchaseId, processedAt in profile.Data.ProcessedReceipts do
-					if type(processedAt) ~= "number" or processedAt < cutoff then
-						profile.Data.ProcessedReceipts[purchaseId] = nil
-					end
-				end
-			else
-				profile.Data.ProcessedReceipts = {}
+			local data = profile.Data :: any
+			local function stampOfValue(value: any): any
+				return value
 			end
-
-			-- Las re-entregas de un regalo no duran más de unos días; 30 de margen.
-			if type((profile.Data :: any).ClaimedGifts) == "table" then
-				local cutoff = os.time() - (30 * 24 * 3600)
-				for giftId, claimedAt in (profile.Data :: any).ClaimedGifts do
-					if type(claimedAt) ~= "number" or claimedAt < cutoff then
-						(profile.Data :: any).ClaimedGifts[giftId] = nil
-					end
+			for _, ledgerName in { "ProcessedReceipts", "ClaimedGifts" } do
+				if type(data[ledgerName]) == "table" then
+					_capLedger(data[ledgerName], stampOfValue)
+				else
+					data[ledgerName] = {}
 				end
-			else
-				(profile.Data :: any).ClaimedGifts = {}
 			end
-
-			-- Mismo horizonte que ProcessedReceipts: son marcas de receipts aún reintentables.
-			if type((profile.Data :: any).GiftDeliveries) == "table" then
-				local cutoff = os.time() - (7 * 24 * 3600)
-				for purchaseId, delivery in (profile.Data :: any).GiftDeliveries do
-					if type(delivery) ~= "table" or type(delivery.At) ~= "number" or delivery.At < cutoff then
-						(profile.Data :: any).GiftDeliveries[purchaseId] = nil
-					end
-				end
+			if type(data.GiftDeliveries) == "table" then
+				_capLedger(data.GiftDeliveries, function(delivery: any): any
+					return if type(delivery) == "table" then delivery.At else nil
+				end)
 			else
-				(profile.Data :: any).GiftDeliveries = {}
+				data.GiftDeliveries = {}
 			end
 
 			-- GDPR.

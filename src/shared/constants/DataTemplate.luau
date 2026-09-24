@@ -164,7 +164,7 @@ export type PendingGifts = { [string]: PendingGift }
 
 --[[
 	PurchaseId → os.time() del claim. Evita que un receipt/message re-entregado
-	vuelva a crear un PendingGift ya reclamado. DataService lo poda por edad al cargar.
+	vuelva a crear un PendingGift ya reclamado. DataService lo acota por número al cargar.
 ]]
 export type ClaimedGifts = { [string]: number }
 
@@ -184,7 +184,7 @@ export type GiftIntent = {
 --[[
 	PurchaseId → entrega de regalo YA intentada (en el perfil del comprador). Se escribe
 	antes de depositar/enviar el message: un reintento del receipt vuelve a entregar al
-	mismo receptor aunque GiftIntent haya caducado o cambiado. DataService la poda al cargar.
+	mismo receptor aunque GiftIntent haya caducado o cambiado. DataService la acota por número al cargar.
 ]]
 export type GiftDelivery = {
 	ReceiverUserId: number,
