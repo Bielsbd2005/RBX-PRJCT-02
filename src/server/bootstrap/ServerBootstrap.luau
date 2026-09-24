@@ -205,9 +205,40 @@ function ServerBootstrap.start(serverRoot: Script): ()
 		return Enum.ProductPurchaseDecision.PurchaseGranted
 	end
 
+	--[[
+		Roblox re-entrega los receipts pendientes al entrar el jugador, antes de que cargue
+		su perfil, y no reintenta hasta otra entrada u otra compra: devolver NotProcessedYet
+		ahí deja la compra sin conceder indefinidamente. El callback puede yieldear sin
+		límite (doc de ProcessReceipt), así que se espera al perfil.
+	]]
+	local RECEIPT_PROFILE_WAIT_SECONDS = 60
+
+	local function waitForBuyerProfile(userId: number): boolean
+		local deadline = os.clock() + RECEIPT_PROFILE_WAIT_SECONDS
+		while true do
+			local buyer = Players:GetPlayerByUserId(userId)
+			if not buyer then
+				return false
+			end
+			if DataService:GetProfile(buyer) then
+				return true
+			end
+			if os.clock() >= deadline then
+				return false
+			end
+			task.wait(0.25)
+		end
+	end
+
 	-- Dispatcher central de ProcessReceipt: BattlePass, luego regalos y por último packs.
 	-- Vive aquí (cross-cutting) para no acoplarlo a una sola feature.
 	MarketplaceService.ProcessReceipt = function(receiptInfo: any): Enum.ProductPurchaseDecision
+		-- Aquí y no en cada handler: sin perfil, Gifting devuelve nil y el regalo caería
+		-- al grant de pack normal.
+		if not waitForBuyerProfile(receiptInfo.PlayerId) then
+			return Enum.ProductPurchaseDecision.NotProcessedYet
+		end
+
 		local bpDecision = BattlePassService:ProcessReceipt(receiptInfo)
 		if bpDecision ~= nil then
 			return bpDecision
