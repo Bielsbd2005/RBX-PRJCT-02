@@ -73,6 +73,9 @@ local MAX_PENDING_GIFTS = 50
 -- deben quemarlo). Las lecturas de receptores online son gratis y no se cachean.
 local RECEIVER_CHECK_TTL = 60
 local RECEIVER_CHECK_CACHE_MAX = 256
+-- Checks offline SIN caché por emisor y minuto: la caché no frena a quien pide un
+-- receptor distinto cada vez, y cada uno es un GetAsync del presupuesto del servidor.
+local OFFLINE_CHECKS_PER_MINUTE = 5
 
 local GiftingService = {}
 
@@ -81,6 +84,7 @@ local _started = false
 local _sendLimiter = RateLimiter.new(SEND_COOLDOWN)
 local _claimLimiter = RateLimiter.new(CLAIM_COOLDOWN)
 local _receiverChecks: { [number]: { at: number, accepts: boolean, reason: string } } = {}
+local _offlineChecksBySender: { [number]: { number } } = {}
 -- Último SendGift por jugador: un envío que sale del yield ya superado no escribe su
 -- intención (pisaría la del envío nuevo y el pago iría al receptor equivocado).
 local _sendSeqByUserId: { [number]: number } = {}
@@ -138,7 +142,24 @@ end
 	TOCTOU asumido: si el receptor desactiva los regalos entre el prompt y el receipt,
 	la entrega sigue (el Robux ya se pagó y el opt-out es anti-spam, no una barrera).
 ]]
-local function _receiverAcceptsGifts(receiverUserId: number): (boolean, string)
+local function _consumeOfflineCheck(senderUserId: number): boolean
+	local now = os.clock()
+	local stamps = _offlineChecksBySender[senderUserId]
+	if not stamps then
+		stamps = {}
+		_offlineChecksBySender[senderUserId] = stamps
+	end
+	while #stamps > 0 and now - stamps[1] >= 60 do
+		table.remove(stamps, 1)
+	end
+	if #stamps >= OFFLINE_CHECKS_PER_MINUTE then
+		return false
+	end
+	table.insert(stamps, now)
+	return true
+end
+
+local function _receiverAcceptsGifts(senderUserId: number, receiverUserId: number): (boolean, string)
 	local receiver = Players:GetPlayerByUserId(receiverUserId)
 	if receiver then
 		local profile = _dataService:GetProfile(receiver)
@@ -153,6 +174,10 @@ local function _receiverAcceptsGifts(receiverUserId: number): (boolean, string)
 	local cached = _receiverChecks[receiverUserId]
 	if cached and os.clock() - cached.at < RECEIVER_CHECK_TTL then
 		return cached.accepts, cached.reason
+	end
+
+	if not _consumeOfflineCheck(senderUserId) then
+		return false, "Too many gift requests. Try again in a minute."
 	end
 
 	local view, apiOk = _dataService:ViewProfileAsync(receiverUserId)
@@ -204,7 +229,7 @@ function GiftingService:_handleSendGift(player: Player, data: Network.SendGiftPa
 		return
 	end
 
-	local accepts, reason = _receiverAcceptsGifts(receiverUserId)
+	local accepts, reason = _receiverAcceptsGifts(player.UserId, receiverUserId)
 	if not accepts then
 		_respondSend(player, false, reason)
 		return
@@ -554,6 +579,7 @@ function GiftingService:Start(dataService: DataService): ()
 	-- normal del mismo pack, ese receipt pasa a compra normal (cash al comprador).
 	Players.PlayerRemoving:Connect(function(player: Player)
 		_sendSeqByUserId[player.UserId] = nil
+		_offlineChecksBySender[player.UserId] = nil
 	end)
 
 	MarketplaceService.PromptProductPurchaseFinished:Connect(function(userId: number, productId: number, purchased: boolean)
