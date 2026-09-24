@@ -20,8 +20,8 @@ de fuego en el suelo que daña a los enemigos que haya dentro. Código:
   El cliente solo predice el feedback de sus propios impactos, de ahí el remote.
 - El daño pasa por `WeaponsSystem.doDamage` con `damageData.Name` = id del arma. Cuenta
   para kills, asistencias, kill feed y kills por arma aunque el tirador haya cambiado de arma.
-- La zona se apaga si el tirador muere o sale del juego: `doDamage` no aplica daño sin un
-  dealer con Character.
+- La zona y las quemaduras que ha prendido se apagan si el tirador muere, sale del juego o
+  vuelve al menú: solo siguen mientras su Character sea el cuerpo vivo que lanzó el fuego.
 - Cada jugador tiene como mucho 3 zonas activas; al crear la cuarta se apaga la más antigua.
 - El fuego no usa remotes: la Part de la zona y el efecto del cuerpo se crean en el
   servidor y replican solos. El único remote es el feedback del tirador.
