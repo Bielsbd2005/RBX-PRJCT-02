@@ -468,6 +468,10 @@ function WeaponsGui:OnHitOtherPlayer(damage: number, humanoidHit: Humanoid, hitP
 	self.hitFeedback:onHitOtherPlayer(damage, humanoidHit, hitPart)
 end
 
+function WeaponsGui:onShotHeard(weaponInstance: Instance)
+	self.directionalIndicators:showGunfire(weaponInstance)
+end
+
 function WeaponsGui:onWeaponEquipped(weapon: any)
 	self:stopReloadProgressAnimation()
 	self._hotbarDirty = true

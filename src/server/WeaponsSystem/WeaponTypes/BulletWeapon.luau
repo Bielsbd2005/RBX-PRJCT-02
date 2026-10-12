@@ -522,6 +522,9 @@ function BulletWeapon:simulateFire(firingPlayer, fireInfo)
 	-- Sin Stop() del disparo anterior: las colas se solapan en el pool, y cortarlas
 	-- deja solo el chasquido inicial en las automáticas.
 	self:tryPlaySound("Fired", self:getConfigValue("FiredPlaybackSpeedRange"))
+	if self.player ~= Players.LocalPlayer and self.weaponsSystem.gui then
+		self.weaponsSystem.gui:onShotHeard(self.instance)
+	end
 
 	self:_kickMovingParts()
 	self:_emitMuzzleEffects()
