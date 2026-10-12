@@ -164,6 +164,8 @@ export type PendingGift = {
 	SenderUserId: number,
 	SenderName: string,
 	CashAmount: number,
+	-- Regalo de gamepass (`GamePassDefinition.Name`); CashAmount va a 0.
+	PassName: string?,
 	ProductId: number,
 	SentAt: number,
 }
@@ -199,6 +201,17 @@ export type GiftDelivery = {
 	At: number,
 }
 export type GiftDeliveries = { [string]: GiftDelivery }
+
+--[[
+	Gamepasses poseídos por regalo. Key = `GamePassDefinition.Name`. Roblox no sabe
+	nada de ellos: GamePassService los suma a la posesión del pass real, y un refund
+	del comprador no los retira.
+]]
+export type GiftedPass = {
+	SenderUserId: number,
+	At: number,
+}
+export type GiftedPasses = { [string]: GiftedPass }
 
 -- Definición de tareas en shared/constants/DailyTasks.luau.
 --   DateKey: "YYYY-MM-DD" UTC del último reset.
@@ -252,6 +265,7 @@ export type PlayerProfile = {
 	ClaimedGifts: ClaimedGifts,
 	GiftIntent: GiftIntent,
 	GiftDeliveries: GiftDeliveries,
+	GiftedPasses: GiftedPasses,
 }
 
 -- Reconcile() rellena claves faltantes en perfiles existentes, pero no borra las que sobran.
@@ -422,6 +436,8 @@ local DEFAULT: PlayerProfile = {
 	},
 
 	GiftDeliveries = {},
+
+	GiftedPasses = {},
 }
 
 -- ProfileStore hace deep-copy al crear un perfil.

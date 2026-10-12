@@ -37,6 +37,7 @@ local GIFT_COLOR_HEX = "#FFC850"
 local SUBTITLE_FORMAT = `<font color="{SENDER_COLOR_HEX}">@%s</font> just gifted you <font color="{GIFT_COLOR_HEX}">%s</font>!`
 
 local SHOW_TWEEN_INFO = TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+local PASS_LABEL_FORMAT = "%s Pass"
 local CLAIM_TIMEOUT = 5
 local CLAIM_CLICK_GUARD = 0.4
 
@@ -107,18 +108,25 @@ function GiftingFeature.start(menuController: any): any
 		end
 		currentGiftId = giftId
 
-		local cashAmount = tonumber(gift.CashAmount) or 0
-		if cashAmount <= 0 then
-			local product = StoreProducts.Cash.ByProductId[tonumber(gift.ProductId) or 0]
-			if product then
-				cashAmount = product.CashAmount
+		local giftLabel: string
+		local pass = if type(gift.PassName) == "string" then StoreProducts.GamePasses.ByName[gift.PassName] else nil
+		if pass then
+			giftLabel = string.format(PASS_LABEL_FORMAT, pass.DisplayName)
+		else
+			local cashAmount = tonumber(gift.CashAmount) or 0
+			if cashAmount <= 0 then
+				local product = StoreProducts.Cash.ByProductId[tonumber(gift.ProductId) or 0]
+				if product then
+					cashAmount = product.CashAmount
+				end
 			end
+			giftLabel = UIUtils.formatCashAmount(cashAmount)
 		end
 
 		subtitleLabel.Text = string.format(
 			SUBTITLE_FORMAT,
 			escapeRichText(tostring(gift.SenderName or "???")),
-			UIUtils.formatCashAmount(cashAmount)
+			giftLabel
 		)
 
 		stopAnimations()
@@ -262,7 +270,10 @@ function GiftingFeature.start(menuController: any): any
 		if claiming and data.giftId == claimingGiftId then
 			claiming = false
 			claimingGiftId = nil
-			if data.success then
+			local pass = StoreProducts.GamePasses.ByName[data.passName]
+			if data.success and pass then
+				Notify.success(`{string.format(PASS_LABEL_FORMAT, pass.DisplayName)} unlocked!`)
+			elseif data.success then
 				Notify.success(`+{UIUtils.formatCashAmount(data.cashAmount)} Cash`)
 			else
 				local message = if data.message ~= "" then data.message else "That gift couldn't be claimed."

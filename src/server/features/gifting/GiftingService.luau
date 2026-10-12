@@ -1,6 +1,8 @@
 --!strict
 --[[
-	Envío, entrega y claim de regalos (packs de cash comprados con Robux).
+	Envío, entrega y claim de regalos comprados con Robux: packs de cash y gamepasses
+	(estos vía su developer product `GiftProductId`; el claim escribe GiftedPasses en
+	vez de conceder cash, y GamePassService lo cuenta como pass poseído).
 
 	Envío (SendGift):
 	  1. Valida producto (StoreProducts), receptor ≠ uno mismo y que el receptor
@@ -50,6 +52,7 @@ local NetGuards = require(Shared.networking.NetGuards)
 local StoreProducts = require(Shared.constants.StoreProducts)
 
 local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
+local GamePassService = require(script.Parent.Parent.Parent.core.GamePassService)
 local TelemetryService = require(script.Parent.Parent.Parent.core.TelemetryService)
 local RateLimiter = require(script.Parent.Parent.Parent.utils.RateLimiter)
 type DataService = DataServiceMod.DataServiceModule
@@ -74,6 +77,35 @@ local MAX_PENDING_GIFTS = 50
 local RECEIVER_CHECK_TTL = 60
 local RECEIVER_CHECK_CACHE_MAX = 256
 
+-- Lo que se sabe regalar, por el developer product que se cobra. Un pack de Gems no
+-- está: su receipt sigue siendo siempre una compra normal.
+type Giftable = {
+	ProductId: number,
+	RobuxPrice: number,
+	Sku: string,
+	CashAmount: number,
+	Pass: StoreProducts.GamePassDefinition?,
+}
+
+local GIFTABLE_BY_PRODUCT_ID: { [number]: Giftable } = {}
+for productId, pack in StoreProducts.Cash.ByProductId do
+	GIFTABLE_BY_PRODUCT_ID[productId] = {
+		ProductId = productId,
+		RobuxPrice = pack.RobuxPrice,
+		Sku = pack.ButtonName,
+		CashAmount = pack.CashAmount,
+	}
+end
+for productId, pass in StoreProducts.GamePasses.ByGiftProductId do
+	GIFTABLE_BY_PRODUCT_ID[productId] = {
+		ProductId = productId,
+		RobuxPrice = pass.RobuxPrice,
+		Sku = `{pass.Name}Gift`,
+		CashAmount = 0,
+		Pass = pass,
+	}
+end
+
 local GiftingService = {}
 
 local _dataService: DataService = nil :: any
@@ -92,12 +124,20 @@ local function _respondSend(player: Player, success: boolean, message: string): 
 	}, player)
 end
 
-local function _respondClaim(player: Player, success: boolean, giftId: string, message: string, cashAmount: number): ()
+local function _respondClaim(
+	player: Player,
+	success: boolean,
+	giftId: string,
+	message: string,
+	cashAmount: number,
+	passName: string?
+): ()
 	Network.Gifting.ClaimResponse.SendTo({
 		success = success,
 		giftId = giftId,
 		message = message,
 		cashAmount = cashAmount,
+		passName = passName or "",
 	}, player)
 end
 
@@ -123,6 +163,7 @@ local function _giftMessagePayload(giftId: string, gift: any): any
 		SenderUserId = gift.SenderUserId,
 		SenderName = gift.SenderName,
 		CashAmount = gift.CashAmount,
+		PassName = gift.PassName,
 		ProductId = gift.ProductId,
 		SentAt = gift.SentAt,
 	}
@@ -183,13 +224,46 @@ local function _receiverAcceptsGifts(receiverUserId: number): (boolean, string)
 	return accepts, reason
 end
 
+--[[
+	Motivo por el que este pass no se le puede regalar al receptor, o nil. Sin yields.
+	Exige al receptor en este server: su posesión (caché de Roblox + perfil) solo se
+	conoce aquí, y cobrar un pass que ya tiene no tiene arreglo. Ante la duda, no cobra.
+]]
+local function _passGiftRejection(receiverUserId: number, pass: StoreProducts.GamePassDefinition): string?
+	local receiver = Players:GetPlayerByUserId(receiverUserId)
+	local profile = receiver and _dataService:GetProfile(receiver)
+	if not receiver or not profile then
+		return "That player must be in this server to receive a pass."
+	end
+
+	local owns = GamePassService.Peek(receiver, pass.PassId)
+	if owns == nil then
+		-- Owns relanza el fetch de un pass sin resolver.
+		GamePassService.Owns(receiver, pass.PassId)
+		return "Something went wrong. Try again."
+	end
+	if owns then
+		return "That player already owns this pass."
+	end
+
+	local pending = (profile.Data :: any).PendingGifts
+	if type(pending) == "table" then
+		for _, gift in pending do
+			if type(gift) == "table" and gift.PassName == pass.Name then
+				return "That player already has this pass waiting as a gift."
+			end
+		end
+	end
+	return nil
+end
+
 -- Corre en thread propio (yielda: view offline).
 function GiftingService:_handleSendGift(player: Player, data: Network.SendGiftPayload): ()
 	local seq = (_sendSeqByUserId[player.UserId] or 0) + 1
 	_sendSeqByUserId[player.UserId] = seq
 
-	local product = StoreProducts.Cash.ByProductId[data.productId]
-	if not product or product.ProductId <= 0 then
+	local product = GIFTABLE_BY_PRODUCT_ID[data.productId]
+	if not product then
 		_respondSend(player, false, "That item can't be gifted.")
 		return
 	end
@@ -213,6 +287,14 @@ function GiftingService:_handleSendGift(player: Player, data: Network.SendGiftPa
 	-- El jugador pudo irse, o mandar otro SendGift, durante el yield de arriba.
 	if player.Parent ~= Players or _sendSeqByUserId[player.UserId] ~= seq then
 		return
+	end
+
+	if product.Pass then
+		local rejection = _passGiftRejection(receiverUserId, product.Pass)
+		if rejection then
+			_respondSend(player, false, rejection)
+			return
+		end
 	end
 
 	-- Persistir la intención ANTES del prompt: si este write falla NO lanzamos
@@ -271,19 +353,57 @@ function GiftingService:_depositGift(player: Player, giftId: string, gift: any):
 	return if _dataService:SetValue(player, { "PendingGifts", giftId }, gift) then "deposited" else "error"
 end
 
+--[[
+	Receipt de un pass de regalo sin intención viva (caducó, o un SendGift posterior la
+	pisó). No hay compra normal a la que caer como con el cash: el pass se lo queda el
+	comprador. Si ya lo tiene no se concede nada y el receipt queda sin procesar.
+]]
+function GiftingService:_grantPassToBuyer(buyer: Player, product: Giftable, purchaseId: string): Enum.ProductPurchaseDecision
+	local pass = product.Pass :: StoreProducts.GamePassDefinition
+	if GamePassService.Peek(buyer, pass.PassId) ~= false then
+		warn(("[GiftingService] Receipt %s del regalo de %s sin intención y el comprador %d ya lo posee (o sin resolver): sin procesar.")
+			:format(purchaseId, pass.Name, buyer.UserId))
+		return Enum.ProductPurchaseDecision.NotProcessedYet
+	end
+
+	local ok = _dataService:BatchUpdate(buyer, {
+		{ path = { "GiftedPasses", pass.Name }, value = { SenderUserId = buyer.UserId, At = os.time() } },
+		{ path = { "Stats", "TotalRobuxSpent" }, delta = product.RobuxPrice },
+		{ path = { "ProcessedReceipts", purchaseId }, value = os.time() },
+	})
+	if not ok then
+		return Enum.ProductPurchaseDecision.NotProcessedYet
+	end
+	-- Antes del save: si este falla, el reintento sale por idempotencia y ya no avisaría.
+	GamePassService.NotifyGifted(buyer, pass.PassId)
+	if not _dataService:SaveReceipt(buyer, purchaseId) then
+		return Enum.ProductPurchaseDecision.NotProcessedYet
+	end
+
+	TelemetryService.RecordPurchase({
+		userId = buyer.UserId,
+		purchaseId = purchaseId,
+		productId = product.ProductId,
+		sku = product.Sku,
+		robuxPrice = product.RobuxPrice,
+		cashGranted = 0,
+		kind = "Gift",
+		receiverUserId = buyer.UserId,
+	})
+	return Enum.ProductPurchaseDecision.PurchaseGranted
+end
+
 function GiftingService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchaseDecision?
-	local product = StoreProducts.Cash.ByProductId[receiptInfo.ProductId]
+	local product = GIFTABLE_BY_PRODUCT_ID[receiptInfo.ProductId]
 	if not product then
 		return nil
 	end
 
 	local buyer = Players:GetPlayerByUserId(receiptInfo.PlayerId)
-	if not buyer then
-		return nil
-	end
-	local profile = _dataService:GetProfile(buyer)
-	if not profile then
-		return nil
+	local profile = buyer and _dataService:GetProfile(buyer)
+	if not buyer or not profile then
+		-- Un pass de regalo no tiene handler de compra normal al que seguir.
+		return if product.Pass then Enum.ProductPurchaseDecision.NotProcessedYet else nil
 	end
 
 	-- Idempotencia ANTES de mirar la intención (ver cabecera): un receipt ya procesado
@@ -319,7 +439,7 @@ function GiftingService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchaseDe
 			end
 			-- Sin intención activa y sin entrega intentada: compra normal. Trade-off asumido:
 			-- preferible a una intención eterna que desvíe compras normales futuras del mismo pack.
-			return nil
+			return if product.Pass then self:_grantPassToBuyer(buyer, product, purchaseId) else nil
 		end
 		receiverUserId = math.floor(tonumber(intent.ReceiverUserId) :: number)
 		if not _dataService:BatchUpdate(buyer, {
@@ -347,6 +467,7 @@ function GiftingService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchaseDe
 		SenderUserId = buyer.UserId,
 		SenderName = buyer.Name,
 		CashAmount = product.CashAmount,
+		PassName = if product.Pass then product.Pass.Name else nil,
 		ProductId = product.ProductId,
 		SentAt = os.time(),
 	}
@@ -404,7 +525,7 @@ function GiftingService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchaseDe
 		userId = buyer.UserId,
 		purchaseId = purchaseId,
 		productId = product.ProductId,
-		sku = product.ButtonName,
+		sku = product.Sku,
 		robuxPrice = product.RobuxPrice,
 		cashGranted = product.CashAmount,
 		kind = "Gift",
@@ -428,7 +549,12 @@ end
 function GiftingService:_ingestGiftMessage(player: Player, message: any, processed: () -> ()): ()
 	local giftId = tostring(message.Id or "")
 	local cashAmount = math.floor(tonumber(message.CashAmount) or 0)
-	if giftId == "" or #giftId > M.GiftId or cashAmount <= 0 then
+	local passName: string? = if type(message.PassName) == "string" then message.PassName else nil
+	if passName and not StoreProducts.GamePasses.ByName[passName] then
+		warn(("[GiftingService] Regalo %s de un pass fuera del catálogo (%s): descartado."):format(giftId, passName))
+		passName = nil
+	end
+	if giftId == "" or #giftId > M.GiftId or (cashAmount <= 0 and not passName) then
 		processed() -- malformado: descartar para no crecer la cola
 		return
 	end
@@ -437,6 +563,7 @@ function GiftingService:_ingestGiftMessage(player: Player, message: any, process
 		SenderUserId = math.floor(tonumber(message.SenderUserId) or 0),
 		SenderName = tostring(message.SenderName or "???"),
 		CashAmount = cashAmount,
+		PassName = passName,
 		ProductId = math.floor(tonumber(message.ProductId) or 0),
 		SentAt = math.floor(tonumber(message.SentAt) or os.time()),
 	}
@@ -467,6 +594,7 @@ function GiftingService:_handleClaimGift(player: Player, giftId: string): ()
 	end
 
 	local amount = math.max(0, math.floor(tonumber(gift.CashAmount) or 0))
+	local pass = if type(gift.PassName) == "string" then StoreProducts.GamePasses.ByName[gift.PassName] else nil
 
 	-- Borrar ANTES de conceder: si algo falla a medias preferimos restaurar el
 	-- regalo (abajo) a arriesgar un doble-grant.
@@ -475,21 +603,39 @@ function GiftingService:_handleClaimGift(player: Player, giftId: string): ()
 		return
 	end
 
-	local ok = _dataService:BatchUpdate(player, {
-		{ path = { "Stats", "Cash" }, delta = amount },
-		{ path = { "Stats", "TotalCashEarned" }, delta = amount },
-		-- El cash regalado lo compró el remitente con Robux: cuenta también en
-		-- el contador de comprado, para que la telemetría pueda restar y medir
-		-- el ritmo JUGADO sin regalos dentro.
-		{ path = { "Stats", "TotalCashPurchased" }, delta = amount },
+	local updates: { any } = {
 		-- Ledger anti doble-claim: si este giftId (PurchaseId) volviera a
 		-- entregarse (receipt/message re-entregado tras un crash), _depositGift
 		-- lo rechaza. DataService lo poda por edad al cargar el perfil.
 		{ path = { "ClaimedGifts", giftId }, value = os.time() },
-	})
+	}
+	if pass then
+		local gifted = (profile.Data :: any).GiftedPasses
+		if type(gifted) ~= "table" or gifted[pass.Name] == nil then
+			table.insert(updates, {
+				path = { "GiftedPasses", pass.Name },
+				value = { SenderUserId = math.floor(tonumber(gift.SenderUserId) or 0), At = os.time() },
+			})
+		end
+	else
+		table.insert(updates, { path = { "Stats", "Cash" }, delta = amount })
+		table.insert(updates, { path = { "Stats", "TotalCashEarned" }, delta = amount })
+		-- El cash regalado lo compró el remitente con Robux: cuenta también en
+		-- el contador de comprado, para que la telemetría pueda restar y medir
+		-- el ritmo JUGADO sin regalos dentro.
+		table.insert(updates, { path = { "Stats", "TotalCashPurchased" }, delta = amount })
+	end
+
+	local ok = _dataService:BatchUpdate(player, updates)
 	if not ok then
 		_dataService:SetValue(player, { "PendingGifts", giftId }, gift)
 		_respondClaim(player, false, giftId, "Something went wrong. Try again.", 0)
+		return
+	end
+
+	if pass then
+		GamePassService.NotifyGifted(player, pass.PassId)
+		_respondClaim(player, true, giftId, "", 0, pass.Name)
 		return
 	end
 

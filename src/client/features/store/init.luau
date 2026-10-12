@@ -15,14 +15,15 @@
 	Las filas se buscan por nombre en cualquier nivel bajo Store, así que re-anidar
 	el ScrollingFrame/Container/Content en Studio no rompe el binder.
 
-	Cada pack puede traer su botón `Gift` (Cash1.Gift…) que abre GiftFlow con ESE pack.
-	Es hijo del botón del pack: Roblox entrega el clic solo al botón más profundo, así
-	que regalar no dispara la compra. Con la lista de jugadores en pantalla la tienda se
-	oculta y vuelve al cerrarse el flujo.
+	Cada pack o pass puede traer su botón `Gift` (Cash1.Gift, VIP.Gift…) que abre
+	GiftFlow con ESE producto. Es hijo del botón del pack: Roblox entrega el clic solo
+	al botón más profundo, así que regalar no dispara la compra. Con la lista de
+	jugadores en pantalla la tienda se oculta y vuelve al cerrarse el flujo.
 
 	Los gamepasses de PassesRow no son developer products: se promptean con
 	PromptGamePassPurchase, no pasan por ProcessReceipt y la posesión es
-	permanente, así que su botón además refleja si el jugador ya lo tiene.
+	permanente, así que su botón además refleja si el jugador ya lo tiene (comprado
+	o regalado). Su `Gift` cobra el developer product `GiftProductId` del pass.
 
 	TODO: Bundles.
 ]]
@@ -37,8 +38,10 @@ local Client = script.Parent.Parent
 
 local Packages = ReplicatedStorage:WaitForChild("Packages")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Fusion = require(Packages.fusion) :: any
 local Janitor = require(Packages.janitor) :: any
 
+local DataController = require(Client.core.data.DataController)
 local PanelController = require(Client.core.ui.PanelController)
 local BlurController = require(Client.core.ui.BlurController)
 local GameSounds = require(Client.core.ui.GameSounds)
@@ -167,16 +170,16 @@ function StoreFeature.start(menuController: any): any
 		button.AutoButtonColor = false
 	end
 
-	-- `giftable` es del catálogo entero (ver bindCatalogRow); un pack sin ProductId tampoco
-	-- se regala. En ambos casos el botón sigue ahí pero no abre nada.
-	local function bindGiftButton(button: GuiButton, product: StoreProducts.ProductBase, giftable: boolean)
+	-- `giftProductId` = developer product que se cobra al regalar; 0 = no se regala (el
+	-- botón sigue ahí pero no abre nada).
+	local function bindGiftButton(button: GuiButton, giftProductId: number)
 		local giftNode = button:FindFirstChild(GIFT_BUTTON_NAME)
 		if not (giftNode and giftNode:IsA("GuiButton")) then
 			return
 		end
 		local giftBtn = giftNode :: GuiButton
 
-		local enabled = giftable and product.ProductId > 0
+		local enabled = giftProductId > 0
 		-- `Active` se queda en true aunque no sea regalable: un botón inactivo deja pasar el
 		-- clic al botón del pack de debajo y saldría el prompt de compra. `Selectable` refleja
 		-- el estado para que el gamepad no se pare en un botón muerto.
@@ -194,7 +197,7 @@ function StoreFeature.start(menuController: any): any
 			if not enabled then
 				return
 			end
-			ensureGiftFlow():openForProduct(product :: any)
+			ensureGiftFlow():openForProduct(giftProductId)
 		end), "Disconnect")
 	end
 
@@ -227,7 +230,7 @@ function StoreFeature.start(menuController: any): any
 			table.insert(rowItems, button)
 
 			applyProductToButton(button, product, getAmount(product))
-			bindGiftButton(button, product, giftable)
+			bindGiftButton(button, if giftable then product.ProductId else 0)
 			InteractiveScaleTween.bindButton(button, janitor, {
 				enableHover = canUseHoverAnimations,
 				hoverScale = UITheme.ButtonHoverScale,
@@ -251,17 +254,21 @@ function StoreFeature.start(menuController: any): any
 		return product.GemAmount
 	end, false)
 
-	-- Binder propio y no `bindCatalogRow`: un pass no tiene cantidad que mostrar
-	-- ni se regala, se promptea con otra API y encima tiene un estado que los
-	-- packs no tienen (ya comprado).
+	-- Binder propio y no `bindCatalogRow`: un pass no tiene cantidad que mostrar, se
+	-- promptea con otra API, se regala con otro producto y encima tiene un estado que
+	-- los packs no tienen (ya poseído).
 
 	-- passId → refresco del botón, para el único listener de compras de abajo.
-	local refreshOwnedByPassId: { [number]: (owned: boolean) -> () } = {}
+	local setRobloxOwnedByPassId: { [number]: (owned: boolean) -> () } = {}
+	-- `GamePassDefinition.Name` → refresco del botón, para el observer de GiftedPasses.
+	local setGiftedByPassName: { [string]: (gifted: boolean) -> () } = {}
 
 	local function bindGamePassButton(button: GuiButton, pass: StoreProducts.GamePassDefinition)
 		local priceNode = button:FindFirstChild("Price")
 		local ownedNode = button:FindFirstChild(OWNED_NODE_NAME)
-		local owned = false
+		-- Dos fuentes: Roblox solo conoce el pass comprado; el regalado vive en el perfil.
+		local robloxOwned = false
+		local gifted = false
 
 		--[[
 			El pass es permanente: a quien ya lo tiene el botón deja de comprar y lo dice. Si la
@@ -269,6 +276,7 @@ function StoreFeature.start(menuController: any): any
 			precio, para que un dueño no quede ante un botón muerto sin explicación.
 		]]
 		local function refresh()
+			local owned = robloxOwned or gifted
 			if ownedNode and ownedNode:IsA("GuiObject") then
 				ownedNode.Visible = owned
 			end
@@ -288,21 +296,31 @@ function StoreFeature.start(menuController: any): any
 			button.Selectable = buyable
 		end
 
-		local function setOwned(nextOwned: boolean)
-			if owned == nextOwned then
+		local function setRobloxOwned(nextOwned: boolean)
+			if robloxOwned == nextOwned then
 				return
 			end
-			owned = nextOwned
+			robloxOwned = nextOwned
 			refresh()
 		end
 
 		button.AutoButtonColor = false
 		refresh()
 
+		-- Aunque ya lo posea: el dueño de un pass puede seguir regalándolo.
+		bindGiftButton(button, if pass.PassId > 0 then pass.GiftProductId else 0)
+
 		if pass.PassId <= 0 then
 			return
 		end
-		refreshOwnedByPassId[pass.PassId] = setOwned
+		setRobloxOwnedByPassId[pass.PassId] = setRobloxOwned
+		setGiftedByPassName[pass.Name] = function(nextGifted: boolean)
+			if gifted == nextGifted then
+				return
+			end
+			gifted = nextGifted
+			refresh()
+		end
 
 		-- Una consulta por pass al arrancar la feature (llamada web): el estado solo cambia por
 		-- una compra, que ya avisa por PromptGamePassPurchaseFinished. En Studio, el flag.
@@ -312,7 +330,7 @@ function StoreFeature.start(menuController: any): any
 				if not game:IsLoaded() then
 					game.Loaded:Wait()
 				end
-				setOwned(not noGamePasses())
+				setRobloxOwned(not noGamePasses())
 				return
 			end
 
@@ -323,7 +341,7 @@ function StoreFeature.start(menuController: any): any
 				warn(`[StoreFeature] UserOwnsGamePassAsync falló para {pass.Name}: {result}`)
 				return
 			end
-			setOwned(result == true)
+			setRobloxOwned(result == true)
 		end)
 
 		InteractiveScaleTween.bindButton(button, janitor, {
@@ -335,7 +353,7 @@ function StoreFeature.start(menuController: any): any
 		janitor:Add(button.Activated:Connect(function()
 			-- Re-chequeo del estado vivo (no el capturado al cablear): un pass comprado en otro
 			-- sitio no debe acabar en un prompt de algo que ya se tiene.
-			if owned then
+			if robloxOwned or gifted then
 				return
 			end
 			MarketplaceService:PromptGamePassPurchase(player, pass.PassId)
@@ -366,11 +384,27 @@ function StoreFeature.start(menuController: any): any
 		if not wasPurchased or purchasePlayer ~= player then
 			return
 		end
-		local refresh = refreshOwnedByPassId[passId]
-		if refresh then
-			refresh(true)
+		local setRobloxOwned = setRobloxOwnedByPassId[passId]
+		if setRobloxOwned then
+			setRobloxOwned(true)
 		end
 	end), "Disconnect")
+
+	local fusionScope = Fusion.scoped(Fusion)
+	janitor:Add(function()
+		Fusion.doCleanup(fusionScope)
+	end, true)
+
+	DataController:WhenReady():andThen(function()
+		local observer = fusionScope:Observer(DataController.GiftedPasses)
+		-- onBind dispara también inmediatamente.
+		janitor:Add(observer:onBind(function()
+			local giftedPasses = Fusion.peek(DataController.GiftedPasses)
+			for passName, setGifted in setGiftedByPassName do
+				setGifted(type(giftedPasses) == "table" and giftedPasses[passName] ~= nil)
+			end
+		end), true)
+	end)
 
 	-- StaggerReveal comparte el nodo "InteractiveScale" con InteractiveScaleTween
 	-- (Roblox solo aplica una UIScale por instancia), así que la cascada y el

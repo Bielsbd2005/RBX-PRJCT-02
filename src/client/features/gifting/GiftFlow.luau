@@ -1,8 +1,8 @@
 --!strict
 --[[
 	Flujo de envío de regalos (UserInterface.Gifting). Es agnóstico de quién lo
-	abre: el llamante decide desde qué GUI se lanza y le pasa el pack de Robux a
-	regalar con `openForProduct(product)`.
+	abre: el llamante decide desde qué GUI se lanza y le pasa el developer product a
+	regalar con `openForProduct(productId)` (un pack, o el `GiftProductId` de un pass).
 
 	No toca ninguna GUI que no sea la suya. Si el panel que lo abre debe
 	ocultarse mientras la lista está en pantalla, ese panel lo hace en su
@@ -44,15 +44,12 @@ local Packages = ReplicatedStorage:WaitForChild("Packages")
 
 local Janitor = require(Packages.janitor) :: any
 local Network = require(Shared.networking.Network)
-local StoreProducts = require(Shared.constants.StoreProducts)
 local BotNames = require(Shared.constants.BotNames)
 local GameConfig = require(Shared.GameConfig)
 local AssetIds = require(Shared.constants.AssetIds)
 local GameSounds = require(Client.core.ui.GameSounds)
 local Notify = require(Client.core.ui.NotificationController)
 local StaggerReveal = require(Client.core.ui.animators.StaggerReveal)
-
-type StoreProductDefinition = StoreProducts.StoreProductDefinition
 
 local AVATAR_THUMB_FORMAT = "rbxthumb://type=AvatarHeadShot&id=%d&w=48&h=48"
 -- Por encima del peor caso del servidor (ViewProfileAsync acotado a 10 s): liberar antes
@@ -184,7 +181,7 @@ function GiftFlow.new(config: GiftFlowConfig, janitor: any)
 	self._onClosed = config.onClosed
 
 	self._receiver = nil :: UserEntry?
-	self._product = nil :: StoreProductDefinition?
+	self._productId = nil :: number?
 	self._rows = {} :: { { row: GuiObject, janitor: any } }
 	self._sendPending = false
 	self._awaitingPurchase = false
@@ -282,8 +279,7 @@ function GiftFlow.new(config: GiftFlowConfig, janitor: any)
 		if userId ~= player.UserId or not self._awaitingPurchase then
 			return
 		end
-		local product = self._product
-		if product and productId ~= product.ProductId then
+		if self._productId and productId ~= self._productId then
 			return
 		end
 		if purchased then
@@ -411,7 +407,8 @@ function GiftFlow:_onGiftPressed(entry: UserEntry, button: GuiObject)
 end
 
 function GiftFlow:_onSend()
-	if not self._product then
+	local productId = self._productId
+	if not productId then
 		return
 	end
 	if self._sendPending or self._awaitingPurchase then
@@ -432,12 +429,12 @@ function GiftFlow:_onSend()
 
 	Network.Gifting.SendGift.Send({
 		receiverUserId = tostring(receiver.userId),
-		productId = (self._product :: StoreProductDefinition).ProductId,
+		productId = productId,
 	})
 end
 
-function GiftFlow:openForProduct(product: StoreProductDefinition)
-	self._product = product
+function GiftFlow:openForProduct(productId: number)
+	self._productId = productId
 	self._receiver = nil
 	self._sendPending = false
 	self._awaitingPurchase = false

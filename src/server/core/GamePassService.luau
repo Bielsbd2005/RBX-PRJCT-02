@@ -10,8 +10,11 @@
 	`OnOwnershipGained` existe porque el prefetch es asíncrono y quien pregunta al
 	spawnear (el holster) suele hacerlo antes de que resuelva.
 
-	No se persiste en el profile: la posesión la sirve Roblox y guardarla dejaría
-	beneficios activos tras un refund. La compra sí va a telemetría (kind "GamePass").
+	La posesión del pass real no se persiste en el profile: la sirve Roblox y guardarla
+	dejaría beneficios activos tras un refund. La compra sí va a telemetría (kind "GamePass").
+
+	Un pass regalado (profile.GiftedPasses, lo escribe GiftingService) cuenta como
+	poseído: Roblox no sabe nada de él, así que se lee del perfil en cada consulta.
 ]]
 
 local MarketplaceService = game:GetService("MarketplaceService")
@@ -24,12 +27,14 @@ local StoreProducts = require(Shared.constants.StoreProducts)
 local DebugFlags = require(Shared.utils.DebugFlags)
 
 local TelemetryService = require(script.Parent.TelemetryService)
+local DataServiceMod = require(script.Parent.data.DataService)
+type DataService = DataServiceMod.DataServiceModule
 
 --[[
 	En Studio no se pregunta a Roblox (el creador posee sus passes y en un local
 	server nadie posee nada): todos los passes desbloqueados, salvo que el
 	BoolValue ReplicatedStorage.Debug.NoGamePasses esté marcado, que los bloquea
-	todos. Se lee en vivo; la tienda del cliente lee el mismo flag.
+	todos menos los regalados. Se lee en vivo; la tienda del cliente lee el mismo flag.
 ]]
 local IS_STUDIO = RunService:IsStudio()
 local noGamePasses = DebugFlags.bind(ReplicatedStorage, "NoGamePasses")
@@ -37,6 +42,7 @@ local noGamePasses = DebugFlags.bind(ReplicatedStorage, "NoGamePasses")
 local GamePassService = {}
 
 local _started = false
+local _dataService: DataService = nil :: any
 
 -- userId → passId → posee. Sin tabla de jugador = desconectado; sin entrada de
 -- pass = sin resolver (un fetch fallido no se cachea).
@@ -53,6 +59,18 @@ local function _fire(player: Player, passId: number)
 		-- Por listener: uno que reviente no debe impedir los demás.
 		task.spawn(listener, player, passId)
 	end
+end
+
+-- false con el perfil sin cargar: quien dependa del resultado recibe `OnOwnershipGained`
+-- cuando carga.
+local function _isGifted(player: Player, passId: number): boolean
+	local pass = StoreProducts.GamePasses.ByPassId[passId]
+	if not pass then
+		return false
+	end
+	local profile = _dataService:GetProfile(player)
+	local gifted = profile and (profile.Data :: any).GiftedPasses
+	return type(gifted) == "table" and gifted[pass.Name] ~= nil
 end
 
 -- Avisa solo en false→true. No-op si el jugador ya se fue.
@@ -147,11 +165,18 @@ end
 -- del resultado debe suscribirse con `OnOwnershipGained`.
 function GamePassService.Owns(player: Player, passId: number): boolean
 	-- Antes del chequeo de id: así también desbloquea passes aún sin id.
-	if IS_STUDIO then
-		return not noGamePasses()
+	if IS_STUDIO and not noGamePasses() then
+		return true
 	end
 
 	if passId <= 0 then
+		return false
+	end
+
+	if _isGifted(player, passId) then
+		return true
+	end
+	if IS_STUDIO then
 		return false
 	end
 
@@ -171,18 +196,32 @@ end
 -- Como Owns pero sin lanzar fetch y distinguiendo "sin resolver" (nil) de "no lo
 -- posee": para retirar un beneficio persistido hace falta un "no" confirmado.
 function GamePassService.Peek(player: Player, passId: number): boolean?
-	if IS_STUDIO then
-		return not noGamePasses()
+	if IS_STUDIO and not noGamePasses() then
+		return true
 	end
 	if passId <= 0 then
+		return false
+	end
+	if _isGifted(player, passId) then
+		return true
+	end
+	if IS_STUDIO then
 		return false
 	end
 	local owned = _ownedByUserId[player.UserId]
 	return if owned then owned[passId] else nil
 end
 
--- Cada resolución (prefetch, compra), sea sí o no; thread propio. En Studio no
--- se dispara nunca: usar Peek.
+-- Avisa de un pass recién regalado; llamar DESPUÉS de escribir profile.GiftedPasses.
+function GamePassService.NotifyGifted(player: Player, passId: number)
+	for _, listener in _resolvedListeners do
+		task.spawn(listener, player, passId, true)
+	end
+	_fire(player, passId)
+end
+
+-- Cada resolución (prefetch, compra, regalo), sea sí o no; thread propio. En Studio
+-- solo se dispara con los regalos: usar Peek.
 function GamePassService.OnOwnershipResolved(listener: (player: Player, passId: number, owns: boolean) -> ())
 	table.insert(_resolvedListeners, listener)
 end
@@ -193,11 +232,12 @@ function GamePassService.OnOwnershipGained(listener: (player: Player, passId: nu
 	table.insert(_gainedListeners, listener)
 end
 
-function GamePassService.Start()
+function GamePassService.Start(dataService: DataService)
 	if _started then
 		return
 	end
 	_started = true
+	_dataService = dataService
 
 	if IS_STUDIO then
 		warn(string.format(
@@ -211,6 +251,16 @@ function GamePassService.Start()
 	end
 
 	Players.PlayerAdded:Connect(_track)
+
+	-- Quien preguntó antes de cargar el perfil recibió "no" de un pass regalado. Solo
+	-- `gained`: los services que dependen del perfil ya escuchan ProfileLoaded.
+	dataService.ProfileLoaded:Connect(function(player: Player)
+		for _, pass in StoreProducts.GamePasses.InOrder do
+			if _isGifted(player, pass.PassId) then
+				_fire(player, pass.PassId)
+			end
+		end
+	end)
 
 	Players.PlayerRemoving:Connect(function(player)
 		_ownedByUserId[player.UserId] = nil

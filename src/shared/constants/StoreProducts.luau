@@ -55,13 +55,21 @@ export type ProductRow<T> = {
 
 	`RobuxPrice` solo pinta el label (con PassId = 0 no hay `GetProductInfo`); el
 	precio que se cobra es el del panel de Roblox y deben coincidir.
+
+	Roblox no deja comprar un pass para otro jugador: regalarlo es comprar el developer
+	product `GiftProductId` (mismo precio), que GiftingService convierte en una entrada
+	de `GiftedPasses` en el perfil del receptor. GiftProductId = 0 ⇒ no se regala.
 ]]
 export type GamePassDefinition = {
-	-- Nombre legible; se usa como sku en analíticas.
+	-- Nombre legible; se usa como sku en analíticas y como key de `GiftedPasses`
+	-- (renombrarlo deja sin pass a quien lo recibió regalado).
 	Name: string,
+	-- Texto para el jugador (alerta y notificación de regalo).
+	DisplayName: string,
 	-- Botón de la GUI donde vive el pass (Store…PassesRow.<ButtonName>).
 	ButtonName: string,
 	PassId: number,
+	GiftProductId: number,
 	RobuxPrice: number,
 	-- Precio ya formateado para el label (derivado de RobuxPrice).
 	PriceText: string,
@@ -75,6 +83,8 @@ export type GamePassCatalog = {
 	InOrder: { GamePassDefinition },
 	ByName: { [string]: GamePassDefinition },
 	ByPassId: { [number]: GamePassDefinition },
+	-- Solo passes regalables de verdad (GiftProductId y PassId > 0).
+	ByGiftProductId: { [number]: GamePassDefinition },
 }
 
 export type Catalog<T> = {
@@ -107,12 +117,28 @@ local GEM_PACKS = {
 }
 
 -- En el orden en que se pintan. `RobuxPrice` debe coincidir con el precio del panel
--- de Roblox o el botón mentirá.
+-- de Roblox (el del pass y el de su developer product de regalo) o el botón mentirá.
+-- TODO: crear los developer products de regalo en el panel de Roblox y poner su id.
 local GAME_PASS_LIST = {
 	-- Bonus "VIP" de ResultsRewards, ítems isVIPExclusive, Gems de bienvenida y tag VIP (VIPItemsService).
-	{ Name = "VIP", ButtonName = "VIP", PassId = 1962133164, RobuxPrice = 299, WelcomeGems = 100 },
+	{
+		Name = "VIP",
+		DisplayName = "VIP",
+		ButtonName = "VIP",
+		PassId = 1962133164,
+		GiftProductId = 0,
+		RobuxPrice = 299,
+		WelcomeGems = 100,
+	},
 	-- Cuelga de la espalda el arma que no llevas en la mano (BackWeaponService).
-	{ Name = "BackWeapon", ButtonName = "BackWeapon", PassId = 1964587184, RobuxPrice = 200 },
+	{
+		Name = "BackWeapon",
+		DisplayName = "Back Weapon",
+		ButtonName = "BackWeapon",
+		PassId = 1964587184,
+		GiftProductId = 0,
+		RobuxPrice = 200,
+	},
 }
 
 --[[
@@ -176,11 +202,13 @@ end
 --[[
 	Como `buildCatalog` para gamepasses. Un `PassId` duplicado daría por comprado un
 	beneficio que nadie pagó; solo se comprueba en los configurados (PassId > 0).
+	Un pass sin PassId tampoco se regala: nadie podría poseerlo.
 ]]
 local function buildGamePasses(passes: { any }): GamePassCatalog
 	local inOrder = {} :: { GamePassDefinition }
 	local byName = {} :: { [string]: GamePassDefinition }
 	local byPassId = {} :: { [number]: GamePassDefinition }
+	local byGiftProductId = {} :: { [number]: GamePassDefinition }
 
 	for _, entry in passes do
 		local pass = table.clone(entry)
@@ -198,6 +226,16 @@ local function buildGamePasses(passes: { any }): GamePassCatalog
 				error(`[StoreProducts] GamePasses: PassId {pass.PassId} repetido en "{clash.Name}" y "{pass.Name}"`)
 			end
 			byPassId[pass.PassId] = pass
+
+			if pass.GiftProductId > 0 then
+				local giftClash = byGiftProductId[pass.GiftProductId]
+				if giftClash then
+					error(
+						`[StoreProducts] GamePasses: GiftProductId {pass.GiftProductId} repetido en "{giftClash.Name}" y "{pass.Name}"`
+					)
+				end
+				byGiftProductId[pass.GiftProductId] = pass
+			end
 		end
 
 		table.insert(inOrder, pass)
@@ -208,6 +246,7 @@ local function buildGamePasses(passes: { any }): GamePassCatalog
 		ByName = table.freeze(byName),
 		-- `PromptGamePassPurchaseFinished` solo entrega el passId.
 		ByPassId = table.freeze(byPassId),
+		ByGiftProductId = table.freeze(byGiftProductId),
 	})
 end
 
@@ -216,14 +255,20 @@ local Gems = buildCatalog("GemsPage", GEM_PACKS) :: Catalog<GemProductDefinition
 local GamePasses = buildGamePasses(GAME_PASS_LIST)
 
 -- El dispatcher de receipts (ServerBootstrap) prueba un catálogo tras otro, así
--- que un mismo developer product en ambos entregaría la moneda equivocada según
--- el orden de las comprobaciones.
+-- que un mismo developer product en dos entregaría lo equivocado según el orden
+-- de las comprobaciones.
 for productId, gemPack in Gems.ByProductId do
 	local cashPack = Cash.ByProductId[productId]
 	if cashPack then
 		error(
 			`[StoreProducts] ProductId {productId} usado por Cash "{cashPack.ButtonName}" y Gems "{gemPack.ButtonName}"`
 		)
+	end
+end
+for productId, pass in GamePasses.ByGiftProductId do
+	local pack = Cash.ByProductId[productId] or Gems.ByProductId[productId]
+	if pack then
+		error(`[StoreProducts] ProductId {productId} usado por el pack "{pack.ButtonName}" y el regalo de "{pass.Name}"`)
 	end
 end
 

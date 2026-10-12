@@ -95,7 +95,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 
 	-- Antes que las features: el prefetch de posesión de gamepasses es una llamada web y
 	-- quien pregunta (bonus VIP, holster) no bloquea; cuanto antes se pueble el caché mejor.
-	GamePassService.Start()
+	GamePassService.Start(DataService)
 
 	--[[
 		TelemetryService antes que RewardService: quien emite eventos necesita el servicio
@@ -215,7 +215,8 @@ function ServerBootstrap.start(serverRoot: Script): ()
 
 		-- Gifting intercepta receipts de store products cuando el comprador tiene
 		-- una intención de regalo activa (GiftIntent): el cash va al receptor, no
-		-- al comprador. nil ⇒ compra normal, sigue el handler de abajo.
+		-- al comprador. nil ⇒ compra normal, sigue el handler de abajo. Los developer
+		-- products de regalo de un gamepass los resuelve siempre él.
 		local giftDecision = GiftingService:ProcessReceipt(receiptInfo)
 		if giftDecision ~= nil then
 			return giftDecision

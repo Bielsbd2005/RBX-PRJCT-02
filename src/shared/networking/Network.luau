@@ -313,12 +313,14 @@ local GiftingNamespace = ByteNet.DefineNamespace("Gifting", function()
 			ReliabilityType = "Reliable",
 		}),
 
+		-- S → C. passName = `GamePassDefinition.Name` del pass reclamado; "" si era cash.
 		ClaimResponse = ByteNet.DefinePacket({
 			Value = ByteNet.Struct({
 				success    = ByteNet.Bool,
 				giftId     = ByteNet.String,
 				message    = ByteNet.String,
 				cashAmount = ByteNet.Int32,
+				passName   = ByteNet.String,
 			}),
 			ReliabilityType = "Reliable",
 		}),

@@ -58,6 +58,7 @@ DataController.DailyTasks    = nil :: any
 DataController.BattlePass    = nil :: any
 DataController.Metadata      = nil :: any
 DataController.PendingGifts  = nil :: any
+DataController.GiftedPasses  = nil :: any
 
 -- Equipados optimistas del Locker: Loadout publica la Replica con estos valores
 -- encima hasta que la Replica trae el mismo valor (o se retiran). Clave = path unido.
@@ -129,6 +130,7 @@ function DataController:Start(): ()
 	DataController.BattlePass    = _scope:Value(_deepCopy(DataTemplate.BattlePass))
 	DataController.Metadata      = _scope:Value(_deepCopy(DataTemplate.Metadata))
 	DataController.PendingGifts  = _scope:Value(_deepCopy(DataTemplate.PendingGifts))
+	DataController.GiftedPasses  = _scope:Value(_deepCopy(DataTemplate.GiftedPasses))
 
 	_readyPromise = Promise.new(function(resolve: (any) -> ())
 		_readyResolve = resolve
@@ -160,6 +162,7 @@ function DataController:Start(): ()
 		DataController.BattlePass:set(replica.Data.BattlePass)
 		DataController.Metadata:set(replica.Data.Metadata)
 		DataController.PendingGifts:set(replica.Data.PendingGifts)
+		DataController.GiftedPasses:set(replica.Data.GiftedPasses)
 
 		-- Cada listener recibe una tabla de sección con referencia nueva (Sift en el
 		-- servidor), así Value:set dispara aunque los valores internos sean iguales.
@@ -239,6 +242,12 @@ function DataController:Start(): ()
 		replica:AddCleanupTask(
 			replica:ListenToChange({ "PendingGifts" }, function(newPendingGifts: any)
 				DataController.PendingGifts:set(newPendingGifts)
+			end)
+		)
+
+		replica:AddCleanupTask(
+			replica:ListenToChange({ "GiftedPasses" }, function(newGiftedPasses: any)
+				DataController.GiftedPasses:set(newGiftedPasses)
 			end)
 		)
 
