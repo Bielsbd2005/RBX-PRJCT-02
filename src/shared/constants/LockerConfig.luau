@@ -112,16 +112,13 @@ local function isUserAdmin(playerOrUserId: (Player | number)?): boolean
 	return userId == ADMIN_USER_ID
 end
 
--- Solo desbloquea al admin 286176976 (o a todos en Studio si se activa el BoolValue de depuración).
+-- En Studio manda solo el BoolValue Debug.UnlockAllLocker (desbloquea a todos), para
+-- que el admin pueda probar el locker como un jugador normal. Fuera, solo el admin.
 local function isUnlockAllActive(playerOrUserId: (Player | number)?): boolean
-	local isToggleOn = LockerConfig.UnlockAll == true or (IS_STUDIO and unlockAllFlag() == true)
-	if not isToggleOn then
-		return false
+	if IS_STUDIO then
+		return unlockAllFlag() == true
 	end
-	if IS_STUDIO and unlockAllFlag() == true then
-		return true
-	end
-	return isUserAdmin(playerOrUserId)
+	return LockerConfig.UnlockAll == true and isUserAdmin(playerOrUserId)
 end
 
 local function getTotalNonDefaultWrapsCount(): number
@@ -135,7 +132,7 @@ local function getTotalNonDefaultWrapsCount(): number
 end
 
 LockerConfig = {
-	-- Activo: en partida y en Studio solo desbloquea al admin 286176976.
+	-- Solo cuenta fuera de Studio, y solo para el admin (ver isUnlockAllActive).
 	UnlockAll = true,
 	AdminUserId = ADMIN_USER_ID,
 	NavItems = NAV_ITEMS,
