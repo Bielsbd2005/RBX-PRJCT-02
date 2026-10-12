@@ -33,6 +33,23 @@ local CATEGORY_LABEL: { [string]: string } = {
 	Special = "Weapon",
 }
 
+BattlePassRewards.IMAGE_NODE_NAMES = table.freeze({ "Item", "ItemHat", "ItemHair", "ItemFace", "ItemBody" })
+
+-- Hijo de LevelReward donde va la imagen; debe coincidir con resolveItemImageNode de LockerGrid.
+function BattlePassRewards.imageNodeName(reward: BattlePassConfig.Reward): string
+	if reward.Kind ~= "Item" then
+		return "Item"
+	end
+	if reward.Category == "Faces" then
+		return "ItemFace"
+	elseif reward.Category == "Outfits" then
+		return "ItemBody"
+	elseif reward.Category == "Hats" then
+		return if string.sub(reward.ItemId or "", 1, 4) == "Hair" then "ItemHair" else "ItemHat"
+	end
+	return "Item"
+end
+
 function BattlePassRewards.isWrap(reward: BattlePassConfig.Reward): boolean
 	return reward.Kind == "Item" and reward.Category == "WeaponWraps" and reward.ItemId ~= nil
 end
@@ -47,10 +64,18 @@ function BattlePassRewards.image(reward: BattlePassConfig.Reward): string
 	end
 	local catalog = ItemsConfig[reward.Category]
 	local def = if type(catalog) == "table" then catalog[reward.ItemId] else nil
-	return reward.Icon or (if def and type(def.Image) == "string" then def.Image else "")
+	local image = if def and type(def.Image) == "string" and def.Image ~= ""
+		then def.Image
+		elseif def and type(def.CatalogEmoteId) == "number"
+		then "rbxthumb://type=Asset&id=" .. tostring(def.CatalogEmoteId) .. "&w=150&h=150"
+		else ""
+	return reward.Icon or image
 end
 
 function BattlePassRewards.rarity(reward: BattlePassConfig.Reward): string
+	if reward.Kind == "Gems" then
+		return "Legendary"
+	end
 	if reward.Kind ~= "Item" then
 		return BattlePassRewards.RARITY_FALLBACK
 	end
@@ -72,6 +97,16 @@ function BattlePassRewards.valueText(reward: BattlePassConfig.Reward): string
 	end
 	local category = reward.Category or ""
 	return CATEGORY_LABEL[category] or category
+end
+
+-- Imagen del arma de un wrap por arma; nil si es global (vale para todas).
+function BattlePassRewards.wrapWeaponImage(reward: BattlePassConfig.Reward): string?
+	if reward.Global or not WeaponCategoryMod.isValid(reward.WeaponCategory) then
+		return nil
+	end
+	local catalog = ItemsConfig[reward.WeaponCategory :: string]
+	local def = if type(catalog) == "table" and reward.WeaponId then catalog[reward.WeaponId] else nil
+	return if type(def) == "table" and type(def.Image) == "string" and def.Image ~= "" then def.Image else nil
 end
 
 -- Wrap global sin loadout → id nil y el previewer cae al modelo "Default".

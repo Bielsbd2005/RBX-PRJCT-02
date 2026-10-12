@@ -25,8 +25,9 @@ AssetIds.Images = table.freeze({
 	-- Placeholder del card de un wrap que el jugador aún no posee.
 	WrapLockedPlaceholder = asset(82849715642061),
 
-	-- Icono de recompensa en Cash (Resultados y tiers del pase).
+	-- Icono de recompensa en Cash (Resultados y tiers del pase) y en Gems (tiers del pase).
 	CashReward = asset(113694528712529),
+	GemsReward = asset(130738983561553),
 
 	-- HUD de partida.
 	Skull = asset(130437553674754),

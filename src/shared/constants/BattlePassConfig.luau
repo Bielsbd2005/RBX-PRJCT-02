@@ -73,9 +73,7 @@ BattlePassConfig.XPRates = {
 
 BattlePassConfig.RewardIcons = {
 	Cash = AssetIds.Images.CashReward,
-	-- TODO: subir el icono de Gems. Vacío a propósito: sin icono la UI caería al de
-	-- Cash y confundiría las monedas.
-	Gems = "",
+	Gems = AssetIds.Images.GemsReward,
 }
 
 local function _toNumber(value: any, fallback: number): number

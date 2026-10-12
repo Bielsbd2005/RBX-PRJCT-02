@@ -13,6 +13,7 @@ local Client = script.Parent.Parent.Parent
 local Janitor = require(ReplicatedStorage:WaitForChild("Packages").janitor) :: any
 local InteractiveScaleTween = require(Client.core.ui.animators.InteractiveScaleTween)
 local UITheme = require(Client.core.ui.UITheme)
+local AssetIds = require(Shared.constants.AssetIds)
 local BattlePassConfig = require(Shared.constants.BattlePassConfig)
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
 local WeaponWrapPreviewer = require(Client.features.locker.Previewers.WeaponWrapPreviewer)
@@ -28,6 +29,7 @@ local TYPE_CLAIMED_TEXT = Color3.fromRGB(255, 255, 255)
 -- Misma paleta de rareza que las cards del locker, para que un item brille igual en ambos.
 local GLOW_CLAIMED_COLOR = Color3.fromRGB(34, 34, 34)
 local RARITY_GLOW = UITheme.LockerRarityGlow
+local RARITY_GRADIENTS = UITheme.LockerRarityGradients
 local STATUS_LEVEL_FORMAT = "Lvl. %d"
 local LEVEL_PASSED_BG = Color3.fromRGB(255, 196, 0)
 local LEVEL_LOCKED_BG = Color3.fromRGB(255, 255, 255)
@@ -45,10 +47,12 @@ local SLOT_CLICK_SCALE = 0.97
 type SlotRefs = {
 	frame: GuiObject,
 	container: GuiObject,
-	image: ImageLabel?,
+	-- Nodo de imagen por nombre (Item, ItemHat…); ver BattlePassRewards.imageNodeName.
+	images: { [string]: ImageLabel },
 	viewport: ViewportFrame?,
+	weapon: ImageLabel?,
 	value: TextLabel?,
-	rewardGradient: UIGradient?,
+	rarityGradient: UIGradient?,
 	glow: GuiObject?,
 	levelLabel: TextLabel?,
 	locked: GuiObject?,
@@ -57,8 +61,7 @@ type SlotRefs = {
 	check: ImageLabel?,
 }
 
--- previewKey = wrap + arma: si cambia cualquiera hay que rehacer el viewport.
-type WrapEntry = { previewKey: string, janitor: any }
+type WrapEntry = { wrapId: string, janitor: any }
 
 -- Lo que la casilla necesita saber del jugador para pintar un nivel.
 export type SlotState = {
@@ -116,19 +119,29 @@ local function resolveSlot(pathFolder: Instance, index: number): SlotRefs?
 	local container: GuiObject = if containerNode and containerNode:IsA("GuiObject") then containerNode else frame
 
 	local reward = container:FindFirstChild("LevelReward")
-	local imageNode = reward and reward:FindFirstChild("ImageReward")
 	local viewportNode = reward and reward:FindFirstChild("ViewportReward")
-	local valueNode = reward and reward:FindFirstChild("Value")
-	local rewardGradientNode = if reward then reward:FindFirstChildOfClass("UIGradient") else nil
+	local weaponNode = reward and reward:FindFirstChild("Weapon")
+	local rarityGradientNode = if reward then reward:FindFirstChildOfClass("UIGradient") else nil
 	local glowNode = reward and reward:FindFirstChild("Glow")
 	local checkNode = reward and reward:FindFirstChild("Check")
 
 	local footer = reward and reward:FindFirstChild("Footer")
 	local status = footer and footer:FindFirstChild("Status")
 	local lockedNode = status and status:FindFirstChild("Locked")
+	local valueNode = status and status:FindFirstChild("Value")
+	if lockedNode and lockedNode:IsA("ImageLabel") then
+		lockedNode.Image = AssetIds.Images.LockerLocked
+	end
 
-	-- El nivel puede ir en Container.Level o en Footer.Status.Value.
-	local levelNode = container:FindFirstChild("Level") or (status and status:FindFirstChild("Value"))
+	local images: { [string]: ImageLabel } = {}
+	for _, name in BattlePassRewards.IMAGE_NODE_NAMES do
+		local node = reward and reward:FindFirstChild(name)
+		if node and node:IsA("ImageLabel") then
+			images[name] = node
+		end
+	end
+
+	local levelNode = container:FindFirstChild("Level")
 
 	local typeNode = container:FindFirstChild("Type") or (reward and reward:FindFirstChild("Type"))
 	local claimNode = container:FindFirstChild("Claim") or (reward and reward:FindFirstChild("Claim"))
@@ -136,10 +149,11 @@ local function resolveSlot(pathFolder: Instance, index: number): SlotRefs?
 	return {
 		frame = frame,
 		container = container,
-		image = if imageNode and imageNode:IsA("ImageLabel") then imageNode else nil,
+		images = images,
 		viewport = if viewportNode and viewportNode:IsA("ViewportFrame") then viewportNode else nil,
+		weapon = if weaponNode and weaponNode:IsA("ImageLabel") then weaponNode else nil,
 		value = if valueNode and valueNode:IsA("TextLabel") then valueNode else nil,
-		rewardGradient = rewardGradientNode,
+		rarityGradient = rarityGradientNode,
 		glow = if glowNode and glowNode:IsA("GuiObject") then glowNode else nil,
 		levelLabel = if levelNode and levelNode:IsA("TextLabel") then levelNode else nil,
 		locked = if lockedNode and lockedNode:IsA("GuiObject") then lockedNode else nil,
@@ -304,15 +318,10 @@ end
 
 local function paintWrapViewport(self: Internal, refs: SlotRefs, reward: BattlePassConfig.Reward)
 	local viewport = refs.viewport :: ViewportFrame
-	if refs.image then
-		refs.image.Visible = false
-	end
 	viewport.Visible = true
 	local wrapId = reward.ItemId :: string
-	local weaponCategory, weaponId, weaponName = BattlePassRewards.wrapPreviewWeapon(reward)
-	local previewKey = `{wrapId}|{weaponCategory}|{weaponId or ""}`
 	local existing = self._wrapBySlot[refs.frame]
-	if existing and existing.previewKey == previewKey then
+	if existing and existing.wrapId == wrapId then
 		return
 	end
 	clearWrap(self, refs.frame)
@@ -321,35 +330,41 @@ local function paintWrapViewport(self: Internal, refs: SlotRefs, reward: BattleP
 		return
 	end
 	local previewJanitor = Janitor.new()
-	local ok, usedWeapon = WeaponWrapPreviewer.Render(viewport, {
-		WrapId = wrapId,
-		PreviewWeaponCategory = weaponCategory,
-		PreviewWeaponId = weaponId,
-		PreviewWeaponDisplayName = weaponName,
-	}, previewJanitor)
+	-- Como las cards del locker: template `Wrap` y no el arma; el arma va en LevelReward.Weapon.
+	local ok = WeaponWrapPreviewer.Render(viewport, { WrapId = wrapId }, previewJanitor)
 	if ok then
-		-- Solo el bloque genérico (sin modelo de arma) necesita recentrarse.
-		if not usedWeapon then
-			WeaponWrapPreviewer.reframeCentered(viewport)
-		end
-		self._wrapBySlot[refs.frame] = { previewKey = previewKey, janitor = previewJanitor }
+		WeaponWrapPreviewer.reframeCentered(viewport)
+		self._wrapBySlot[refs.frame] = { wrapId = wrapId, janitor = previewJanitor }
 	else
 		previewJanitor:Destroy()
 	end
 end
 
 local function paintContent(self: Internal, refs: SlotRefs, reward: BattlePassConfig.Reward, isClaimed: boolean)
-	if BattlePassRewards.isWrap(reward) and refs.viewport then
+	local isWrap = BattlePassRewards.isWrap(reward)
+	if refs.weapon then
+		local weaponImage = if isWrap then BattlePassRewards.wrapWeaponImage(reward) else nil
+		refs.weapon.Image = weaponImage or ""
+		refs.weapon.Visible = weaponImage ~= nil
+	end
+
+	local usesViewport = isWrap and refs.viewport ~= nil
+	if usesViewport then
 		paintWrapViewport(self, refs, reward)
 	else
 		clearWrap(self, refs.frame)
 		if refs.viewport then
 			refs.viewport.Visible = false
 		end
-		if refs.image then
-			refs.image.Image = BattlePassRewards.image(reward)
-			refs.image.Visible = true
-		end
+	end
+
+	local wanted = BattlePassRewards.imageNodeName(reward)
+	local imageNode = if usesViewport then nil else (refs.images[wanted] or refs.images.Item)
+	for _, node in refs.images do
+		node.Visible = node == imageNode
+	end
+	if imageNode then
+		imageNode.Image = BattlePassRewards.image(reward)
 	end
 
 	if refs.value then
@@ -360,23 +375,32 @@ local function paintContent(self: Internal, refs: SlotRefs, reward: BattlePassCo
 
 	local tintColor = if isClaimed then CLAIMED_IMG_COLOR else Color3.fromRGB(255, 255, 255)
 	local tintTransp = if isClaimed then CLAIMED_IMG_TRANSPARENCY else 0
-	if refs.image then
-		refs.image.ImageColor3 = tintColor
-		refs.image.ImageTransparency = tintTransp
+	if imageNode then
+		imageNode.ImageColor3 = tintColor
+		imageNode.ImageTransparency = tintTransp
 	end
 	if refs.viewport then
 		refs.viewport.ImageColor3 = tintColor
 		refs.viewport.ImageTransparency = tintTransp
 	end
+	if refs.weapon then
+		refs.weapon.ImageColor3 = tintColor
+		refs.weapon.ImageTransparency = tintTransp
+	end
 	if refs.check then
 		refs.check.Visible = isClaimed
+	end
+
+	local rarity = BattlePassRewards.rarity(reward)
+	if refs.rarityGradient then
+		refs.rarityGradient.Color = RARITY_GRADIENTS[rarity] or RARITY_GRADIENTS[BattlePassRewards.RARITY_FALLBACK]
 	end
 
 	local glow = refs.glow
 	if glow then
 		local color = if isClaimed
 			then GLOW_CLAIMED_COLOR
-			else (RARITY_GLOW[BattlePassRewards.rarity(reward)] or RARITY_GLOW[BattlePassRewards.RARITY_FALLBACK])
+			else (RARITY_GLOW[rarity] or RARITY_GLOW[BattlePassRewards.RARITY_FALLBACK])
 		if color then
 			if glow:IsA("ImageLabel") or glow:IsA("ImageButton") then
 				glow.ImageColor3 = color
@@ -427,9 +451,6 @@ function BattlePassSlots.paint(self: Internal, index: number, tierDef: BattlePas
 		refs.claim.Visible = state.claimable
 	end
 	paintLevel(self, refs, state)
-	if refs.rewardGradient then
-		refs.rewardGradient.Enabled = tierDef.Premium
-	end
 end
 
 -- Un único tween de Position por Container, compartido por stagger y selección.

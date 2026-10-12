@@ -6,7 +6,7 @@
 	GUI (PlayerGui.UserInterface.BattlePass). Cada nodo se busca primero bajo el frame
 	intermedio OPCIONAL `Content` (o `Main`) y luego en la raíz.
 	Todo con FindFirstChild: un nodo que falte no rompe el feature.
-	  CloseBtn (root; fallback Header.CloseBtn)
+	  CloseBtn (fallback Header.CloseBtn)
 	  Nav.Back (.Indicator) / Nav.Next (.Indicator) / Nav.Info ("1/8")
 	  SkipLevel / SkipLevel5 (Robux, .Price opcional)
 	  Banner.PurchaseBtn (Gems, premium; .Value = precio en Gems de la season)
@@ -15,9 +15,11 @@
 	    Container.Level                    ("Lvl. 5"; oculto en el slot del nivel actual)
 	    Container.Type / Container.Claim   (OPCIONALES)
 	    Container.LevelReward
-	      .ViewportReward (wraps) / .ImageReward (resto) / .Value (tipo de recompensa)
-	      .Glow / .Check                   (OPCIONALES)
-	      .Footer.Status.Locked
+	      .ViewportReward (wraps)
+	      .Item / .ItemHat / .ItemHair / .ItemFace / .ItemBody (resto, como la card del locker)
+	      .Weapon (ImageLabel OPCIONAL: arma de un wrap por arma; oculto en el resto)
+	      .UIGradient (color de rareza) / .Glow / .Check (OPCIONALES)
+	      .Footer.Status.Locked (icono lo pone el código) / .Footer.Status.Value (tipo de recompensa)
 	  CurrentLevel (OPCIONAL; .Fill, .Level): plantilla clonada UNA vez y reparentada
 	    al Container del nivel actual en cada render, para no crear CanvasGroups por tick.
 ]]
@@ -99,7 +101,7 @@ function BattlePassFeature.start(menuController: any): any
 	local navIndicator: GuiObject? = if navIndicatorNode and navIndicatorNode:IsA("GuiObject") then navIndicatorNode else nil
 
 	local header = findPanelChild("Header")
-	local closeNode = frame:FindFirstChild("CloseBtn") or (header and header:FindFirstChild("CloseBtn"))
+	local closeNode = findPanelChild("CloseBtn") or (header and header:FindFirstChild("CloseBtn"))
 	local closeBtn: GuiButton? = if closeNode and closeNode:IsA("GuiButton") then closeNode else nil
 
 	local navFolder = findPanelChild("Nav")
@@ -493,14 +495,12 @@ function BattlePassFeature.start(menuController: any): any
 			render()
 			updateNavButton()
 		end), true)
-		-- Los wraps globales van sobre el arma equipada: la previewKey detecta el cambio
-		-- pero hace falta repintar para que se relea.
+		-- En la escena, los wraps globales van sobre el arma equipada.
 		local loadoutObs = scope:Observer(DataController.Loadout :: any)
 		janitor:Add(loadoutObs:onBind(function()
 			if not isOpen then
 				return
 			end
-			render()
 			if lastSceneReward then
 				pushScenePreview(lastSceneReward)
 			end

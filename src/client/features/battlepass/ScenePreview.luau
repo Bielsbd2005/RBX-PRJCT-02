@@ -59,8 +59,8 @@ local PILE_PART_NAME = "Part"
 local PILE_VALUE_NAME = "Value"
 local PILE_SPAWN_NAME = "PileSpawn"
 
-local HEAD_SCALE = 3
-local WEAPON_SCALE = 3
+local HEAD_SCALE = 4
+local WEAPON_SCALE = 4
 local DUMMY_SCALE = 2
 -- Los montones son assets hechos a medida: su tamaño bueno es el de Studio.
 local PILE_SCALE = 1
