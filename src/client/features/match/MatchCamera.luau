@@ -5,17 +5,40 @@
 ]]
 
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+
+local GameConfig = require(ReplicatedStorage.Shared.GameConfig)
 
 local Client = script.Parent.Parent.Parent
 local CameraLock = require(Client.core.camera.CameraLock)
 local ResultsScene = require(script.Parent.ResultsScene)
 
-local INTRO_DURATION = 1.0           -- duración del movimiento dramático (s)
-local TILT_DEG = 32                  -- pitch inicial (negativo = empieza mirando arriba)
-local ROLL_DEG = 8                   -- inclinación lateral (dutch) inicial que se endereza
-local DOLLY_BACK = 12                -- studs que arranca por detrás (dolly hacia delante)
-local FOV_PUNCH = 14                 -- FOV extra al inicio → zoom-in sutil que se asienta
+local INTRO_DURATION = 1.5           -- duración de la entrada (s)
+local DOLLY_BACK = 14                -- studs que arranca por detrás (dolly hacia delante)
+local TRUCK_SIDE = 7                 -- studs que arranca a un lado: la entrada describe un arco
+local TILT_DEG = 16                  -- pitch inicial que se asienta
+local ROLL_DEG = 10                  -- inclinación lateral (dutch) inicial que se endereza
+local FOV_PUNCH = 18                 -- FOV extra al inicio → zoom-in que se asienta
+-- Tilt y roll terminan antes que el recorrido: el final es solo un empuje recto.
+local ROTATION_SETTLE = 0.75         -- fracción de INTRO_DURATION
+-- Curva de la entrada: llega rápido y aterriza suave. EASE_IN retrasa el arranque
+-- porque el fundido de entrada tapa el principio.
+local EASE_IN_POWER = 1.15
+local EASE_OUT_POWER = 3
+-- Deriva lenta que sigue el mismo arco tras la entrada y se va cerrando sobre el
+-- encuadre autorado mientras dura Resultados. Casi toda lateral: orbitar al equipo apenas lo mueve en
+-- pantalla, y las tarjetas 2D están alineadas con las réplicas.
+local DRIFT_SIDE = 2                 -- studs
+local DRIFT_BACK = 0.9
+-- Vaivén sobre la deriva, mínimo por el mismo motivo.
+local SWAY_YAW_DEG = 0.28
+local SWAY_PITCH_DEG = 0.16
+local SWAY_YAW_SPEED = 0.35          -- rad/s
+local SWAY_PITCH_SPEED = 0.27
+-- Punto al que mira la entrada si el mapa no trae anclas de jugador.
+local FOCUS_FALLBACK_DISTANCE = 20
+local START_WALL_MARGIN = 1          -- studs que se separa el arranque de una pared
 
 -- Las cámaras de Resultados se conducen DESPUÉS del script de cámara de Roblox
 -- (Camera), la ShoulderCamera (Camera-1) y la killcam (Camera+1). Con RenderStepped
@@ -43,6 +66,37 @@ local function _stopCinematic()
 		_cinematicCamera.FieldOfView = _cinematicOrigFOV
 		_cinematicCamera = nil
 	end
+end
+
+-- Fracción del recorrido que queda (1 → 0) en el instante `t` de 0 a 1.
+local function _remaining(t: number): number
+	return (1 - math.clamp(t, 0, 1) ^ EASE_IN_POWER) ^ EASE_OUT_POWER
+end
+
+-- Centro del equipo en la escena de Resultados.
+local function _resultsFocus(finalCFrame: CFrame): Vector3
+	local sum = Vector3.zero
+	local count = 0
+	for _, anchor in ResultsScene.getAnchors() do
+		sum += anchor.Position
+		count += 1
+	end
+	if count == 0 then
+		return finalCFrame.Position + finalCFrame.LookVector * FOCUS_FALLBACK_DISTANCE
+	end
+	return sum / count
+end
+
+-- Cuánto del desplazamiento de arranque cabe (0..1) antes de topar con geometría
+-- desde el encuadre final: la entrada no puede empezar dentro de una pared.
+local function _clearFraction(finalPosition: Vector3, offset: Vector3): number
+	local params = RaycastParams.new()
+	params.RespectCanCollide = true
+	local hit = workspace:Raycast(finalPosition, offset, params)
+	if not hit then
+		return 1
+	end
+	return math.max(hit.Distance - START_WALL_MARGIN, 0) / offset.Magnitude
 end
 
 local function _bind(step: (dt: number) -> ())
@@ -146,8 +200,9 @@ function MatchCamera.holdCurrent(guardFn: (() -> boolean)?)
 	end)
 end
 
---- Intro rápido (tilt + roll + zoom + dolly) que entra al encuadre `Results.Camera`
---- del mapa y se sostiene. Re-afirma Scriptable cada frame para ganar a respawns y
+--- Entrada rápida en arco (dolly + truck + tilt + roll + zoom) con la mirada clavada
+--- en el equipo, que al llegar no se para: sigue derivando despacio por el mismo arco
+--- hasta el encuadre `Results.Camera` del mapa. Re-afirma Scriptable cada frame para ganar a respawns y
 --- setGameplay. Se detiene cuando `guardFn` devuelve false o con stopResultsCinematic.
 function MatchCamera.startResultsCinematic(guardFn: (() -> boolean)?)
 	local camera = workspace.CurrentCamera
@@ -165,12 +220,28 @@ function MatchCamera.startResultsCinematic(guardFn: (() -> boolean)?)
 	_stopCinematic()
 
 	local finalCFrame: CFrame = captured
-	local finalRotation = finalCFrame.Rotation
+	local finalPosition = finalCFrame.Position
 
-	-- Dolly solo en horizontal (look aplanado a XZ): la entrada nunca cambia la altura
-	-- y no atraviesa el suelo por inclinada que esté la cámara final.
+	-- Desplazamiento solo en horizontal (ejes aplanados a XZ): la entrada nunca cambia
+	-- la altura y no atraviesa el suelo por inclinada que esté la cámara final.
 	local flatLook = Vector3.new(finalCFrame.LookVector.X, 0, finalCFrame.LookVector.Z)
 	flatLook = if flatLook.Magnitude > 1e-4 then flatLook.Unit else finalCFrame.LookVector
+	local flatRight = Vector3.new(-flatLook.Z, 0, flatLook.X)
+	local introOffset = flatRight * TRUCK_SIDE - flatLook * DOLLY_BACK
+	local driftOffset = flatRight * DRIFT_SIDE - flatLook * DRIFT_BACK
+	local clear = _clearFraction(finalPosition, introOffset + driftOffset)
+	introOffset *= clear
+	driftOffset *= clear
+
+	-- Mirar al equipo durante el arco da paralaje; `aimCorrection` es lo que separa
+	-- "mirar al foco" del encuadre autorado, así que con el recorrido a 0 sale exacto.
+	local focus = _resultsFocus(finalCFrame)
+	local toFocus = focus - finalPosition
+	-- lookAt degenera con el foco encima o debajo de la cámara: ahí no se reorienta.
+	local tracksFocus = toFocus.Magnitude > 1 and math.abs(toFocus.Unit.Y) < 0.98
+	local aimCorrection = if tracksFocus
+		then CFrame.lookAt(finalPosition, focus):ToObjectSpace(finalCFrame)
+		else finalCFrame.Rotation
 
 	_cinematicCamera = camera
 	_cinematicOrigFOV = camera.FieldOfView
@@ -187,18 +258,27 @@ function MatchCamera.startResultsCinematic(guardFn: (() -> boolean)?)
 		end
 		elapsed += dt
 
-		local it = math.clamp(elapsed / INTRO_DURATION, 0, 1)
-		local intro = (1 - it) ^ 4
+		local t = elapsed / INTRO_DURATION
+		local travel = _remaining(t)
+		local twist = _remaining(t / ROTATION_SETTLE)
 
-		local pos = finalCFrame.Position - flatLook * (DOLLY_BACK * intro)
-		local targetCFrame = CFrame.new(pos)
-			* finalRotation
-			* CFrame.Angles(math.rad(TILT_DEG * intro), 0, math.rad(ROLL_DEG * intro))
+		local drift = math.max(1 - elapsed / GameConfig.EndResultsDuration, 0)
+
+		local position = finalPosition + introOffset * travel + driftOffset * drift
+		local aim = if tracksFocus then CFrame.lookAt(position, focus) else CFrame.new(position)
+		local sway = CFrame.Angles(
+			math.rad(SWAY_PITCH_DEG) * math.sin(elapsed * SWAY_PITCH_SPEED),
+			math.rad(SWAY_YAW_DEG) * math.sin(elapsed * SWAY_YAW_SPEED),
+			0
+		)
 
 		camera.CameraType = Enum.CameraType.Scriptable
 		camera.CameraSubject = nil
-		camera.CFrame = targetCFrame
-		camera.FieldOfView = finalFOV + FOV_PUNCH * intro
+		camera.CFrame = aim
+			* aimCorrection
+			* CFrame.Angles(math.rad(TILT_DEG * twist), 0, math.rad(ROLL_DEG * twist))
+			* sway
+		camera.FieldOfView = finalFOV + FOV_PUNCH * travel
 	end)
 end
 

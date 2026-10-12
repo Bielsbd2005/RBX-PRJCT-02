@@ -1014,10 +1014,7 @@ function MatchFeature.start(menuController: any): any
 			-- Normalmente ya congelada desde applySnapshotPhase; esto cambia el guard a esta fase.
 			MatchCamera.holdCurrent(isShowingResults)
 
-			local function onResultsFinished()
-				if not isShowingResults() then
-					return
-				end
+			local function leaveResults()
 				resultsView:hide()
 				MatchState.setPhase("Lobby")
 				MatchCamera.stopResultsCinematic()
@@ -1042,6 +1039,20 @@ function MatchFeature.start(menuController: any): any
 				end
 			end
 
+			-- Fundido a negro → con la pantalla tapada se cambia la escena de Resultados por
+			-- el lobby y la votación → reveal.
+			local function onResultsFinished()
+				if not isShowingResults() then
+					return
+				end
+				fade:cover(function()
+					if isShowingResults() then
+						leaveResults()
+					end
+					fade:reveal()
+				end)
+			end
+
 			-- Si algo saca al jugador de Resultados a mitad del fundido, descubrir la pantalla.
 			fade:cover(function()
 				if not isShowingResults() then
@@ -1058,9 +1069,9 @@ function MatchFeature.start(menuController: any): any
 						return
 					end
 					MatchCamera.startResultsCinematic(isShowingResults)
-					-- La ventana del servidor empezó en RoundEnded: se descuenta el fundido para cerrar
-					-- a la vez que desmonta el mapa.
-					local remaining = GameConfig.EndResultsDuration - (os.clock() - roundEndedAt)
+					-- La ventana del servidor empezó en RoundEnded: se descuentan el fundido de
+					-- entrada y el de salida para llegar a negro a la vez que desmonta el mapa.
+					local remaining = GameConfig.EndResultsDuration - (os.clock() - roundEndedAt) - ScreenFade.DURATION
 					resultsView:show(localTeam, playerEntries, remaining, onResultsFinished, latestMatchResults)
 					fade:reveal()
 				end)

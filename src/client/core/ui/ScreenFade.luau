@@ -18,6 +18,9 @@ local GUI_NAME = "ScreenFadeGui"
 local ScreenFade = {}
 ScreenFade.__index = ScreenFade
 
+-- Segundos que tarda `cover` en llegar a negro (y `reveal` en descubrir).
+ScreenFade.DURATION = FADE_INFO.Time
+
 export type ScreenFade = typeof(setmetatable(
 	{} :: {
 		_veil: Frame,
