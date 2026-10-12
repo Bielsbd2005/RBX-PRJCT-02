@@ -96,6 +96,13 @@ export type WeaponKills = {
 	Special: { [string]: number },
 }
 
+-- weaponId → contadores de los desafíos de maestría que no son bajas: las claves son
+-- los WrapMastery.Stat distintos de "Kills".
+export type WeaponChallenges = {
+	Main: { [string]: { [string]: number } },
+	Special: { [string]: { [string]: number } },
+}
+
 --[[
 	Whitelist de claves en SettingsService: un cambio de tipo aquí requiere tocar
 	su handler (UpdateSlider/UpdateToggle).
@@ -232,6 +239,7 @@ export type PlayerProfile = {
 	InventoryMeta: InventoryMeta,
 	Loadout: Loadout,
 	WeaponKills: WeaponKills,
+	WeaponChallenges: WeaponChallenges,
 	Settings: Settings,
 	Rewards: Rewards,
 	LoginStreak: LoginStreak,
@@ -323,6 +331,11 @@ local DEFAULT: PlayerProfile = {
 	},
 
 	WeaponKills = {
+		Main = {},
+		Special = {},
+	},
+
+	WeaponChallenges = {
 		Main = {},
 		Special = {},
 	},

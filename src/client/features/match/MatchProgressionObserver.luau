@@ -21,44 +21,42 @@ local DataController = require(script.Parent.Parent.Parent.core.data.DataControl
 -- Hitos intermedios (25/50/75%) solo para tiers con objetivo >= esto; los pequeños
 -- solo notifican al completarse.
 local MASTERY_MILESTONE_MIN_TARGET = 50
+local MASTERY_STATS: { WrapMastery.Stat } = { "Kills", "Precision", "Streaks" }
+-- Qué cuenta el aviso, según el Precision de la clase del arma.
+local PRECISION_LABELS = {
+	Headshots = "Headshots",
+	CloseKills = "Close kills",
+	LongKills = "Long shots",
+}
 
 local MatchProgressionObserver = {}
 
--- Tiers de maestría = wraps con KillChallenge.
-local function _buildMasteryTiers(): { { kills: number, wrapKey: string, def: any } }
-	local tiers = {}
-	local weaponWraps = ItemsConfig.WeaponWraps
-	if type(weaponWraps) == "table" then
-		for wrapKey, def in weaponWraps do
-			if type(def) == "table" and type(def.KillChallenge) == "table" then
-				local kills = tonumber(def.KillChallenge.Kills)
-				if kills and kills > 0 then
-					table.insert(tiers, { kills = kills, wrapKey = wrapKey, def = def })
-				end
-			end
-		end
-	end
-	table.sort(tiers, function(a, b)
-		return a.kills < b.kills
-	end)
-	return tiers
-end
-
-local function _nextMasteryTier(tiers: { { kills: number, wrapKey: string, def: any } }, n: number)
-	for _, tier in tiers do
-		if tier.kills > n then
+-- Siguiente wrap del arma para ese contador; los objetivos dependen de su clase.
+local function _nextMasteryTier(category: string, weaponId: string, stat: WrapMastery.Stat, n: number): { wrapId: string, goal: number }?
+	for _, tier in WrapMastery.tiersOf(category, weaponId, stat) do
+		if tier.goal > n then
 			return tier
 		end
 	end
 	return nil
 end
 
--- 0..3; el 100% no cuenta (eso es completar).
-local function _milestoneQuarter(n: number, target: number): number
-	if target <= 0 then
+-- Marca que avisa al subir: el cuarto del objetivo (0..3; el 100% es completar) o, en
+-- las rachas, cada una, porque nada más le dice al jugador que la racha ha contado.
+local function _milestoneMark(stat: WrapMastery.Stat, n: number, target: number): number
+	if stat == "Streaks" then
+		return n
+	elseif target < MASTERY_MILESTONE_MIN_TARGET then
 		return 0
 	end
 	return math.clamp(math.floor((n / target) / 0.25), 0, 3)
+end
+
+local function _statLabel(category: string, weaponId: string, stat: WrapMastery.Stat): string
+	if stat == "Precision" then
+		return PRECISION_LABELS[WrapMastery.classOf(category, weaponId).Precision]
+	end
+	return stat
 end
 
 local function _eachWeaponKill(weaponKills: any, fn: (category: string, weaponId: string, kills: number) -> ())
@@ -77,9 +75,10 @@ local function _eachWeaponKill(weaponKills: any, fn: (category: string, weaponId
 	end
 end
 
-local function _masteryRewardFields(wrapKey: string, def: any): any
+local function _masteryRewardFields(wrapKey: string): any
+	local def = ItemsConfig.WeaponWraps[wrapKey]
 	return {
-		name = if type(def.Name) == "string" and def.Name ~= "" then def.Name else wrapKey,
+		name = if type(def) == "table" and type(def.Name) == "string" and def.Name ~= "" then def.Name else wrapKey,
 		wrapId = wrapKey,
 	}
 end
@@ -90,22 +89,6 @@ type AttachDeps = {
 	fusionScope: any,
 	janitor: any,
 }
-
-local function _isMasteryWrap(wrapKey: string): (boolean, any)
-	local weaponWraps = ItemsConfig.WeaponWraps
-	if type(weaponWraps) ~= "table" then
-		return false, nil
-	end
-	local def = weaponWraps[wrapKey]
-	if type(def) ~= "table" then
-		return false, nil
-	end
-	local challenge = def.KillChallenge
-	if type(challenge) == "table" and tonumber(challenge.Kills) and challenge.Kills > 0 then
-		return true, def
-	end
-	return WrapMastery.scopeOf(wrapKey) ~= nil, def
-end
 
 local function _snapshotWrapsOwned(inventory: any): { [string]: { [string]: { [string]: boolean } } }
 	local snapshot: { [string]: { [string]: { [string]: boolean } } } = {}
@@ -188,16 +171,13 @@ function MatchProgressionObserver.attach(deps: AttachDeps)
 					for weaponId, wrapMap in weaponMap do
 						local prevWraps = prevCat[weaponId] or {}
 						for wrapKey, _ in wrapMap do
-							if not prevWraps[wrapKey] and not celebrated[wrapKey] then
-								local isMastery, def = _isMasteryWrap(wrapKey)
-								if isMastery then
-									celebrated[wrapKey] = true
-									local fields = _masteryRewardFields(wrapKey, def)
-									fields.current = 1
-									fields.target = 1
-									fields.isComplete = true
-									hud:playMasteryAnimation(fields)
-								end
+							if not prevWraps[wrapKey] and not celebrated[wrapKey] and WrapMastery.isMasteryWrap(wrapKey) then
+								celebrated[wrapKey] = true
+								local fields = _masteryRewardFields(wrapKey)
+								fields.current = 1
+								fields.target = 1
+								fields.isComplete = true
+								hud:playMasteryAnimation(fields)
 							end
 						end
 					end
@@ -211,45 +191,49 @@ function MatchProgressionObserver.attach(deps: AttachDeps)
 		local inventoryObserver = fusionScope:Observer(DataController.Inventory)
 		janitor:Add(inventoryObserver:onBind(updateWrapsAndDetectUnlocks), true)
 
-		-- Hitos 25/50/75% hacia el siguiente tier; el 100% lo dispara la detección de
-		-- wrap de arriba. Al entrar en una banda nueva se siembra sin notificar.
-		local masteryTiers = _buildMasteryTiers()
-		local lastMilestoneByWeapon: { [string]: { target: number, quarter: number } } = {}
+		-- Hitos hacia el siguiente tier de cada contador (_milestoneMark); el 100% lo dispara
+		-- la detección de wrap de arriba. Al entrar en un tier nuevo se siembra sin notificar.
+		-- Un arma con contadores de desafío siempre tiene bajas: basta recorrer WeaponKills.
+		local lastMarkByTier: { [string]: { target: number, mark: number } } = {}
 		local milestoneSeeded = false
-		local function onWeaponKillsChanged()
-			local weaponKills = Fusion.peek(DataController.WeaponKills)
-			_eachWeaponKill(weaponKills, function(category, weaponId, kills)
-				local key = category .. "|" .. weaponId
-				local tier = _nextMasteryTier(masteryTiers, kills)
-				if not tier then
-					lastMilestoneByWeapon[key] = nil
-					return
+		local function onMasteryStatsChanged()
+			local weaponChallenges = Fusion.peek(DataController.WeaponChallenges) :: any
+			_eachWeaponKill(Fusion.peek(DataController.WeaponKills), function(category, weaponId, kills)
+				local categoryChallenges = if type(weaponChallenges) == "table" then weaponChallenges[category] else nil
+				local challengeStats = if type(categoryChallenges) == "table" then categoryChallenges[weaponId] else nil
+				for _, stat in MASTERY_STATS do
+					local value = if stat == "Kills"
+						then kills
+						else (if type(challengeStats) == "table" then tonumber(challengeStats[stat]) else nil) or 0
+					local key = category .. "|" .. weaponId .. "|" .. stat
+					local tier = _nextMasteryTier(category, weaponId, stat, value)
+					if not tier then
+						lastMarkByTier[key] = nil
+						continue
+					end
+					local mark = _milestoneMark(stat, value, tier.goal)
+					local prev = lastMarkByTier[key]
+					if not prev or prev.target ~= tier.goal then
+						lastMarkByTier[key] = { target = tier.goal, mark = mark }
+						continue
+					end
+					if milestoneSeeded and mark > prev.mark and matchHudGui and matchHudGui.Enabled then
+						local fields = _masteryRewardFields(tier.wrapId)
+						fields.name ..= ": " .. _statLabel(category, weaponId, stat)
+						fields.current = value
+						fields.target = tier.goal
+						fields.isComplete = false
+						hud:playMasteryAnimation(fields)
+					end
+					prev.mark = math.max(prev.mark, mark)
 				end
-				local quarter = _milestoneQuarter(kills, tier.kills)
-				local prev = lastMilestoneByWeapon[key]
-				if not prev or prev.target ~= tier.kills then
-					lastMilestoneByWeapon[key] = { target = tier.kills, quarter = quarter }
-					return
-				end
-				if milestoneSeeded
-					and quarter > prev.quarter
-					and quarter >= 1
-					and tier.kills >= MASTERY_MILESTONE_MIN_TARGET
-					and matchHudGui and matchHudGui.Enabled
-				then
-					local fields = _masteryRewardFields(tier.wrapKey, tier.def)
-					fields.current = kills
-					fields.target = tier.kills
-					fields.isComplete = false
-					hud:playMasteryAnimation(fields)
-				end
-				prev.quarter = math.max(prev.quarter, quarter)
 			end)
 			milestoneSeeded = true
 		end
-		local weaponKillsObserver = fusionScope:Observer(DataController.WeaponKills)
-		janitor:Add(weaponKillsObserver:onBind(onWeaponKillsChanged), true)
-		onWeaponKillsChanged()
+		for _, masteryStats in { DataController.WeaponKills, DataController.WeaponChallenges } do
+			janitor:Add(fusionScope:Observer(masteryStats):onBind(onMasteryStatsChanged), true)
+		end
+		onMasteryStatsChanged()
 
 		-- La rotación se siembra con el DateKey del estado, el mismo con el que paga el
 		-- server. Se reserva el cash (hud:reserveChallengeCash) porque el server manda

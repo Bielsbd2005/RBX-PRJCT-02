@@ -664,7 +664,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 	updateActionFrameForSelected = function()
 		local selectedItem = selectedCatalogItem
-		wrapInfo:show(if isWrapsMode and wrapsView == "maestry" then selectedItem else nil, inventory:getWrapsTargetCategory())
+		wrapInfo:show(if isWrapsMode and wrapsView == "maestry" then selectedItem else nil, inventory)
 		if not selectedItem then
 			wrapsButton.Visible = false
 			actionPanel:hide()
@@ -683,7 +683,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 				end
 			end
 			actionPanel:hide()
-		elseif (selectedItem.KillGoal ~= nil and selectedItem.KillGoal > 0)
+		elseif selectedItem.IsMasteryWrap
 			or (selectedItem.Category == LockerCategory.WEAPON_WRAPS
 				and not (selectedItem.CanPurchase and selectedItem.Price > 0)) then
 			-- No comprables con cash: wraps de desafío (se desbloquean por progreso) y
@@ -906,8 +906,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			refreshBanners()
 		end), true)
 
-		local weaponKillsObserver = fusionScope:Observer(DataController.WeaponKills)
-		janitor:Add(weaponKillsObserver:onBind(function()
+		local function onMasteryStatsChanged()
 			if not isOpen then
 				dirtyWhileClosed = true
 				return
@@ -916,7 +915,10 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 				local selectedQualifiedId = if selectedCatalogItem then selectedCatalogItem.qualifiedId else nil
 				populateMainContentForNavItem(selectedMainCategory, selectedNavKey, selectedQualifiedId)
 			end
-		end), true)
+		end
+		for _, masteryStats in { DataController.WeaponKills, DataController.WeaponChallenges } do
+			janitor:Add(fusionScope:Observer(masteryStats):onBind(onMasteryStatsChanged), true)
+		end
 
 		local inventoryObserver = fusionScope:Observer(DataController.Inventory)
 		janitor:Add(inventoryObserver:onBind(function()

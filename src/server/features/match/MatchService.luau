@@ -182,6 +182,8 @@ type Round = {
 	-- dentro de la ventana, así nadie se cura más veces de las que mata. No se puede
 	-- verificar que el orbe existiera ni la proximidad.
 	pickupCreditsByUserId: { [number]: { number } },
+	-- Bajas por arma ("Categoría|Id") en la vida actual: rachas de maestría de wraps.
+	weaponStreaksByUserId: { [number]: { [string]: number } },
 	-- Última muerte registrada cerca de cada spawn point; SpawnSelector lo usa
 	-- para penalizar respawnear donde alguien acaba de morir (anti spawn-trap).
 	-- Weak keys: si un spawn point se destruye, el GC libera la entry solo.
@@ -221,6 +223,7 @@ local function _newRound(): Round
 		entriesByUserId = {},
 		recentKillTimestampsByUserId = {},
 		pickupCreditsByUserId = {},
+		weaponStreaksByUserId = {},
 		recentDeathBySpawn = setmetatable({}, { __mode = "k" }) :: any,
 	}
 end
@@ -638,7 +641,8 @@ local function _scoreInRoundDeath(
 			round.recentDeathBySpawn[nearestSpawn] = time()
 		end
 	end
-	local attackerUserId, attackerWeaponId, attackerWasHeadshot, attackerWeaponCategory = KillRewardsService:ResolveKillAttacker(humanoid)
+	local attackerUserId, attackerWeaponId, attackerWasHeadshot, attackerWeaponCategory, killDistance =
+		KillRewardsService:ResolveKillAttacker(humanoid)
 	local attackerPlayer = if attackerUserId then Players:GetPlayerByUserId(attackerUserId) else nil
 	local killerName: string
 	if attackerPlayer then
@@ -648,7 +652,7 @@ local function _scoreInRoundDeath(
 	else
 		killerName = ""
 	end
-	KillRewardsService:RegisterPlayerDeath(player, attackerUserId, attackerWeaponId, attackerWasHeadshot, attackerWeaponCategory)
+	KillRewardsService:RegisterPlayerDeath(player, attackerUserId, attackerWeaponId, attackerWasHeadshot, attackerWeaponCategory, killDistance)
 
 	-- Ragdoll visible para todos.
 	if withKillEffect then
@@ -685,6 +689,7 @@ local function _sendToMenu(player: Player, session: PlayerSession, reason: strin
 	_markLeftMatch(player.UserId)
 	_setMatchSide(player, nil)
 	DailyTasksService:ResetStreak(player)
+	KillRewardsService:ResetWeaponStreaks(player.UserId)
 	session.inMenu = true
 	session.respawnDebounce = false
 	session.pendingSpawn = false
@@ -1284,7 +1289,8 @@ local function _handleBotDied(botTeam: string, _botName: string, botHumanoid: Hu
 		return
 	end
 
-	local attackerUserId, attackerWeaponId, attackerWasHeadshot, attackerWeaponCategory = KillRewardsService:ResolveKillAttacker(botHumanoid)
+	local attackerUserId, attackerWeaponId, attackerWasHeadshot, attackerWeaponCategory, killDistance =
+		KillRewardsService:ResolveKillAttacker(botHumanoid)
 
 	local killerName = _resolveKillerName(attackerUserId)
 	-- Nombre ficticio del bot víctima (no su nombre crudo "Bot_B_08"). Fallback al
@@ -1303,7 +1309,7 @@ local function _handleBotDied(botTeam: string, _botName: string, botHumanoid: Hu
 
 	if attackerUserId and attackerUserId ~= botFakeUserId then
 		-- Víctima bot: PvE.
-		KillRewardsService:CreditKill(attackerUserId, attackerWeaponId, attackerWasHeadshot, true, attackerWeaponCategory)
+		KillRewardsService:CreditKill(attackerUserId, attackerWeaponId, attackerWasHeadshot, true, attackerWeaponCategory, killDistance)
 	end
 
 	-- Los bots no usan streak: solo contabilizar kills/deaths para HUD.
@@ -1861,6 +1867,7 @@ function MatchService:Start(dataService: DataService): ()
 			round.statsByUserId[userId] = nil
 			round.recentKillTimestampsByUserId[userId] = nil
 			round.pickupCreditsByUserId[userId] = nil
+			round.weaponStreaksByUserId[userId] = nil
 		end
 
 		KillAttributionService:OnPlayerRemoving(userId)

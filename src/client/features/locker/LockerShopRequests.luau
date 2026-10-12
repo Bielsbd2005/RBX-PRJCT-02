@@ -275,11 +275,7 @@ local function canPurchase(self: Internal, item: LockerCatalogItem): boolean
 		Notify.warning("You already own this item.")
 		return false
 	end
-	if item.KillGoal ~= nil and item.KillGoal > 0 then
-		Notify.warning(`Unlock this wrap with {item.KillGoal} kills.`)
-		return false
-	end
-	if item.MasteryScope then
+	if item.IsMasteryWrap then
 		Notify.warning("Unlock this wrap through weapon mastery.")
 		return false
 	end

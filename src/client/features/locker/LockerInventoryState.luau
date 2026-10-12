@@ -54,7 +54,7 @@ export type LockerInventoryState = {
 	setWrapsTarget: (self: LockerInventoryState, weaponCategory: WeaponCategory, weaponId: string?) -> (),
 	getWrapsTargetWeaponId: (self: LockerInventoryState, loadout: LoadoutData?) -> string,
 	getWrapRequestContext: (self: LockerInventoryState, category: string) -> (string, string),
-	getWeaponKills: (self: LockerInventoryState, weaponCategory: WeaponCategory, weaponId: string) -> number,
+	getWeaponStat: (self: LockerInventoryState, weaponCategory: WeaponCategory, weaponId: string, stat: string) -> number,
 	isItemOwned: (self: LockerInventoryState, item: LockerCatalogItem) -> boolean,
 	isItemEquipped: (self: LockerInventoryState, item: LockerCatalogItem) -> boolean,
 }
@@ -247,10 +247,15 @@ function LockerInventoryState.getWrapRequestContext(self: Internal, category: st
 	return self._wrapsTargetCategory, self:getWrapsTargetWeaponId(self:getLoadout())
 end
 
-function LockerInventoryState.getWeaponKills(_self: Internal, weaponCategory: WeaponCategory, weaponId: string): number
-	local weaponKills = Fusion.peek(DataController.WeaponKills) :: any
-	local categoryKills = if type(weaponKills) == "table" then weaponKills[weaponCategory] else nil
-	local value = if type(categoryKills) == "table" then tonumber(categoryKills[weaponId]) else nil
+-- Contador del arma para un desafío de maestría (`stat` es un WrapMastery.Stat).
+function LockerInventoryState.getWeaponStat(_self: Internal, weaponCategory: WeaponCategory, weaponId: string, stat: string): number
+	local section = Fusion.peek(if stat == "Kills" then DataController.WeaponKills else DataController.WeaponChallenges) :: any
+	local categoryMap = if type(section) == "table" then section[weaponCategory] else nil
+	local entry = if type(categoryMap) == "table" then categoryMap[weaponId] else nil
+	if stat ~= "Kills" then
+		entry = if type(entry) == "table" then entry[stat] else nil
+	end
+	local value = tonumber(entry)
 	return if value and value > 0 then math.floor(value) else 0
 end
 

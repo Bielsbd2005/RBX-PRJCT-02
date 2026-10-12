@@ -36,7 +36,8 @@ export type LockerCatalogItem = {
 	PreviewWeaponCategory: string?,
 	PreviewWeaponId: string?,
 	PreviewWeaponDisplayName: string?,
-	KillGoal: number?,
+	-- Wrap de maestría (WrapMastery): no se compra, se gana con el arma.
+	IsMasteryWrap: boolean?,
 	MasteryScope: string?,
 	-- Vista Maestry, desafío sin desbloquear: progreso/objetivo que muestra la card.
 	ChallengeProgress: number?,
@@ -132,15 +133,6 @@ function LockerCatalog:_getTemplateItems(categoryKey: LockerCategoryKey, navKey:
 	local catalogItems = {} :: { LockerCatalogItem }
 	for itemId, definition in sourceItems do
 		if type(definition) == "table" then
-			local killGoalValue: number? = nil
-			local killChallenge = definition.KillChallenge
-			if type(killChallenge) == "table" then
-				local kills = tonumber((killChallenge :: any).Kills)
-				if kills and kills > 0 then
-					killGoalValue = math.floor(kills)
-				end
-			end
-
 			local seasonId: string? = if type(definition.Season) == "string" and definition.Season ~= ""
 				then definition.Season
 				else nil
@@ -173,7 +165,7 @@ function LockerCatalog:_getTemplateItems(categoryKey: LockerCategoryKey, navKey:
 				Material = if typeof(definition.Material) == "EnumItem" and definition.Material.EnumType == Enum.Material then definition.Material else nil,
 				isAnimated = definition.isAnimated == true,
 				StudsPerTile = tonumber(definition.StudsPerTile),
-				KillGoal = killGoalValue,
+				IsMasteryWrap = WrapMastery.isMasteryWrap(tostring(itemId)),
 				MasteryScope = WrapMastery.scopeOf(tostring(itemId)),
 			})
 		end

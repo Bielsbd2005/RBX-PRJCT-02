@@ -50,6 +50,7 @@ DataController.Inventory     = nil :: any
 DataController.InventoryMeta = nil :: any
 DataController.Loadout       = nil :: any
 DataController.WeaponKills   = nil :: any
+DataController.WeaponChallenges = nil :: any
 DataController.Settings      = nil :: any
 DataController.Rewards       = nil :: any
 DataController.LoginStreak   = nil :: any
@@ -120,6 +121,7 @@ function DataController:Start(): ()
 	_realLoadout = _deepCopy(DataTemplate.Loadout)
 	DataController.Loadout       = _scope:Value(_realLoadout)
 	DataController.WeaponKills   = _scope:Value(_deepCopy(DataTemplate.WeaponKills))
+	DataController.WeaponChallenges = _scope:Value(_deepCopy(DataTemplate.WeaponChallenges))
 	DataController.Settings      = _scope:Value(_deepCopy(DataTemplate.Settings))
 	DataController.Rewards       = _scope:Value(_deepCopy(DataTemplate.Rewards))
 	DataController.LoginStreak   = _scope:Value(_deepCopy(DataTemplate.LoginStreak))
@@ -150,6 +152,7 @@ function DataController:Start(): ()
 		_realLoadout = replica.Data.Loadout
 		_publishLoadout()
 		DataController.WeaponKills:set(replica.Data.WeaponKills)
+		DataController.WeaponChallenges:set(replica.Data.WeaponChallenges)
 		DataController.Settings:set(replica.Data.Settings)
 		DataController.Rewards:set(replica.Data.Rewards)
 		DataController.LoginStreak:set(replica.Data.LoginStreak)
@@ -182,6 +185,12 @@ function DataController:Start(): ()
 		replica:AddCleanupTask(
 			replica:ListenToChange({ "WeaponKills" }, function(newWeaponKills: any)
 				DataController.WeaponKills:set(newWeaponKills)
+			end)
+		)
+
+		replica:AddCleanupTask(
+			replica:ListenToChange({ "WeaponChallenges" }, function(newWeaponChallenges: any)
+				DataController.WeaponChallenges:set(newWeaponChallenges)
 			end)
 		)
 
