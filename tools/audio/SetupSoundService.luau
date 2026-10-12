@@ -16,7 +16,8 @@
 	    ├─ Audio (Folder)             ← ÚNICO sitio donde autorar sonidos
 	    │   ├─ Music/     Lobby
 	    │   ├─ UI/        Click · Open · Close · Error · Purchase · Coin
-	    │   └─ Gameplay/  Hit · Headshot · Elimination · Health · BalloonPop · XpOrb · Confetti · Electrocution · Explosion
+	    │   ├─ Gameplay/  Hit · Headshot · Elimination · Health · Explosion
+	    │   └─ KillEffects/ BalloonPop · XpOrb · Confetti · Electrocution · Oof · Noobify · Disassemble · Bobblehead · Tombstone
 	    └─ Runtime (Folder)           ← clones que crea el juego; no tocar
 
 	El juego usa `Sound` + `SoundGroup`, no el API nuevo de audio
@@ -145,22 +146,43 @@ local LAYOUT = {
 			{ name = "Health",      role = 0.40, gain = 1.51,
 			  legacy = { "Audio/Gameplay/Health", "Audio/Gameplay/Pickup" },
 			  players = { "Health", "Pickup" } },
-			{ name = "BalloonPop",  role = 0.35, gain = 1.00,
-			  legacy = {},
-			  players = { "BalloonPop" } },
-			{ name = "XpOrb",       role = 0.30, gain = 1.00,
-			  legacy = {},
-			  players = { "XpOrb" } },
-			{ name = "Confetti",    role = 0.40, gain = 1.00,
-			  legacy = {},
-			  players = { "Confetti" } },
-			{ name = "Electrocution", role = 0.40, gain = 1.00,
-			  legacy = {},
-			  players = { "Electrocution" } },
 			-- 3D en el punto de impacto (NetworkingCallbacks.PlayExplosionVFX).
 			{ name = "Explosion",   role = 0.55, gain = 1.00,
 			  legacy = {},
 			  players = { "Explosion" } },
+		},
+	},
+	{
+		folder = "KillEffects",
+		group = "Gameplay",
+		sounds = {
+			{ name = "BalloonPop",  role = 0.35, gain = 1.00,
+			  legacy = { "Audio/Gameplay/BalloonPop" },
+			  players = { "BalloonPop" } },
+			{ name = "XpOrb",       role = 0.30, gain = 1.00,
+			  legacy = { "Audio/Gameplay/XpOrb" },
+			  players = { "XpOrb" } },
+			{ name = "Confetti",    role = 0.40, gain = 1.00,
+			  legacy = { "Audio/Gameplay/Confetti" },
+			  players = { "Confetti" } },
+			{ name = "Electrocution", role = 0.40, gain = 1.00,
+			  legacy = { "Audio/Gameplay/Electrocution" },
+			  players = { "Electrocution" } },
+			{ name = "Oof",         role = 0.50, gain = 1.00,
+			  legacy = {},
+			  players = { "Oof" } },
+			{ name = "Noobify",     role = 0.50, gain = 1.00,
+			  legacy = {},
+			  players = { "Noobify" } },
+			{ name = "Disassemble", role = 0.45, gain = 1.00,
+			  legacy = {},
+			  players = { "Disassemble" } },
+			{ name = "Bobblehead",  role = 0.45, gain = 1.00,
+			  legacy = {},
+			  players = { "Bobblehead" } },
+			{ name = "Tombstone",   role = 0.50, gain = 1.00,
+			  legacy = {},
+			  players = { "Tombstone" } },
 		},
 	},
 }

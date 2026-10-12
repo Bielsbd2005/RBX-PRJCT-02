@@ -55,7 +55,8 @@ El contexto termina cuando el cadáver sale del DataModel. Lo que deba sobrevivi
    el ragdoll de Default, reutilizar `DefaultKillEffect` en el registro.
 3. Si tiene parte de cliente: módulo en `client/core/visuals/killEffects/` y su línea en
    `HANDLERS` de `KillEffectVisuals`.
-4. Sonido de `SoundService.Audio.Gameplay`: clave en `GameSounds` y en
+4. Sonido de `SoundService.Audio.KillEffects`: clave en `GameSounds` (si es de cliente)
+   o búsqueda vía `Utils.findKillEffectSound` (si corre en `apply`), y en
    `tools/audio/SetupSoundService.luau` (ver `AUDIO.md`).
 
 ## Reglas del cadáver

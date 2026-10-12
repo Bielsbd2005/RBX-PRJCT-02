@@ -8,7 +8,7 @@
 -- El HumanoidRootPart no se toca: KillCam lo lee.
 --
 -- Debe caber en DEFAULT_PREVIEW_TIME de KillEffectsRegistry.
--- Sonido: ReplicatedStorage.Templates.Disassemble (Sound) si existe; si no, CONFIG.SOUND_ID.
+-- Sonido: SoundService.Audio.KillEffects.Disassemble (Sound) si existe; si no, ReplicatedStorage.Templates.Disassemble o CONFIG.SOUND_ID.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Debris = game:GetService("Debris")
@@ -131,15 +131,19 @@ local function centroid(parts: { BasePart }): Vector3?
 end
 
 local function makeSound(): Sound
+	local sound = Utils.findKillEffectSound(CONFIG.SOUND_TEMPLATE_NAME)
+	if sound then
+		return sound:Clone()
+	end
 	local templates = ReplicatedStorage:FindFirstChild(CONFIG.TEMPLATES_FOLDER)
 	local template = if templates then templates:FindFirstChild(CONFIG.SOUND_TEMPLATE_NAME) else nil
 	if template and template:IsA("Sound") and template.SoundId ~= "" then
 		return template:Clone()
 	end
-	local sound = Instance.new("Sound")
-	sound.SoundId = CONFIG.SOUND_ID
-	sound.Volume = CONFIG.SOUND_VOLUME
-	return sound
+	local fallback = Instance.new("Sound")
+	fallback.SoundId = CONFIG.SOUND_ID
+	fallback.Volume = CONFIG.SOUND_VOLUME
+	return fallback
 end
 
 local function playSoundAt(position: Vector3, step: number)

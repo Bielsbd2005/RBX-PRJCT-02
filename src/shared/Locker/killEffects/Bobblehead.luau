@@ -9,7 +9,7 @@
 -- Instantáneo a propósito: animarlo con el cuerpo congelado o ya en ragdoll se ve raro.
 -- El cuerpo usa Model:ScaleTo (escala tamaños, attachments y mallas de accesorios); la
 -- cabeza y lo que cuelga de ella se escalan a mano alrededor del cuello.
--- Sonido: ReplicatedStorage.Templates.Bobblehead (Sound) si existe; sin él, en silencio.
+-- Sonido: SoundService.Audio.KillEffects.Bobblehead (Sound) si existe; si no, ReplicatedStorage.Templates.Bobblehead; sin él, en silencio.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -35,13 +35,21 @@ type Transform = {
 }
 
 local function playSound(head: BasePart)
+	local sound = Utils.findKillEffectSound(CONFIG.SOUND_TEMPLATE_NAME)
+	if sound then
+		local clone = sound:Clone()
+		clone.Parent = head
+		clone:Play()
+		return
+	end
+
 	local templates = ReplicatedStorage:FindFirstChild(CONFIG.TEMPLATES_FOLDER)
 	local template = if templates then templates:FindFirstChild(CONFIG.SOUND_TEMPLATE_NAME) else nil
 	if template and template:IsA("Sound") and template.SoundId ~= "" then
 		-- Dentro del cadáver: se limpia con él.
-		local sound = template:Clone()
-		sound.Parent = head
-		sound:Play()
+		local clone = template:Clone()
+		clone.Parent = head
+		clone:Play()
 	end
 end
 

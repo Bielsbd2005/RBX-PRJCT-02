@@ -5,8 +5,8 @@
 	  0 → golpe    cae un yunque; su sombra crece en el suelo; justo antes del golpe el
 	               cuerpo se estira (anticipación)
 	  golpe        el cuerpo se aplasta y ensancha pegado a la base del yunque
-	  suelo        el cuerpo pasa a ser una pegatina (bamboleo), polvo, estrellitas
-	               girando; el yunque rebota y se queda encima
+	  suelo        el cuerpo pasa a ser una pegatina (bamboleo) y sale polvo; el
+	               yunque rebota y se queda encima
 	Yunque y pegatina duran lo que el cadáver: se funden con él (bots) y, si se borra
 	de golpe (respawn, fin del preview), se desvanecen en VANISH_TIME en vez de cortarse.
 
@@ -72,17 +72,6 @@ local CONFIG = {
 	DUST_GROWTH = 3,
 	DUST_TIME = 0.45,
 	DUST_START_TRANSPARENCY = 0.3,
-
-	-- Estrellitas del mareo sobre la pegatina.
-	STAR_COUNT = 3,
-	STAR_RADIUS = 1.1,
-	STAR_HEIGHT = 0.9,
-	STAR_SIZE = 0.35,
-	STAR_SPIN = 7, -- rad/s
-	STAR_BOB = 0.15,
-	STAR_TIME = 1.6,
-	STAR_FADE = 0.3,
-	STAR_COLOR = Color3.fromRGB(255, 221, 64),
 }
 
 local DUST_FALLBACK = Color3.fromRGB(150, 130, 105)
@@ -188,10 +177,13 @@ local function layFlat(copy: Model)
 	copy:PivotTo(CFrame.Angles(math.pi / 2, 0, 0) * upright:ToObjectSpace(copy:GetPivot()))
 end
 
+-- LocalTransparencyModifier además de Transparency: el fundido del servidor
+-- (RagdollCleanup) replica Transparency y volvería a mostrar el cuerpo.
 local function hideLocally(char: Model)
 	for _, desc in char:GetDescendants() do
 		if desc:IsA("BasePart") or desc:IsA("Decal") then -- Texture hereda de Decal
 			desc.Transparency = 1
+			desc.LocalTransparencyModifier = 1
 		end
 	end
 end
@@ -432,9 +424,16 @@ function Flattened.play(char: Model, ctx: Types.Ctx)
 		):Play()
 		if fresh then
 			emitParticles(sticker)
-			local sound = sticker:FindFirstChildWhichIsA("Sound", true)
+			local sound = Utils.findKillEffectSound("Flattened", { "Pancake" })
 			if sound then
-				sound:Play()
+				local clone = sound:Clone()
+				clone.Parent = sticker
+				clone:Play()
+			else
+				local s = sticker:FindFirstChildWhichIsA("Sound", true)
+				if s then
+					s:Play()
+				end
 			end
 		end
 	end
@@ -453,7 +452,7 @@ function Flattened.play(char: Model, ctx: Types.Ctx)
 	local fall = fromY - stickerTop
 	-- Cae con aceleración constante (t²): toca la cabeza en hitAt.
 	local hitAt = landAt * math.sqrt(math.clamp((fromY - headTop) / math.max(fall, 1e-3), 0, 1))
-	local endAt = landAt + math.max(CONFIG.BOUNCE_TIME, CONFIG.STAR_TIME, CONFIG.DUST_TIME)
+	local endAt = landAt + math.max(CONFIG.BOUNCE_TIME, CONFIG.DUST_TIME)
 	local age0 = ctx.age()
 
 	-- Yunque.
@@ -470,7 +469,13 @@ function Flattened.play(char: Model, ctx: Types.Ctx)
 	local pivotToBottom = spot.Y - (Utils.lowestWorldY(anvil) or spot.Y)
 	local anvilWidth = footprint(anvil)
 	anvilFadeParts = basePartsOf(anvil)
-	local impactSound = anvil:FindFirstChildWhichIsA("Sound", true)
+	local impactSound: Sound? = Utils.findKillEffectSound("Anvil", { "FlattenedImpact", "Flattened" })
+	if impactSound then
+		impactSound = impactSound:Clone()
+		impactSound.Parent = anvil
+	else
+		impactSound = anvil:FindFirstChildWhichIsA("Sound", true)
+	end
 
 	local function anvilBottomAt(t: number): number
 		if t < landAt then
@@ -507,15 +512,6 @@ function Flattened.play(char: Model, ctx: Types.Ctx)
 	ctx.add(shadow)
 	local dust = makeFxPart(Enum.PartType.Cylinder, dustColor(hit))
 	ctx.add(dust)
-	local stars: { Part } = {}
-	for _ = 1, CONFIG.STAR_COUNT do
-		local star = makeFxPart(Enum.PartType.Ball, CONFIG.STAR_COLOR)
-		star.Material = Enum.Material.Neon
-		star.Size = Vector3.one * CONFIG.STAR_SIZE * scale
-		ctx.add(star)
-		table.insert(stars, star)
-	end
-	local starCenter = spot + Vector3.new(0, stickerTop - groundY + CONFIG.STAR_HEIGHT * scale, 0)
 
 	local impacted = false
 	local landed = false
@@ -546,9 +542,6 @@ function Flattened.play(char: Model, ctx: Types.Ctx)
 			anvil:PivotTo(CFrame.new(spot.X, stickerTop + pivotToBottom, spot.Z) * anvilRotation)
 			shadow:Destroy()
 			dust:Destroy()
-			for _, star in stars do
-				star:Destroy()
-			end
 			return
 		end
 
@@ -597,23 +590,6 @@ function Flattened.play(char: Model, ctx: Types.Ctx)
 			dust.Transparency = CONFIG.DUST_START_TRANSPARENCY + (1 - CONFIG.DUST_START_TRANSPARENCY) * u
 		else
 			dust.Transparency = 1
-		end
-
-		-- Estrellitas girando sobre la pegatina.
-		local starAge = t - landAt
-		if starAge >= 0 and starAge < CONFIG.STAR_TIME then
-			local fade = math.clamp((starAge - (CONFIG.STAR_TIME - CONFIG.STAR_FADE)) / CONFIG.STAR_FADE, 0, 1)
-			for i, star in stars do
-				local angle = starAge * CONFIG.STAR_SPIN + (i - 1) * 2 * math.pi / #stars
-				local bob = math.sin(starAge * CONFIG.STAR_SPIN * 1.5 + i) * CONFIG.STAR_BOB * scale
-				local offset = Vector3.new(math.cos(angle), 0, math.sin(angle)) * CONFIG.STAR_RADIUS * scale
-				star.CFrame = CFrame.new(starCenter + offset + Vector3.new(0, bob, 0))
-				star.Transparency = fade
-			end
-		else
-			for _, star in stars do
-				star.Transparency = 1
-			end
 		end
 	end
 

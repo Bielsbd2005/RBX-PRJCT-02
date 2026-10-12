@@ -7,7 +7,7 @@
 
 	Flashes y trozos son partes ANCLADAS de un pool con tope movidas analíticamente;
 	al agotarse el pool se omiten, nunca se crean de más.
-	Sin SoundService.Audio.Gameplay.BalloonPop montado es mudo.
+	Sin SoundService.Audio.KillEffects.BalloonPop montado es mudo.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")

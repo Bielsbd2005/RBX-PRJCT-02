@@ -32,7 +32,7 @@
 	    atraía, nunca por frame.
 	  · La lista de quién puede recoger se relee cada COLLECTOR_REFRESH.
 	  · Más allá de CULL_DISTANCE no se monta nada.
-	  · Sin SoundService.Audio.Gameplay.XpOrb montado es mudo (avisa una vez).
+	  · Sin SoundService.Audio.KillEffects.XpOrb montado es mudo (avisa una vez).
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")

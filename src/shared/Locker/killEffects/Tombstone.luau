@@ -2,8 +2,8 @@
 
 -- Kill effect: el cuerpo desaparece y una lápida (ReplicatedStorage.Templates.Lapida)
 -- cae y se clava vertical en el suelo real bajo el punto de muerte (raycast hacia
--- abajo; solo hereda el yaw del personaje). Si la plantilla lleva un Sound dentro de
--- una parte, suena en el impacto.
+-- abajo; solo hereda el yaw del personaje). Sonido: SoundService.Audio.KillEffects.Tombstone (o Lapida),
+-- o dentro de la plantilla; suena en el impacto.
 --
 -- Todo se anima en un único Heartbeat con TweenService:GetValue y no con tweens
 -- encadenados, porque las fases (rebote, vaivén, cascotes) se solapan.
@@ -231,9 +231,16 @@ local function applyName(tombstone: Instance, char: Model, name: string)
 end
 
 local function playImpactSound(tombstone: Instance)
-	local sound = tombstone:FindFirstChildWhichIsA("Sound", true)
+	local sound = Utils.findKillEffectSound("Tombstone", { CONFIG.TEMPLATE_NAME, "TombstoneImpact" })
 	if sound then
-		sound:Play()
+		local clone = sound:Clone()
+		clone.Parent = tombstone
+		clone:Play()
+		return
+	end
+	local templateSound = tombstone:FindFirstChildWhichIsA("Sound", true)
+	if templateSound then
+		templateSound:Play()
 	end
 end
 

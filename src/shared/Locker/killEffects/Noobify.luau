@@ -6,11 +6,12 @@
 --
 -- Todo son propiedades replicadas y sin animar, así que va entero aquí (servidor en
 -- partida, cliente en los previews), sin parte de cliente.
--- Sonido: ReplicatedStorage.Templates.Noobify (Sound) si existe; sin él, en silencio.
+-- Sonido: SoundService.Audio.KillEffects.Noobify (Sound) si existe; si no, ReplicatedStorage.Templates.Noobify; sin él, en silencio.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local DefaultKillEffect = require(script.Parent.Default)
+local Utils = require(script.Parent.Utils)
 
 local YELLOW = Color3.fromRGB(245, 205, 48)
 local BLUE = Color3.fromRGB(13, 105, 172)
@@ -36,14 +37,26 @@ local CONFIG = {
 local Noobify = {}
 
 local function playSound(char: Model)
+	local head = char:FindFirstChild("Head")
+	if not head then
+		return
+	end
+
+	local sound = Utils.findKillEffectSound(CONFIG.SOUND_TEMPLATE_NAME)
+	if sound then
+		local clone = sound:Clone()
+		clone.Parent = head
+		clone:Play()
+		return
+	end
+
 	local templates = ReplicatedStorage:FindFirstChild(CONFIG.TEMPLATES_FOLDER)
 	local template = if templates then templates:FindFirstChild(CONFIG.SOUND_TEMPLATE_NAME) else nil
-	local head = char:FindFirstChild("Head")
-	if template and template:IsA("Sound") and template.SoundId ~= "" and head then
+	if template and template:IsA("Sound") and template.SoundId ~= "" then
 		-- Dentro del cadáver: se limpia con él.
-		local sound = template:Clone()
-		sound.Parent = head
-		sound:Play()
+		local clone = template:Clone()
+		clone.Parent = head
+		clone:Play()
 	end
 end
 

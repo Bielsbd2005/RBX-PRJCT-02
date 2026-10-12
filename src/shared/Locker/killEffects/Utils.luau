@@ -3,10 +3,39 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local SoundService = game:GetService("SoundService")
 
 local CollisionGroups = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("CollisionGroups"))
+local AudioRuntime = require(
+	ReplicatedStorage:WaitForChild("Shared"):WaitForChild("utils"):WaitForChild("AudioRuntime")
+)
 
 local KillEffectUtils = {}
+
+--- Busca un Sound en SoundService.Audio.KillEffects por nombre o nombres alternativos.
+function KillEffectUtils.findKillEffectSound(name: string, fallbackNames: { string }?): Sound?
+	local audio = SoundService:FindFirstChild("Audio")
+	local folder = if audio then audio:FindFirstChild("KillEffects") else nil
+	if not folder then
+		return nil
+	end
+
+	local sound = AudioRuntime.findSound(folder, name)
+	if sound and sound.SoundId ~= "" then
+		return sound
+	end
+
+	if fallbackNames then
+		for _, alt in fallbackNames do
+			sound = AudioRuntime.findSound(folder, alt)
+			if sound and sound.SoundId ~= "" then
+				return sound
+			end
+		end
+	end
+
+	return nil
+end
 
 -- Aun muerto, el Humanoid evalúa su máquina de estados cada step (recoloca el root,
 -- apaga CanCollide de extremidades): EvaluateStateMachine = false la congela. Estado

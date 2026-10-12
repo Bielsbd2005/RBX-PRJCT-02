@@ -26,22 +26,28 @@ SoundService
 │   │   ├─ Coin
 │   │   ├─ LevelUp
 │   │   └─ FamePassUp
-│   └─ Gameplay/
-│       ├─ Hit
-│       ├─ Headshot
-│       ├─ Elimination
-│       ├─ Health
+│   ├─ Gameplay/
+│   │   ├─ Hit
+│   │   ├─ Headshot
+│   │   ├─ Elimination
+│   │   ├─ Health
+│   │   └─ Explosion
+│   └─ KillEffects/
 │       ├─ BalloonPop
 │       ├─ XpOrb
 │       ├─ Confetti
 │       ├─ Electrocution
-│       └─ Explosion
+│       ├─ Oof
+│       ├─ Noobify
+│       ├─ Disassemble
+│       ├─ Bobblehead
+│       └─ Tombstone
 └─ Runtime (Folder)           ← clones del juego; no autorar aquí
 ```
 
-Las tres carpetas de `Audio` son espejo de los tres buses: cada `Sound` sale
-ruteado al `SoundGroup` de su categoría por su propiedad `SoundGroup`, y los
-tres buses cuelgan de `Master` **por parentesco**. Un `SoundGroup` no tiene
+Las carpetas de `Audio` rutean a los buses: cada `Sound` sale
+ruteado al `SoundGroup` de su categoría por su propiedad `SoundGroup` (los de `KillEffects`
+al bus `Gameplay`), y los tres buses cuelgan de `Master` **por parentesco**. Un `SoundGroup` no tiene
 propiedad `SoundGroup`: no se rutea a otro bus, se mete dentro de él. Así bajar
 `UI.Volume` baja solo la interfaz y bajar `Master.Volume` baja todo.
 
@@ -68,11 +74,16 @@ aplicando y hay que ajustar los tres buses por separado.
 | `Gameplay/Headshot` | Impacto a la cabeza | `DamageBillboardHandler` |
 | `Gameplay/Elimination` | Matas o asistes a un jugador | `NetworkingCallbacks` |
 | `Gameplay/Health` | Recoges el orbe de vida | `PickupDropEffect` |
-| `Gameplay/BalloonPop` | Revienta cada globo del kill effect Balloons (3D, tono ascendente por globo) | `visuals/killEffects/Balloons` |
-| `Gameplay/XpOrb` | Recoges un orbe del kill effect XpOrbs (3D, tono aleatorio, uno tras otro) | `visuals/killEffects/XpOrbs` |
-| `Gameplay/Confetti` | Muere alguien con el kill effect Confetti (3D en el punto de muerte, tono aleatorio) | `visuals/killEffects/Confetti` |
-| `Gameplay/Electrocution` | Muere alguien con el kill effect Electrocution (3D en el cadáver, tono aleatorio) | `visuals/killEffects/Electrocution` |
 | `Gameplay/Explosion` | Impacto de un proyectil explosivo, p. ej. el RPG (3D en el punto de impacto) | `NetworkingCallbacks` |
+| `KillEffects/BalloonPop` | Revienta cada globo del kill effect Balloons (3D, tono ascendente por globo) | `visuals/killEffects/Balloons` |
+| `KillEffects/XpOrb` | Recoges un orbe del kill effect XpOrbs (3D, tono aleatorio, uno tras otro) | `visuals/killEffects/XpOrbs` |
+| `KillEffects/Confetti` | Muere alguien con el kill effect Confetti (3D en el punto de muerte, tono aleatorio) | `visuals/killEffects/Confetti` |
+| `KillEffects/Electrocution` | Muere alguien con el kill effect Electrocution (3D en el cadáver, tono aleatorio) | `visuals/killEffects/Electrocution` |
+| `KillEffects/Oof` | Muerte del kill effect Oof | `shared/Locker/killEffects/Oof` |
+| `KillEffects/Noobify` | Transformación del kill effect Noobify | `shared/Locker/killEffects/Noobify` |
+| `KillEffects/Disassemble` | Desmontaje por fases del kill effect Disassemble | `shared/Locker/killEffects/Disassemble` |
+| `KillEffects/Bobblehead` | Inflado de cabeza del kill effect Bobblehead | `shared/Locker/killEffects/Bobblehead` |
+| `KillEffects/Tombstone` | Impacto de la lápida del kill effect Tombstone | `shared/Locker/killEffects/Tombstone` |
 | `Music/Lobby` | Música del lobby (loop, con EQ de muffle) | `features/music` |
 
 Los botones llamados `CloseBtn` **no** reproducen `Click`: el panel que cierran

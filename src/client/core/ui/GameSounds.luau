@@ -48,11 +48,11 @@ local SPECS: { [string]: SoundSpec } = {
 	Headshot = { folder = "Gameplay", name = "Headshot" },
 	Elimination = { folder = "Gameplay", name = "Elimination" },
 	Health = { folder = "Gameplay", name = "Health" },
-	-- Los de kill effects los reproducen visuals/killEffects/* en 3D (no pasan por `play`).
-	BalloonPop = { folder = "Gameplay", name = "BalloonPop" },
-	XpOrb = { folder = "Gameplay", name = "XpOrb" },
-	Confetti = { folder = "Gameplay", name = "Confetti" },
-	Electrocution = { folder = "Gameplay", name = "Electrocution" },
+	-- Los de kill effects viven en SoundService.Audio.KillEffects y los reproducen visuals/killEffects/* en 3D.
+	BalloonPop = { folder = "KillEffects", name = "BalloonPop" },
+	XpOrb = { folder = "KillEffects", name = "XpOrb" },
+	Confetti = { folder = "KillEffects", name = "Confetti" },
+	Electrocution = { folder = "KillEffects", name = "Electrocution" },
 	LobbyMusic = { folder = "Music", name = "Lobby", looped = true },
 }
 
@@ -107,6 +107,26 @@ function GameSounds.resolve(key: string): Sound?
 	local sound = AudioRuntime.findSound(folder, spec.name)
 	if sound then
 		return sound
+	end
+
+	-- Si es de KillEffects, buscar posibles alias o fallback a Gameplay
+	if spec.folder == "KillEffects" then
+		local altName = if key == "BalloonPop" then "Balloons"
+			elseif key == "XpOrb" then "XpOrbs"
+			else nil
+		if altName then
+			local altSound = AudioRuntime.findSound(folder, altName)
+			if altSound then
+				return altSound
+			end
+		end
+
+		local legacyFolder = if audio then audio:FindFirstChild("Gameplay") else nil
+		local legacySound = AudioRuntime.findSound(legacyFolder, spec.name)
+			or (if altName then AudioRuntime.findSound(legacyFolder, altName) else nil)
+		if legacySound then
+			return legacySound
+		end
 	end
 
 	warnOnce(key, `falta {pathOf(spec)} — ejecuta tools/audio/SetupSoundService.luau`)

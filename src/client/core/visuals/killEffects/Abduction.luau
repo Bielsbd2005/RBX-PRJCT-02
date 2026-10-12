@@ -43,6 +43,7 @@ local TweenService = game:GetService("TweenService")
 local killEffects = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Locker"):WaitForChild("killEffects")
 local Abduction = require(killEffects:WaitForChild("Abduction"))
 local AbductionFlight = require(killEffects:WaitForChild("AbductionFlight"))
+local Utils = require(killEffects:WaitForChild("Utils"))
 local Types = require(script.Parent.Parent.KillEffectTypes)
 
 local ATTR = Abduction.ATTR
@@ -394,14 +395,29 @@ end
 
 local function buildRig(scale: number): Rig
 	local template = Abduction.findTemplate()
+	local rig: Rig
 	if template then
-		local ok, rig = pcall(buildTemplateRig, template, scale)
-		if ok and rig then
-			return rig
+		local ok, result = pcall(buildTemplateRig, template, scale)
+		if ok and result then
+			rig = result
+		else
+			debugWarn("plantilla " .. template:GetFullName() .. " inutilizable, OVNI procedural: " .. tostring(result))
+			rig = buildProceduralRig(scale)
 		end
-		debugWarn("plantilla " .. template:GetFullName() .. " inutilizable, OVNI procedural: " .. tostring(rig))
+	else
+		rig = buildProceduralRig(scale)
 	end
-	return buildProceduralRig(scale)
+
+	if not rig.sound then
+		local sound = Utils.findKillEffectSound("Abduction", { "UFO" })
+		if sound then
+			local clone = sound:Clone()
+			clone.Parent = rig.root
+			rig.sound = clone
+		end
+	end
+
+	return rig
 end
 
 local function makeAnchor(name: string, parent: Instance): Part

@@ -76,10 +76,13 @@ local function findTemplate(): BasePart?
 	return if template and template:IsA("BasePart") then template else nil
 end
 
+-- LocalTransparencyModifier además de Transparency: el fundido del servidor
+-- (RagdollCleanup) replica Transparency y volvería a mostrar el cuerpo.
 local function hideLocally(char: Model)
 	for _, desc in char:GetDescendants() do
 		if desc:IsA("BasePart") or desc:IsA("Decal") then -- Texture hereda de Decal
 			desc.Transparency = 1
+			desc.LocalTransparencyModifier = 1
 		end
 	end
 end
