@@ -54,6 +54,10 @@ local DEATH_BODY_TO_LOBBY_DELAY = 4.5
 -- Debounce mínimo entre reapariciones de lobby por jugador (anti-bucle infinito si
 -- una muerte en lobby vuelve a disparar el respawn de lobby de inmediato).
 local LOBBY_RESPAWN_DEBOUNCE = 2
+-- Espera a Died tras Health = 0 antes de contar la muerte igualmente. El estado Dead lo
+-- decide el cliente dueño del personaje (llega ~1 ping tarde) y uno que lo desactiva
+-- no dispararía Died nunca: ni kill para el asesino ni punto para el rival.
+local DIED_FALLBACK_GRACE = 1.5
 -- Part de Workspace donde aparecen TODOS los mapas: el pivot del modelo del mapa
 -- se coloca en su CFrame al cargar. Sin ella, el mapa se queda donde se autoró.
 local MAP_ANCHOR_NAME = "MapAnchor"
@@ -71,6 +75,8 @@ local _dataService: DataService = nil :: any
 -- Estado por-jugador: un único registro por userId, creado en PlayerAdded y destruido
 -- atómicamente en PlayerRemoving. Los campos de scope RONDA se resetean en bloque al
 -- desmontar la ronda (_resetSessionRoundState); el resto persiste toda la sesión.
+type DeathListener = { Disconnect: (self: DeathListener) -> () }
+
 type PlayerSession = {
 	-- Scope ronda (hasta respawnDebounce, lo resetea _resetSessionRoundState).
 	team: ("A" | "B")?,
@@ -97,7 +103,7 @@ type PlayerSession = {
 	pendingProfileActions: { () -> () },
 	-- Connections del jugador. deathConn/charDescendantConn siguen al character
 	-- vivo actual (se re-registran en cada CharacterAdded).
-	deathConn: RBXScriptConnection?,
+	deathConn: DeathListener?,
 	characterConn: RBXScriptConnection?,
 	charDescendantConn: RBXScriptConnection?,
 }
@@ -725,7 +731,14 @@ local function _registerDeathListener(player: Player, character: Model)
 
 	humanoid.BreakJointsOnDeath = false
 
-	session.deathConn = humanoid.Died:Connect(function()
+	-- Una sola vez por character: la dispara Died o, si no llega, el fallback de Health.
+	local listening = true
+	local function onDeath()
+		if not listening then
+			return
+		end
+		listening = false
+
 		-- Muerte fuera de partida (lobby/menú): el motor no auto-respawnea
 		-- (CharacterAutoLoads off), así que devolvemos el cuerpo al LobbySpawn para
 		-- que no quede muerto/sin cuerpo. Con debounce: si el lobby resultara letal
@@ -819,7 +832,26 @@ local function _registerDeathListener(player: Player, character: Model)
 			end
 			SpawnService.SpawnAtLobby(player)
 		end)
+	end
+
+	local diedConn = humanoid.Died:Connect(onDeath)
+	local healthConn = humanoid.HealthChanged:Connect(function(health: number)
+		if health > 0 or not listening then
+			return
+		end
+		task.delay(DIED_FALLBACK_GRACE, function()
+			if humanoid.Health <= 0 then
+				onDeath()
+			end
+		end)
 	end)
+	session.deathConn = {
+		Disconnect = function(_self: DeathListener)
+			listening = false
+			diedConn:Disconnect()
+			healthConn:Disconnect()
+		end,
+	}
 end
 
 local function _ensureActiveMapContainer(): BasePart
@@ -1043,10 +1075,12 @@ end
 
 -- Jugadores que estaban en la ronda al terminar (elegibles para recompensas y
 -- vuelta al lobby). Devuelve un set local — solo lo consume _enterResults.
+-- Un join aún sin spawnear no cuenta: no jugó, y su tarea de join lo devuelve al lobby.
 local function _captureRoundEndEligiblePlayers(): { [number]: true }
 	local eligible: { [number]: true } = {}
 	for _, player in Players:GetPlayers() do
-		if not _isPlayerInMenu(player.UserId) then
+		local session = _sessions[player.UserId]
+		if session and not session.inMenu and not session.pendingSpawn then
 			eligible[player.UserId] = true
 		end
 	end
@@ -1584,8 +1618,11 @@ local function _onRequestJoinMatch(_: Network.Empty, player: Player)
 
 		-- SpawnOnAssignedTeam yielda en el lock de body-swap: un ReturnToMenu o el fin de
 		-- ronda pueden haber reubicado al jugador en el lobby ANTES de este LoadCharacter,
-		-- que lo ha devuelto al mapa. Se le vuelve a mandar al lobby.
-		if session.inMenu then
+		-- que lo ha devuelto al mapa. Se le vuelve a mandar al lobby. Sin mirar la fase, un
+		-- JoinMatchSpawned tras RoundEnded dejaba al cliente con el HUD de partida en el lobby.
+		if session.inMenu or not _isRoundActive() then
+			session.inMenu = true
+			session.pendingSpawn = false
 			SpawnService.SpawnAtLobby(player)
 			return
 		end

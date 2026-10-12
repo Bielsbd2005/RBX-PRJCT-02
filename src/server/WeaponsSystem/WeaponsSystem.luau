@@ -1076,6 +1076,11 @@ function WeaponsSystem.applyBotDamage(target: Humanoid, amount: number, botChara
 	if not targetCharacter or not targetCharacter:IsA("Model") or TeamUtils.isSameTeam(botCharacter, targetCharacter) then
 		return
 	end
+	-- Como en _defaultDamageCallback: sin esto el bot quedaba de último atacante sin hacer
+	-- daño, y volver al menú durante la protección contaba como muerte.
+	if targetCharacter:FindFirstChildOfClass("ForceField") then
+		return
+	end
 	WeaponsSystem.setLastAttacker(target, botUserId, weaponName, false)
 	target:TakeDamage(amount)
 	_notifyVictimHit(target, botCharacter)

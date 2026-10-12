@@ -306,7 +306,13 @@ function MatchNotificationsQueue:_resolveContainer(): GuiObject?
 	if not gui then
 		return nil
 	end
-	return gui:WaitForChild("Container"):WaitForChild("MainFrame") :: GuiObject
+	local root = gui:WaitForChild("Container", POPUP_WAIT_SECONDS)
+	local mainFrame = root and root:WaitForChild("MainFrame", POPUP_WAIT_SECONDS)
+	if not (mainFrame and mainFrame:IsA("GuiObject")) then
+		warn("[MatchNotificationsQueue] No se encontró Container.MainFrame: se saltan las notificaciones")
+		return nil
+	end
+	return mainFrame
 end
 
 -- Sin parpadeo entre notificaciones encadenadas.
@@ -337,13 +343,25 @@ function MatchNotificationsQueue:_processQueue()
 	self._active = true
 	self:_refreshNotifying()
 	task.spawn(function()
-		nextRun(function()
+		local finished = false
+		local function onDone()
+			if finished then
+				return
+			end
+			finished = true
 			self._active = false
 			if not self._destroyed then
 				self:_processQueue()
 			end
 			self:_refreshNotifying()
-		end)
+		end
+		-- Si una notificación revienta sin llamar a onDone, _active se quedaría a true: la cola
+		-- no avanzaría más y MatchHud dejaría ocultas las filas de equipo toda la sesión.
+		local ok, err = xpcall(nextRun, debug.traceback, onDone)
+		if not ok then
+			warn(`[MatchNotificationsQueue] Una notificación falló: {err}`)
+			onDone()
+		end
 	end)
 end
 
@@ -433,11 +451,10 @@ function MatchNotificationsQueue:_playLevelUpFrame(
 	soundKey: string
 )
 	self:_enqueue(function(onDone)
-		local container = self:_resolveContainer()
-		if not container then onDone() return end
+		local frame = self:_resolvePopup("LevelUp")
+		if not frame then onDone() return end
 		-- Dentro del closure: `_enqueue` puede retrasarlo y el sonido va cuando el frame ENTRA.
 		GameSounds.play(soundKey)
-		local frame = container:WaitForChild("LevelUp") :: GuiObject
 
 		_setLabel(frame, "Title", title)
 		_setLabel(frame, "Level", tostring(math.max(0, math.floor(newLevel))))

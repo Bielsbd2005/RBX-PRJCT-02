@@ -48,6 +48,7 @@ type Zone = {
 	damagePerTick: number,
 	endsAt: number,
 	dealer: Player,
+	dealerCharacter: Model?,
 	weaponName: string,
 	weaponsSystem: any,
 }
@@ -165,8 +166,10 @@ local function _extinguish(zone: Zone)
 	Debris:AddItem(part, FADE_OUT_TIME)
 end
 
-local function _dealerAlive(dealer: Player): boolean
-	if not dealer.Parent then
+-- `dealerCharacter`: el cuerpo que lanzó el fuego. Volver al menú da un cuerpo de lobby
+-- vivo, y sin esto su fuego seguiría quemando (y matando sin atacante que acreditar).
+local function _dealerAlive(dealer: Player, dealerCharacter: Model?): boolean
+	if not dealer.Parent or dealer.Character ~= dealerCharacter then
 		return false
 	end
 	local character = dealer.Character
@@ -183,6 +186,7 @@ type Burn = {
 	humanoid: Humanoid,
 	character: Model,
 	dealer: Player,
+	dealerCharacter: Model?,
 	damagePerTick: number,
 	weaponName: string,
 	weaponsSystem: any,
@@ -219,6 +223,7 @@ end
 
 type BurnSource = {
 	dealer: Player,
+	dealerCharacter: Model?,
 	damagePerTick: number,
 	weaponName: string,
 	weaponsSystem: any,
@@ -231,6 +236,7 @@ local function _refreshBurn(source: BurnSource, humanoid: Humanoid, character: M
 			humanoid = humanoid,
 			character = character,
 			dealer = source.dealer,
+			dealerCharacter = source.dealerCharacter,
 			damagePerTick = source.damagePerTick,
 			weaponName = source.weaponName,
 			weaponsSystem = source.weaponsSystem,
@@ -240,6 +246,7 @@ local function _refreshBurn(source: BurnSource, humanoid: Humanoid, character: M
 		_attachBodyFire(character)
 	end
 	burn.dealer = source.dealer
+	burn.dealerCharacter = source.dealerCharacter
 	burn.damagePerTick = source.damagePerTick
 	burn.expiresAt = now + BURN_LINGER
 end
@@ -247,7 +254,7 @@ end
 
 local function _burnTick(now: number)
 	for humanoid, burn in burning do
-		local dealerOk = _dealerAlive(burn.dealer)
+		local dealerOk = _dealerAlive(burn.dealer, burn.dealerCharacter)
 		if now >= burn.expiresAt or humanoid.Health <= 0 or not humanoid:IsDescendantOf(workspace) or not dealerOk then
 			_removeBodyFire(burn.character)
 			burning[humanoid] = nil
@@ -278,7 +285,7 @@ local function _tick()
 		local zone = zones[i]
 		-- Sin dealer vivo doDamage no aplica el daño (_defaultDamageCallback lo exige):
 		-- mejor apagar la zona que dejar un fuego que no quema.
-		if now >= zone.endsAt or not zone.part.Parent or not _dealerAlive(zone.dealer) then
+		if now >= zone.endsAt or not zone.part.Parent or not _dealerAlive(zone.dealer, zone.dealerCharacter) then
 			_extinguish(zone)
 			table.remove(zones, i)
 			continue
@@ -354,6 +361,7 @@ function FireZone.ignite(params: IgniteParams)
 	end
 	_refreshBurn({
 		dealer = params.dealer,
+		dealerCharacter = params.dealer.Character,
 		damagePerTick = params.damagePerSecond * TICK_INTERVAL,
 		weaponName = params.weaponName,
 		weaponsSystem = params.weaponsSystem,
@@ -400,6 +408,7 @@ function FireZone.spawn(params: SpawnParams)
 		damagePerTick = params.damagePerSecond * TICK_INTERVAL,
 		endsAt = os.clock() + params.duration,
 		dealer = params.dealer,
+		dealerCharacter = params.dealer.Character,
 		weaponName = params.weaponName,
 		weaponsSystem = params.weaponsSystem,
 	})
