@@ -42,7 +42,6 @@ local HANDLERS: { [string]: Handler } = {
 	Confetti = require(handlers:WaitForChild("Confetti")),
 	Electrocution = require(handlers:WaitForChild("Electrocution")),
 	Flattened = require(handlers:WaitForChild("Flattened")),
-	GumDrop = require(handlers:WaitForChild("GumDrop")),
 	XpOrbs = require(handlers:WaitForChild("XpOrbs")),
 }
 

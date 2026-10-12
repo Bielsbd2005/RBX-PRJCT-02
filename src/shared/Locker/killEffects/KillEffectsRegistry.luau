@@ -16,7 +16,6 @@ local OofKillEffect = require(script.Parent.Oof)
 local NoobifyKillEffect = require(script.Parent.Noobify)
 local BobbleheadKillEffect = require(script.Parent.Bobblehead)
 local FlattenedKillEffect = require(script.Parent.Flattened)
-local GumDropKillEffect = require(script.Parent.GumDrop)
 local ElectrocutionKillEffect = require(script.Parent.Electrocution)
 
 -- La parte de servidor de un kill effect (en los previews corre en el cliente). La
@@ -54,7 +53,6 @@ local killEffectsById = {
 		previewTime = 2.5,
 	},
 	Electrocution = ElectrocutionKillEffect,
-	GumDrop = GumDropKillEffect,
 } :: { [string]: KillEffectModule }
 
 local KillEffectsRegistry = {}
