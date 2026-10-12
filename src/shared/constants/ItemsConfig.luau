@@ -216,7 +216,7 @@ Special = {
 		-- Los wraps NO se venden: sólo se consiguen por maestría (Challenge, MasteryScope) o en el pase.
 		-- TODO: salvo Galaxy, los de maestría piden textura propia; de momento color y material.
 		Mastery_Carbon = {
-			Name = "Carbon",
+			Name = "Graphite",
 			Price = 0,
 			LevelRequired = 0,
 			Rarity = "Common",
@@ -227,7 +227,7 @@ Special = {
 			Challenge = { Stat = "Kills", Goal = 100 },
 		},
 		Mastery_Bronze = {
-			Name = "Bronze",
+			Name = "Copper",
 			Price = 0,
 			LevelRequired = 0,
 			Rarity = "Rare",
@@ -238,7 +238,7 @@ Special = {
 			Challenge = { Stat = "Kills", Goal = 300 },
 		},
 		Mastery_Silver = {
-			Name = "Silver",
+			Name = "Jade",
 			Price = 0,
 			LevelRequired = 0,
 			Rarity = "Rare",
@@ -249,7 +249,7 @@ Special = {
 			Challenge = { Stat = "Kills", Goal = 750 },
 		},
 		Mastery_Obsidian = {
-			Name = "Obsidian",
+			Name = "Cobalt",
 			Price = 0,
 			LevelRequired = 0,
 			Rarity = "Epic",
@@ -261,7 +261,7 @@ Special = {
 			Challenge = { Stat = "Kills", Goal = 1500 },
 		},
 		Mastery_Titanium = {
-			Name = "Titanium",
+			Name = "Amethyst",
 			Price = 0,
 			LevelRequired = 0,
 			Rarity = "Epic",
@@ -273,7 +273,7 @@ Special = {
 			Challenge = { Stat = "Kills", Goal = 3000 },
 		},
 		Mastery_Ruby = {
-			Name = "Garnet",
+			Name = "Prismatic",
 			Price = 0,
 			LevelRequired = 0,
 			Rarity = "Epic",
@@ -285,7 +285,7 @@ Special = {
 			Challenge = { Stat = "Precision", Goal = 200 },
 		},
 		Mastery_Inferno = {
-			Name = "Inferno",
+			Name = "Thorns",
 			Price = 0,
 			LevelRequired = 0,
 			Rarity = "Legendary",

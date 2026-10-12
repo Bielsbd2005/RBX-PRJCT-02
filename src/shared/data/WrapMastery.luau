@@ -25,16 +25,17 @@ export type Grant = { category: string, weaponId: string, wrapId: string }
 
 local SCOPE_ORDER: { Scope } = { "Weapon", "Category", "All" }
 local STATS: { Stat } = { "Kills", "Precision", "Streaks" }
--- De menor a mayor dificultad: el orden en que se listan. Son claves de
--- ItemsConfig.WeaponWraps; un wrap de maestría que falte aquí va al final.
+-- El orden en que se listan: los retos de Kills, luego Precision y Streaks, y al
+-- final los de ámbito. Son claves de ItemsConfig.WeaponWraps; un wrap de maestría
+-- que falte aquí va al final.
 local DIFFICULTY_ORDER = {
 	"Mastery_Carbon",
 	"Mastery_Bronze",
 	"Mastery_Silver",
 	"Mastery_Obsidian",
+	"Mastery_Titanium",
 	"Mastery_Ruby",
 	"Mastery_Inferno",
-	"Mastery_Titanium",
 	"Mastery_Gold",
 	"Mastery_Damascus",
 	"Mastery_Void",
