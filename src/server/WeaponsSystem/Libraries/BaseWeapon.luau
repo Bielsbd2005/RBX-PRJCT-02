@@ -484,6 +484,20 @@ function BaseWeapon:_getPooledSound(soundName: string): Sound?
 	return pool.items[1]
 end
 
+-- Las armas de bots tienen `self.player == nil` siempre; la propia solo hasta que
+-- onAncestryChanged resuelve al dueño, de ahí el fallback por ancestro.
+function BaseWeapon:_isHeldByLocalPlayer(): boolean
+	local localPlayer = Players.LocalPlayer
+	if not localPlayer then
+		return false
+	end
+	if self.player ~= nil then
+		return self.player == localPlayer
+	end
+	local character = localPlayer.Character
+	return self.instance:IsDescendantOf(localPlayer) or (character ~= nil and self.instance:IsDescendantOf(character))
+end
+
 function BaseWeapon:tryPlaySound(soundName, playbackSpeedRange)
 	playbackSpeedRange = playbackSpeedRange or 0
 
@@ -494,7 +508,12 @@ function BaseWeapon:tryPlaySound(soundName, playbackSpeedRange)
 
 	-- Si la sound estaba sonando (overlap con firerate alto), reiniciar.
 	sound.TimePosition = 0
-	sound.PlaybackSpeed = sound.PlaybackSpeed + localRandom:NextNumber(-playbackSpeedRange * 0.5, playbackSpeedRange * 0.5)
+	-- Tono relativo al template, no al clon: sumarlo sobre el clon acumula deriva
+	-- en cada reúso del pool.
+	local template = self.sounds[soundName] :: Sound
+	sound.PlaybackSpeed = template.PlaybackSpeed + localRandom:NextNumber(-playbackSpeedRange * 0.5, playbackSpeedRange * 0.5)
+	-- También relativo al template: el pool sobrevive a que el arma cambie de manos.
+	sound.Volume = template.Volume * (if self:_isHeldByLocalPlayer() then 1 else self:getConfigValue("OthersVolumeScale"))
 	sound:Play()
 
 	return sound

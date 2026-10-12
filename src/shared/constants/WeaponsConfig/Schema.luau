@@ -36,6 +36,7 @@ Schema.Base = {
 	CrosshairSpread = key("number", 0, "Distancia (px a 1080 de alto) del centro al borde interior de cada brazo del crosshair sin apuntar; > 0 coloca los brazos por código. No aplica a escopetas (IsShotgun)."),
 	CrosshairAimSpread = key("number", 0, "Como CrosshairSpread, pero apuntando (0 = brazos tocando el centro). Sólo con CrosshairSpread > 0."),
 	CrosshairHideTop = key("boolean", false, "Oculta el brazo Top del crosshair."),
+	OthersVolumeScale = key("number", 0.6, "Multiplicador de volumen de los sonidos del arma (disparo, recarga) cuando la lleva otro jugador o un bot. 1 = igual que la propia."),
 } :: KeySchema
 
 Schema.Bullet = {

@@ -234,5 +234,19 @@ Los sonidos de **arma** (disparo, recarga, equip) viven dentro de cada `Tool` en
 `BaseWeapon:tryPlaySound`, que también hace pool, pero parentando las copias
 junto al template dentro del Tool — se destruyen solas al desequipar.
 
+El disparo (`Fired`) no corta al anterior: las colas se solapan en el pool. Por
+eso el asset tiene que ser **un solo disparo** con el golpe en el instante 0, no
+una ráfaga grabada, y la cadencia la pone `ShotCooldown`. Como las voces
+solapadas suman amplitud, un arma rápida necesita menos `Volume` que una lenta.
+El tono de cada disparo varía alrededor del `PlaybackSpeed` del template, así
+que ese valor es el que da carácter al arma (bajo = pesada, alto = ligera).
+
+Los sonidos de un arma que lleva otro jugador o un bot se reproducen con el
+`Volume` del template multiplicado por `OthersVolumeScale`
+([Schema.luau](../src/shared/constants/WeaponsConfig/Schema.luau)); los de la
+tuya, con el `Volume` tal cual. El default del esquema vale para todas las armas
+y una definición puede sobrescribirlo. Eso es aparte de la atenuación 3D, que
+sigue saliendo de las propiedades `RollOff*` del `Sound` en el Tool.
+
 Las partículas de impacto son otra cosa y viven en
 `ReplicatedStorage.Templates.HitVFX`. Ver [HIT-VFX.md](HIT-VFX.md).

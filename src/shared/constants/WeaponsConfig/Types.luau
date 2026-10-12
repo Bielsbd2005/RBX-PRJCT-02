@@ -22,6 +22,7 @@ export type BaseWeaponConfig = {
 	CrosshairSpread: number?,
 	CrosshairAimSpread: number?,
 	CrosshairHideTop: boolean?,
+	OthersVolumeScale: number?,
 }
 
 export type BulletWeaponConfig = BaseWeaponConfig & {

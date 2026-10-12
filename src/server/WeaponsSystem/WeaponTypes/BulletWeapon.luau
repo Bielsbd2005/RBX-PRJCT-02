@@ -519,10 +519,9 @@ end
 function BulletWeapon:simulateFire(firingPlayer, fireInfo)
 	BaseWeapon.simulateFire(self, fireInfo)
 
-	if self.lastFireSound then
-		self.lastFireSound:Stop()
-	end
-	self.lastFireSound = self:tryPlaySound("Fired", self:getConfigValue("FiredPlaybackSpeedRange"))
+	-- Sin Stop() del disparo anterior: las colas se solapan en el pool, y cortarlas
+	-- deja solo el chasquido inicial en las automáticas.
+	self:tryPlaySound("Fired", self:getConfigValue("FiredPlaybackSpeedRange"))
 
 	self:_kickMovingParts()
 	self:_emitMuzzleEffects()
