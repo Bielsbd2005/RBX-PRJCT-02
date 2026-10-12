@@ -98,6 +98,7 @@ export type PlayerCosmetics = {
 	outfitId: string,
 	faceId: string,
 	hatId: string,
+	emoteId: string,
 }
 
 export type EndResultsPlayerEntry = {
@@ -110,10 +111,11 @@ export type EndResultsPlayerEntry = {
 	level: number,
 	isBot: boolean,
 	-- Para bots vienen del roster; para reales, del packet TeamCosmetics; "" para el
-	-- local (ResultsView usa su loadout).
+	-- local (ResultsView usa su loadout). Los bots no tienen emote.
 	outfitId: string,
 	faceId: string,
 	hatId: string,
+	emoteId: string,
 }
 
 local function _setHorizontalFill(fillNode: GuiObject?, ratio: number)
@@ -765,6 +767,7 @@ function MatchHud:captureEndResultsData(rosterSides: { [number]: string }?): (st
 			outfitId = if cos then cos.outfitId else "",
 			faceId = if cos then cos.faceId else "",
 			hatId = if cos then cos.hatId else "",
+			emoteId = if cos then cos.emoteId else "",
 		})
 	end
 
@@ -781,6 +784,7 @@ function MatchHud:captureEndResultsData(rosterSides: { [number]: string }?): (st
 			outfitId = entry.outfitId,
 			faceId = entry.faceId,
 			hatId = entry.hatId,
+			emoteId = "",
 		})
 	end
 

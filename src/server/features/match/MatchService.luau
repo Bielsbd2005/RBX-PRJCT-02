@@ -398,7 +398,7 @@ local function _sendBotRosterToPlayer(player: Player)
 	end)
 end
 
--- Envía a `player` los cosméticos (outfit/face/hat) de sus compañeros REALES, para
+-- Envía a `player` los cosméticos (outfit/face/hat/emote) de sus compañeros REALES, para
 -- reconstruir sus réplicas en Resultados. Solo su propio equipo, y solo otros
 -- jugadores (los bots ya van en el BotRoster; el jugador local usa su loadout).
 local function _sendTeamCosmeticsTo(player: Player)
@@ -412,13 +412,19 @@ local function _sendTeamCosmeticsTo(player: Player)
 		local otherSession = _sessions[other.UserId]
 		if other ~= player and otherSession and otherSession.team == side then
 			local profile = _dataService:GetProfile(other)
-			local loadout = profile and profile.Data and profile.Data.Loadout
-			if type(loadout) == "table" then
+			local profileData = profile and profile.Data
+			local loadout = profileData and profileData.Loadout
+			if type(loadout) == "table" and profileData then
+				local outfit = if type(loadout.Outfit) == "string" and InventoryRepository.ownsItem(profileData, "Outfits", loadout.Outfit, other) then loadout.Outfit else ""
+				local face = if type(loadout.Face) == "string" and InventoryRepository.ownsItem(profileData, "Faces", loadout.Face, other) then loadout.Face else ""
+				local hat = if type(loadout.Hat) == "string" and InventoryRepository.ownsItem(profileData, "Hats", loadout.Hat, other) then loadout.Hat else ""
+				local emote = if type(loadout.Emote) == "string" and InventoryRepository.ownsItem(profileData, "Emotes", loadout.Emote, other) then loadout.Emote else ""
 				table.insert(list, {
 					userId = other.UserId,
-					outfitId = if type(loadout.Outfit) == "string" then loadout.Outfit else "",
-					faceId = if type(loadout.Face) == "string" then loadout.Face else "",
-					hatId = if type(loadout.Hat) == "string" then loadout.Hat else "",
+					outfitId = outfit,
+					faceId = face,
+					hatId = hat,
+					emoteId = emote,
 				})
 			end
 		end

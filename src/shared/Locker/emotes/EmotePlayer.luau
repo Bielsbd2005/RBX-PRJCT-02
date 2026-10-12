@@ -1,9 +1,9 @@
 --!strict
 --[[
 	EmotePlayer.luau
-	Reproduce un emote (ItemsConfig.Emotes[emoteId].AnimationId) sobre un rig.
-	Lo comparten el preview del Locker (sobre el dummy) y EmoteController (sobre
-	el personaje del jugador en partida).
+	Reproduce un emote de ItemsConfig.Emotes sobre un rig. Lo comparten el preview
+	del Locker (sobre el dummy), EmoteController (sobre el personaje del jugador en
+	partida) y las réplicas de Resultados.
 
 	Las animaciones cargadas en el Animator del personaje local se replican solas
 	al resto de clientes, así que no hace falta ningún remote.

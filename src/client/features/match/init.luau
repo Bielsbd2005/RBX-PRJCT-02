@@ -850,6 +850,7 @@ function MatchFeature.start(menuController: any): any
 					outfitId = if type(entry.outfitId) == "string" then entry.outfitId else "",
 					faceId = if type(entry.faceId) == "string" then entry.faceId else "",
 					hatId = if type(entry.hatId) == "string" then entry.hatId else "",
+					emoteId = if type(entry.emoteId) == "string" then entry.emoteId else "",
 				}
 			end
 		end

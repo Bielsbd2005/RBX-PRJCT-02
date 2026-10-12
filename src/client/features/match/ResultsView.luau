@@ -30,12 +30,14 @@ local FaceApplier = require(Client.features.locker.Appliers.FaceApplier)
 local HatApplier = require(Client.features.locker.Appliers.HatApplier)
 local DataController = require(Client.core.data.DataController)
 local ResultsScene = require(script.Parent.ResultsScene)
+local EmotePlayer = require(Shared.Locker.emotes.EmotePlayer)
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
 local AssetIds = require(Shared.constants.AssetIds)
 
 local SLOT_COUNT = 4
 local REPLICA_FOLDER_NAME = "ResultsReplicas"
-local IDLE_ANIMATION_ID = AssetIds.Animations.PreviewIdle
+-- Debe ser el idle del Locker (LobbyCharacterPreview): pose de quien no tiene emote.
+local IDLE_ANIMATION_ID = AssetIds.Animations.CharacterIdle
 local LOCAL_USER_ID = Players.LocalPlayer.UserId
 
 local LOCKED_COLOR = Color3.fromRGB(133, 134, 134)
@@ -71,6 +73,12 @@ export type ResultEntry = {
 	outfitId: string,
 	faceId: string,
 	hatId: string,
+	emoteId: string,
+}
+
+type ReplicaEmote = {
+	rig: Model,
+	emoteId: string,
 }
 
 type UiSlot = {
@@ -204,6 +212,8 @@ function ResultsView.new(resultsFrame: GuiObject?): any
 	self._rewardClones = {} :: { Instance }
 	self._replicaFolder = nil :: Folder?
 	self._replicaJanitor = Janitor.new()
+	-- Se reproducen en show(), no al construir: en preload() la pantalla sigue en negro.
+	self._replicaEmotes = {} :: { ReplicaEmote }
 	self._preloadedSize = -1 -- tamaño de equipo con el que se construyeron las réplicas
 	self._uiWarned = false
 	self._showing = false
@@ -211,12 +221,12 @@ function ResultsView.new(resultsFrame: GuiObject?): any
 	return self
 end
 
-local function _readLoadout(): (string?, string?, string?)
+local function _readLoadout(): (string?, string?, string?, string?)
 	local loadout = Fusion.peek(DataController.Loadout) :: { [string]: any }
 	if type(loadout) ~= "table" then
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	end
-	return _optString(loadout.Outfit), _optString(loadout.Face), _optString(loadout.Hat)
+	return _optString(loadout.Outfit), _optString(loadout.Face), _optString(loadout.Hat), _optString(loadout.Emote)
 end
 
 function ResultsView:_resolveBodyTemplate(outfitId: string?): Model?
@@ -233,7 +243,7 @@ function ResultsView:_resolveBodyTemplate(outfitId: string?): Model?
 	return if default and default:IsA("Model") then default :: Model else nil
 end
 
-function ResultsView:_spawnReplica(template: Model, anchor: CFrame, parent: Instance, face: string?, hat: string?)
+function ResultsView:_spawnReplica(template: Model, anchor: CFrame, parent: Instance, face: string?, hat: string?): Model
 	local clone = template:Clone()
 	clone.Name = "ResultReplica"
 	for _, desc in clone:GetDescendants() do
@@ -252,14 +262,15 @@ function ResultsView:_spawnReplica(template: Model, anchor: CFrame, parent: Inst
 
 	FaceApplier.new(clone, ItemsConfig):ApplyItemId(face)
 	HatApplier.new(clone, ItemsConfig):ApplyItemId(hat)
+	return clone
 end
 
 -- El local usa su loadout; el resto, lo que traiga la entrada (roster/TeamCosmetics).
-local function _appearanceFor(entry: ResultEntry): (string?, string?, string?)
+local function _appearanceFor(entry: ResultEntry): (string?, string?, string?, string?)
 	if entry.userId == LOCAL_USER_ID then
 		return _readLoadout()
 	end
-	return _optString(entry.outfitId), _optString(entry.faceId), _optString(entry.hatId)
+	return _optString(entry.outfitId), _optString(entry.faceId), _optString(entry.hatId), _optString(entry.emoteId)
 end
 
 function ResultsView:_buildReplicas(team: { ResultEntry })
@@ -276,10 +287,13 @@ function ResultsView:_buildReplicas(team: { ResultEntry })
 		local entry = team[i]
 		local anchor = anchors[i]
 		if anchor then
-			local outfit, face, hat = _appearanceFor(entry)
+			local outfit, face, hat, emote = _appearanceFor(entry)
 			local template = self:_resolveBodyTemplate(outfit)
 			if template then
-				self:_spawnReplica(template, anchor, folder, face, hat)
+				local replica = self:_spawnReplica(template, anchor, folder, face, hat)
+				if emote then
+					table.insert(self._replicaEmotes, { rig = replica, emoteId = emote })
+				end
 			end
 		end
 	end
@@ -297,11 +311,21 @@ end
 function ResultsView:_clearReplicas()
 	self._replicaJanitor:Destroy()
 	self._replicaJanitor = Janitor.new()
+	table.clear(self._replicaEmotes)
 	if self._replicaFolder then
 		self._replicaFolder:Destroy()
 		self._replicaFolder = nil
 	end
 	self._preloadedSize = -1
+end
+
+-- Una sola vez aunque el ítem sea Looped (como en partida). El idle sigue debajo con
+-- menos prioridad, así que al acabar la réplica vuelve a él.
+function ResultsView:_playReplicaEmotes()
+	for _, pending in self._replicaEmotes do
+		EmotePlayer.play(pending.rig, pending.emoteId, false)
+	end
+	table.clear(self._replicaEmotes)
 end
 
 function ResultsView:_clearRewardClones()
@@ -502,6 +526,7 @@ function ResultsView:show(localTeam: string, entries: { ResultEntry }, duration:
 	if self._preloadedSize ~= #team then
 		self:_buildReplicas(team)
 	end
+	self:_playReplicaEmotes()
 
 	for i = 1, SLOT_COUNT do
 		local slot = self._slots[i]

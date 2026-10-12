@@ -52,7 +52,7 @@ AssetIds.Animations = table.freeze({
 	CharacterJump = asset(507765000),
 	BotToolHold = asset(72875354504675),
 
-	-- Idle de los maniquíes en preview (locker y pantalla de resultados).
+	-- Idle del maniquí de preview del pase de batalla.
 	PreviewIdle = asset(115197033304718),
 	-- Idle del asesino en el viewport de la pantalla de muerte.
 	KillerViewportIdle = asset(126774009783214),

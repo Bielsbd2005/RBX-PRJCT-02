@@ -159,7 +159,7 @@ local MatchNamespace = ByteNet.DefineNamespace("Match", function()
 		}),
 
 		-- S → C. Compañeros REALES del receptor para la pantalla de Resultados.
-		-- json: [{ userId, outfitId, faceId, hatId }]
+		-- json: [{ userId, outfitId, faceId, hatId, emoteId }]
 		TeamCosmetics = ByteNet.DefinePacket({
 			Value = ByteNet.Struct({
 				json = ByteNet.String,
