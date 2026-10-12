@@ -119,6 +119,10 @@ local GENERATED_ATTRIBUTE = "GeneratedFromWeaponTool"
 -- guardó el place tras un playtest pueden haber quedado grabadas en el asset y
 -- el display saldría con la skin de otro.
 local WRAP_TEXTURE_PREFIX = "ScrollTexture_"
+-- Mismos nombres que WeaponWrapPainter: el SurfaceAppearance del wrap y el Folder
+-- donde aparca los propios del arma.
+local WRAP_SURFACE_NAME = "WrapSurfaceAppearance"
+local ORIGINAL_SURFACES_STASH_NAME = "WrapOriginalSurfaces"
 
 local lockerFolder = ReplicatedStorage.Shared:FindFirstChild("Locker")
 local displayRoot = lockerFolder and lockerFolder:FindFirstChild(DISPLAY_ROOT_NAME)
@@ -162,6 +166,14 @@ local function stripNonDisplayContent(model)
 		elseif descendant:IsA("Texture") and string.sub(descendant.Name, 1, #WRAP_TEXTURE_PREFIX) == WRAP_TEXTURE_PREFIX then
 			descendant:Destroy()
 			strippedTextures += 1
+		elseif descendant:IsA("SurfaceAppearance") and descendant.Name == WRAP_SURFACE_NAME then
+			descendant:Destroy()
+			strippedTextures += 1
+		elseif descendant:IsA("Folder") and descendant.Name == ORIGINAL_SURFACES_STASH_NAME then
+			for _, original in descendant:GetChildren() do
+				original.Parent = descendant.Parent
+			end
+			descendant:Destroy()
 		elseif isFunctionalOnly(descendant) then
 			descendant:Destroy()
 			strippedFunctional += 1

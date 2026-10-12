@@ -7,16 +7,21 @@
 	Las texturas animadas solo se taguean con ANIMATED_TEXTURE_TAG y sus velocidades
 	van en atributos: las anima WeaponWrapAnimator en el cliente, también dentro de
 	ViewportFrames. Pintado en el server, tag y atributos replican.
+
+	Un wrap lleva además SurfaceAppearance si en Shared.Locker.wraps hay uno con su id
+	o su Name (ver el README de esa carpeta): no se declara en ItemsConfig.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CollectionService = game:GetService("CollectionService")
+local RunService = game:GetService("RunService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
 local WeaponWrapParts = require(script.Parent.WeaponWrapParts)
 
 export type WrapDefinition = {
+	Name: string?,
 	TextureID: string?,
 	BaseColor: Color3?,
 	Material: Enum.Material?,
@@ -24,6 +29,8 @@ export type WrapDefinition = {
 	isAnimated: boolean?,
 	ScrollSpeedU: number?,
 	ScrollSpeedV: number?,
+	-- No viene del catálogo: lo añade getDefinition desde Shared.Locker.wraps.
+	SurfaceAppearance: SurfaceAppearance?,
 }
 
 local WeaponWrapPainter = {}
@@ -49,6 +56,13 @@ local TEXTURE_FACES: { { name: string, face: Enum.NormalId } } = {
 local ORIGINAL_MATERIAL_ATTR = "WrapOriginalMaterial"
 local ORIGINAL_COLOR_ATTR = "WrapOriginalColor"
 
+-- Deben coincidir con tools/weapons/StudioMigration.luau, que los limpia del display.
+local WRAP_SURFACE_NAME = "WrapSurfaceAppearance"
+local ORIGINAL_SURFACES_STASH_NAME = "WrapOriginalSurfaces"
+
+local SURFACES_FOLDER_NAME = "wraps"
+local surfaceTemplates: { [string]: SurfaceAppearance }? = nil
+
 local function optionalString(value: any): string?
 	return if type(value) == "string" and value ~= "" then value else nil
 end
@@ -57,10 +71,62 @@ local function optionalMaterial(value: any): Enum.Material?
 	return if typeof(value) == "EnumItem" and value.EnumType == Enum.Material then value :: Enum.Material else nil
 end
 
-function WeaponWrapPainter.getDefinition(wrapId: string?): WrapDefinition?
+local function getCatalogEntry(wrapId: string): WrapDefinition?
 	local catalog = ItemsConfig.WeaponWraps
-	local definition = if wrapId and type(catalog) == "table" then catalog[wrapId] else nil
+	local definition = if type(catalog) == "table" then catalog[wrapId] else nil
 	return if type(definition) == "table" then definition :: WrapDefinition else nil
+end
+
+-- Indexa por nombre todo SurfaceAppearance de Shared.Locker.wraps, a cualquier
+-- profundidad: las subcarpetas son solo para ordenar. Como los Hats, en Studio se
+-- nombran por el id o por el `Name` del catálogo.
+local function getSurfaceTemplate(wrapId: string, definition: WrapDefinition): SurfaceAppearance?
+	if not surfaceTemplates then
+		local folder = script.Parent:FindFirstChild(SURFACES_FOLDER_NAME)
+		if not folder then
+			return nil
+		end
+		local knownNames: { [string]: true } = {}
+		if RunService:IsStudio() and type(ItemsConfig.WeaponWraps) == "table" then
+			for id, entry in ItemsConfig.WeaponWraps do
+				knownNames[id] = true
+				if type(entry) == "table" and type(entry.Name) == "string" then
+					knownNames[entry.Name] = true
+				end
+			end
+		end
+		local templates: { [string]: SurfaceAppearance } = {}
+		for _, node in folder:GetDescendants() do
+			if not node:IsA("SurfaceAppearance") then
+				continue
+			end
+			if RunService:IsStudio() then
+				if templates[node.Name] then
+					warn(`[WeaponWrapPainter] SurfaceAppearance duplicado en Locker.wraps: {node.Name}`)
+				elseif not knownNames[node.Name] then
+					warn(`[WeaponWrapPainter] {node:GetFullName()} no corresponde a ningún wrap de ItemsConfig.WeaponWraps`)
+				end
+			end
+			templates[node.Name] = node
+		end
+		surfaceTemplates = templates
+	end
+	local templates = surfaceTemplates :: { [string]: SurfaceAppearance }
+	return templates[wrapId] or (if definition.Name then templates[definition.Name] else nil)
+end
+
+function WeaponWrapPainter.getDefinition(wrapId: string?): WrapDefinition?
+	local definition = if wrapId then getCatalogEntry(wrapId) else nil
+	if not (wrapId and definition) then
+		return nil
+	end
+	local surface = getSurfaceTemplate(wrapId, definition)
+	if not surface then
+		return definition
+	end
+	local resolved = table.clone(definition)
+	resolved.SurfaceAppearance = surface
+	return resolved
 end
 
 -- No todos los modelos de display traen PrimaryPart. "Main" es el nombre de una
@@ -110,12 +176,50 @@ local function applyMaterial(part: BasePart, material: Enum.Material?)
 	end
 end
 
+-- Un SurfaceAppearance solo actúa como hijo directo de un MeshPart: el propio del arma
+-- se aparca en un Folder dentro de la pieza (sobrevive a Clone y replica) mientras
+-- manda el del wrap, y vuelve cuando el siguiente wrap no trae ninguno.
+local function applySurface(part: BasePart, template: SurfaceAppearance?)
+	local current = part:FindFirstChild(WRAP_SURFACE_NAME)
+	if current then
+		current:Destroy()
+	end
+	local stash: Instance? = part:FindFirstChild(ORIGINAL_SURFACES_STASH_NAME)
+
+	if not (template and part:IsA("MeshPart")) then
+		if stash then
+			for _, original in stash:GetChildren() do
+				original.Parent = part
+			end
+			stash:Destroy()
+		end
+		return
+	end
+
+	for _, child in part:GetChildren() do
+		if child:IsA("SurfaceAppearance") then
+			if not stash then
+				local created = Instance.new("Folder")
+				created.Name = ORIGINAL_SURFACES_STASH_NAME
+				created.Parent = part
+				stash = created
+			end
+			child.Parent = stash
+		end
+	end
+
+	local surface = template:Clone()
+	surface.Name = WRAP_SURFACE_NAME
+	surface.Parent = part
+end
+
 -- studsPerTileScale: para modelos escalados (el pase escala el arma de su escena),
 -- o saldrían más tiles que en la card.
 function WeaponWrapPainter.paintParts(parts: { BasePart }, definition: WrapDefinition?, studsPerTileScale: number?)
 	local textureId = if definition then optionalString(definition.TextureID) else nil
 	local baseColor = if definition and typeof(definition.BaseColor) == "Color3" then definition.BaseColor else nil
 	local material = if definition then optionalMaterial(definition.Material) else nil
+	local surfaceTemplate = if definition then definition.SurfaceAppearance else nil
 	local studsPerTile = math.max(0.01, tonumber(definition and definition.StudsPerTile) or WeaponWrapPainter.DEFAULT_STUDS_PER_TILE)
 		* (studsPerTileScale or 1)
 	local animated = definition ~= nil and definition.isAnimated == true
@@ -126,6 +230,7 @@ function WeaponWrapPainter.paintParts(parts: { BasePart }, definition: WrapDefin
 		-- También con textura: el color se ve a través de sus zonas transparentes.
 		applyColor(part, baseColor)
 		applyMaterial(part, material)
+		applySurface(part, surfaceTemplate)
 
 		if not textureId then
 			for _, child in part:GetChildren() do

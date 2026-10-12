@@ -4,7 +4,8 @@
   "globIgnorePaths": [
     "src/shared/Bodies/*.rbxm",
     "src/shared/Locker/Hats/*.rbxm",
-    "src/shared/Locker/weapons/**/*.rbxm"
+    "src/shared/Locker/weapons/**/*.rbxm",
+    "src/shared/Locker/wraps/**/*.rbxm"
   ],
 
   "tree": {
