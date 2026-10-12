@@ -567,7 +567,7 @@ local function _getKillEffectIdForAttacker(attackerUserId: number?): string
 	local profile = if _dataService then _dataService:GetProfile(attackerPlayer) else nil
 	if profile and profile.Data and profile.Data.Loadout then
 		local killEffect = profile.Data.Loadout.KillEffect
-		if type(killEffect) == "string" and killEffect ~= "" then
+		if type(killEffect) == "string" and killEffect ~= "" and InventoryRepository.ownsItem(profile.Data, "KillEffects", killEffect, attackerPlayer) then
 			return killEffect
 		end
 	end
@@ -578,7 +578,7 @@ end
 -- revalida catálogo y posesión: un Loadout.Banner que ya no existe (ítem retirado)
 -- o que no se posee cae al Default en vez de mandar un id que el cliente no sabe
 -- pintar.
-local function _resolveEquippedBanner(profileData: any): string
+local function _resolveEquippedBanner(profileData: any, playerOrUserId: (Player | number)?): string
 	local loadout = if type(profileData) == "table" then profileData.Loadout else nil
 	local bannerId = if type(loadout) == "table" then loadout.Banner else nil
 	if type(bannerId) ~= "string" or bannerId == "" or bannerId == ItemDefaults.ITEM_ID then
@@ -588,7 +588,7 @@ local function _resolveEquippedBanner(profileData: any): string
 	if type(banners) ~= "table" or banners[bannerId] == nil then
 		return ItemDefaults.ITEM_ID
 	end
-	if not InventoryRepository.ownsItem(profileData, "Banners", bannerId) then
+	if not InventoryRepository.ownsItem(profileData, "Banners", bannerId, playerOrUserId) then
 		return ItemDefaults.ITEM_ID
 	end
 	return bannerId
@@ -766,7 +766,7 @@ local function _registerDeathListener(player: Player, character: Model)
 					if type(lvl) == "number" then
 						killerLevel = math.floor(lvl)
 					end
-					killerBanner = _resolveEquippedBanner(killerProfile.Data)
+					killerBanner = _resolveEquippedBanner(killerProfile.Data, attackerPlayer)
 				end
 			end
 

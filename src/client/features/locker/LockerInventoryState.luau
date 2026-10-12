@@ -143,19 +143,27 @@ function LockerInventoryState.rebuildEquipped(self: Internal)
 	local nextEquipped = {} :: { [string]: string }
 	for category, slot in CATEGORY_TO_LOADOUT_SLOT do
 		local equippedItem = optionalString(loadout[slot])
-		if equippedItem then
+		if equippedItem and self:isOwned(category, equippedItem) then
 			nextEquipped[category] = equippedItem
+		elseif category ~= LockerCategory.HATS then
+			nextEquipped[category] = ItemDefaults.ITEM_ID
 		end
 	end
 	self._equipped = nextEquipped
 end
 
 function LockerInventoryState.isOwned(self: Internal, category: string, itemId: string): boolean
+	if LockerConfig.isUnlockAllActive() then
+		return true
+	end
 	local categoryLookup = self._owned[category]
 	return categoryLookup ~= nil and categoryLookup[itemId] == true
 end
 
 function LockerInventoryState.ownsWrap(self: Internal, weaponCategory: string, weaponId: string, wrapId: string): boolean
+	if LockerConfig.isUnlockAllActive() then
+		return true
+	end
 	local categoryLookup = self._ownedWrapsByWeapon[weaponCategory :: WeaponCategory]
 	local weaponLookup = categoryLookup and categoryLookup[weaponId]
 	return weaponLookup ~= nil and (weaponLookup[wrapId] or 0) > 0
@@ -163,6 +171,9 @@ end
 
 -- Wraps poseídos para un arma, SIN contar el Default.
 function LockerInventoryState.countOwnedWraps(self: Internal, weaponCategory: WeaponCategory, weaponId: string): number
+	if LockerConfig.isUnlockAllActive() then
+		return LockerConfig.getTotalNonDefaultWrapsCount()
+	end
 	local categoryLookup = self._ownedWrapsByWeapon[weaponCategory]
 	local weaponLookup = categoryLookup and categoryLookup[weaponId]
 	if not weaponLookup then
@@ -184,7 +195,11 @@ function LockerInventoryState.getEquipped(self: Internal, category: string): str
 		return equippedItem
 	end
 	local slot = CATEGORY_TO_LOADOUT_SLOT[category]
-	return if slot then optionalString(self:getLoadout()[slot]) else nil
+	local loadoutItem = if slot then optionalString(self:getLoadout()[slot]) else nil
+	if loadoutItem and self:isOwned(category, loadoutItem) then
+		return loadoutItem
+	end
+	return if category == LockerCategory.HATS then nil else ItemDefaults.ITEM_ID
 end
 
 function LockerInventoryState.getEquippedWeapon(self: Internal, category: WeaponCategory): string

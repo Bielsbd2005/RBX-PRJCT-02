@@ -111,7 +111,7 @@ local function _sync(player: Player)
 	end
 
 	for _, item in VIP_ITEMS do
-		local has = InventoryRepository.ownsItem(profile.Data, item.category, item.itemId)
+		local has = InventoryRepository.rawOwnsItem(profile.Data, item.category, item.itemId)
 		if owns and not has then
 			_dataService:GrantItem(player, item.category, item.itemId, GRANT_SOURCE)
 		elseif not owns and has then

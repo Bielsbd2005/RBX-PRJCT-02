@@ -66,18 +66,30 @@ local function _resolveWeaponId(rawWeaponId: string?, fallbackWeaponId: string?)
 	return ItemDefaults.ITEM_ID
 end
 
-local function _ownsTargetWeapon(profileData: any, weaponCategory: string, weaponId: string): boolean
+local function _ownsTargetWeapon(profileData: any, weaponCategory: string, weaponId: string, player: Player?): boolean
 	if not WeaponCategory.isValid(weaponCategory) then
 		return false
 	end
-	return InventoryRepository.ownsWeapon(profileData, weaponCategory :: WeaponCategory.WeaponCategory, weaponId)
+	return InventoryRepository.ownsWeapon(profileData, weaponCategory :: WeaponCategory.WeaponCategory, weaponId, player)
 end
 
-local function _getOwnedWeaponWrap(profileData: any, weaponCategory: string, weaponId: string, wrapId: string): boolean
+local function _getOwnedWeaponWrap(
+	profileData: any,
+	weaponCategory: string,
+	weaponId: string,
+	wrapId: string,
+	player: Player?
+): boolean
 	if not WeaponCategory.isValid(weaponCategory) then
 		return false
 	end
-	return InventoryRepository.ownsWeaponWrap(profileData, weaponCategory :: WeaponCategory.WeaponCategory, weaponId, wrapId)
+	return InventoryRepository.ownsWeaponWrap(
+		profileData,
+		weaponCategory :: WeaponCategory.WeaponCategory,
+		weaponId,
+		wrapId,
+		player
+	)
 end
 
 -- Segundos entre dos acciones del mismo tipo por jugador.
@@ -173,17 +185,17 @@ local function _onBuyItem(data: Network.ShopItemPayload, player: Player): ()
 		local equippedWeaponId = if weaponSlot then profile.Data.Loadout[weaponSlot] else nil
 		weaponIdForWraps = _resolveWeaponId(data.weaponId, equippedWeaponId)
 
-		if not _ownsTargetWeapon(profile.Data, weaponCategoryForWraps, weaponIdForWraps) then
+		if not _ownsTargetWeapon(profile.Data, weaponCategoryForWraps, weaponIdForWraps, player) then
 			Network.Shop.Response.SendTo({ success = false, message = "You don't own that weapon." }, player)
 			return
 		end
 
-		if _getOwnedWeaponWrap(profile.Data, weaponCategoryForWraps, weaponIdForWraps, data.itemId) then
+		if _getOwnedWeaponWrap(profile.Data, weaponCategoryForWraps, weaponIdForWraps, data.itemId, player) then
 			Network.Shop.Response.SendTo({ success = false, message = "You already own this wrap for that weapon." }, player)
 			return
 		end
 	else
-		local alreadyOwned = _getPath(profile.Data.Inventory, { data.category, data.itemId })
+		local alreadyOwned = InventoryRepository.ownsItem(profile.Data, data.category, data.itemId, player)
 		if alreadyOwned then
 			Network.Shop.Response.SendTo({ success = false, message = "You already own this item." }, player)
 			return
@@ -369,12 +381,12 @@ local function _onEquipItem(data: Network.ShopItemPayload, player: Player): ()
 		local equippedWeaponId = profile.Data.Loadout[weaponSlot]
 		local targetWeaponId = _resolveWeaponId(data.weaponId, equippedWeaponId)
 
-		if not _ownsTargetWeapon(profile.Data, weaponCategory, targetWeaponId) then
+		if not _ownsTargetWeapon(profile.Data, weaponCategory, targetWeaponId, player) then
 			Network.Shop.Response.SendTo({ success = false, message = "You don't own that weapon." }, player)
 			return
 		end
 
-		if not _getOwnedWeaponWrap(profile.Data, weaponCategory, targetWeaponId, data.itemId) then
+		if not _getOwnedWeaponWrap(profile.Data, weaponCategory, targetWeaponId, data.itemId, player) then
 			Network.Shop.Response.SendTo({ success = false, message = "You don't own this wrap for that weapon." }, player)
 			return
 		end
@@ -385,7 +397,7 @@ local function _onEquipItem(data: Network.ShopItemPayload, player: Player): ()
 		end
 		ok = _dataService:SetValue(player, { wrapsRootPath[1], wrapsRootPath[2], targetWeaponId }, data.itemId)
 	else
-		local isOwned = _getPath(profile.Data.Inventory, { data.category, data.itemId })
+		local isOwned = InventoryRepository.ownsItem(profile.Data, data.category, data.itemId, player)
 		if not isOwned then
 			Network.Shop.Response.SendTo({ success = false, message = "You don't own this item." }, player)
 			return

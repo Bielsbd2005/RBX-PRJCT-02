@@ -41,6 +41,7 @@ local DataController = require(Client.core.data.DataController)
 local Confetti = require(Client.core.ui.Confetti)
 local ScreenFade = require(Client.core.ui.ScreenFade)
 local GameSounds = require(Client.core.ui.GameSounds)
+local DebugFlags = require(Shared.utils.DebugFlags)
 
 local LockerFeature = {}
 
@@ -364,7 +365,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		local lockedLevel: number?
 		if item and item.Category == LockerCategory.OUTFITS then
 			targetOutfitId = item.id
-			if getCurrentLevel() < item.LevelRequired then
+			if not inventory:isItemOwned(item) and getCurrentLevel() < item.LevelRequired then
 				lockedLevel = item.LevelRequired
 			end
 		else
@@ -929,6 +930,18 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 				populateMainContentForNavItem(selectedMainCategory, selectedNavKey, selectedQualifiedId)
 			end
 		end), true)
+
+		DebugFlags.bind(ReplicatedStorage, "UnlockAllLocker", function()
+			if not isOpen then
+				dirtyWhileClosed = true
+				return
+			end
+			inventory:rebuildOwned()
+			if selectedMainCategory and selectedNavKey then
+				local selectedQualifiedId = if selectedCatalogItem then selectedCatalogItem.qualifiedId else nil
+				populateMainContentForNavItem(selectedMainCategory, selectedNavKey, selectedQualifiedId)
+			end
+		end)
 
 		local loadoutObserver = fusionScope:Observer(DataController.Loadout)
 		janitor:Add(loadoutObserver:onBind(function()

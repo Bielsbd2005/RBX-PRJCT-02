@@ -42,7 +42,7 @@ local function _whenChild(parent: Instance, name: string, className: string, onF
 	end)
 end
 
-function DebugFlags.bind(root: Instance, name: string): () -> boolean
+function DebugFlags.bind(root: Instance, name: string, onChanged: ((boolean) -> ())?): () -> boolean
 	if not IS_STUDIO then
 		return _alwaysFalse
 	end
@@ -52,8 +52,14 @@ function DebugFlags.bind(root: Instance, name: string): () -> boolean
 		_whenChild(folder, name, "BoolValue", function(child)
 			local flag = child :: BoolValue
 			enabled = flag.Value
+			if onChanged then
+				onChanged(enabled)
+			end
 			flag.Changed:Connect(function(value: boolean)
 				enabled = value
+				if onChanged then
+					onChanged(value)
+				end
 			end)
 		end)
 	end)

@@ -6,14 +6,17 @@
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local WeaponCategoryMod = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("WeaponCategory"))
-local ItemDefaults = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("ItemDefaults"))
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local WeaponCategoryMod = require(Shared:WaitForChild("constants"):WaitForChild("WeaponCategory"))
+local ItemDefaults = require(Shared:WaitForChild("constants"):WaitForChild("ItemDefaults"))
+local LockerConfig = require(Shared:WaitForChild("constants"):WaitForChild("LockerConfig"))
 
 local InventoryRepository = {}
 
 export type WeaponCategory = WeaponCategoryMod.WeaponCategory
 
-function InventoryRepository.ownsItem(profileData: any, category: string, itemId: string): boolean
+-- Lee la posesión física guardada en profileData.Inventory sin aplicar flags de depuración.
+function InventoryRepository.rawOwnsItem(profileData: any, category: string, itemId: string): boolean
 	local categoryInv = if profileData.Inventory then profileData.Inventory[category] else nil
 	if type(categoryInv) ~= "table" then
 		return false
@@ -21,15 +24,13 @@ function InventoryRepository.ownsItem(profileData: any, category: string, itemId
 	return categoryInv[itemId] == true
 end
 
-function InventoryRepository.ownsWeapon(profileData: any, category: WeaponCategory, weaponId: string): boolean
-	if weaponId == ItemDefaults.ITEM_ID then
-		return true
-	end
-	return InventoryRepository.ownsItem(profileData, category, weaponId)
-end
-
 -- Los wraps pueden guardarse como { [wrapId] = true } o { [wrapId] = count }.
-function InventoryRepository.ownsWeaponWrap(profileData: any, category: WeaponCategory, weaponId: string, wrapId: string): boolean
+function InventoryRepository.rawOwnsWeaponWrap(
+	profileData: any,
+	category: WeaponCategory,
+	weaponId: string,
+	wrapId: string
+): boolean
 	if wrapId == ItemDefaults.ITEM_ID then
 		return true
 	end
@@ -50,6 +51,46 @@ function InventoryRepository.ownsWeaponWrap(profileData: any, category: WeaponCa
 		return true
 	end
 	return type(isOwned) == "number" and isOwned > 0
+end
+
+function InventoryRepository.ownsItem(
+	profileData: any,
+	category: string,
+	itemId: string,
+	playerOrUserId: (Player | number)?
+): boolean
+	if LockerConfig.isUnlockAllActive(playerOrUserId) then
+		return true
+	end
+	return InventoryRepository.rawOwnsItem(profileData, category, itemId)
+end
+
+function InventoryRepository.ownsWeapon(
+	profileData: any,
+	category: WeaponCategory,
+	weaponId: string,
+	playerOrUserId: (Player | number)?
+): boolean
+	if LockerConfig.isUnlockAllActive(playerOrUserId) then
+		return true
+	end
+	if weaponId == ItemDefaults.ITEM_ID then
+		return true
+	end
+	return InventoryRepository.rawOwnsItem(profileData, category, weaponId)
+end
+
+function InventoryRepository.ownsWeaponWrap(
+	profileData: any,
+	category: WeaponCategory,
+	weaponId: string,
+	wrapId: string,
+	playerOrUserId: (Player | number)?
+): boolean
+	if LockerConfig.isUnlockAllActive(playerOrUserId) then
+		return true
+	end
+	return InventoryRepository.rawOwnsWeaponWrap(profileData, category, weaponId, wrapId)
 end
 
 return InventoryRepository

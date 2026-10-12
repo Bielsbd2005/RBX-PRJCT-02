@@ -1,5 +1,18 @@
 --!strict
 
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local DebugFlags = require(Shared:WaitForChild("utils"):WaitForChild("DebugFlags"))
+local ItemsConfig = require(Shared:WaitForChild("constants"):WaitForChild("ItemsConfig"))
+local ItemDefaults = require(Shared:WaitForChild("constants"):WaitForChild("ItemDefaults"))
+
+local IS_STUDIO = RunService:IsStudio()
+local IS_CLIENT = RunService:IsClient()
+local unlockAllFlag = DebugFlags.bind(ReplicatedStorage, "UnlockAllLocker")
+
 export type LockerCategoryKey = "Style" | "Arsenal" | "Effects"
 
 export type LockerNavItemDefinition = {
@@ -77,12 +90,62 @@ local function makeQualifiedId(category: string, id: string): string
 	return category .. "." .. id
 end
 
-local LockerConfig = {
+local LockerConfig: any
+
+-- Único UserId con permiso de admin para UnlockAll en servidores públicos.
+local ADMIN_USER_ID = 286176976
+
+local function isUserAdmin(playerOrUserId: (Player | number)?): boolean
+	local userId: number? = nil
+
+	if playerOrUserId == nil then
+		if IS_CLIENT then
+			local player = Players.LocalPlayer
+			userId = if player then player.UserId else nil
+		end
+	elseif typeof(playerOrUserId) == "Instance" and playerOrUserId:IsA("Player") then
+		userId = (playerOrUserId :: Player).UserId
+	else
+		userId = tonumber(playerOrUserId)
+	end
+
+	return userId == ADMIN_USER_ID
+end
+
+-- Solo desbloquea al admin 286176976 (o a todos en Studio si se activa el BoolValue de depuración).
+local function isUnlockAllActive(playerOrUserId: (Player | number)?): boolean
+	local isToggleOn = LockerConfig.UnlockAll == true or (IS_STUDIO and unlockAllFlag() == true)
+	if not isToggleOn then
+		return false
+	end
+	if IS_STUDIO and unlockAllFlag() == true then
+		return true
+	end
+	return isUserAdmin(playerOrUserId)
+end
+
+local function getTotalNonDefaultWrapsCount(): number
+	local count = 0
+	for wrapId in ItemsConfig.WeaponWraps do
+		if wrapId ~= ItemDefaults.ITEM_ID then
+			count += 1
+		end
+	end
+	return count
+end
+
+LockerConfig = {
+	-- Activo: en partida y en Studio solo desbloquea al admin 286176976.
+	UnlockAll = true,
+	AdminUserId = ADMIN_USER_ID,
 	NavItems = NAV_ITEMS,
 	ItemsConfigByNav = ITEMS_CONFIG_BY_NAV,
 	CategoryToLoadoutSlot = CATEGORY_TO_LOADOUT_SLOT,
 	RarityRank = RARITY_RANK,
 	makeQualifiedId = makeQualifiedId,
+	isUnlockAllActive = isUnlockAllActive,
+	isUserAdmin = isUserAdmin,
+	getTotalNonDefaultWrapsCount = getTotalNonDefaultWrapsCount,
 }
 
 return table.freeze(LockerConfig)

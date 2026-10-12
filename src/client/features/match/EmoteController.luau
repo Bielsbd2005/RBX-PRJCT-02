@@ -25,6 +25,8 @@ local EmotePlayer = require(Shared.Locker.emotes.EmotePlayer)
 local DataController = require(Client.core.data.DataController)
 local MatchState = require(script.Parent.MatchState)
 local MatchWeapons = require(script.Parent.MatchWeapons)
+local ItemDefaults = require(Shared.constants.ItemDefaults)
+local LockerConfig = require(Shared.constants.LockerConfig)
 
 local EMOTE_KEY = Enum.KeyCode.E
 local EMOTE_COOLDOWN = 0.5
@@ -116,6 +118,14 @@ function EmoteController.start(): () -> ()
 		local loadout = Fusion.peek(DataController.Loadout) :: any
 		local emoteId = if type(loadout) == "table" then loadout.Emote else nil
 		if not EmotePlayer.getAnimationId(emoteId) then
+			return
+		end
+
+		local inventory = Fusion.peek(DataController.Inventory) :: any
+		local isOwned = LockerConfig.isUnlockAllActive()
+			or (emoteId == ItemDefaults.ITEM_ID)
+			or (type(inventory) == "table" and type(inventory.Emotes) == "table" and inventory.Emotes[emoteId] == true)
+		if not isOwned then
 			return
 		end
 

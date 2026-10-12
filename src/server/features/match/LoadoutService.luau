@@ -75,9 +75,14 @@ local function _clearMatchLoadoutHat(character: Model)
 	end
 end
 
-local function _resolveWeaponWrapForLoadout(profileData: any, loadoutCategory: WeaponCategory.WeaponCategory, weaponId: string): string
+local function _resolveWeaponWrapForLoadout(
+	profileData: any,
+	loadoutCategory: WeaponCategory.WeaponCategory,
+	weaponId: string,
+	player: Player?
+): string
 	return LoadoutWraps.resolveEquipped(profileData.Loadout, loadoutCategory, weaponId, function(category, id, wrapId)
-		return _ownsWeaponWrap(profileData, category :: WeaponCategory.WeaponCategory, id, wrapId)
+		return _ownsWeaponWrap(profileData, category :: WeaponCategory.WeaponCategory, id, wrapId, player)
 	end)
 end
 
@@ -116,17 +121,17 @@ local function _grantMatchLoadoutTools(
 	local mainWeaponId = if type(loadout.MainWeapon) == "string" and loadout.MainWeapon ~= "" then loadout.MainWeapon else ItemDefaults.ITEM_ID
 	local specialWeaponId = if type(loadout.SpecialWeapon) == "string" and loadout.SpecialWeapon ~= "" then loadout.SpecialWeapon else ItemDefaults.ITEM_ID
 
-	if not _ownsWeapon(profileData, WeaponCategory.MAIN, mainWeaponId) then
+	if not _ownsWeapon(profileData, WeaponCategory.MAIN, mainWeaponId, player) then
 		warn(string.format("[LoadoutService] %s tiene Loadout.MainWeapon=%s pero no lo posee — fallback a Default.", player.Name, mainWeaponId))
 		mainWeaponId = ItemDefaults.ITEM_ID
 	end
-	if not _ownsWeapon(profileData, WeaponCategory.SPECIAL, specialWeaponId) then
+	if not _ownsWeapon(profileData, WeaponCategory.SPECIAL, specialWeaponId, player) then
 		warn(string.format("[LoadoutService] %s tiene Loadout.SpecialWeapon=%s pero no lo posee — fallback a Default.", player.Name, specialWeaponId))
 		specialWeaponId = ItemDefaults.ITEM_ID
 	end
 
-	local mainWrapId = _resolveWeaponWrapForLoadout(profileData, WeaponCategory.MAIN, mainWeaponId)
-	local specialWrapId = _resolveWeaponWrapForLoadout(profileData, WeaponCategory.SPECIAL, specialWeaponId)
+	local mainWrapId = _resolveWeaponWrapForLoadout(profileData, WeaponCategory.MAIN, mainWeaponId, player)
+	local specialWrapId = _resolveWeaponWrapForLoadout(profileData, WeaponCategory.SPECIAL, specialWeaponId, player)
 
 	local backpackNode = player:WaitForChild("Backpack", 1)
 	local backpack = if backpackNode and backpackNode:IsA("Backpack") then backpackNode else nil
@@ -216,6 +221,9 @@ function LoadoutService.applyCosmetics(player: Player, character: Model, dataSer
 	local loadout = profile.Data.Loadout
 
 	local hatId = _getOptionalString(loadout.Hat)
+	if hatId and not InventoryRepository.ownsItem(profile.Data, "Hats", hatId, player) then
+		hatId = nil
+	end
 	if hatId then
 		local hatTemplate = CosmeticsTemplates.findHatTemplate(hatId)
 		if hatTemplate then
@@ -228,6 +236,9 @@ function LoadoutService.applyCosmetics(player: Player, character: Model, dataSer
 	end
 
 	local faceId = _getOptionalString(loadout.Face)
+	if faceId and not InventoryRepository.ownsItem(profile.Data, "Faces", faceId, player) then
+		faceId = nil
+	end
 	if faceId then
 		local headNode = character:FindFirstChild("Head")
 		if headNode and headNode:IsA("BasePart") then
@@ -289,6 +300,9 @@ function LoadoutService.loadCharacterWithBody(player: Player, dataService: any)
 		local outfitId: string? = nil
 		if profile and profile.Data and profile.Data.Loadout then
 			outfitId = _getOptionalString(profile.Data.Loadout.Outfit)
+			if outfitId and not InventoryRepository.ownsItem(profile.Data, "Outfits", outfitId, player) then
+				outfitId = nil
+			end
 		end
 
 		local template = _resolveFullBodyTemplate(outfitId)
