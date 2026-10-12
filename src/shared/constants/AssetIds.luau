@@ -22,8 +22,6 @@ AssetIds.Images = table.freeze({
 	LockerPurchase = asset(120069483795815),
 	LockerStatusCash = asset(70857919112721),
 	LockerStatusGems = asset(136585960459787),
-	-- Placeholder del card de un wrap que el jugador aún no posee.
-	WrapLockedPlaceholder = asset(82849715642061),
 
 	-- Icono de recompensa en Cash (Resultados y tiers del pase) y en Gems (tiers del pase).
 	CashReward = asset(113694528712529),

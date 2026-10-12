@@ -40,6 +40,10 @@ type ItemGridCardRefs = {
 	itemBodyNode: GuiObject?,
 	nameNode: TextLabel?,
 	viewportNode: ViewportFrame?,
+	viewportDefaultAmbient: Color3?,
+	viewportDefaultLightColor: Color3?,
+	-- Studio: GuiObject `Locked` hijo del ViewportFrame; visible solo en wraps no poseídos.
+	viewportLockedNode: GuiObject?,
 	-- qualifiedId del wrap renderizado ahora en viewportNode: RefreshVisibleState corre
 	-- en cada cambio de Loadout y re-renderizar la escena 3D de cada card es caro.
 	renderedWrapId: string?,
@@ -106,7 +110,7 @@ export type LockerGrid = {
 	_clearCardViewportPreview: (self: LockerGrid, card: GuiObject) -> (),
 	_applyWeaponWrapViewportPreview: (self: LockerGrid, card: GuiObject, item: LockerCatalogItem) -> boolean,
 	_applyRarityVisuals: (self: LockerGrid, card: GuiObject, rarity: string) -> (),
-	_syncWrapPreviewVisibility: (self: LockerGrid, card: GuiObject, item: LockerCatalogItem, isOwned: boolean) -> (),
+	_syncWrapPreviewVisibility: (self: LockerGrid, card: GuiObject, item: LockerCatalogItem) -> (),
 	_applyCatalogItemToCard: (self: LockerGrid, card: GuiObject, item: LockerCatalogItem, layoutOrder: number) -> (),
 	_resetTransientState: (self: LockerGrid, notifySelection: boolean) -> (),
 	_countGridColumns: (self: LockerGrid) -> number?,
@@ -123,8 +127,13 @@ local GRID_ITEM_LOCKED_COLOR = Color3.fromRGB(24, 24, 24)
 local STATUS_EQUIPPED_TEXT_COLOR = Color3.fromRGB(124, 255, 0)
 -- Nombre del UIStroke de la card (en cualquier nivel) que se enciende al estar equipada.
 local EQUIPPED_STROKE_NAME = "Equiped"
--- Wrap no poseído: se muestra en Item en vez del viewport 3D.
-local WRAP_LOCKED_PLACEHOLDER_IMAGE = AssetIds.Images.WrapLockedPlaceholder
+
+-- Iluminación del ViewportFrame de un wrap no poseído: se ve apagado.
+local WRAP_LOCKED_VIEWPORT_AMBIENT = Color3.fromRGB(0, 0, 0)
+local WRAP_LOCKED_VIEWPORT_LIGHT_COLOR = Color3.fromRGB(74, 74, 74)
+local WRAP_LOCKED_EMISSIVE_STRENGTH = 1.26
+-- Valor propio del SurfaceAppearance clonado, para devolvérselo al desbloquear el wrap.
+local DEFAULT_EMISSIVE_STRENGTH_ATTR = "LockerDefaultEmissiveStrength"
 
 local STATUS_ICON_LOCKED = AssetIds.Images.LockerLocked
 local STATUS_ICON_CASH = AssetIds.Images.LockerStatusCash
@@ -262,6 +271,7 @@ function LockerGrid:_buildGridCardRefs(card: GuiObject, templateKey: TemplateKey
 
 	local viewportNode = if button then button:FindFirstChild("ViewportFrame") else nil
 	local viewport = if viewportNode and viewportNode:IsA("ViewportFrame") then viewportNode else nil
+	local viewportLockedNode = if viewport then viewport:FindFirstChild("Locked") else nil
 
 	local itemNode = if button then button:FindFirstChild("Item") else nil
 	local resolvedItemNode = if itemNode and (itemNode:IsA("ImageLabel") or itemNode:IsA("ImageButton")) then itemNode else nil
@@ -315,6 +325,9 @@ function LockerGrid:_buildGridCardRefs(card: GuiObject, templateKey: TemplateKey
 		itemBodyNode = resolvedItemBodyNode,
 		nameNode = resolvedNameNode,
 		viewportNode = viewport,
+		viewportDefaultAmbient = if viewport then viewport.Ambient else nil,
+		viewportDefaultLightColor = if viewport then viewport.LightColor else nil,
+		viewportLockedNode = if viewportLockedNode and viewportLockedNode:IsA("GuiObject") then viewportLockedNode else nil,
 		statusValueNode = if statusValueNode and statusValueNode:IsA("TextLabel") then statusValueNode else nil,
 		statusValueDefaultColor = if statusValueNode and statusValueNode:IsA("TextLabel") then statusValueNode.TextColor3 else nil,
 		equippedStrokeNode = equippedStrokeNode,
@@ -408,6 +421,23 @@ local function resolveItemImageNode(refs: ItemGridCardRefs, item: LockerCatalogI
 	return refs.itemNode
 end
 
+local function setLockedEmissive(viewportNode: ViewportFrame, isLocked: boolean)
+	for _, descendant in viewportNode:GetDescendants() do
+		if not descendant:IsA("SurfaceAppearance") then
+			continue
+		end
+		local default = descendant:GetAttribute(DEFAULT_EMISSIVE_STRENGTH_ATTR)
+		if isLocked then
+			if default == nil then
+				descendant:SetAttribute(DEFAULT_EMISSIVE_STRENGTH_ATTR, descendant.EmissiveStrength)
+			end
+			descendant.EmissiveStrength = WRAP_LOCKED_EMISSIVE_STRENGTH
+		elseif type(default) == "number" then
+			descendant.EmissiveStrength = default
+		end
+	end
+end
+
 local function isChallengeItem(item: LockerCatalogItem): boolean
 	local goal = item.ChallengeGoal
 	return goal ~= nil and goal > 0
@@ -482,8 +512,20 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 		refs.equippedStrokeNode.Enabled = isEquipped
 	end
 
+	local isLockedWrap = item.Category == LockerCategory.WEAPON_WRAPS and not isOwned
+	if refs.viewportLockedNode then
+		refs.viewportLockedNode.Visible = isLockedWrap
+	end
+	local viewportNode = refs.viewportNode
+	if viewportNode then
+		setLockedEmissive(viewportNode, isLockedWrap)
+	end
+	if viewportNode and refs.viewportDefaultAmbient and refs.viewportDefaultLightColor then
+		viewportNode.Ambient = if isLockedWrap then WRAP_LOCKED_VIEWPORT_AMBIENT else refs.viewportDefaultAmbient
+		viewportNode.LightColor = if isLockedWrap then WRAP_LOCKED_VIEWPORT_LIGHT_COLOR else refs.viewportDefaultLightColor
+	end
+
 	if refs.templateKey == "wraps" then
-		self:_syncWrapPreviewVisibility(card, item, isOwned)
 		local isChallenge = isChallengeItem(item) and not isOwned
 
 		local isWrapPurchasable = item.CanPurchase and item.Price > 0
@@ -637,14 +679,11 @@ function LockerGrid:_applyRarityVisuals(card: GuiObject, rarity: string)
 	end
 end
 
--- También se llama desde _updateGridCardVisual: un wrap desbloqueado con el grid
--- abierto pasa de placeholder a render 3D sin Populate.
-function LockerGrid:_syncWrapPreviewVisibility(card: GuiObject, item: LockerCatalogItem, isOwned: boolean)
+-- El wrap se renderiza en 3D se posea o no: el bloqueo lo marcan el icono y el texto de estado.
+function LockerGrid:_syncWrapPreviewVisibility(card: GuiObject, item: LockerCatalogItem)
 	local refs = self:_getGridCardRefs(card)
 	local isWrap = item.Category == LockerCategory.WEAPON_WRAPS
-	local isLockedWrap = isWrap and not isOwned
-	local needsViewport = not isLockedWrap
-		and (shouldUseWeaponWrapViewportPreview(item) or (refs.templateKey == "wraps" and isWrap))
+	local needsViewport = shouldUseWeaponWrapViewportPreview(item) or (refs.templateKey == "wraps" and isWrap)
 	local usesViewportPreview = false
 
 	if needsViewport then
@@ -654,11 +693,7 @@ function LockerGrid:_syncWrapPreviewVisibility(card: GuiObject, item: LockerCata
 	end
 
 	if refs.viewportNode then
-		if refs.templateKey == "wraps" then
-			refs.viewportNode.Visible = not isLockedWrap
-		else
-			refs.viewportNode.Visible = usesViewportPreview
-		end
+		refs.viewportNode.Visible = refs.templateKey == "wraps" or usesViewportPreview
 	end
 
 	-- Las cards del pool se reusan entre categorías: ocultar los nodos de imagen que no tocan.
@@ -682,7 +717,7 @@ function LockerGrid:_syncWrapPreviewVisibility(card: GuiObject, item: LockerCata
 	if imageNode then
 		local image = imageNode :: any
 		image.Visible = not usesViewportPreview
-		image.Image = if isLockedWrap then WRAP_LOCKED_PLACEHOLDER_IMAGE else item.Image
+		image.Image = item.Image
 		if imageNode == refs.itemNode then
 			if shouldUseFullSizeWeaponImage(item) then
 				image.Size = UDim2.fromScale(1, 1)
@@ -700,7 +735,7 @@ function LockerGrid:_applyCatalogItemToCard(card: GuiObject, item: LockerCatalog
 
 	local refs = self:_getGridCardRefs(card)
 	self:_applyRarityVisuals(card, item.Rarity)
-	self:_syncWrapPreviewVisibility(card, item, self._callbacks.isItemOwned(item))
+	self:_syncWrapPreviewVisibility(card, item)
 
 	local seasonText = item.SeasonLabel or item.Season
 	if refs.seasonNode then
