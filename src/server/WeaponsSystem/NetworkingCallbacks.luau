@@ -13,10 +13,12 @@ local LocalPlayer = (not IsServer) and Players.LocalPlayer or nil
 
 local HealthBarController = nil
 local StreakDisplay = nil
+local KillPop = nil
 
 if not IsServer then
 	HealthBarController = require(script.Parent:WaitForChild("Libraries"):WaitForChild("HealthBarController"))
 	StreakDisplay = require(script.Parent:WaitForChild("Libraries"):WaitForChild("StreakDisplay"))
+	KillPop = require(script.Parent:WaitForChild("Libraries"):WaitForChild("KillPop"))
 
 	-- Al morir, sin esperar al respawn.
 	local function _hookCharacterForStreak(character: Model)
@@ -239,6 +241,10 @@ function NetworkingCallbacks.PlayerEliminated(victimName, xpGained, wasHeadshot,
 
 	if StreakDisplay then
 		StreakDisplay.onKill()
+	end
+
+	if KillPop then
+		KillPop.show()
 	end
 
 	if WeaponsSystem then
