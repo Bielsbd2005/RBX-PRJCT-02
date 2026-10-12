@@ -279,6 +279,7 @@ function ShoulderCamera.new(weaponsSystem)
 	self.shakeTrauma = 0
 	self.shakeTime = 0
 	self.fovKick = 0
+	self._smoothedYOffset = self.normalOffset.Y
 	self.smoothedStrafeAlpha = 0
 	self.smoothedForwardAlpha = 0
 	self.turnFOVAlpha = 0
@@ -437,6 +438,7 @@ function ShoulderCamera:setEnabled(enabled)
 		self.shakeTrauma = 0
 		self.shakeTime = 0
 		self.fovKick = 0
+		self._smoothedYOffset = self.normalOffset.Y
 		self.smoothedStrafeAlpha = 0
 		self.smoothedForwardAlpha = 0
 		self.turnFOVAlpha = 0
@@ -570,9 +572,24 @@ function ShoulderCamera:onRenderStep(dt)
 	local yawRotation = CFrame.Angles(0, self.yaw, 0)
 	local pitchRotation = CFrame.Angles(self.pitch + self.currentRecoil.Y, 0, 0)
 	local xOffset = CFrame.new(self.currentOffset.X, 0, 0)
-	local yOffset = CFrame.new(0, self.currentOffset.Y, 0)
-	local zOffset = CFrame.new(0, 0, self.currentOffset.Z)
 	local collisionRadius = self:getCollisionRadius()
+	-- ── Ceiling clamp ─────────────────────────────────────────────────
+	-- Lanza un ray vertical desde el rootPart hacia arriba por la altura
+	-- del offset + collisionRadius. Si golpea techo, reduce el yOffset
+	-- para que la cámara no traspase la geometría.
+	local desiredYOffset = self.currentOffset.Y
+	do
+		local ceilingRayLength = desiredYOffset + collisionRadius
+		local ceilingRay = Ray.new(rootPartPos, Vector3.new(0, ceilingRayLength, 0))
+		local ceilHit, ceilPoint = self:penetrateCast(ceilingRay, self.raycastIgnoreList)
+		if ceilHit then
+			local headroom = ceilPoint.Y - rootPartPos.Y - collisionRadius
+			desiredYOffset = math.clamp(headroom, 0, self.currentOffset.Y)
+		end
+	end
+	self._smoothedYOffset = dampNumber(self._smoothedYOffset or desiredYOffset, desiredYOffset, 18, dt)
+	local yOffset = CFrame.new(0, self._smoothedYOffset, 0)
+	local zOffset = CFrame.new(0, 0, self.currentOffset.Z)
 	local cameraYawRotationAndXOffset =
 		yawRotation * 		-- First rotate around the Y axis (look left/right)
 		xOffset 			-- Then perform the desired offset (so camera is centered to side of player instead of directly on player)
@@ -709,6 +726,32 @@ function ShoulderCamera:onRenderStep(dt)
 	local currentOffsetDir = self.currentCFrame.LookVector.Unit
 	self.currentCFrame = self.currentCFrame + (currentOffsetDir * self.lastOcclusionDistance)
 	self.aimCFrame = self.currentCFrame
+
+	-- ── Final position validation (spring arm) ──────────────────────
+	-- Safety net: el side correction solo cubre xOffset, GetLargestCutoffDistance
+	-- solo cubre la dirección focus→cámara desde el rootPart, y el ceiling clamp
+	-- solo el eje Y. Cuando el pitch rota yOffset+zOffset en diagonal, la cámara
+	-- puede acabar dentro de geometría que ninguno de los tres detecta.
+	-- Un ray desde el focus al punto final atrapa CUALQUIER caso restante.
+	do
+		local focusPos = cameraFocus.Position
+		local cameraPos = self.currentCFrame.Position
+		local toCamera = cameraPos - focusPos
+		local toCameraLen = toCamera.Magnitude
+		if toCameraLen > 0.1 then
+			local ray = Ray.new(focusPos, toCamera + toCamera.Unit * collisionRadius)
+			local valHit, valHitPoint = self:penetrateCast(ray, self.raycastIgnoreList)
+			if valHit then
+				local safeDist = math.max((valHitPoint - focusPos).Magnitude - collisionRadius, 0)
+				if safeDist < toCameraLen then
+					local correction = toCamera.Unit * safeDist - toCamera
+					self.currentCFrame = self.currentCFrame + correction
+					self.aimCFrame = self.currentCFrame
+				end
+			end
+		end
+	end
+
 	self.currentCamera.CFrame = self.currentCFrame
 
 	self.currentRecoil = self.currentRecoil - (self.currentRecoil * self.recoilDecay * dt)
