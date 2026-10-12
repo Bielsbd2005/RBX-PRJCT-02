@@ -229,6 +229,37 @@ local function generateDisplayModel(tool, category, weaponId)
 	local clone = source:Clone()
 	clone.Name = weaponId
 	clone:SetAttribute(GENERATED_ATTRIBUTE, true)
+
+	-- Orientación para la preview del locker:
+	-- Calcula el yaw del cañón (origen -> TipAttachment) proyectado en el espacio
+	-- local del Pivot del modelo, para que todas las armas miren en la misma dirección.
+	-- Si la Tool o el source ya tienen un atributo PreviewYaw autorado a mano, se respeta.
+	local authoredYaw = tool:GetAttribute("PreviewYaw") or source:GetAttribute("PreviewYaw")
+	if authoredYaw ~= nil and type(authoredYaw) == "number" then
+		clone:SetAttribute("PreviewYaw", authoredYaw)
+	else
+		local tip = tool:FindFirstChild("TipAttachment", true)
+		local handle = tool:FindFirstChild("HandleAttachment", true)
+			or tool:FindFirstChild("Handle")
+			or source.PrimaryPart
+		if tip and tip:IsA("Attachment") and handle then
+			local tipPos = tip.WorldPosition
+			local originPos = if handle:IsA("Attachment")
+				then handle.WorldPosition
+				elseif handle:IsA("BasePart")
+				then handle.Position
+				else source:GetPivot().Position
+			local barrelWorld = tipPos - originPos
+			local barrelLocal = source:GetPivot():VectorToObjectSpace(barrelWorld)
+			if barrelLocal.Magnitude > 0.01 then
+				-- Ángulo respecto a -Z (frente estándar en Roblox)
+				local barrelAngle = math.atan2(barrelLocal.X, -barrelLocal.Z)
+				local yawDeg = math.round(math.deg(-barrelAngle))
+				clone:SetAttribute("PreviewYaw", yawDeg)
+			end
+		end
+	end
+
 	local strippedScripts, strippedTextures, strippedFunctional = stripNonDisplayContent(clone)
 	-- La Tool se autora desanclada (BaseWeapon la suelda al Handle), pero el
 	-- display no tiene Handle ni soldaduras fiables: el preview 3D del locker
@@ -256,6 +287,11 @@ local function generateDisplayModel(tool, category, weaponId)
 		existing:Destroy()
 	end
 	clone.Parent = categoryFolder
+
+	local previewYaw = clone:GetAttribute("PreviewYaw")
+	if previewYaw ~= nil then
+		print(string.format("[Migration] display %s/%s: PreviewYaw = %d°", category, weaponId, previewYaw))
+	end
 
 	if strippedScripts > 0 or strippedTextures > 0 or strippedFunctional > 0 then
 		print(string.format(

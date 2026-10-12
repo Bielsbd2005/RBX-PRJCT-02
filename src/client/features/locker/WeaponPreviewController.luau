@@ -122,6 +122,7 @@ type LivePreview = {
 	locked: boolean,
 	basePivot: CFrame,
 	baseScale: number,
+	baseYaw: number,
 	t: number,
 	idleT: number,
 	punchT: number?,
@@ -231,7 +232,10 @@ local function applyPose(live: LivePreview, userYaw: number)
 			instance:ScaleTo(target)
 		end
 	end
-	setWeaponPreviewPivot(instance, live.basePivot * CFrame.new(0, y, 0) * CFrame.Angles(0, yaw, 0))
+	setWeaponPreviewPivot(
+		instance,
+		live.basePivot * CFrame.new(0, y, 0) * CFrame.Angles(0, yaw, 0) * CFrame.Angles(0, live.baseYaw, 0)
+	)
 end
 
 -- El arma de muestra queda en idle toda la sesión (también en partida): fuera de cámara
@@ -470,6 +474,48 @@ function WeaponPreviewController:_createPreview(category: WeaponCategory, desire
 	return clonedWeapon
 end
 
+local function resolvePreviewYaw(
+	instance: Instance,
+	categoryConfig: any?,
+	itemId: string?
+): number
+	-- 1. Definición en ItemsConfig (override directo en código)
+	local definition = if type(categoryConfig) == "table" and itemId then categoryConfig[itemId] else nil
+	if type(definition) == "table" and type(definition.PreviewYaw) == "number" then
+		return math.rad(definition.PreviewYaw)
+	end
+
+	-- 2. Atributo PreviewYaw en el modelo (estampado por StudioMigration o autorado en Studio)
+	local attr = instance:GetAttribute("PreviewYaw")
+	if type(attr) == "number" then
+		return math.rad(attr)
+	end
+
+	-- 3. Fallback dinámico si el modelo aún conserva TipAttachment
+	local tip = instance:FindFirstChild("TipAttachment", true)
+	if tip and tip:IsA("Attachment") then
+		local handle = instance:FindFirstChild("HandleAttachment", true)
+			or instance:FindFirstChild("Handle")
+			or (if instance:IsA("Model") then instance.PrimaryPart else nil)
+		local originPos = if handle and handle:IsA("Attachment")
+			then handle.WorldPosition
+			elseif handle and handle:IsA("BasePart")
+			then handle.Position
+			elseif instance:IsA("Model")
+			then instance:GetPivot().Position
+			else (instance :: BasePart).Position
+
+		local pivot = if instance:IsA("Model") then instance:GetPivot() else (instance :: BasePart).CFrame
+		local barrelLocal = pivot:VectorToObjectSpace(tip.WorldPosition - originPos)
+		if barrelLocal.Magnitude > 0.01 then
+			local barrelAngle = math.atan2(barrelLocal.X, -barrelLocal.Z)
+			return -barrelAngle
+		end
+	end
+
+	return 0
+end
+
 -- Lleva el mundo a lo que toca mostrar en la categoría en foco. Devuelve true si
 -- ya se estaba viendo exactamente eso.
 function WeaponPreviewController:_render(): boolean
@@ -506,6 +552,9 @@ function WeaponPreviewController:_render(): boolean
 		return false
 	end
 
+	local categoryConfig = self._options.itemsConfig[category]
+	local baseYaw = resolvePreviewYaw(instance, categoryConfig, desired.itemId)
+
 	local basePivot = getSpawnPivot(spawnTarget)
 	local live: LivePreview = {
 		instance = instance,
@@ -515,6 +564,7 @@ function WeaponPreviewController:_render(): boolean
 		locked = locked,
 		basePivot = basePivot,
 		baseScale = if instance:IsA("Model") then instance:GetScale() else 1,
+		baseYaw = baseYaw,
 		t = if hadPrevious then -ENTER_DELAY_AFTER_EXIT else 0,
 		idleT = 0,
 		punchT = nil,

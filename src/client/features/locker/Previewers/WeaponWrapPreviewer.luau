@@ -4,6 +4,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ItemDefaults = require(Shared:WaitForChild("constants"):WaitForChild("ItemDefaults"))
+local ItemsConfig = require(Shared:WaitForChild("constants"):WaitForChild("ItemsConfig"))
 local WeaponWrapPainter = require(Shared:WaitForChild("Locker"):WaitForChild("WeaponWrapPainter"))
 local wrapPreviewTemplate = ReplicatedStorage:WaitForChild("Templates"):WaitForChild("Wrap")
 local sharedWeaponAssets = Shared:WaitForChild("Locker"):WaitForChild("weapons")
@@ -161,16 +162,29 @@ function WeaponWrapPreviewer.Render(viewportNode: ViewportFrame, item: WeaponWra
         return false, usedWeaponTemplate
     end
 
+    local previewYawRad = 0
+    local yawAttr = clonedWrap:GetAttribute("PreviewYaw")
+    if type(yawAttr) == "number" then
+        previewYawRad = math.rad(yawAttr)
+    elseif item.PreviewWeaponCategory and item.PreviewWeaponId then
+        local categoryConfig = (ItemsConfig :: any)[item.PreviewWeaponCategory]
+        local def = if type(categoryConfig) == "table" then categoryConfig[item.PreviewWeaponId] else nil
+        if type(def) == "table" and type(def.PreviewYaw) == "number" then
+            previewYawRad = math.rad(def.PreviewYaw)
+        end
+    end
+
     local modelCenter: CFrame
     local updatedSize: Vector3
+    local orientationConYaw = orientacionFija * CFrame.Angles(0, previewYawRad, 0)
     if clonedWrap:IsA("Model") then
         modelCenter = clonedWrap:GetBoundingBox()
-        clonedWrap:PivotTo(CFrame.new(modelCenter.Position) * orientacionFija)
+        clonedWrap:PivotTo(CFrame.new(modelCenter.Position) * orientationConYaw)
         modelCenter, updatedSize = clonedWrap:GetBoundingBox()
     elseif clonedWrap:IsA("BasePart") then
         modelCenter = clonedWrap.CFrame
         updatedSize = clonedWrap.Size
-        clonedWrap.CFrame = CFrame.new(modelCenter.Position) * orientacionFija
+        clonedWrap.CFrame = CFrame.new(modelCenter.Position) * orientationConYaw
     else
         return false, usedWeaponTemplate
     end
