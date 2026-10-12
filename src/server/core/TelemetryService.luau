@@ -6,7 +6,8 @@
 	Contrato: nunca lanza (todo en pcall), nunca bloquea al caller (Record* solo
 	mutan memoria; el IO va en loops propios) y la cola está acotada.
 
-	Eventos propios: SESSION_END, ROBUX_PURCHASE, SERVER_FLUSH, FUNNEL_STEP,
+	Eventos propios: SESSION_END, ROBUX_PURCHASE, SERVER_FLUSH (con los errores de
+	script del servidor agrupados por firma), FUNNEL_STEP,
 	ITEM_PURCHASE, LEVEL_UP, ASSET_MANIFEST; las features añaden los suyos con
 	Enqueue (MATCH_END, MAP_VOTE). Tiempos: server/core/TelemetryConfig.luau.
 
@@ -18,6 +19,7 @@ local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local ScriptContext = game:GetService("ScriptContext")
 local ServerStorage = game:GetService("ServerStorage")
 
 -- En server/core y no en shared: no debe replicarse al cliente.
@@ -82,6 +84,12 @@ type Accumulator = {
 type CombatEntry = { cat: string, w: string, v: string, k: number, h: number }
 type CombatAccumulator = { [string]: CombatEntry }
 
+--[[
+	sig = firma normalizada (ver _errorSignature), n = veces en la ventana,
+	stack = traza de la primera aparición, recortada.
+]]
+type ScriptErrorEntry = { sig: string, n: number, stack: string }
+
 local TelemetryService = {}
 
 local _started = false
@@ -94,6 +102,13 @@ local _droppedEvents = 0
 local _droppedCritical = 0
 local _accumulators: { [number]: Accumulator } = {}
 local _combatAccumulators: { [number]: CombatAccumulator } = {}
+
+-- Ventana entre SERVER_FLUSH. Sin esto un script roto en producción solo se ve
+-- como una caída de actividad sin explicación.
+local _scriptErrors: { [string]: ScriptErrorEntry } = {}
+local _scriptErrorSignatures = 0
+local _scriptErrorsTotal = 0
+local _inErrorHandler = false
 
 local _sending = false
 local _consecutiveFailures = 0
@@ -496,6 +511,83 @@ local function _buildSessionEnd(player: Player): any?
 	return payload
 end
 
+local SCRIPT_ERROR_SIG_MAX = 200
+local SCRIPT_ERROR_STACK_MAX = 300
+
+--[[
+	Misma causa → misma firma: "Ruta.Del.Script:123: texto". La ruta y la línea se
+	conservan (son la identidad del fallo); del texto se quitan los números, y de
+	todo el nombre de los jugadores presentes (tools y scripts dentro del personaje
+	llevan "Workspace.<nombre>" en la ruta, y si no cada jugador sería una firma).
+]]
+local function _errorSignature(message: string): string
+	local line = string.match(message, "^[^\n]*") or message
+	for _, player in Players:GetPlayers() do
+		-- Solo como segmento de ruta: un jugador llamado "Server" no puede mangar
+		-- "ServerScriptService.Server". Los nombres solo llevan [A-Za-z0-9_].
+		local name = player.Name .. "%f[^%w_]"
+		line = string.gsub(line, "Workspace%." .. name, "Workspace.<player>")
+		line = string.gsub(line, "Players%." .. name, "Players.<player>")
+	end
+	local location, text = string.match(line, "^(.-:%d+): (.*)$")
+	if location and text then
+		line = location .. ": " .. string.gsub(text, "%d+", "#")
+	else
+		line = string.gsub(line, "%d+", "#")
+	end
+	return string.sub(line, 1, SCRIPT_ERROR_SIG_MAX)
+end
+
+local function _recordScriptError(message: any, stackTrace: any)
+	_scriptErrorsTotal += 1
+	local sig = _errorSignature(tostring(message))
+	local entry = _scriptErrors[sig]
+	if entry then
+		entry.n += 1
+		return
+	end
+	-- Una tormenta de firmas distintas no puede hacer crecer la memoria: las que no
+	-- caben siguen contando en el total.
+	if _scriptErrorSignatures >= TelemetryConfig.ScriptErrorsMaxSignatures then
+		return
+	end
+	_scriptErrorSignatures += 1
+	_scriptErrors[sig] = {
+		sig = sig,
+		n = 1,
+		stack = string.sub(tostring(stackTrace or ""), 1, SCRIPT_ERROR_STACK_MAX),
+	}
+end
+
+-- Top N por repeticiones; el resto solo viaja dentro de scriptErrorsTotal.
+local function _drainScriptErrors(): (number, { ScriptErrorEntry }?)
+	local total = _scriptErrorsTotal
+	if total == 0 then
+		return 0, nil
+	end
+
+	local entries: { ScriptErrorEntry } = {}
+	for _, entry in _scriptErrors do
+		table.insert(entries, entry)
+	end
+	table.sort(entries, function(a, b)
+		if a.n ~= b.n then
+			return a.n > b.n
+		end
+		return a.sig < b.sig
+	end)
+
+	local top: { ScriptErrorEntry } = {}
+	for index = 1, math.min(#entries, TelemetryConfig.ScriptErrorsTopN) do
+		table.insert(top, entries[index])
+	end
+
+	_scriptErrors = {}
+	_scriptErrorSignatures = 0
+	_scriptErrorsTotal = 0
+	return total, if #top > 0 then top else nil
+end
+
 local function _buildServerFlush(): any
 	local economyByUser: { [string]: any } = {}
 	local hasAny = false
@@ -533,6 +625,8 @@ local function _buildServerFlush(): any
 	local droppedCritical = _droppedCritical
 	_droppedCritical = 0
 
+	local scriptErrorsTotal, scriptErrors = _drainScriptErrors()
+
 	return {
 		uptimeSeconds = math.floor(os.clock() - _serverStartClock),
 		playerCount = #Players:GetPlayers(),
@@ -544,6 +638,9 @@ local function _buildServerFlush(): any
 		queueSize = #_queue,
 		consecutiveFailures = _consecutiveFailures,
 		circuitOpen = _isCircuitOpen(),
+		-- Todos los errores de la ventana; scriptErrors solo lleva las firmas más repetidas.
+		scriptErrorsTotal = scriptErrorsTotal,
+		scriptErrors = scriptErrors,
 		economyByUser = if hasAny then economyByUser else nil,
 		combatByUser = if hasCombat then combatByUser else nil,
 	}
@@ -905,6 +1002,17 @@ function TelemetryService.Start(dataService: DataService, botCountProvider: (() 
 
 	_resolveAuthHeader()
 
+	-- En el servidor solo dispara con errores de scripts del servidor. El flag evita
+	-- el bucle si el propio handler llegara a lanzar.
+	ScriptContext.Error:Connect(function(message: string, stackTrace: string)
+		if _inErrorHandler then
+			return
+		end
+		_inErrorHandler = true
+		pcall(_recordScriptError, message, stackTrace)
+		_inErrorHandler = false
+	end)
+
 	-- Con retraso para que el place termine de cargar las carpetas de modelos.
 	task.delay(5, function()
 		if not _started then
@@ -1004,6 +1112,9 @@ function TelemetryService.Destroy()
 	table.clear(_queue)
 	table.clear(_accumulators)
 	table.clear(_combatAccumulators)
+	table.clear(_scriptErrors)
+	_scriptErrorSignatures = 0
+	_scriptErrorsTotal = 0
 end
 
 return TelemetryService

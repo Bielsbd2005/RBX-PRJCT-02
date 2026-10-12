@@ -6,6 +6,7 @@ local ServerStorage = game:GetService("ServerStorage")
 local TeamsService = game:GetService("Teams")
 local Workspace = game:GetService("Workspace")
 local HttpService = game:GetService("HttpService")
+local RunService = game:GetService("RunService")
 
 local ServerScriptService = game:GetService("ServerScriptService")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
@@ -1435,9 +1436,16 @@ local function _onClientReady(_: Network.Empty, player: Player)
 	player:SetAttribute(ClientBootStage.JOIN_STATE_ATTRIBUTE, ClientBootStage.JOIN_READY)
 	-- Cuánto tardó el cliente en estar usable desde PlayerAdded: es la métrica
 	-- que dice si el flujo de carga aguanta las conexiones reales.
+	-- firstJoin solo si el perfil ya cargó (JoinCount sube en el load); si no,
+	-- nil y el ingest lo guarda como desconocido en vez de como "vuelve".
+	local profile = if _dataService then _dataService:GetProfile(player) else nil
+	local meta = profile and (profile :: any).Data and (profile :: any).Data.Metadata
 	TelemetryService.Enqueue("CLIENT_READY", {
 		userId = player.UserId,
 		bootMs = math.floor((time() - session.joinedAt) * 1000),
+		-- En Studio la carga es local y casi instantánea: no debe entrar en los percentiles.
+		isStudio = RunService:IsStudio(),
+		firstJoin = if meta and type(meta.JoinCount) == "number" then meta.JoinCount == 1 else nil,
 	})
 end
 

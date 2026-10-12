@@ -34,6 +34,9 @@ export type TelemetryConfigType = {
 	ShutdownGraceSeconds: number,
 	ShutdownDeadlineSeconds: number,
 
+	ScriptErrorsTopN: number,
+	ScriptErrorsMaxSignatures: number,
+
 	Debug: boolean,
 }
 
@@ -79,6 +82,11 @@ local TelemetryConfig: TelemetryConfigType = {
 	--   Deadline→ tope duro para drenar la cola.
 	ShutdownGraceSeconds = 2,
 	ShutdownDeadlineSeconds = 10,
+
+	-- Errores de script por firma: SERVER_FLUSH envía sólo las TopN más repetidas
+	-- (el total va aparte) y la memoria guarda como mucho MaxSignatures entre flushes.
+	ScriptErrorsTopN = 5,
+	ScriptErrorsMaxSignatures = 50,
 
 	-- Logs verbosos de batches. Dejar en false en producción.
 	Debug = false,
