@@ -50,7 +50,7 @@ AssetIds.Animations = table.freeze({
 	CharacterIdle = asset(507766388),
 	CharacterRun = asset(507767714),
 	CharacterJump = asset(507765000),
-	BotToolHold = asset(80449761976468),
+	BotToolHold = asset(72875354504675),
 
 	-- Idle de los maniquíes en preview (locker y pantalla de resultados).
 	PreviewIdle = asset(115197033304718),

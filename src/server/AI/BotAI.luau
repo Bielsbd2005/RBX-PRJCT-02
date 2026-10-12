@@ -43,6 +43,9 @@ local NAV_PHASE_ATTR = "NavPhase"
 -- Tope del gate de aterrizaje al spawnear. Si el bot cae al vacío o queda
 -- suspendido, el FSM arranca igual pasado este tiempo en vez de colgarse.
 local SPAWN_GROUND_TIMEOUT = 1.5
+-- Alcance del rayo que busca el suelo bajo el bot: el HumanoidRootPart va ~3 studs por
+-- encima, más la altura de un salto.
+local GROUND_SEARCH_DEPTH = BotConfig.Movement.JumpHeight + 6
 
 -- El WeaponsSystem vivo es el que ServerWeaponsScript copia a ReplicatedStorage al
 -- arrancar; se resuelve al primer disparo porque al cargar este módulo puede no estar.
@@ -126,6 +129,7 @@ export type BotAIInstance = typeof(setmetatable({} :: {
 	_aliveTargets: { AliveTarget },
 	_botModelByFakeUserId: { [number]: Model }?,
 	_raycastParams: RaycastParams?,
+	_groundParams: RaycastParams?,
 	_currentTarget: Model?,
 	_currentTargetRoot: BasePart?,
 	_currentTargetHum: Humanoid?,
@@ -140,6 +144,8 @@ export type BotAIInstance = typeof(setmetatable({} :: {
 	_fireReadyAt: number,
 	_combatCycleEndAt: number,
 	_combatMoveDir: Vector3,
+	_combatLedgeFallback: boolean,
+	_nextJumpCheckAt: number,
 	_targetCandidates: { { char: Model, d: number, score: number, root: BasePart } },
 	_tool: Tool?,
 	_tipAttachment: Attachment?,
@@ -217,6 +223,7 @@ function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?, wrapId
 		_aliveTargets = {},
 		_botModelByFakeUserId = nil,
 		_raycastParams = nil,
+		_groundParams = nil,
 		_currentTarget = nil,
 		_currentTargetPlayer = nil,
 		_currentTargetRoot = nil,
@@ -231,6 +238,8 @@ function BotAI.new(botModel: Model, team: "A" | "B", fakeUserId: number?, wrapId
 		_fireReadyAt = 0,
 		_combatCycleEndAt = 0,
 		_combatMoveDir = Vector3.zero,
+		_combatLedgeFallback = false,
+		_nextJumpCheckAt = 0,
 		_targetCandidates = {},
 		_tool = nil,
 		_tipAttachment = nil,
@@ -251,14 +260,17 @@ end
 
 --[[
 @desc Network ownership al servidor: movimiento y disparo autoritativos.
+@desc Se reafirma en cada tick, no solo al spawnear: soldar o desanclar piezas después
+@desc (el arma) devuelve el ensamblaje a ownership automático y lo simula el cliente más cercano.
+@desc pcall porque la API lanza con el ensamblaje anclado; devuelve false en ese caso.
 ]]
-function BotAI:_setupNetworkOwnership()
-	local ok = pcall(function()
-		(self._rootPart :: any):SetNetworkOwner(nil)
-	end)
-	if not ok then
-		warn("[BotAI] SetNetworkOwner falló en " .. self._dummy.Name)
-	end
+function BotAI:_ensureServerOwnership(): boolean
+	return (pcall(function()
+		local assemblyRoot = self._rootPart.AssemblyRootPart :: any
+		if assemblyRoot and assemblyRoot:GetNetworkOwnershipAuto() then
+			assemblyRoot:SetNetworkOwner(nil)
+		end
+	end))
 end
 
 --[[
@@ -760,15 +772,21 @@ end
 @desc actual expira, aplicando la banda de distancia de BotConfig.Combat:
 @desc   • dist < MinEngageDistance  → paso lateral + retroceso (nunca pausa:
 @desc     quedarse quieto pegado al jugador es justo lo que queremos evitar).
-@desc   • dist > MaxEngageDistance  → paso lateral + aproximación.
+@desc   • dist > MaxEngageDistance  → aproximación con un desvío lateral leve.
 @desc   • en medio                  → lateral puro o pausa según personality.
 @desc También lo usa CHASE a distancia de standoff para buscar ángulo sin
 @desc hacer path hasta el cuerpo del objetivo.
+@desc Un paso que lleva a una cornisa se descarta (al elegirlo y en cada tick
+@desc mientras dura): se prueba su espejo, luego el lateral puro y, si no, quieto.
 ]]
 function BotAI:_updateCombatMove(now: number, targetPos: Vector3, dist: number)
 	if now < self._combatCycleEndAt then
-		return
+		local moveDir = self._combatMoveDir
+		if moveDir == Vector3.zero or not self:_isLedgeAhead(moveDir) then
+			return
+		end
 	end
+	self._combatLedgeFallback = false
 	local combat = self._combat
 	local tooClose = dist < BotConfig.Combat.MinEngageDistance
 	local tooFar = dist > BotConfig.Combat.MaxEngageDistance
@@ -794,20 +812,78 @@ function BotAI:_updateCombatMove(now: number, targetPos: Vector3, dist: number)
 			-- marcha atrás en línea recta contra la pared de detrás.
 			forward = -(0.6 + math.random() * 0.3)
 		elseif tooFar then
-			forward = 0.5 + math.random() * 0.3
+			-- Lateral leve: la aproximación dura hasta RetaliationRange y con pesos
+			-- parejos el bot la recorre en diagonales de ~50°, un zigzag muy marcado.
+			lateral *= 0.4
+			forward = 1
 		end
-		local dir = right * lateral + toTarget.Unit * forward
-		if dir.Magnitude > 0.01 then
-			self._combatMoveDir = dir.Unit
-		else
-			self._combatMoveDir = right
+		local toTargetUnit = toTarget.Unit
+		local options = {
+			right * lateral + toTargetUnit * forward,
+			right * -lateral + toTargetUnit * forward,
+			right * lateralSign,
+			right * -lateralSign,
+		}
+		-- Sin avance ni retroceso las dos últimas repiten a las dos primeras.
+		local optionCount = if forward ~= 0 then 4 else 2
+		local chosen = Vector3.zero
+		local fallback = true
+		for i = 1, optionCount do
+			local option = options[i].Unit
+			if not self:_isLedgeAhead(option) then
+				chosen = option
+				fallback = i > 2
+				break
+			end
 		end
+		self._combatMoveDir = chosen
+		self._combatLedgeFallback = fallback
 	else
 		self._combatMoveDir = Vector3.zero
 	end
 	local lo = combat.CombatStepMin
 	local hi = combat.CombatStepMax
+	if self._combatMoveDir == Vector3.zero then
+		lo = combat.CombatPauseMin
+		hi = combat.CombatPauseMax
+	end
 	self._combatCycleEndAt = now + lo + math.random() * (hi - lo)
+end
+
+-- true si a LedgeProbeDistance en `dir` el suelo cae más de LedgeMaxDrop respecto al que
+-- pisa el bot. El strafe usa humanoid:Move, sin navmesh: es lo único que le impide salirse
+-- de una plataforma. Se compara con el suelo bajo el bot y no con su altura para que un
+-- salto no parezca una cornisa.
+function BotAI:_isLedgeAhead(dir: Vector3): boolean
+	local params = self._groundParams
+	if not params then
+		return false
+	end
+	local rootPos = self._rootPart.Position
+	local ground = workspace:Raycast(rootPos, Vector3.new(0, -GROUND_SEARCH_DEPTH, 0), params)
+	if not ground then
+		-- Ya en caída libre: no queda nada que evitar.
+		return false
+	end
+	local depth = rootPos.Y - ground.Position.Y + BotConfig.Combat.LedgeMaxDrop
+	local ahead = workspace:Raycast(
+		rootPos + dir * BotConfig.Combat.LedgeProbeDistance,
+		Vector3.new(0, -depth, 0),
+		params
+	)
+	return ahead == nil
+end
+
+-- El intervalo se rollea UNA vez por check: rollearlo cada tick haría que saltara
+-- en cuanto se cumple el mínimo.
+function BotAI:_maybeJump(now: number, chance: number)
+	if now < self._nextJumpCheckAt then
+		return
+	end
+	self._nextJumpCheckAt = now + math.random(20, 50) / 10
+	if math.random() < chance * self._combat.JumpChanceMult then
+		self._humanoid.Jump = true
+	end
 end
 
 -- Gate por cambio: ATTACK y CHASE iteran a 20Hz y reescribirían el mismo valor.
@@ -852,6 +928,10 @@ function BotAI:_moveToLocation(location: Vector3, stopCondition: () -> boolean):
 			walking = true
 			self:_setNavPhase("walking")
 		end
+		-- Solo andando: saltar parado durante "path-wait" delata al bot.
+		if walking then
+			self:_maybeJump(os.clock(), BotConfig.Movement.RoamJumpChance)
+		end
 		task.wait(0.1)
 	end
 
@@ -875,8 +955,10 @@ function BotAI:Start(
 	self._aliveTargets = aliveTargets or {}
 	self._roamGraph = roamGraph
 	self._botModelByFakeUserId = botModelByFakeUserId
-	self:_setupNetworkOwnership()
 	self:_setupTool()
+	if not self:_ensureServerOwnership() then
+		warn("[BotAI] SetNetworkOwner falló en " .. self._dummy.Name)
+	end
 
 	local humanoid = self._humanoid
 	local rootPart = self._rootPart
@@ -888,6 +970,14 @@ function BotAI:Start(
 	-- don't block line of sight. Walls (Default) and live characters still block.
 	raycastParams.CollisionGroup = CollisionGroups.CHARACTERS
 	self._raycastParams = raycastParams
+
+	-- RespectCanCollide: un volumen sin colisión (zona, decorado) bajo un balcón no es suelo.
+	local groundParams = RaycastParams.new()
+	groundParams.FilterDescendantsInstances = { self._dummy }
+	groundParams.FilterType = Enum.RaycastFilterType.Exclude
+	groundParams.CollisionGroup = CollisionGroups.CHARACTERS
+	groundParams.RespectCanCollide = true
+	self._groundParams = groundParams
 
 	self._navigator = Navigator.new(humanoid, rootPart, AGENT_PARAMS)
 
@@ -906,6 +996,7 @@ function BotAI:Start(
 	task.spawn(function()
 		task.wait(math.random() * 0.1)
 		while self._isAlive and humanoid.Health > 0 do
+			self:_ensureServerOwnership()
 			if self._stuckDetector then
 				self._stuckDetector:tick(os.clock())
 			end
@@ -930,9 +1021,8 @@ function BotAI:Start(
 
 	local currentTrack: AnimationTrack? = nil
 	local lastShotTime = 0
-	-- Próximo instante en que ATTACK evalúa si salta; el intervalo se rollea UNA vez por
-	-- check (rollearlo cada tick haría que pasara en cuanto se cumple el mínimo).
-	local nextJumpCheckAt = 0
+	-- Desfasado por bot: con 0 todos rollearían el primer salto a la vez al spawnear.
+	self._nextJumpCheckAt = os.clock() + math.random(20, 50) / 10
 
 	local connRun = humanoid.Running:Connect(function(speed)
 		if speed > 0.5 then
@@ -1067,7 +1157,10 @@ function BotAI:Start(
 				-- objetivo se nos ha echado encima, cortarlo ya: la banda de
 				-- distancia solo se evalúa al rerollear.
 				if targetDist < BotConfig.Combat.MinEngageDistance
-					and self._combatMoveDir:Dot(flatDelta) >= 0 then
+					and self._combatMoveDir:Dot(flatDelta) >= 0
+					-- Sin retroceso posible por una cornisa: rerollear cada tick solo
+					-- haría temblar al bot entre un lateral y otro.
+					and not self._combatLedgeFallback then
 					self._combatCycleEndAt = 0
 				end
 				-- Strafe según personality + banda de distancia.
@@ -1078,12 +1171,7 @@ function BotAI:Start(
 					lastAppliedMoveDir = self._combatMoveDir
 				end
 
-				if now >= nextJumpCheckAt then
-					if math.random() < profile.JumpChance * self._combat.JumpChanceMult then
-						humanoid.Jump = true
-					end
-					nextJumpCheckAt = now + math.random(20, 50) / 10
-				end
+				self:_maybeJump(now, profile.JumpChance)
 
 				-- Cadencia del arma equipada (resuelta en _setupTool); precisión por personality.
 				local fireRate = self._fireRate
@@ -1215,6 +1303,7 @@ function BotAI:Start(
 						self._navigator:goTo(targetPos)
 					end
 				end
+				self:_maybeJump(os.clock(), profile.JumpChance)
 
 				task.wait(0.05)
 

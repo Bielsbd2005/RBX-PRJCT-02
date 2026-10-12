@@ -83,9 +83,14 @@ end
 -- Bool cacheado: mark() se llama desde el tick del StuckDetector.
 local function _bindFlag(flag: BoolValue)
 	_enabled = flag.Value
+	if _enabled then
+		print("[StuckViz] ShowStuckMarkers enabled")
+	end
 	flag.Changed:Connect(function(value: boolean)
 		_enabled = value
-		if not value then
+		if value then
+			print("[StuckViz] ShowStuckMarkers enabled")
+		else
 			_clearAll()
 		end
 	end)

@@ -23,6 +23,7 @@ export type BotConfigType = {
 	Movement: {
 		WalkSpeed: number,
 		JumpHeight: number,
+		RoamJumpChance: number,
 		WanderRadius: number,
 		WaypointSmoothDistance: number,
 		WaypointVerticalTolerance: number,
@@ -52,6 +53,8 @@ export type BotConfigType = {
 		FarPrecisionMult: number,
 		MinEngageDistance: number,
 		MaxEngageDistance: number,
+		LedgeProbeDistance: number,
+		LedgeMaxDrop: number,
 		ChaseStandoffDistance: number,
 		ChaseResumeDistance: number,
 		VsPlayer: CombatTargetProfile,
@@ -86,6 +89,9 @@ local BotConfig: BotConfigType = {
 	Movement = {
 		WalkSpeed = 22,           -- igual que players (ShoulderCamera.normalWalkSpeed)
 		JumpHeight = 5,
+		-- Probabilidad por check de salto (cada 2-5 s) mientras camina sin objetivo;
+		-- se multiplica por el JumpChanceMult de la personality, igual que en combate.
+		RoamJumpChance = 0.3,
 		WanderRadius = 40,
 		-- Radio de llegada a un waypoint, solo en XZ. Techo: menor que la separación XZ
 		-- entre waypoints en la pendiente máxima (WaypointSpacing·cos(AgentMaxSlope) =
@@ -131,6 +137,12 @@ local BotConfig: BotConfigType = {
 		-- Banda en ATTACK: por debajo el strafe retrocede, por encima se acerca, en medio es lateral.
 		MinEngageDistance = 12,
 		MaxEngageDistance = 30,
+		-- Studs por delante del paso de combate donde se busca suelo. A WalkSpeed y tick
+		-- de 0.05s son ~3 ticks de margen para frenar.
+		LedgeProbeDistance = 4,
+		-- Desnivel máximo que el strafe baja sin considerarlo cornisa. Debe cubrir la
+		-- rampa de AgentMaxSlope a LedgeProbeDistance, o el bot no bajaría rampas peleando.
+		LedgeMaxDrop = 5,
 		-- En CHASE, a menos de esta distancia corta el path y hace strafe: caminar hasta
 		-- el cuerpo del jugador lo empuja y el StuckDetector escala hasta teleport.
 		ChaseStandoffDistance = 10,
@@ -141,7 +153,7 @@ local BotConfig: BotConfigType = {
 		VsPlayer = {
 			DamageMin = 2,
 			DamageMax = 5,
-			JumpChance = 0.03,
+			JumpChance = 0.35,
 		},
 		VsBot = {
 			DamageMin = 10,
