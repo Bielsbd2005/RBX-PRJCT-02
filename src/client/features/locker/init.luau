@@ -317,8 +317,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		lobbyCharacter = lobbyCharacter,
 		cameraController = cameraController,
 		lockerFolder = lockerFolder,
-		dummySpawn = lockerFolder:WaitForChild("DummySpawn"),
-		dummyTemplate = Shared:WaitForChild("Bodies"):WaitForChild("KillEffectDummy") :: Model,
 	})
 	janitor:Add(killEffectPreview, "Destroy")
 
@@ -341,11 +339,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 	local function applySelectedHatPreview(item: LockerCatalogItem?)
 		if item and item.Category == LockerCategory.HATS then
-			-- Hat bloqueado por nivel: contorno de bloqueo (sin billboard, solo es del body).
-			local lockedLevel: number? = if getCurrentLevel() < item.LevelRequired
-				then item.LevelRequired
-				else nil
-			lobbyCharacter:applyHatItem(item, lockedLevel)
+			lobbyCharacter:applyHatItem(item)
 			return
 		end
 
@@ -513,7 +507,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 					killEffectPreview:previewKillEffect(item.id)
 				end
 			elseif item and item.Category == LockerCategory.EMOTES then
-				killEffectPreview:previewEmote(item.id)
+				killEffectPreview:previewEmote(item.id, byUser)
 			end
 			updateActionFrameForSelected()
 		end,

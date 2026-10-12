@@ -61,8 +61,8 @@ local function getIdleAnimation(animationId: string): Animation
 	return anim
 end
 
--- Coloca el HumanoidRootPart en `target`. Versión por CFrame porque el podio de
--- Resultados solo guarda CFrames (el mapa ya puede estar desmontado; ver ResultsScene).
+-- Coloca el HumanoidRootPart en `target`. Por CFrame porque el podio de Resultados solo
+-- guarda CFrames (el mapa ya puede estar desmontado; ver ResultsScene).
 function LockerUtils.placePreviewCharacterAtCFrame(previewModel: Model, target: CFrame)
 	local humanoid = previewModel:FindFirstChildWhichIsA("Humanoid", true)
 	if humanoid then
@@ -77,19 +77,6 @@ function LockerUtils.placePreviewCharacterAtCFrame(previewModel: Model, target: 
 	end
 
 	previewModel:MoveTo(target.Position)
-end
-
-function LockerUtils.placePreviewCharacter(previewModel: Model, spawnTarget: Instance)
-	if spawnTarget:IsA("BasePart") then
-		LockerUtils.placePreviewCharacterAtCFrame(previewModel, (spawnTarget :: BasePart).CFrame)
-		return
-	end
-
-	local humanoid = previewModel:FindFirstChildWhichIsA("Humanoid", true)
-	if humanoid then
-		humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
-	end
-	previewModel:PivotTo(spawnTarget:GetPivot())
 end
 
 -- Si el template trae partes desplazadas (p.ej. Transform guardado), el ragdoll

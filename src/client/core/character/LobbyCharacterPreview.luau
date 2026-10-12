@@ -37,11 +37,8 @@ local LOCKED_OUTLINE_COLOR = Color3.fromRGB(255, 255, 255)
 local LOCKED_FILL_TRANSPARENCY = 0.1
 
 -- ReplicatedStorage.Templates.LevelLock (TextLabel en Status.Level), clonado en el
--- LowerTorso solo con el body bloqueado; el hat bloqueado no lleva billboard.
+-- LowerTorso solo con el body bloqueado.
 local LEVEL_LOCK_TEMPLATE_NAME = "LevelLock"
-
--- Va en el Handle del hat: el Highlight del modelo cubriría también el body.
-local HAT_LOCK_HIGHLIGHT_NAME = "HatLockHighlight"
 
 local function getOptionalString(value: any): string?
 	if type(value) == "string" and value ~= "" then
@@ -239,7 +236,6 @@ local function _new(): any
 	self._highlightHidden = false
 	self._levelLock = nil :: Instance?
 	self._lockedLevel = nil :: number?
-	self._hatLockedLevel = nil :: number?
 	self._previewHidden = false
 	-- Radianes; 0 = de frente.
 	self._yaw = 0
@@ -311,7 +307,6 @@ function LobbyCharacterPreview:_bindHighlight(preview: Model)
 		if levelLock and levelLock:IsA("BillboardGui") then
 			levelLock.Enabled = not hidden
 		end
-		self:_applyHatLock()
 	end)
 
 	self._previewJanitor:Add(stopObserving, true)
@@ -333,50 +328,6 @@ function LobbyCharacterPreview:_applyLockVisuals()
 	end
 
 	self:_updateLevelLock()
-end
-
--- Sin billboard para el hat: el nivel requerido ya lo muestra el ActionFrame del locker.
-function LobbyCharacterPreview:_applyHatLock()
-	local model = self._model
-	if not model then
-		return
-	end
-
-	for _, child in model:GetChildren() do
-		if not (child:IsA("Accessory") and child:GetAttribute("CosmeticHat") == true) then
-			continue
-		end
-
-		local handle = child:FindFirstChild("Handle")
-		if not (handle and handle:IsA("BasePart")) then
-			continue
-		end
-
-		local existing = handle:FindFirstChild(HAT_LOCK_HIGHLIGHT_NAME)
-		if not self._hatLockedLevel then
-			if existing then
-				existing:Destroy()
-			end
-			continue
-		end
-
-		local highlight: Highlight
-		if existing and existing:IsA("Highlight") then
-			highlight = existing
-		else
-			highlight = Instance.new("Highlight")
-			highlight.Name = HAT_LOCK_HIGHLIGHT_NAME
-			highlight.DepthMode = Enum.HighlightDepthMode.Occluded
-			highlight.Adornee = handle
-			highlight.Parent = handle
-		end
-
-		highlight.FillColor = HIGHLIGHT_COLOR
-		highlight.FillTransparency = LOCKED_FILL_TRANSPARENCY
-		highlight.OutlineColor = LOCKED_OUTLINE_COLOR
-		highlight.OutlineTransparency = HIGHLIGHT_OUTLINE_ALPHA
-		highlight.Enabled = not self._highlightHidden and not self._hiddenByOwner
-	end
 end
 
 function LobbyCharacterPreview:_updateLevelLock()
@@ -543,23 +494,19 @@ function LobbyCharacterPreview:applyFaceId(faceId: string?)
 	self:_reapplyHiddenState()
 end
 
-function LobbyCharacterPreview:applyHatItem(itemData: any, lockedLevel: number?)
-	self._hatLockedLevel = lockedLevel
+function LobbyCharacterPreview:applyHatItem(itemData: any)
 	self._lastHat = { itemData = itemData }
 	if self._hatApplier then
 		self._hatApplier:Apply(itemData)
 	end
-	self:_applyHatLock()
 	self:_reapplyHiddenState()
 end
 
-function LobbyCharacterPreview:applyHatId(hatId: string?, lockedLevel: number?)
-	self._hatLockedLevel = lockedLevel
+function LobbyCharacterPreview:applyHatId(hatId: string?)
 	self._lastHat = { id = hatId }
 	if self._hatApplier then
 		self._hatApplier:ApplyItemId(hatId)
 	end
-	self:_applyHatLock()
 	self:_reapplyHiddenState()
 end
 
@@ -699,7 +646,6 @@ function LobbyCharacterPreview:setHiddenByOwner(hidden: boolean)
 	if levelLock and levelLock:IsA("BillboardGui") then
 		levelLock.Enabled = not self._highlightHidden and not hidden
 	end
-	self:_applyHatLock()
 end
 
 function LobbyCharacterPreview:endPreview()

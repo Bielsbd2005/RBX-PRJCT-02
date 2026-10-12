@@ -3,8 +3,7 @@
 	Preview de kill effects y emotes en el Locker. Se hace SOBRE el personaje del lobby
 	(P1), al que apunta Workspace.Cameras.killEffects: al clic se oculta y en su sitio y
 	pose aparece un doble (LobbyCharacterPreview:buildLookClone) que recibe el efecto;
-	pasado KillEffectsRegistry.previewTime el doble se destruye. Sin preview del lobby se
-	usa el maniquí Shared.Bodies.KillEffectDummy en Workspace.Locker.DummySpawn.
+	pasado KillEffectsRegistry.previewTime el doble se destruye.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -22,15 +21,13 @@ export type Deps = {
 	lobbyCharacter: any,
 	cameraController: any,
 	lockerFolder: Instance,
-	dummySpawn: Instance,
-	dummyTemplate: Model,
 }
 
 export type LockerKillEffectPreview = {
 	destroyDummy: (self: LockerKillEffectPreview) -> (),
 	previewKillEffect: (self: LockerKillEffectPreview, effectId: string) -> (),
 	spawnEmoteDummy: (self: LockerKillEffectPreview) -> (),
-	previewEmote: (self: LockerKillEffectPreview, emoteId: string) -> (),
+	previewEmote: (self: LockerKillEffectPreview, emoteId: string, byUser: boolean?) -> (),
 	Destroy: (self: LockerKillEffectPreview) -> (),
 }
 
@@ -39,6 +36,7 @@ type Internal = LockerKillEffectPreview & {
 	_dummy: Model?,
 	_respawnTask: thread?,
 	_previewingEffectId: string?,
+	_previewingEmoteId: string?,
 	_nextAllowedAt: number,
 }
 
@@ -51,6 +49,7 @@ function LockerKillEffectPreview.new(deps: Deps): LockerKillEffectPreview
 		_dummy = nil,
 		_respawnTask = nil,
 		_previewingEffectId = nil,
+		_previewingEmoteId = nil,
 		_nextAllowedAt = 0,
 	}, LockerKillEffectPreview) :: any
 	return self
@@ -66,37 +65,29 @@ function LockerKillEffectPreview.destroyDummy(self: Internal)
 	end
 	self._dummy = nil
 	self._previewingEffectId = nil
+	self._previewingEmoteId = nil
 	self._deps.cameraController:followSubject(nil)
 	self._deps.lobbyCharacter:setHiddenByOwner(false)
 end
 
--- Doble del personaje del lobby (o el maniquí), listo para recibir el efecto.
-local function spawnDummy(self: Internal): Model
+-- Doble del personaje del lobby, listo para recibir el efecto. nil si el lobby no tiene
+-- body que clonar.
+local function spawnDummy(self: Internal): Model?
 	self:destroyDummy()
 	local deps = self._deps
 
 	local clone = deps.lobbyCharacter:buildLookClone()
-	if clone then
-		-- Ya viene con la pose del personaje vivo: no se recoloca ni se pasa a la pose
-		-- canónica, o dejaría de coincidir con lo que se ve.
-		local hrp = clone:FindFirstChild("HumanoidRootPart")
-		if hrp and hrp:IsA("BasePart") then
-			hrp.Anchored = true
-		end
-		clone.Parent = deps.lockerFolder
-		deps.lobbyCharacter:setHiddenByOwner(true)
-	else
-		clone = deps.dummyTemplate:Clone()
-		clone.Parent = deps.lockerFolder
-		LockerUtils.placePreviewCharacter(clone, deps.dummySpawn)
-		LockerUtils.snapPartsToCanonicalPose(clone)
-		-- Anclar HRP para que el maniquí no caiga antes de que el efecto lo suelte (los
-		-- kill effects desanclan todo en su paso final).
-		local hrp = clone:FindFirstChild("HumanoidRootPart")
-		if hrp and hrp:IsA("BasePart") then
-			hrp.Anchored = true
-		end
+	if not clone then
+		return nil
 	end
+	-- Ya viene con la pose del personaje vivo: no se recoloca ni se pasa a la pose
+	-- canónica, o dejaría de coincidir con lo que se ve.
+	local hrp = clone:FindFirstChild("HumanoidRootPart")
+	if hrp and hrp:IsA("BasePart") then
+		hrp.Anchored = true
+	end
+	clone.Parent = deps.lockerFolder
+	deps.lobbyCharacter:setHiddenByOwner(true)
 	self._dummy = clone
 	return clone
 end
@@ -112,6 +103,9 @@ function LockerKillEffectPreview.previewKillEffect(self: Internal, effectId: str
 	self._nextAllowedAt = now + PREVIEW_COOLDOWN
 
 	local dummy = spawnDummy(self)
+	if not dummy then
+		return
+	end
 	self._previewingEffectId = effectId
 	-- La cámara sigue un poco al cuerpo si sale volando hacia arriba. Se engancha antes
 	-- de aplicar el efecto para medir la subida desde la pose de reposo.
@@ -133,17 +127,30 @@ end
 -- que LobbyCharacterPreview.
 function LockerKillEffectPreview.spawnEmoteDummy(self: Internal)
 	local dummy = spawnDummy(self)
+	if not dummy then
+		return
+	end
 	local idleJanitor = Janitor.new()
 	idleJanitor:LinkToInstance(dummy)
 	LockerUtils.playPreviewIdleAnimation(dummy, idleJanitor, AssetIds.Animations.CharacterIdle)
 end
 
--- Si el dummy está a medio kill effect (o no existe), se respawnea antes.
-function LockerKillEffectPreview.previewEmote(self: Internal, emoteId: string)
+-- Si el dummy está a medio kill effect (o no existe), se respawnea antes. Sin clic
+-- solo suena si cambia el emote: el grid re-notifica la selección al refrescar (p. ej.
+-- al llegar el Loadout tras equipar) y lo repetía.
+function LockerKillEffectPreview.previewEmote(self: Internal, emoteId: string, byUser: boolean?)
+	if not byUser and self._dummy and self._previewingEmoteId == emoteId then
+		return
+	end
 	if not self._dummy or self._respawnTask then
 		self:spawnEmoteDummy()
 	end
-	EmotePlayer.play(self._dummy :: Model, emoteId)
+	local dummy = self._dummy
+	if not dummy then
+		return
+	end
+	self._previewingEmoteId = emoteId
+	EmotePlayer.play(dummy, emoteId)
 end
 
 function LockerKillEffectPreview.Destroy(self: Internal)
