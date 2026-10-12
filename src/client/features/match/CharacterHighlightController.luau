@@ -28,6 +28,11 @@ local HEAL_FLASH_HOLD = 0.45 -- s
 local TI_HEAL_FLASH_IN  = TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local TI_HEAL_FLASH_OUT = TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
+-- Reveal de enemigos a través de paredes al spawnear (2.5 s total).
+local SPAWN_REVEAL_HOLD    = 1.75
+local SPAWN_REVEAL_FADE    = 0.75
+local TI_SPAWN_REVEAL_FADE = TweenInfo.new(SPAWN_REVEAL_FADE, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
 -- Deben ser los mismos que consulta TeamUtils.getSide.
 local TEAM_ATTRS_TO_WATCH = { "Team", "TeamSide", "BotTeam", "Side", "TeamAffinity" }
 
@@ -43,6 +48,10 @@ local _started = false
 local _healFlashToken = 0
 local _healFlashTweens: { Tween } = {}
 local _localLastHealth: number? = nil
+
+local _spawnRevealToken = 0
+local _spawnRevealActive = false
+local _spawnRevealTweens: { Tween } = {}
 
 local function _hasAnyTeamAttribute(model: Model): boolean
 	for _, attrName in TEAM_ATTRS_TO_WATCH do
@@ -131,6 +140,63 @@ local function _flashLocalHeal()
 		end)
 	end)
 	tweenIn:Play()
+end
+
+local function _cancelSpawnReveal()
+	local wasActive = _spawnRevealActive
+	_spawnRevealActive = false
+	for _, t in _spawnRevealTweens do
+		t:Cancel()
+	end
+	table.clear(_spawnRevealTweens)
+	if wasActive then
+		for model, highlight in _trackedHighlights do
+			if model ~= localPlayer.Character and not MatchState.isLocalAlly(model) then
+				highlight.DepthMode = Enum.HighlightDepthMode.Occluded
+				_refreshColor(model)
+			end
+		end
+	end
+end
+
+local function _beginSpawnReveal()
+	_spawnRevealToken += 1
+	local token = _spawnRevealToken
+	_cancelSpawnReveal()
+	_spawnRevealActive = true
+
+	for model, highlight in _trackedHighlights do
+		if model ~= localPlayer.Character and not MatchState.isLocalAlly(model) then
+			highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+		end
+	end
+
+	task.delay(SPAWN_REVEAL_HOLD, function()
+		if _spawnRevealToken ~= token then
+			return
+		end
+
+		for model, highlight in _trackedHighlights do
+			if model ~= localPlayer.Character
+				and not MatchState.isLocalAlly(model)
+				and highlight.DepthMode == Enum.HighlightDepthMode.AlwaysOnTop
+			then
+				local tween = TweenService:Create(highlight, TI_SPAWN_REVEAL_FADE, {
+					FillTransparency = 1,
+					OutlineTransparency = 1,
+				})
+				_spawnRevealTweens[#_spawnRevealTweens + 1] = tween
+				tween:Play()
+			end
+		end
+
+		task.delay(SPAWN_REVEAL_FADE, function()
+			if _spawnRevealToken ~= token then
+				return
+			end
+			_cancelSpawnReveal()
+		end)
+	end)
 end
 
 -- Lineal para casar con el tween del cuerpo en RagdollCleanup.
@@ -225,6 +291,10 @@ local function _attach(model: Model)
 
 	_trackedConns[model] = conns
 	_refreshColor(model)
+
+	if _spawnRevealActive and model ~= localPlayer.Character and not MatchState.isLocalAlly(model) then
+		highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+	end
 
 	local pendingFade = model:GetAttribute(FADE_OUT_ATTR)
 	if type(pendingFade) == "number" and pendingFade > 0 then
@@ -326,6 +396,10 @@ local function _wirePlayer(player: Player)
 		_attach(char)
 		if player == localPlayer then
 			_refreshAll()
+			local phase = MatchState.getPhase()
+			if phase == "InMatch" or phase == "Dying" or phase == "Joining" then
+				_beginSpawnReveal()
+			end
 		end
 	end
 	if player.Character then
@@ -370,6 +444,9 @@ function CharacterHighlightController:Stop()
 		return
 	end
 	_started = false
+
+	_spawnRevealToken += 1
+	_cancelSpawnReveal()
 
 	for _, conn in _moduleConns do
 		conn:Disconnect()
