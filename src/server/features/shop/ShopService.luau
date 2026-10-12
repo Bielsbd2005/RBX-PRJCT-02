@@ -203,7 +203,7 @@ local function _onBuyItem(data: Network.ShopItemPayload, player: Player): ()
 	end
 
 	local playerLevel: number = profile.Data.Stats.Level or 0
-	if playerLevel < (itemConfig.LevelRequired or 1) then
+	if playerLevel < (itemConfig.LevelRequired or 0) then
 		Network.Shop.Response.SendTo({
 			success = false,
 			message = "You need level " .. tostring(itemConfig.LevelRequired) .. " to buy this item.",

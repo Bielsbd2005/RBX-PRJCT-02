@@ -259,7 +259,7 @@ end
 
 -- Exclusivo = aparece en algún tier (de cualquier season, incluidos borradores y
 -- pasadas) y no se consigue de otra forma. Un ítem comprable (CanPurchase) o de
--- maestría (KillChallenge, MasteryScope) que también esté en el pase no es exclusivo: marcarlo lo volvería
+-- maestría (Challenge, MasteryScope) que también esté en el pase no es exclusivo: marcarlo lo volvería
 -- incomprable en ShopService e invisible en LockerCatalog.
 local _bpExclusiveCache: { [string]: { [string]: boolean } }? = nil
 local function _buildBPExclusiveCache(): { [string]: { [string]: boolean } }
@@ -272,7 +272,7 @@ local function _buildBPExclusiveCache(): { [string]: { [string]: boolean } }
 				local catalog = ItemsConfig[reward.Category]
 				local def = if type(catalog) == "table" then catalog[reward.ItemId] else nil
 				local obtainableElsewhere = type(def) == "table"
-					and (def.CanPurchase == true or def.KillChallenge ~= nil or def.MasteryScope ~= nil)
+					and (def.CanPurchase == true or def.Challenge ~= nil or def.MasteryScope ~= nil)
 				if not obtainableElsewhere then
 					local cat = set[reward.Category]
 					if not cat then

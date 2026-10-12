@@ -79,9 +79,13 @@ local function makeCatalogCacheKey(categoryKey: LockerCategoryKey, navKey: strin
 	return tostring(categoryKey) .. ":" .. tostring(navKey)
 end
 
-local function normalizeImageId(imageValue: any, fallback: string): string
+local function normalizeImageId(imageValue: any, fallback: string, catalogEmoteId: number?): string
 	if type(imageValue) == "string" and imageValue ~= "" then
 		return imageValue
+	end
+
+	if type(catalogEmoteId) == "number" and catalogEmoteId > 0 then
+		return "rbxthumb://type=Asset&id=" .. tostring(catalogEmoteId) .. "&w=150&h=150"
 	end
 
 	return fallback
@@ -156,7 +160,7 @@ function LockerCatalog:_getTemplateItems(categoryKey: LockerCategoryKey, navKey:
 				Currency = if type(definition.Currency) == "string" then definition.Currency else nil,
 				LevelRequired = math.max(0, tonumber(definition.LevelRequired) or 0),
 				Rarity = tostring(definition.Rarity or "Common"),
-				Image = normalizeImageId(definition.Image, self._defaultThumbnail),
+				Image = normalizeImageId(definition.Image, self._defaultThumbnail, definition.CatalogEmoteId),
 				CanPurchase = definition.CanPurchase == true,
 				-- BP-exclusive si lo flagea ItemsConfig O si es reward de cualquier season del pase.
 				isBPExclusive = definition.isBPExclusive == true

@@ -106,7 +106,11 @@ local function _lockerItemsForLevel(level: number, out: { ResultItem })
 					title = "UNLOCKED",
 					category = tostring(category),
 					itemId = tostring(itemId),
-					image = if type(definition.Image) == "string" then definition.Image else "",
+					image = if type(definition.Image) == "string" and definition.Image ~= ""
+						then definition.Image
+						elseif type(definition.CatalogEmoteId) == "number"
+						then "rbxthumb://type=Asset&id=" .. tostring(definition.CatalogEmoteId) .. "&w=150&h=150"
+						else "",
 					name = name,
 				})
 				if #out >= MAX_ITEMS then
