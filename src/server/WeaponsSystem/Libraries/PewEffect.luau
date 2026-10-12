@@ -63,6 +63,13 @@ local function ensureState(label: ImageLabel): State
 	local state: State = { tween = nil, conn = nil }
 	states[label] = state
 
+	-- El label crece al 180% del BillboardGui: si este recorta (ClipsDescendants en
+	-- las Tools), se corta todo lo que sobresale.
+	local container = label.Parent
+	if container and container:IsA("BillboardGui") then
+		container.ClipsDescendants = false
+	end
+
 	-- Liberar la entrada cuando la Tool se despawnea.
 	label.AncestryChanged:Connect(function(_child, parent)
 		if parent == nil then

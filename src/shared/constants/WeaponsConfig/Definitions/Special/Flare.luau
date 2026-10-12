@@ -18,7 +18,7 @@ return {
 		MaxDistance = 400,
 		RecoilDecay = 0.85,
 		RecoilMin = 0.3,
-		ReloadHingeAngle = -60,
+		ReloadHingeAngle = 60,
 		ReloadTime = 1.8,
 		ShotCooldown = 1,
 		ShotEffect = "Flare",

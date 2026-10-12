@@ -421,9 +421,9 @@ end
 
 local HIT_MARK_LIFETIME = 5
 
--- En un Decal/Texture, Color3 blanco = sin tinte (aspecto normal del agujero).
+-- En un Decal/Texture, Color3 multiplica la imagen: negro = agujero carbonizado.
 local HIT_MARK_HEAT_START = Color3.fromRGB(255, 120, 30)
-local HIT_MARK_HEAT_END = Color3.fromRGB(255, 255, 255)
+local HIT_MARK_HEAT_END = Color3.fromRGB(0, 0, 0)
 local HIT_MARK_HEAT_DURATION = 1.5
 local HIT_MARK_HEAT_TWEEN = TweenInfo.new(HIT_MARK_HEAT_DURATION, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
