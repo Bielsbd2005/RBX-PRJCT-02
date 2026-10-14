@@ -25,6 +25,7 @@ local Fusion = require(Packages.fusion) :: any
 local Janitor = require(Packages.janitor) :: any
 local Network = require(Shared.networking.Network)
 local StoreProducts = require(Shared.constants.StoreProducts)
+local LimitedBundles = require(Shared.data.LimitedBundles)
 local DataController = require(Client.core.data.DataController)
 local Notify = require(Client.core.ui.NotificationController)
 local UIUtils = require(Client.core.ui.UIUtils)
@@ -38,6 +39,7 @@ local SUBTITLE_FORMAT = `<font color="{SENDER_COLOR_HEX}">@%s</font> just gifted
 
 local SHOW_TWEEN_INFO = TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 local PASS_LABEL_FORMAT = "%s Pass"
+local BUNDLE_LABEL_FORMAT = "%s %s"
 local CLAIM_TIMEOUT = 5
 local CLAIM_CLICK_GUARD = 0.4
 
@@ -110,8 +112,12 @@ function GiftingFeature.start(menuController: any): any
 
 		local giftLabel: string
 		local pass = if type(gift.PassName) == "string" then StoreProducts.GamePasses.ByName[gift.PassName] else nil
+		local bundle = if type(gift.BundleName) == "string" then StoreProducts.Bundles.ByName[gift.BundleName] else nil
 		if pass then
 			giftLabel = string.format(PASS_LABEL_FORMAT, pass.DisplayName)
+		elseif bundle then
+			local serialText = string.format(LimitedBundles.SERIAL_FORMAT, tonumber(gift.Serial) or 0)
+			giftLabel = string.format(BUNDLE_LABEL_FORMAT, bundle.DisplayName, serialText)
 		else
 			local cashAmount = tonumber(gift.CashAmount) or 0
 			if cashAmount <= 0 then
@@ -271,8 +277,11 @@ function GiftingFeature.start(menuController: any): any
 			claiming = false
 			claimingGiftId = nil
 			local pass = StoreProducts.GamePasses.ByName[data.passName]
+			local bundle = StoreProducts.Bundles.ByName[data.bundleName]
 			if data.success and pass then
 				Notify.success(`{string.format(PASS_LABEL_FORMAT, pass.DisplayName)} unlocked!`)
+			elseif data.success and bundle then
+				Notify.success(`{bundle.DisplayName} unlocked!`)
 			elseif data.success then
 				Notify.success(`+{UIUtils.formatCashAmount(data.cashAmount)} Cash`)
 			else

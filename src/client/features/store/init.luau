@@ -5,27 +5,35 @@
 		Store
 		  CloseBtn
 		  ScrollingFrame.Container.Content
-		    CoinsRow    ← Cash1…Cash5   (packs de StoreProducts.Cash)
-		    GemsRow     ← Gems1…Gems5   (packs de StoreProducts.Gems)
-		    PassesRow   ← VIP, BackWeapon (StoreProducts.GamePasses)
-		    Bundles y los títulos/subtítulos (sin cablear)
+		    CoinsRow    ← slots 1…5 (packs de StoreProducts.Cash, en orden de InOrder)
+		    GemsRow     ← slots 1…5 (packs de StoreProducts.Gems, en orden de InOrder)
+		    PassesRow   ← slots VIP, BackWeapon (ButtonName de StoreProducts.GamePasses)
+		    BundlesRow  ← slots Bundle01… (ButtonName de StoreProducts.Bundles)
+		    Títulos/subtítulos (sin cablear)
 
-	Los botones ya existen en Studio con el nombre de su pack; aquí solo se les
-	rellenan los labels (Amount/Price) y se les cuelga el PromptProductPurchase.
-	Las filas se buscan por nombre en cualquier nivel bajo Store, así que re-anidar
-	el ScrollingFrame/Container/Content en Studio no rompe el binder.
+	Slot (Frame) de pack, pass o bundle:
+		MainButton (GuiButton, compra)
+		  Ammount.Value  ← cantidad del pack / DisplayName del pass
+		  Stock.Value    ← solo bundles, opcional: unidades que quedan o "SOLD OUT"
+		Price.Value      ← precio
+		Gift             ← regalo (hermano de MainButton, no lo pisa)
+		Owned            ← passes y bundles, opcional: visible si ya se posee
+	El título de un bundle (MainButton.Title) es arte de la GUI: no se toca.
 
-	Cada pack o pass puede traer su botón `Gift` (Cash1.Gift, VIP.Gift…) que abre
-	GiftFlow con ESE producto. Es hijo del botón del pack: Roblox entrega el clic solo
-	al botón más profundo, así que regalar no dispara la compra. Con la lista de
-	jugadores en pantalla la tienda se oculta y vuelve al cerrarse el flujo.
+	Los slots ya existen en Studio; aquí solo se rellenan los labels y se cuelga la
+	compra. Las filas se buscan por nombre en cualquier nivel bajo Store, así que
+	re-anidar el ScrollingFrame/Container/Content en Studio no rompe el binder.
+
+	`Gift` abre GiftFlow con ESE producto. Con la lista de jugadores en pantalla la
+	tienda se oculta y vuelve al cerrarse el flujo.
 
 	Los gamepasses de PassesRow no son developer products: se promptean con
 	PromptGamePassPurchase, no pasan por ProcessReceipt y la posesión es
-	permanente, así que su botón además refleja si el jugador ya lo tiene (comprado
+	permanente, así que su slot además refleja si el jugador ya lo tiene (comprado
 	o regalado). Su `Gift` cobra el developer product `GiftProductId` del pass.
 
-	TODO: Bundles.
+	Los bundles limitados no se promptean desde aquí: se piden al servidor
+	(Network.Store.BuyBundle), que comprueba stock y posesión y lanza él el prompt.
 ]]
 
 local MarketplaceService = game:GetService("MarketplaceService")
@@ -50,6 +58,9 @@ local StaggerReveal = require(Client.core.ui.animators.StaggerReveal)
 local UIUtils = require(Client.core.ui.UIUtils)
 local UITheme = require(Client.core.ui.UITheme)
 local GiftFlow = require(Client.features.gifting.GiftFlow)
+local Notify = require(Client.core.ui.NotificationController)
+local Network = require(Shared.networking.Network)
+local LimitedBundles = require(Shared.data.LimitedBundles)
 local StoreProducts = require(Shared.constants.StoreProducts)
 local DebugFlags = require(Shared.utils.DebugFlags)
 
@@ -62,8 +73,17 @@ local noGamePasses = DebugFlags.bind(ReplicatedStorage, "NoGamePasses")
 local CASH_ROW_NAME = "CoinsRow"
 local GEMS_ROW_NAME = "GemsRow"
 local PASSES_ROW_NAME = "PassesRow"
+local BUNDLES_ROW_NAME = "BundlesRow"
+local SLOT_STOCK_NAME = "Stock"
+local STOCK_TEXT_FORMAT = "%d LEFT"
+local SOLD_OUT_TEXT = "SOLD OUT"
 
 local GIFT_BUTTON_NAME = "Gift"
+local SLOT_BUY_BUTTON_NAME = "MainButton"
+-- "Ammount" con doble m: así se llama el nodo en Studio.
+local SLOT_AMOUNT_NAME = "Ammount"
+local SLOT_PRICE_NAME = "Price"
+local SLOT_VALUE_LABEL_NAME = "Value"
 
 -- La tienda NO hace el pop de panel (animationMode = "none"): solo se animan sus packs
 -- en cascada. Las filas arrancan a la vez, así que el retardo separa columnas
@@ -71,10 +91,14 @@ local GIFT_BUTTON_NAME = "Gift"
 local ROW_REVEAL_STAGGER = 0.05
 local ROW_REVEAL_TWEEN = TweenInfo.new(0.28, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 
--- Nodo opcional del botón de un gamepass que la GUI muestra cuando ya se posee.
+-- Nodo opcional del slot de un gamepass o bundle que la GUI muestra cuando ya se posee.
 local OWNED_NODE_NAME = "Owned"
 -- Texto de reemplazo del precio cuando la GUI no trae ese nodo.
 local OWNED_PRICE_TEXT = "Owned"
+
+-- Más suave que UITheme.ButtonHoverScale: los slots son grandes y el 4% del tema se
+-- comía el hueco con el vecino.
+local SLOT_HOVER_SCALE = 1.015
 
 local StoreFeature = {}
 
@@ -150,17 +174,39 @@ function StoreFeature.start(menuController: any): any
 		return giftFlow
 	end
 
-	-- Rellena los labels del pack. Ambos son opcionales: un botón sin Amount o sin
-	-- Price sigue comprando, solo no muestra ese dato.
-	local function applyProductToButton(button: GuiButton, product: StoreProducts.ProductBase, amount: number)
-		local amountNode = button:FindFirstChild("Amount")
-		if amountNode and amountNode:IsA("TextLabel") then
-			amountNode.Text = UIUtils.formatCashAmount(amount)
+	local function findValueLabel(parent: Instance, containerName: string): TextLabel?
+		local holder = parent:FindFirstChild(containerName)
+		local label = holder and holder:FindFirstChild(SLOT_VALUE_LABEL_NAME)
+		return if label and label:IsA("TextLabel") then label else nil
+	end
+
+	-- `sku` solo para el warn: con slots por posición, el nombre no dice qué pack falta.
+	local function resolveSlot(row: Instance, rowName: string, slotName: string, sku: string): (GuiObject?, GuiButton?)
+		local slot = row:FindFirstChild(slotName)
+		local button = slot and slot:FindFirstChild(SLOT_BUY_BUTTON_NAME)
+		if not (slot and slot:IsA("GuiObject") and button and button:IsA("GuiButton")) then
+			warn(`[StoreFeature] {rowName}.{slotName}.{SLOT_BUY_BUTTON_NAME} no encontrado ({sku}).`)
+			return nil, nil
+		end
+		return slot, button
+	end
+
+	-- Rellena los labels del pack. Ambos son opcionales: un slot sin cantidad o sin
+	-- precio sigue comprando, solo no muestra ese dato.
+	local function applyProductToSlot(
+		slot: GuiObject,
+		button: GuiButton,
+		product: StoreProducts.ProductBase,
+		amount: number
+	)
+		local amountLabel = findValueLabel(button, SLOT_AMOUNT_NAME)
+		if amountLabel then
+			amountLabel.Text = UIUtils.formatCashAmount(amount)
 		end
 
-		local priceNode = button:FindFirstChild("Price")
-		if priceNode and priceNode:IsA("TextLabel") then
-			priceNode.Text = product.PriceText
+		local priceLabel = findValueLabel(slot, SLOT_PRICE_NAME)
+		if priceLabel then
+			priceLabel.Text = product.PriceText
 		end
 
 		-- ProductId = 0 → developer product sin crear en el panel de Roblox: el
@@ -172,8 +218,7 @@ function StoreFeature.start(menuController: any): any
 
 	-- `giftProductId` = developer product que se cobra al regalar; 0 = no se regala (el
 	-- botón sigue ahí pero no abre nada).
-	local function bindGiftButton(button: GuiButton, giftProductId: number)
-		local giftNode = button:FindFirstChild(GIFT_BUTTON_NAME)
+	local function bindGiftButton(giftNode: Instance?, giftProductId: number)
 		if not (giftNode and giftNode:IsA("GuiButton")) then
 			return
 		end
@@ -181,7 +226,7 @@ function StoreFeature.start(menuController: any): any
 
 		local enabled = giftProductId > 0
 		-- `Active` se queda en true aunque no sea regalable: un botón inactivo deja pasar el
-		-- clic al botón del pack de debajo y saldría el prompt de compra. `Selectable` refleja
+		-- clic al botón de compra de debajo y saldría el prompt. `Selectable` refleja
 		-- el estado para que el gamepad no se pare en un botón muerto.
 		giftBtn.Active = true
 		giftBtn.Selectable = enabled
@@ -219,21 +264,19 @@ function StoreFeature.start(menuController: any): any
 		local rowItems: { GuiObject } = {}
 		table.insert(revealRows, rowItems)
 
-		for _, product in catalog.InOrder do
-			local buttonNode = row:FindFirstChild(product.ButtonName)
-			if not (buttonNode and buttonNode:IsA("GuiButton")) then
-				warn(`[StoreFeature] {rowName}.{product.ButtonName} no encontrado.`)
+		for index, product in catalog.InOrder do
+			local slot, button = resolveSlot(row, rowName, tostring(index), product.ButtonName)
+			if not (slot and button) then
 				continue
 			end
-			local button = buttonNode :: GuiButton
 
-			table.insert(rowItems, button)
+			table.insert(rowItems, slot)
 
-			applyProductToButton(button, product, getAmount(product))
-			bindGiftButton(button, if giftable then product.ProductId else 0)
+			applyProductToSlot(slot, button, product, getAmount(product))
+			bindGiftButton(slot:FindFirstChild(GIFT_BUTTON_NAME), if giftable then product.ProductId else 0)
 			InteractiveScaleTween.bindButton(button, janitor, {
 				enableHover = canUseHoverAnimations,
-				hoverScale = UITheme.ButtonHoverScale,
+				hoverScale = SLOT_HOVER_SCALE,
 				clickScale = UITheme.ButtonClickScale,
 			})
 
@@ -258,14 +301,14 @@ function StoreFeature.start(menuController: any): any
 	-- promptea con otra API, se regala con otro producto y encima tiene un estado que
 	-- los packs no tienen (ya poseído).
 
-	-- passId → refresco del botón, para el único listener de compras de abajo.
+	-- passId → refresco del slot, para el único listener de compras de abajo.
 	local setRobloxOwnedByPassId: { [number]: (owned: boolean) -> () } = {}
-	-- `GamePassDefinition.Name` → refresco del botón, para el observer de GiftedPasses.
+	-- `GamePassDefinition.Name` → refresco del slot, para el observer de GiftedPasses.
 	local setGiftedByPassName: { [string]: (gifted: boolean) -> () } = {}
 
-	local function bindGamePassButton(button: GuiButton, pass: StoreProducts.GamePassDefinition)
-		local priceNode = button:FindFirstChild("Price")
-		local ownedNode = button:FindFirstChild(OWNED_NODE_NAME)
+	local function bindGamePassSlot(slot: GuiObject, button: GuiButton, pass: StoreProducts.GamePassDefinition)
+		local priceNode = findValueLabel(slot, SLOT_PRICE_NAME)
+		local ownedNode = slot:FindFirstChild(OWNED_NODE_NAME)
 		-- Dos fuentes: Roblox solo conoce el pass comprado; el regalado vive en el perfil.
 		local robloxOwned = false
 		local gifted = false
@@ -273,17 +316,21 @@ function StoreFeature.start(menuController: any): any
 		--[[
 			El pass es permanente: a quien ya lo tiene el botón deja de comprar y lo dice. Si la
 			GUI trae nodo `Owned` se muestra y el precio se esconde; si no, lo dice el label del
-			precio, para que un dueño no quede ante un botón muerto sin explicación.
+			precio, para que un dueño no quede ante un botón muerto sin explicación. Se oculta
+			el Frame `Price` entero, no solo su texto, para no dejar la píldora vacía.
 		]]
 		local function refresh()
 			local owned = robloxOwned or gifted
 			if ownedNode and ownedNode:IsA("GuiObject") then
 				ownedNode.Visible = owned
 			end
-			if priceNode and priceNode:IsA("TextLabel") then
+			if priceNode then
 				if ownedNode then
 					priceNode.Text = pass.PriceText
-					priceNode.Visible = not owned
+					local pricePill = priceNode.Parent
+					if pricePill and pricePill:IsA("GuiObject") then
+						pricePill.Visible = not owned
+					end
 				else
 					priceNode.Text = if owned then OWNED_PRICE_TEXT else pass.PriceText
 				end
@@ -304,11 +351,16 @@ function StoreFeature.start(menuController: any): any
 			refresh()
 		end
 
+		local nameLabel = findValueLabel(button, SLOT_AMOUNT_NAME)
+		if nameLabel then
+			nameLabel.Text = pass.DisplayName
+		end
+
 		button.AutoButtonColor = false
 		refresh()
 
 		-- Aunque ya lo posea: el dueño de un pass puede seguir regalándolo.
-		bindGiftButton(button, if pass.PassId > 0 then pass.GiftProductId else 0)
+		bindGiftButton(slot:FindFirstChild(GIFT_BUTTON_NAME), if pass.PassId > 0 then pass.GiftProductId else 0)
 
 		if pass.PassId <= 0 then
 			return
@@ -346,7 +398,7 @@ function StoreFeature.start(menuController: any): any
 
 		InteractiveScaleTween.bindButton(button, janitor, {
 			enableHover = canUseHoverAnimations,
-			hoverScale = UITheme.ButtonHoverScale,
+			hoverScale = SLOT_HOVER_SCALE,
 			clickScale = UITheme.ButtonClickScale,
 		})
 
@@ -366,17 +418,103 @@ function StoreFeature.start(menuController: any): any
 		table.insert(revealRows, passItems)
 
 		for _, pass in StoreProducts.GamePasses.InOrder do
-			local buttonNode = passesRow:FindFirstChild(pass.ButtonName)
-			if not (buttonNode and buttonNode:IsA("GuiButton")) then
-				warn(`[StoreFeature] {PASSES_ROW_NAME}.{pass.ButtonName} no encontrado.`)
+			local slot, button = resolveSlot(passesRow, PASSES_ROW_NAME, pass.ButtonName, pass.Name)
+			if not (slot and button) then
 				continue
 			end
-			table.insert(passItems, buttonNode :: GuiButton)
-			bindGamePassButton(buttonNode :: GuiButton, pass)
+			table.insert(passItems, slot)
+			bindGamePassSlot(slot, button, pass)
 		end
 	else
 		warn(`[StoreFeature] Fila {PASSES_ROW_NAME} no encontrada; gamepasses no cableados.`)
 	end
+
+	-- Refrescos de los bundles, para el observer de Inventory de abajo.
+	local refreshBundleSlots: { () -> () } = {}
+
+	local function bindBundleSlot(slot: GuiObject, button: GuiButton, bundle: StoreProducts.BundleDefinition)
+		local priceLabel = findValueLabel(slot, SLOT_PRICE_NAME)
+		local stockLabel = findValueLabel(button, SLOT_STOCK_NAME)
+		local ownedNode = slot:FindFirstChild(OWNED_NODE_NAME)
+
+		-- Mismo criterio que los passes para el precio y `Owned`. Lo que queda se cuenta
+		-- hasta SellableUnits, donde de verdad se cierra la venta.
+		local function refresh()
+			local owned = LimitedBundles.ownsBundle({ Inventory = Fusion.peek(DataController.Inventory) }, bundle)
+			local sold = LimitedBundles.getSold(bundle)
+			local saleOpen = LimitedBundles.isSaleOpen(bundle, sold)
+
+			if ownedNode and ownedNode:IsA("GuiObject") then
+				ownedNode.Visible = owned
+			end
+			if priceLabel then
+				if ownedNode then
+					priceLabel.Text = bundle.PriceText
+					local pricePill = priceLabel.Parent
+					if pricePill and pricePill:IsA("GuiObject") then
+						pricePill.Visible = not owned
+					end
+				else
+					priceLabel.Text = if owned then OWNED_PRICE_TEXT else bundle.PriceText
+				end
+			end
+			if stockLabel then
+				stockLabel.Text = if sold == nil
+					then ""
+					elseif saleOpen then string.format(STOCK_TEXT_FORMAT, bundle.SellableUnits - (sold :: number))
+					else SOLD_OUT_TEXT
+			end
+
+			local buyable = saleOpen and not owned
+			button.Active = buyable
+			button.Selectable = buyable
+		end
+
+		button.AutoButtonColor = false
+		refresh()
+		table.insert(refreshBundleSlots, refresh)
+		janitor:Add(
+			ReplicatedStorage:GetAttributeChangedSignal(LimitedBundles.soldAttributeName(bundle)):Connect(refresh),
+			"Disconnect"
+		)
+
+		-- Se regala aunque ya lo tenga: el servidor rechaza si el receptor no puede recibirlo.
+		bindGiftButton(slot:FindFirstChild(GIFT_BUTTON_NAME), bundle.ProductId)
+
+		InteractiveScaleTween.bindButton(button, janitor, {
+			enableHover = canUseHoverAnimations,
+			hoverScale = SLOT_HOVER_SCALE,
+			clickScale = UITheme.ButtonClickScale,
+		})
+
+		janitor:Add(button.Activated:Connect(function()
+			if not button.Active then
+				return
+			end
+			Network.Store.BuyBundle.Send({ bundleName = bundle.Name })
+		end), "Disconnect")
+	end
+
+	local bundlesRow = resolveRow(BUNDLES_ROW_NAME)
+	if bundlesRow then
+		local bundleItems: { GuiObject } = {}
+		table.insert(revealRows, bundleItems)
+
+		for _, bundle in StoreProducts.Bundles.InOrder do
+			local slot, button = resolveSlot(bundlesRow, BUNDLES_ROW_NAME, bundle.ButtonName, bundle.Name)
+			if not (slot and button) then
+				continue
+			end
+			table.insert(bundleItems, slot)
+			bindBundleSlot(slot, button, bundle)
+		end
+	elseif #StoreProducts.Bundles.InOrder > 0 then
+		warn(`[StoreFeature] Fila {BUNDLES_ROW_NAME} no encontrada; bundles no cableados.`)
+	end
+
+	janitor:Add(Network.Store.BundleRejected.Listen(function(data: any)
+		Notify.warning(data.message)
+	end), true)
 
 	-- Una sola conexión para toda la fila: la compra se confirma con la tienda
 	-- delante, así que el botón tiene que pasar a "comprado" sin reabrir el panel.
@@ -404,11 +542,16 @@ function StoreFeature.start(menuController: any): any
 				setGifted(type(giftedPasses) == "table" and giftedPasses[passName] ~= nil)
 			end
 		end), true)
+
+		janitor:Add(fusionScope:Observer(DataController.Inventory):onBind(function()
+			for _, refresh in refreshBundleSlots do
+				refresh()
+			end
+		end), true)
 	end)
 
-	-- StaggerReveal comparte el nodo "InteractiveScale" con InteractiveScaleTween
-	-- (Roblox solo aplica una UIScale por instancia), así que la cascada y el
-	-- hover/click de los botones no se pelean por él.
+	-- La cascada escala el slot y el hover/click su MainButton: son UIScales de instancias
+	-- distintas, así que se componen en vez de pelearse.
 	local reveal = StaggerReveal.new({
 		staggerDelay = ROW_REVEAL_STAGGER,
 		tweenInfo = ROW_REVEAL_TWEEN,

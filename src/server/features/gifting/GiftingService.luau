@@ -1,8 +1,9 @@
 --!strict
 --[[
-	Envío, entrega y claim de regalos comprados con Robux: packs de cash y gamepasses
-	(estos vía su developer product `GiftProductId`; el claim escribe GiftedPasses en
-	vez de conceder cash, y GamePassService lo cuenta como pass poseído).
+	Envío, entrega y claim de regalos comprados con Robux: packs de cash, gamepasses
+	(vía su developer product `GiftProductId`; el claim escribe GiftedPasses en vez de
+	conceder cash, y GamePassService lo cuenta como pass poseído) y bundles limitados
+	(el número de serie se reserva al procesar el receipt y viaja en el regalo).
 
 	Envío (SendGift):
 	  1. Valida producto (StoreProducts), receptor ≠ uno mismo y que el receptor
@@ -50,9 +51,11 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Network = require(Shared.networking.Network)
 local NetGuards = require(Shared.networking.NetGuards)
 local StoreProducts = require(Shared.constants.StoreProducts)
+local LimitedBundles = require(Shared.data.LimitedBundles)
 
 local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
 local GamePassService = require(script.Parent.Parent.Parent.core.GamePassService)
+local LimitedBundleService = require(script.Parent.Parent.store.LimitedBundleService)
 local TelemetryService = require(script.Parent.Parent.Parent.core.TelemetryService)
 local RateLimiter = require(script.Parent.Parent.Parent.utils.RateLimiter)
 type DataService = DataServiceMod.DataServiceModule
@@ -88,6 +91,7 @@ type Giftable = {
 	Sku: string,
 	CashAmount: number,
 	Pass: StoreProducts.GamePassDefinition?,
+	Bundle: StoreProducts.BundleDefinition?,
 }
 
 local GIFTABLE_BY_PRODUCT_ID: { [number]: Giftable } = {}
@@ -106,6 +110,17 @@ for productId, pass in StoreProducts.GamePasses.ByGiftProductId do
 		Sku = `{pass.Name}Gift`,
 		CashAmount = 0,
 		Pass = pass,
+	}
+end
+-- Mismo developer product que la compra propia: sin intención de regalo, el receipt
+-- sigue a LimitedBundleService.
+for productId, bundle in StoreProducts.Bundles.ByProductId do
+	GIFTABLE_BY_PRODUCT_ID[productId] = {
+		ProductId = productId,
+		RobuxPrice = bundle.RobuxPrice,
+		Sku = bundle.Name,
+		CashAmount = 0,
+		Bundle = bundle,
 	}
 end
 
@@ -134,7 +149,8 @@ local function _respondClaim(
 	giftId: string,
 	message: string,
 	cashAmount: number,
-	passName: string?
+	passName: string?,
+	bundleName: string?
 ): ()
 	Network.Gifting.ClaimResponse.SendTo({
 		success = success,
@@ -142,6 +158,7 @@ local function _respondClaim(
 		message = message,
 		cashAmount = cashAmount,
 		passName = passName or "",
+		bundleName = bundleName or "",
 	}, player)
 end
 
@@ -168,6 +185,8 @@ local function _giftMessagePayload(giftId: string, gift: any): any
 		SenderName = gift.SenderName,
 		CashAmount = gift.CashAmount,
 		PassName = gift.PassName,
+		BundleName = gift.BundleName,
+		Serial = gift.Serial,
 		ProductId = gift.ProductId,
 		SentAt = gift.SentAt,
 	}
@@ -282,6 +301,23 @@ local function _passGiftRejection(receiverUserId: number, pass: StoreProducts.Ga
 	return nil
 end
 
+--[[
+	Como `_passGiftRejection` para un bundle: el receptor en este server, porque cobrar
+	un bundle que ya tiene no tiene arreglo y su perfil solo se conoce aquí.
+]]
+local function _bundleGiftRejection(receiverUserId: number, bundle: StoreProducts.BundleDefinition): string?
+	local saleRejection = LimitedBundleService.SaleRejection(bundle)
+	if saleRejection then
+		return saleRejection
+	end
+	local receiver = Players:GetPlayerByUserId(receiverUserId)
+	local profile = receiver and _dataService:GetProfile(receiver)
+	if not receiver or not profile then
+		return "That player must be in this server to receive a bundle."
+	end
+	return LimitedBundleService.OwnershipRejection(profile.Data, bundle, false)
+end
+
 -- Corre en thread propio (yielda: view offline).
 function GiftingService:_handleSendGift(player: Player, data: Network.SendGiftPayload): ()
 	local seq = (_sendSeqByUserId[player.UserId] or 0) + 1
@@ -316,6 +352,13 @@ function GiftingService:_handleSendGift(player: Player, data: Network.SendGiftPa
 
 	if product.Pass then
 		local rejection = _passGiftRejection(receiverUserId, product.Pass)
+		if rejection then
+			_respondSend(player, false, rejection)
+			return
+		end
+	end
+	if product.Bundle then
+		local rejection = _bundleGiftRejection(receiverUserId, product.Bundle)
 		if rejection then
 			_respondSend(player, false, rejection)
 			return
@@ -447,8 +490,10 @@ function GiftingService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchaseDe
 	local deliveries = (profile.Data :: any).GiftDeliveries
 	local prior = if type(deliveries) == "table" then deliveries[purchaseId] else nil
 	local receiverUserId: number
+	local serial: number? = nil
 	if type(prior) == "table" and (tonumber(prior.ReceiverUserId) or 0) > 0 then
 		receiverUserId = math.floor(tonumber(prior.ReceiverUserId) :: number)
+		serial = tonumber(prior.Serial)
 	else
 		local intent = (profile.Data :: any).GiftIntent
 		local hasIntent = type(intent) == "table" and (tonumber(intent.ReceiverUserId) or 0) > 0
@@ -467,11 +512,19 @@ function GiftingService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchaseDe
 			return if product.Pass then self:_grantPassToBuyer(buyer, product, purchaseId) else nil
 		end
 		receiverUserId = math.floor(tonumber(intent.ReceiverUserId) :: number)
+		-- Antes de la marca, para que viaje en ella: el reintento entrega el mismo número.
+		if product.Bundle then
+			serial = LimitedBundleService.ReserveSerial(product.Bundle, purchaseId)
+			if not serial then
+				return Enum.ProductPurchaseDecision.NotProcessedYet
+			end
+		end
 		if not _dataService:BatchUpdate(buyer, {
 			{ path = { "GiftDeliveries", purchaseId }, value = {
 				ReceiverUserId = receiverUserId,
 				ProductId = product.ProductId,
 				At = os.time(),
+				Serial = serial,
 			} },
 		}) then
 			return Enum.ProductPurchaseDecision.NotProcessedYet
@@ -493,6 +546,8 @@ function GiftingService:ProcessReceipt(receiptInfo: any): Enum.ProductPurchaseDe
 		SenderName = buyer.Name,
 		CashAmount = product.CashAmount,
 		PassName = if product.Pass then product.Pass.Name else nil,
+		BundleName = if product.Bundle then product.Bundle.Name else nil,
+		Serial = serial,
 		ProductId = product.ProductId,
 		SentAt = os.time(),
 	}
@@ -579,7 +634,13 @@ function GiftingService:_ingestGiftMessage(player: Player, message: any, process
 		warn(("[GiftingService] Regalo %s de un pass fuera del catálogo (%s): descartado."):format(giftId, passName))
 		passName = nil
 	end
-	if giftId == "" or #giftId > M.GiftId or (cashAmount <= 0 and not passName) then
+	local bundleName: string? = if type(message.BundleName) == "string" then message.BundleName else nil
+	local serial = math.floor(tonumber(message.Serial) or 0)
+	if bundleName and (not StoreProducts.Bundles.ByName[bundleName] or serial <= 0) then
+		warn(("[GiftingService] Regalo %s de un bundle desconocido o sin número (%s): descartado."):format(giftId, bundleName))
+		bundleName = nil
+	end
+	if giftId == "" or #giftId > M.GiftId or (cashAmount <= 0 and not passName and not bundleName) then
 		processed() -- malformado: descartar para no crecer la cola
 		return
 	end
@@ -589,6 +650,8 @@ function GiftingService:_ingestGiftMessage(player: Player, message: any, process
 		SenderName = tostring(message.SenderName or "???"),
 		CashAmount = cashAmount,
 		PassName = passName,
+		BundleName = bundleName,
+		Serial = if bundleName then serial else nil,
 		ProductId = math.floor(tonumber(message.ProductId) or 0),
 		SentAt = math.floor(tonumber(message.SentAt) or os.time()),
 	}
@@ -620,6 +683,8 @@ function GiftingService:_handleClaimGift(player: Player, giftId: string): ()
 
 	local amount = math.max(0, math.floor(tonumber(gift.CashAmount) or 0))
 	local pass = if type(gift.PassName) == "string" then StoreProducts.GamePasses.ByName[gift.PassName] else nil
+	local bundle = if type(gift.BundleName) == "string" then StoreProducts.Bundles.ByName[gift.BundleName] else nil
+	local serial = math.floor(tonumber(gift.Serial) or 0)
 
 	-- Borrar ANTES de conceder: si algo falla a medias preferimos restaurar el
 	-- regalo (abajo) a arriesgar un doble-grant.
@@ -642,6 +707,14 @@ function GiftingService:_handleClaimGift(player: Player, giftId: string): ()
 				value = { SenderUserId = math.floor(tonumber(gift.SenderUserId) or 0), At = os.time() },
 			})
 		end
+	elseif bundle then
+		-- Si ya lo tiene (lo compró con el regalo en camino) conserva su número: el regalo
+		-- solo se apunta como reclamado.
+		if serial > 0 and not LimitedBundles.ownsBundle(profile.Data, bundle) then
+			for _, entry in LimitedBundleService.GrantUpdates(bundle, serial, "Gift") do
+				table.insert(updates, entry)
+			end
+		end
 	else
 		table.insert(updates, { path = { "Stats", "Cash" }, delta = amount })
 		table.insert(updates, { path = { "Stats", "TotalCashEarned" }, delta = amount })
@@ -661,6 +734,10 @@ function GiftingService:_handleClaimGift(player: Player, giftId: string): ()
 	if pass then
 		GamePassService.NotifyGifted(player, pass.PassId)
 		_respondClaim(player, true, giftId, "", 0, pass.Name)
+		return
+	end
+	if bundle then
+		_respondClaim(player, true, giftId, "", 0, nil, bundle.Name)
 		return
 	end
 

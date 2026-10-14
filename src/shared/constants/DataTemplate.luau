@@ -73,6 +73,8 @@ export type Inventory = {
 export type InventoryItemMeta = {
 	AcquiredAt: number,
 	Source: string,
+	-- Wraps de un bundle limitado: número de la unidad (LimitedBundleService).
+	Serial: number?,
 }
 export type InventoryMeta = { [string]: { [string]: InventoryItemMeta } }
 
@@ -166,6 +168,9 @@ export type PendingGift = {
 	CashAmount: number,
 	-- Regalo de gamepass (`GamePassDefinition.Name`); CashAmount va a 0.
 	PassName: string?,
+	-- Regalo de bundle limitado (`BundleDefinition.Name`) con su número ya asignado.
+	BundleName: string?,
+	Serial: number?,
 	ProductId: number,
 	SentAt: number,
 }
@@ -199,6 +204,8 @@ export type GiftDelivery = {
 	ReceiverUserId: number,
 	ProductId: number,
 	At: number,
+	-- Bundle limitado: el número reservado, para que el reintento entregue el mismo.
+	Serial: number?,
 }
 export type GiftDeliveries = { [string]: GiftDelivery }
 

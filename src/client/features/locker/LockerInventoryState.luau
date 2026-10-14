@@ -16,6 +16,7 @@ local LockerCategory = require(Shared.constants.LockerCategory)
 local WeaponCategoryMod = require(Shared.constants.WeaponCategory)
 local ItemDefaults = require(Shared.constants.ItemDefaults)
 local LoadoutWraps = require(Shared.data.LoadoutWraps)
+local LimitedBundles = require(Shared.data.LimitedBundles)
 local LockerCatalog = require(script.Parent.LockerCatalog)
 
 type WeaponCategory = WeaponCategoryMod.WeaponCategory
@@ -55,6 +56,7 @@ export type LockerInventoryState = {
 	getWrapsTargetWeaponId: (self: LockerInventoryState, loadout: LoadoutData?) -> string,
 	getWrapRequestContext: (self: LockerInventoryState, category: string) -> (string, string),
 	getWeaponStat: (self: LockerInventoryState, weaponCategory: WeaponCategory, weaponId: string, stat: string) -> number,
+	getWrapSerial: (self: LockerInventoryState, wrapId: string) -> number?,
 	isItemOwned: (self: LockerInventoryState, item: LockerCatalogItem) -> boolean,
 	isItemEquipped: (self: LockerInventoryState, item: LockerCatalogItem) -> boolean,
 }
@@ -260,6 +262,11 @@ function LockerInventoryState.getWeaponStat(_self: Internal, weaponCategory: Wea
 end
 
 -- Un wrap se posee por arma: se mira sobre el arma objetivo de la vista de wraps.
+-- Número de serie de un wrap de bundle limitado; nil si no lo tiene o no es limitado.
+function LockerInventoryState.getWrapSerial(_self: Internal, wrapId: string): number?
+	return LimitedBundles.serialOf(Fusion.peek(DataController.InventoryMeta), wrapId)
+end
+
 function LockerInventoryState.isItemOwned(self: Internal, item: LockerCatalogItem): boolean
 	if item.Category == LockerCategory.WEAPON_WRAPS then
 		return self:ownsWrap(self._wrapsTargetCategory, self:getWrapsTargetWeaponId(self:getLoadout()), item.id)

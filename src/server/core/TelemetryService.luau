@@ -31,7 +31,7 @@ type DataService = DataServiceMod.DataServiceModule
 export type FlowDirection = "source" | "sink"
 -- Dimensión, no etiqueta: mezclar Gems con Cash invalida el ratio Faucet/Sink.
 export type Currency = "Cash" | "Gems"
-export type PurchaseKind = "CashPack" | "GemPack" | "BattlePassPremium" | "SkipTier" | "Gift" | "GamePass"
+export type PurchaseKind = "CashPack" | "GemPack" | "BattlePassPremium" | "SkipTier" | "Gift" | "GamePass" | "Bundle"
 
 export type PurchasePayload = {
 	userId: number,

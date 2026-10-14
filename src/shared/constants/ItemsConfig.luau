@@ -327,6 +327,30 @@ Special = {
 			Material = Enum.Material.SmoothPlastic,
 			MasteryScope = "All",
 		},
+		-- Del bundle limitado Founders (StoreProducts.Bundles): solo se consiguen con él y
+		-- llevan número de serie. Nombre y color PROVISIONALES.
+		Wrap_Founders_Groza = {
+			Name = "Founders",
+			Price = 0,
+			LevelRequired = 0,
+			Rarity = "Mythic",
+			CanPurchase = false,
+			BaseColor = Color3.fromRGB(212, 175, 55),
+			Material = Enum.Material.Foil,
+			isAnimated = false,
+			StudsPerTile = 3,
+		},
+		Wrap_Founders_UZI = {
+			Name = "Founders",
+			Price = 0,
+			LevelRequired = 0,
+			Rarity = "Mythic",
+			CanPurchase = false,
+			BaseColor = Color3.fromRGB(212, 175, 55),
+			Material = Enum.Material.Foil,
+			isAnimated = false,
+			StudsPerTile = 3,
+		},
 	},
 
 	KillEffects = {

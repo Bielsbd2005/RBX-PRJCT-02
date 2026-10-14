@@ -88,6 +88,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	local DailyTasksService = require(serverRoot.features.dailyTasks.DailyTasksService)
 	local BattlePassService = require(serverRoot.features.battlepass.BattlePassService)
 	local GiftingService = require(serverRoot.features.gifting.GiftingService)
+	local LimitedBundleService = require(serverRoot.features.store.LimitedBundleService)
 	local EmoteAssetService = require(serverRoot.features.locker.EmoteAssetService)
 	local ClearDataCommandService = require(serverRoot.features.testing.ClearDataCommandService)
 
@@ -137,6 +138,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	RewardsService:Start(DataService)
 	VIPItemsService:Start(DataService)
 	BattlePassService:Start(DataService)
+	LimitedBundleService.Start(DataService)
 	GiftingService:Start(DataService)
 	DailyTasksService:Start(DataService)
 
@@ -230,7 +232,7 @@ function ServerBootstrap.start(serverRoot: Script): ()
 		end
 	end
 
-	-- Dispatcher central de ProcessReceipt: BattlePass, luego regalos y por último packs.
+	-- Dispatcher central de ProcessReceipt: BattlePass, regalos, packs y bundles.
 	-- Vive aquí (cross-cutting) para no acoplarlo a una sola feature.
 	MarketplaceService.ProcessReceipt = function(receiptInfo: any): Enum.ProductPurchaseDecision
 		-- Aquí y no en cada handler: sin perfil, Gifting devuelve nil y el regalo caería
@@ -256,6 +258,11 @@ function ServerBootstrap.start(serverRoot: Script): ()
 		local packDecision = grantPackPurchase(receiptInfo)
 		if packDecision ~= nil then
 			return packDecision
+		end
+
+		local bundleDecision = LimitedBundleService.ProcessReceipt(receiptInfo)
+		if bundleDecision ~= nil then
+			return bundleDecision
 		end
 
 		warn("[ServerBootstrap] Unknown ProductId:", receiptInfo.ProductId)

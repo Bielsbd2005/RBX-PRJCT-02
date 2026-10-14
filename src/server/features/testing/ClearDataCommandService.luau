@@ -7,6 +7,7 @@ local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService
 type DataService = DataServiceMod.DataServiceModule
 
 local TelemetryService = require(script.Parent.Parent.Parent.core.TelemetryService)
+local LimitedBundleService = require(script.Parent.Parent.store.LimitedBundleService)
 local ItemsConfig = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared").constants.ItemsConfig)
 
 local ClearDataCommandService = {}
@@ -16,6 +17,8 @@ local _dataService: DataService = nil :: any
 local _started = false
 
 local ENABLE_CLEAR_COMMAND = RunService:IsStudio()
+-- Deja el juego como recién lanzado: el perfil de quien lo escribe y los contadores
+-- globales (bundles limitados). Los perfiles de otros jugadores no se tocan.
 local COMMAND = "/resetdata"
 -- Concede todos los banners de ItemsConfig.
 local GRANT_BANNERS_COMMAND = "/banners"
@@ -83,9 +86,10 @@ local function _onPlayerChatted(player: Player, message: string): ()
 	-- registra TelemetryService al siguiente login (el reset pone JoinCount a cero).
 	_recordReset(player)
 
+	local countersReset = LimitedBundleService.ResetForTesting()
 	local success = _dataService:ResetProfile(player)
-	if not success then
-		player:Kick("No se pudieron borrar tus datos. Vuelve a intentar.")
+	if not success or not countersReset then
+		player:Kick("No se pudieron borrar todos los datos (mira el Output). Vuelve a intentar.")
 		return
 	end
 

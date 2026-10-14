@@ -10,6 +10,7 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
 local ItemDefaults = require(Shared.constants.ItemDefaults)
 local WrapMastery = require(Shared.data.WrapMastery)
+local LimitedBundles = require(Shared.data.LimitedBundles)
 local LockerCatalog = require(script.Parent.LockerCatalog)
 local LockerInventoryState = require(script.Parent.LockerInventoryState)
 
@@ -76,6 +77,11 @@ function LockerWrapsView.build(
 				end
 			elseif isChallenge and isOwned then
 				wrapItem.ChallengeUnlocked = true
+			end
+			-- Reutiliza el badge de temporada: un wrap limitado nunca es de un pase.
+			local serial = if isOwned then inventory:getWrapSerial(item.id) else nil
+			if serial then
+				wrapItem.SeasonLabel = string.format(LimitedBundles.SERIAL_FORMAT, serial)
 			end
 			table.insert(wrapItems, wrapItem)
 		end

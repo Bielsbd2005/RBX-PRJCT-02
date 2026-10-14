@@ -274,6 +274,28 @@ local BattlePassNamespace = ByteNet.DefineNamespace("BattlePass", function()
 	}
 end)
 
+-- Los bundles limitados se piden al servidor en vez de promptear desde el cliente: él
+-- comprueba stock y posesión antes, porque un developer product cobrado no se devuelve.
+local StoreNamespace = ByteNet.DefineNamespace("Store", function()
+	return {
+		-- C → S. bundleName = `BundleDefinition.Name`.
+		BuyBundle = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				bundleName = ByteNet.String,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+
+		-- S → C. Solo cuando NO se lanza el prompt.
+		BundleRejected = ByteNet.DefinePacket({
+			Value = ByteNet.Struct({
+				message = ByteNet.String,
+			}),
+			ReliabilityType = "Reliable",
+		}),
+	}
+end)
+
 -- SendGift valida y persiste GiftIntent antes del prompt; al procesarse el receipt
 -- se entrega al receptor (online: PendingGifts; offline u otro server: MessageAsync).
 -- La recepción no tiene packet: el cliente observa PendingGifts replicado.
@@ -313,7 +335,7 @@ local GiftingNamespace = ByteNet.DefineNamespace("Gifting", function()
 			ReliabilityType = "Reliable",
 		}),
 
-		-- S → C. passName = `GamePassDefinition.Name` del pass reclamado; "" si era cash.
+		-- S → C. passName / bundleName = Name del pass o bundle reclamado; "" si no lo era.
 		ClaimResponse = ByteNet.DefinePacket({
 			Value = ByteNet.Struct({
 				success    = ByteNet.Bool,
@@ -321,6 +343,7 @@ local GiftingNamespace = ByteNet.DefineNamespace("Gifting", function()
 				message    = ByteNet.String,
 				cashAmount = ByteNet.Int32,
 				passName   = ByteNet.String,
+				bundleName = ByteNet.String,
 			}),
 			ReliabilityType = "Reliable",
 		}),
@@ -385,6 +408,7 @@ export type RequestPickupPayload = { kind: string }
 export type ClaimTierPayload = { tier: number }
 export type SendGiftPayload = { receiverUserId: string, productId: number }
 export type ClaimGiftPayload = { giftId: string }
+export type BuyBundlePayload = { bundleName: string }
 export type WeaponFiredPayload = { weapon: Instance?, id: number, origin: Vector3, dir: Vector3, charge: number }
 export type WeaponHitPayload = {
 	weapon: Instance?,
@@ -404,6 +428,7 @@ return {
 	Rewards     = RewardsNamespace,
 	Match       = MatchNamespace,
 	BattlePass  = BattlePassNamespace,
+	Store       = StoreNamespace,
 	Gifting     = GiftingNamespace,
 	Weapons     = WeaponsNamespace,
 }

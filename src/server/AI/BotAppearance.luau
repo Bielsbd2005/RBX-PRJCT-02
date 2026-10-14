@@ -18,6 +18,7 @@ local ServerStorage = game:GetService("ServerStorage")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ItemsConfig = require(Shared.constants.ItemsConfig)
 local ItemDefaults = require(Shared.constants.ItemDefaults)
+local StoreProducts = require(Shared.constants.StoreProducts)
 local CosmeticsTemplates = require(Shared.Locker.CosmeticsTemplates)
 local BotPersonality = require(script.Parent:WaitForChild("BotPersonality"))
 
@@ -74,7 +75,10 @@ local function _buildWrapPool(): { string }
 		return pool
 	end
 	for wrapId in wrapsConfig do
-		table.insert(pool, wrapId)
+		-- Los de un bundle limitado son de quien los compró.
+		if not StoreProducts.Bundles.ByWrapId[wrapId] then
+			table.insert(pool, wrapId)
+		end
 	end
 	return pool
 end

@@ -26,7 +26,8 @@ export type LockerCatalogItem = {
 	-- Temporada del pase que lo regaló (proyección `Season` de ItemsConfig, la escribe
 	-- el dashboard). Sin ella el ítem viene de la tienda y no lleva badge.
 	Season: string?,
-	-- Texto del badge de la card: "S1", "S2"… derivado de la season, o "VIP".
+	-- Texto del badge de la card: "S1", "S2"… derivado de la season, "VIP", o el número
+	-- de un wrap limitado ("#127", lo pone LockerWrapsView).
 	SeasonLabel: string?,
 	TextureID: string?,
 	BaseColor: Color3?,
