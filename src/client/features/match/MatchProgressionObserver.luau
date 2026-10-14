@@ -1,7 +1,7 @@
 --!strict
 --[[
 	Observers de DataController que disparan las animaciones in-match de level up,
-	tier-up del BattlePass, maestría de armas y desafíos diarios.
+	maestría de armas y desafíos diarios.
 	Todos siembran el estado inicial sin notificar.
 ]]
 
@@ -130,23 +130,6 @@ function MatchProgressionObserver.attach(deps: AttachDeps)
 		local statsObserver = fusionScope:Observer(DataController.Stats)
 		janitor:Add(statsObserver:onBind(updateCashAndLevel), true)
 		updateCashAndLevel()
-
-		-- CurrentTier es el tier hacia el que se progresa; el jugador ve el último
-		-- completado (currentTier - 1). Varios tiers de golpe → un solo toast.
-		local lastSeenBPTier: number? = nil
-		local function checkBattlePassLevelUp()
-			local bp = Fusion.peek(DataController.BattlePass) :: any
-			if type(bp) ~= "table" then return end
-			local currentTier = if type(bp.CurrentTier) == "number" then math.max(1, math.floor(bp.CurrentTier)) else 1
-			if lastSeenBPTier ~= nil and currentTier > lastSeenBPTier and matchHudGui and matchHudGui.Enabled then
-				local displayLevel = math.max(0, currentTier - 1)
-				hud:playBattlePassLevelUpAnimation(displayLevel)
-			end
-			lastSeenBPTier = currentTier
-		end
-		local bpObserver = fusionScope:Observer(DataController.BattlePass)
-		janitor:Add(bpObserver:onBind(checkBattlePassLevelUp), true)
-		checkBattlePassLevelUp()
 
 		local previousByWeapon: { [string]: { [string]: { [string]: boolean } } } = {}
 		local wrapsSeeded = false

@@ -2,7 +2,7 @@
 --[[
 	En shared porque cliente (Locker: icono, saldo, pack a ofrecer) y servidor
 	(ShopService cobra de este stat) deben coincidir.
-	Gems solo se obtiene con Battle Pass o Robux: un ítem con Currency = "Gems"
+	Gems solo se obtiene con Robux: un ítem con Currency = "Gems"
 	es contenido de pago. ItemsConfig.Price va siempre en su Currency, sin conversión.
 ]]
 

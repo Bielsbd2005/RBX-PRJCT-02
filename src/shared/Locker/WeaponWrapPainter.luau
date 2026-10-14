@@ -230,8 +230,7 @@ local function applySurface(part: BasePart, template: SurfaceAppearance?, hideOr
 	end
 end
 
--- studsPerTileScale: para modelos escalados (el pase escala el arma de su escena),
--- o saldrían más tiles que en la card.
+-- studsPerTileScale: para modelos escalados, o saldrían más tiles que en la card.
 function WeaponWrapPainter.paintParts(parts: { BasePart }, definition: WrapDefinition?, studsPerTileScale: number?)
 	local textureId = if definition then optionalString(definition.TextureID) else nil
 	local baseColor = if definition and typeof(definition.BaseColor) == "Color3" then definition.BaseColor else nil

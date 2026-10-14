@@ -1,7 +1,7 @@
 # Kill effects
 
 Lo que le pasa al cadáver de quien muere, según el kill effect equipado por quien lo mata
-(o el que se previsualiza en el Locker y el pase).
+(o el que se previsualiza en el Locker).
 
 ## Piezas
 
@@ -14,7 +14,7 @@ Lo que le pasa al cadáver de quien muere, según el kill effect equipado por qu
 | Runner de cliente | `client/core/visuals/KillEffectVisuals.luau` | Mapa id → handler; arranca la parte de cliente de cada cadáver. |
 
 `apply` corre en el **servidor** en partida (MatchService, AIService) y en el **cliente**
-en los previews (Locker, pase). Por eso la parte de cliente no distingue: en los previews
+en el preview del Locker. Por eso la parte de cliente no distingue: en los previews
 el registry corre en local y el tag es local.
 
 ## Contrato servidor → cliente

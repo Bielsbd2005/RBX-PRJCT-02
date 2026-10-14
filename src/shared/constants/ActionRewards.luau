@@ -21,7 +21,7 @@ ActionRewards.Amounts = {
 
 	-- Clave = "Daily" .. Key de la tarea en DailyTasks.Pool (la construye
 	-- DailyTasks.RewardKey). El cash es por tarea, no por slot, porque la rotación
-	-- es aleatoria. Sin XP a propósito: el ritmo del pase cuenta solo XP de combate.
+	-- es aleatoria. Sin XP a propósito: el nivel de cuenta sube solo con XP de combate.
 	DailyEliminations = { XP = 0, Cash = 80 },
 	DailyAssists = { XP = 0, Cash = 80 },
 	DailyHeadshots = { XP = 0, Cash = 120 },

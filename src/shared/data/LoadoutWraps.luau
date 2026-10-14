@@ -4,8 +4,8 @@
 	(LoadoutService) y el Locker para enseñar lo mismo que se verá en partida.
 
 	El equip es por arma: `MainWeaponWraps.Default` es la slot del arma con id
-	"Default", no un fallback. Un wrap global del pase da la posesión a todas las
-	armas, pero se equipa arma a arma. El check de posesión cubre un Loadout que
+	"Default", no un fallback. Un wrap global da la posesión a todas las armas,
+	pero se equipa arma a arma. El check de posesión cubre un Loadout que
 	apunte a un wrap que ya no se tiene.
 ]]
 

@@ -23,9 +23,8 @@ AssetIds.Images = table.freeze({
 	LockerStatusCash = asset(70857919112721),
 	LockerStatusGems = asset(136585960459787),
 
-	-- Icono de recompensa en Cash (Resultados y tiers del pase) y en Gems (tiers del pase).
+	-- Icono de recompensa en Cash (Resultados).
 	CashReward = asset(113694528712529),
-	GemsReward = asset(130738983561553),
 
 	-- HUD de partida.
 	Skull = asset(130437553674754),
@@ -51,8 +50,6 @@ AssetIds.Animations = table.freeze({
 	CharacterJump = asset(507765000),
 	BotToolHold = asset(72875354504675),
 
-	-- Idle del maniquí de preview del pase de batalla.
-	PreviewIdle = asset(115197033304718),
 	-- Idle del asesino en el viewport de la pantalla de muerte.
 	KillerViewportIdle = asset(126774009783214),
 })

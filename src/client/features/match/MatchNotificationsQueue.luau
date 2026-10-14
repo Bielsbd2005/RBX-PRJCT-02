@@ -77,7 +77,6 @@ local CONFETTI_LIFETIME_MIN = 1.4
 local CONFETTI_LIFETIME_MAX = 2.2
 
 local LEVEL_UP_TITLE = "LEVEL UP!"
-local BATTLEPASS_LEVEL_UP_TITLE = "FAME PASS!"
 
 local LEVEL_UP_CONFETTI_COLORS = {
 	Color3.fromRGB(30, 110, 255),
@@ -85,14 +84,6 @@ local LEVEL_UP_CONFETTI_COLORS = {
 	Color3.fromRGB(60, 150, 255),
 	Color3.fromRGB(15, 60, 190),
 	Color3.fromRGB(90, 175, 255),
-}
-
-local BATTLEPASS_LEVEL_UP_CONFETTI_COLORS = {
-	Color3.fromRGB(60, 200, 100),
-	Color3.fromRGB(40, 220, 80),
-	Color3.fromRGB(100, 230, 130),
-	Color3.fromRGB(20, 160, 60),
-	Color3.fromRGB(140, 240, 160),
 }
 
 local MASTERY_CONFETTI_COLORS = {
@@ -501,16 +492,6 @@ end
 
 function MatchNotificationsQueue:playLevelUpAnimation(newLevel: number)
 	self:_playLevelUpFrame(newLevel, LEVEL_UP_TITLE, LEVEL_UP_CONFETTI_COLORS, GameSounds.LevelUp)
-end
-
-function MatchNotificationsQueue:playBattlePassLevelUpAnimation(newLevel: number)
-	-- El pase se llama FamePass en la UI.
-	self:_playLevelUpFrame(
-		newLevel,
-		BATTLEPASS_LEVEL_UP_TITLE,
-		BATTLEPASS_LEVEL_UP_CONFETTI_COLORS,
-		GameSounds.FamePassUp
-	)
 end
 
 -- Con timeout: si el asset cambia de forma, se salta la notificación en vez de colgar la cola.

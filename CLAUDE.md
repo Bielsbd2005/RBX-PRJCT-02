@@ -39,9 +39,9 @@ Breves: 1-3 líneas. Al tocar un comentario existente que incumple esto, recórt
 
 ## Fuentes externas
 
-- `shared/constants/BattlePassSeasons.luau` lo genera el dashboard de Telemetry
-  (otro repo): no editar a mano.
-- Los docs de diseño de la economía viven en ese repo, no aquí.
+- Los docs de diseño de la economía viven en el repo del dashboard de Telemetry,
+  no aquí.
+- El Battle Pass se retiró del juego: para recuperarlo, `docs/BATTLE-PASS-RECOVERY.md`.
 
 ## Red y confianza
 

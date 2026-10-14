@@ -5,7 +5,7 @@
 	  • Ítems `isVIPExclusive` de ItemsConfig, al Inventory como cualquier otro ítem.
 	    Si Roblox confirma que ya no lo posee (refund) se retiran y se desequipan, pero
 	    solo los concedidos por aquí (InventoryMeta.Source = "VIP"): si el ítem llegó
-	    por otra vía (p. ej. un reward del pase) se respeta.
+	    por otra vía (p. ej. un regalo) se respeta.
 	  • Gems de bienvenida (`WelcomeGems` del pass), una sola vez por perfil
 	    (Rewards.VIPWelcomeClaimed). Un refund no las retira: pueden estar gastadas.
 	  • Atributo `VipTag.ATTRIBUTE` en el Player, que los clientes leen para el tag.

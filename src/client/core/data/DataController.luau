@@ -55,7 +55,6 @@ DataController.Settings      = nil :: any
 DataController.Rewards       = nil :: any
 DataController.LoginStreak   = nil :: any
 DataController.DailyTasks    = nil :: any
-DataController.BattlePass    = nil :: any
 DataController.Metadata      = nil :: any
 DataController.PendingGifts  = nil :: any
 DataController.GiftedPasses  = nil :: any
@@ -127,7 +126,6 @@ function DataController:Start(): ()
 	DataController.Rewards       = _scope:Value(_deepCopy(DataTemplate.Rewards))
 	DataController.LoginStreak   = _scope:Value(_deepCopy(DataTemplate.LoginStreak))
 	DataController.DailyTasks    = _scope:Value(_deepCopy(DataTemplate.DailyTasks))
-	DataController.BattlePass    = _scope:Value(_deepCopy(DataTemplate.BattlePass))
 	DataController.Metadata      = _scope:Value(_deepCopy(DataTemplate.Metadata))
 	DataController.PendingGifts  = _scope:Value(_deepCopy(DataTemplate.PendingGifts))
 	DataController.GiftedPasses  = _scope:Value(_deepCopy(DataTemplate.GiftedPasses))
@@ -159,7 +157,6 @@ function DataController:Start(): ()
 		DataController.Rewards:set(replica.Data.Rewards)
 		DataController.LoginStreak:set(replica.Data.LoginStreak)
 		DataController.DailyTasks:set(replica.Data.DailyTasks)
-		DataController.BattlePass:set(replica.Data.BattlePass)
 		DataController.Metadata:set(replica.Data.Metadata)
 		DataController.PendingGifts:set(replica.Data.PendingGifts)
 		DataController.GiftedPasses:set(replica.Data.GiftedPasses)
@@ -224,12 +221,6 @@ function DataController:Start(): ()
 		replica:AddCleanupTask(
 			replica:ListenToChange({ "DailyTasks" }, function(newDailyTasks: any)
 				DataController.DailyTasks:set(newDailyTasks)
-			end)
-		)
-
-		replica:AddCleanupTask(
-			replica:ListenToChange({ "BattlePass" }, function(newBattlePass: any)
-				DataController.BattlePass:set(newBattlePass)
 			end)
 		)
 

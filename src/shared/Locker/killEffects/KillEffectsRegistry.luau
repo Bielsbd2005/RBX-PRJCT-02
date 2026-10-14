@@ -23,7 +23,7 @@ local ElectrocutionKillEffect = require(script.Parent.Electrocution)
 -- y la arranca KillEffectVisuals con el tag y los atributos de abajo.
 type KillEffectModule = {
 	apply: (target: Model) -> boolean,
-	-- s que el preview (Locker, pase) mantiene el cadáver en escena. Sin él, DEFAULT_PREVIEW_TIME.
+	-- s que el preview del Locker mantiene el cadáver en escena. Sin él, DEFAULT_PREVIEW_TIME.
 	previewTime: number?,
 }
 

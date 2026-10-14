@@ -2,7 +2,7 @@
 --[[
 	Todo lo que paga una kill y quién se la lleva: atribución, cash/XP de cuenta con los
 	caps de la ronda, Stats lifetime, contadores por arma y wraps de maestría, multikills,
-	dailies, XP del pase y créditos de health pickup. También las asistencias
+	dailies y créditos de health pickup. También las asistencias
 	(GrantCombatReward) y la muerte del jugador (RegisterPlayerDeath).
 
 	MatchService es dueño de la ronda y de las sesiones: este servicio las lee por los
@@ -19,10 +19,8 @@ local ItemsConfig = require(Shared.constants.ItemsConfig)
 local WeaponCategory = require(Shared.constants.WeaponCategory)
 local InventoryRepository = require(Shared.data.InventoryRepository)
 local WrapMastery = require(Shared.data.WrapMastery)
-local BattlePassConfig = require(Shared.constants.BattlePassConfig)
 local KillAttributionService = require(script.Parent:WaitForChild("KillAttributionService"))
 local DailyTasksService = require(script.Parent.Parent.dailyTasks.DailyTasksService)
-local BattlePassService = require(script.Parent.Parent.battlepass.BattlePassService)
 local DataServiceMod = require(script.Parent.Parent.Parent.core.data.DataService)
 local RewardService = require(script.Parent.Parent.Parent.core.RewardService)
 local TelemetryService = require(script.Parent.Parent.Parent.core.TelemetryService)
@@ -43,7 +41,6 @@ export type CombatStats = {
 export type RoundLedger = {
 	cashEarnedByUserId: { [number]: number },
 	xpEarnedByUserId: { [number]: number },
-	bpXpEarnedByUserId: { [number]: number },
 	firstJoinAtByUserId: { [number]: number },
 	recentKillTimestampsByUserId: { [number]: { number } },
 	pickupCreditsByUserId: { [number]: { number } },
@@ -190,25 +187,6 @@ local function _isXPCapReached(userId: number): boolean
 	local round = _deps.getRound()
 	local earned = if round then round.xpEarnedByUserId[userId] or 0 else 0
 	return earned >= _capAllowance(GameConfig.MatchXPCap, userId)
-end
-
---[[
-	Reserva `amount` de XP de pase en el cupo de la ronda (el mismo devengo que MatchXPCap,
-	con contador propio) y devuelve si cabía. Reservar y comprobar van juntos para que quien
-	concede el XP no pueda olvidar apuntarlo. Sin ronda activa no hay cupo.
-]]
-local function _tryConsumeBattlePassXP(player: Player, amount: number): boolean
-	local round = _deps.getRound()
-	if not round or amount <= 0 then
-		return false
-	end
-	local userId = player.UserId
-	local earned = round.bpXpEarnedByUserId[userId] or 0
-	if earned >= _capAllowance(GameConfig.MatchXPCap, userId) then
-		return false
-	end
-	round.bpXpEarnedByUserId[userId] = earned + amount
-	return true
 end
 
 local function _grantActionRewardsToAttacker(attacker: Player?, action: string, weaponId: string?)
@@ -420,7 +398,7 @@ end
 	path PvP (víctima jugador) y PvE (víctima bot):
 	  • bots atacantes: SOLO contador de HUD (sin rewards/persistencia)
 	  • humanos: todo lo que paga una kill (stats de ronda, maestría, health
-	    pickup, cash/XP, Stats lifetime, multikills, dailies y XP del pase), para
+	    pickup, cash/XP, Stats lifetime, multikills y dailies), para
 	    que una muerte cuente para todo o para nada.
 	No toca a la víctima; la atribución sale de ResolveKillAttacker.
 
@@ -483,12 +461,6 @@ function KillRewardsService:CreditKill(
 		DailyTasksService:OnKill(attacker)
 		if wasHeadshot then
 			DailyTasksService:OnHeadshot(attacker)
-		end
-	end)
-	-- El pase tiene su propio cupo por ronda, para que farmear kills no lo suba sin límite.
-	pcall(function()
-		if _tryConsumeBattlePassXP(attacker, BattlePassConfig.XPRates.PerKill) then
-			BattlePassService:OnKill(attacker)
 		end
 	end)
 

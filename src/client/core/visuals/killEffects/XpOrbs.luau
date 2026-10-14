@@ -16,7 +16,7 @@
 	                      un montón de orbes suena en cascada
 	  fin de LIFETIME     parpadea cada vez más rápido y se encoge hasta desaparecer
 
-	En el preview (Locker y pase) no hay nadie vivo cerca que los recoja, así que
+	En el preview del Locker no hay nadie vivo cerca que los recoja, así que
 	pasado PREVIEW_COLLECT_AT vuelan hacia la CÁMARA y se recogen igual: es lo que
 	enseña el efecto entero, sonido incluido.
 

@@ -12,7 +12,7 @@
 --     `ATTR.GROUND_Y`), así el servidor sabe dónde está la panza sin replicar el OVNI.
 --
 -- En `TIMING.BODY_HIDE` el cuerpo se oculta y se ancla, pero no se destruye:
--- MatchService, AIService (RagdollCleanup), el Locker y ScenePreview ya lo hacen, y lo
+-- MatchService, AIService (RagdollCleanup) y el Locker ya lo hacen, y lo
 -- que aún mire al HumanoidRootPart del muerto sigue teniéndolo.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -30,7 +30,7 @@ Abduction.ATTR = table.freeze({
 	-- toma después): el cliente debe volar el mismo AbductionFlight.
 	STARTED_AT = "AbductionStartedAt",
 	ORIGIN = "AbductionOrigin", -- CFrame del HumanoidRootPart al morir
-	SCALE = "AbductionScale", -- 1 = cuerpo normal (ScenePreview escala el maniquí)
+	SCALE = "AbductionScale", -- 1 = cuerpo normal (un maniquí escalado lo cambia)
 	SEED = "AbductionSeed", -- dirección de llegada/salida, igual para todos
 	GROUND_Y = "AbductionGroundY", -- suelo que midió el servidor: todos vuelan a la misma altura
 })
@@ -43,7 +43,7 @@ Abduction.TIMING = table.freeze({
 	LEAVE = 2, -- el OVNI se va: amago, curva hacia el cielo y encoge
 	END = 3.1, -- el OVNI ha desaparecido
 })
--- El preview (Locker, pase) enseña hasta que el OVNI se ha ido.
+-- El preview del Locker enseña hasta que el OVNI se ha ido.
 Abduction.previewTime = Abduction.TIMING.END
 -- Plantilla OPCIONAL: ReplicatedStorage.UFO o ReplicatedStorage.Templates.UFO.
 Abduction.TEMPLATE_NAME = "UFO"

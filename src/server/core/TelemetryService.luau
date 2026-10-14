@@ -31,7 +31,7 @@ type DataService = DataServiceMod.DataServiceModule
 export type FlowDirection = "source" | "sink"
 -- Dimensión, no etiqueta: mezclar Gems con Cash invalida el ratio Faucet/Sink.
 export type Currency = "Cash" | "Gems"
-export type PurchaseKind = "CashPack" | "GemPack" | "BattlePassPremium" | "SkipTier" | "Gift" | "GamePass" | "Bundle"
+export type PurchaseKind = "CashPack" | "GemPack" | "Gift" | "GamePass" | "Bundle"
 
 export type PurchasePayload = {
 	userId: number,
@@ -368,22 +368,6 @@ local function _flushOnce(urgent: boolean?)
 	_sending = false
 end
 
--- JSON convertiría el map en objeto con claves string; el backend quiere un array ordenado.
-local function _sortedNumericKeys(t: any): { number }
-	local keys: { number } = {}
-	if type(t) ~= "table" then
-		return keys
-	end
-	for key in t do
-		local n = tonumber(key)
-		if n then
-			table.insert(keys, n)
-		end
-	end
-	table.sort(keys)
-	return keys
-end
-
 local function _countKeys(t: any): number
 	if type(t) ~= "table" then
 		return 0
@@ -415,7 +399,6 @@ local function _buildSessionEnd(player: Player): any?
 	if data then
 		local stats = data.Stats
 		local meta = data.Metadata
-		local bp = data.BattlePass
 
 		payload.isNewPlayer = meta.JoinCount == 1
 		payload.joinCount = meta.JoinCount
@@ -466,18 +449,6 @@ local function _buildSessionEnd(player: Player): any?
 				special = weaponKills.Special,
 			}
 		end
-		payload.battlePass = {
-			seasonId = bp.SeasonId,
-			currentTier = bp.CurrentTier,
-			totalXPEarned = bp.TotalXPEarned,
-			premiumOwned = bp.PremiumOwned,
-			claimedCount = _countKeys(bp.Claimed),
-			-- Progreso dentro del tier actual.
-			xp = bp.XP or 0,
-			claimedTiers = _sortedNumericKeys(bp.Claimed),
-			grantedSkips = _countKeys(bp.GrantedSkips),
-		}
-
 		local streak = data.LoginStreak
 		if streak then
 			payload.loginStreak = {

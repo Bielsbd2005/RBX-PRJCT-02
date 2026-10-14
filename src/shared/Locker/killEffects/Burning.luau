@@ -10,7 +10,7 @@
 -- Tiene que ser así: `ParticleEmitter:Emit()` desde el servidor no se replica, y
 -- los tweens del Highlight y la PointLight a 20 Hz por red se verían a saltos.
 --
--- Preview (Locker y pase): allí apply corre en CLIENTE (en partida lo aplica el
+-- Preview del Locker: allí apply corre en CLIENTE (en partida lo aplica el
 -- servidor). El fuego arde PREVIEW_BURN_TIME y se marca ENDED para que el cierre se
 -- vea con el cuerpo aún en escena; `previewTime` es cuánto debe mantener el preview
 -- el cadáver (lo lee KillEffectsRegistry.previewTime).

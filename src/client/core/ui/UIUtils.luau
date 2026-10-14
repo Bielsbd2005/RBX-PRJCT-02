@@ -35,44 +35,4 @@ function UIUtils.formatProgressValue(current: number, total: number): string
 	)
 end
 
--- "Ends in 6 weeks, 2 days" (máx. 2 unidades).
-function UIUtils.formatTimeLeft(seconds: number): string
-	if seconds <= 0 then return "" end
-
-	local function unit(n: number, singular: string): string
-		return tostring(n) .. " " .. (if n == 1 then singular else singular .. "s")
-	end
-
-	local minutes = math.floor(seconds / 60)
-	local hours = math.floor(minutes / 60)
-	local days = math.floor(hours / 24)
-	local weeks = math.floor(days / 7)
-
-	if weeks >= 1 then
-		local remDays = days - weeks * 7
-		if remDays > 0 then
-			return ("Ends in %s, %s"):format(unit(weeks, "week"), unit(remDays, "day"))
-		end
-		return ("Ends in %s"):format(unit(weeks, "week"))
-	end
-	if days >= 1 then
-		local remHours = hours - days * 24
-		if remHours > 0 then
-			return ("Ends in %s, %s"):format(unit(days, "day"), unit(remHours, "hour"))
-		end
-		return ("Ends in %s"):format(unit(days, "day"))
-	end
-	if hours >= 1 then
-		local remMinutes = minutes - hours * 60
-		if remMinutes > 0 then
-			return ("Ends in %s, %s"):format(unit(hours, "hour"), unit(remMinutes, "minute"))
-		end
-		return ("Ends in %s"):format(unit(hours, "hour"))
-	end
-	if minutes >= 1 then
-		return ("Ends in %s"):format(unit(minutes, "minute"))
-	end
-	return "Ending soon"
-end
-
 return UIUtils

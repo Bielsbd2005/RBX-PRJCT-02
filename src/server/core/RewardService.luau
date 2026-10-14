@@ -247,10 +247,7 @@ end
 --[[
 	AwardGems: concede Gems (moneda premium).
 	Deliberadamente NO pasa por `ActionRewards` (lo que se gana JUGANDO): los Gems solo
-	salen del Battle Pass o de packs con Robux, y así nadie añade un faucet de Gems a una kill.
-	Únicos callers legítimos:
-	  • BattlePassService — recompensa de tier con Kind = "Gems".
-	  • ServerBootstrap.ProcessReceipt — compra de un pack de Gems con Robux.
+	salen de packs con Robux, y así nadie añade un faucet de Gems a una kill.
 
 	`sourceLabel` es el transactionType para analytics. Devuelve true si se persistió.
 ]]

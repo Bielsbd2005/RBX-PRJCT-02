@@ -666,7 +666,7 @@ function KillEffectUtils.bodyCenter(char: Model): Vector3
 	return char:GetPivot().Position
 end
 
--- 1 para un personaje normal (HRP de 2 studs de alto); ScenePreview escala el maniquí.
+-- 1 para un personaje normal (HRP de 2 studs de alto); más o menos en un maniquí escalado.
 function KillEffectUtils.bodyScale(char: Model): number
 	local root = char:FindFirstChild("HumanoidRootPart")
 	if root and root:IsA("BasePart") then
@@ -691,8 +691,8 @@ function KillEffectUtils.freezeCorpse(char: Model)
 	KillEffectUtils.makeCorpseInert(char)
 end
 
--- Oculta el cuerpo sin destruirlo: sus dueños (MatchService, AIService, Locker,
--- ScenePreview) lo destruyen, y la cámara de muerte sigue mirando su HumanoidRootPart.
+-- Oculta el cuerpo sin destruirlo: sus dueños (MatchService, AIService, Locker)
+-- lo destruyen, y la cámara de muerte sigue mirando su HumanoidRootPart.
 function KillEffectUtils.hideCharacter(char: Model)
 	local humanoid = char:FindFirstChildWhichIsA("Humanoid", true)
 	if humanoid then

@@ -12,7 +12,6 @@ local PANEL_NAMES = {
 	Rewards = true,
 	Voting = true,
 	GiftAlert = true,
-	BattlePass = true,
 }
 
 --- Llama a `onChanged(hidden)` con el estado actual y en cada cambio; devuelve la limpieza.

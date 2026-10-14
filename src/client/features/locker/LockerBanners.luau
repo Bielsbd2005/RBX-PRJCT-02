@@ -9,11 +9,11 @@
 	  · Image       → el banner (Image de ItemsConfig.Banners).
 	  · Equiped     → UIStroke, solo encendido en el banner equipado.
 	  · Footer      → ImageLabel decorativo del pie de la tarjeta.
-	    · Value     → TextLabel con el estado ("EQUIPED" en verde / "OWNED" en blanco).
+	    · Value     → TextLabel con el estado ("EQUIPED" en verde / "OWNED" / precio).
 	  · Glow        → Frame con UIGradient de fondo teñido por rareza.
 
-	Pulsar una tarjeta equipa ese banner. Sin preview ni panel de compra: los
-	banners solo se consiguen en el pase, así que aquí solo aparecen los poseídos.
+	Pulsar un banner poseído lo equipa; uno sin poseer se selecciona y se compra
+	desde el ActionFrame del Locker, como los ítems de la grid.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -24,11 +24,13 @@ local Client = script.Parent.Parent.Parent
 local Janitor = require(ReplicatedStorage:WaitForChild("Packages").janitor) :: any
 local LockerGrid = require(script.Parent:WaitForChild("LockerGrid"))
 local UITheme = require(Client:WaitForChild("core"):WaitForChild("ui"):WaitForChild("UITheme"))
+local UIUtils = require(Client:WaitForChild("core"):WaitForChild("ui"):WaitForChild("UIUtils"))
 
 type LockerCatalogItem = LockerGrid.LockerCatalogItem
 
 export type Callbacks = {
 	canInteract: () -> boolean,
+	isItemOwned: (item: LockerCatalogItem) -> boolean,
 	isItemEquipped: (item: LockerCatalogItem) -> boolean,
 	onActivated: (item: LockerCatalogItem) -> (),
 }
@@ -185,7 +187,10 @@ function LockerBanners:_updateCard(card: BannerCard)
 		card.stroke.Enabled = equipped
 	end
 	if card.statusValueNode then
-		card.statusValueNode.Text = if equipped then STATUS_EQUIPPED_TEXT else STATUS_OWNED_TEXT
+		card.statusValueNode.Text = if equipped
+			then STATUS_EQUIPPED_TEXT
+			elseif self._callbacks.isItemOwned(card.item) then STATUS_OWNED_TEXT
+			else UIUtils.formatCashAmount(card.item.Price)
 		card.statusValueNode.TextColor3 = if equipped
 			then STATUS_EQUIPPED_TEXT_COLOR
 			else (card.statusValueDefaultColor or Color3.fromRGB(255, 255, 255))

@@ -14,8 +14,7 @@
 	`PageName` y `Row` ya no se usan para localizar botones; `Rows` se conserva como
 	orden estable para recorrer el catálogo.
 
-	ProductId = 0 significa "sin configurar" (mismo convenio que
-	`BattlePassConfig.PremiumProductId`): queda fuera de `ByProductId`, ProcessReceipt
+	ProductId = 0 significa "sin configurar": queda fuera de `ByProductId`, ProcessReceipt
 	lo ignora y el binder desactiva el botón.
 ]]
 

@@ -19,14 +19,12 @@ renombra también su SurfaceAppearance.
 
 ## Orden
 
-Las subcarpetas son libres y solo sirven para ordenar (por temporada, por
-origen…): se busca a cualquier profundidad y solo cuenta el nombre.
+Las subcarpetas son libres y solo sirven para ordenar (por origen…): se busca
+a cualquier profundidad y solo cuenta el nombre.
 
     wraps
-    ├── Mastery
-    │   └── Damascus
-    └── S1
-        └── Prism
+    └── Mastery
+        └── Damascus
 
 ## Qué se pinta
 

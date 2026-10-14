@@ -976,7 +976,7 @@ function DataService:GrantItemUpdates(category: string, itemId: string, source: 
 	}
 end
 
--- Único escritor de wraps concedidos (tienda, pase, maestría): posesión en cada arma
+-- Único escritor de wraps concedidos (tienda, bundles, maestría): posesión en cada arma
 -- de `targets` más metadatos, que son por wrap.
 function DataService:GrantWeaponWrapUpdates(wrapId: string, targets: { WrapTarget }, source: string): { BatchUpdateEntry }
 	local updates: { BatchUpdateEntry } = {}

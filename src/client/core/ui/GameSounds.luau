@@ -41,7 +41,6 @@ local SPECS: { [string]: SoundSpec } = {
 	Notification = { folder = "UI", name = "Notification", minInterval = 0.30 },
 	Purchase = { folder = "UI", name = "Purchase", minInterval = 0.25 },
 	LevelUp = { folder = "UI", name = "LevelUp", minInterval = 0.30 },
-	FamePassUp = { folder = "UI", name = "FamePassUp", minInterval = 0.30 },
 	-- Por debajo del stagger entre monedas (0.05) para no cortar la ráfaga.
 	Coin = { folder = "UI", name = "Coin", minInterval = 0.04 },
 	Hit = { folder = "Gameplay", name = "Hit" },
@@ -68,7 +67,6 @@ GameSounds.Toggle = "Toggle"
 GameSounds.Notification = "Notification"
 GameSounds.Purchase = "Purchase"
 GameSounds.LevelUp = "LevelUp"
-GameSounds.FamePassUp = "FamePassUp"
 GameSounds.Coin = "Coin"
 GameSounds.Hit = "Hit"
 GameSounds.Headshot = "Headshot"

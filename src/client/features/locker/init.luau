@@ -114,7 +114,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local lockerFolder = Workspace:WaitForChild("Locker")
 
 	-- Lighting por atributo: el look lo lleva Workspace.Locker (LightingPreset="Locker")
-	-- y la vuelta usa ScenePresetController.applyLobbyOrRestore (como el BattlePass).
+	-- y la vuelta usa ScenePresetController.applyLobbyOrRestore.
 	-- Ancla única del preview de armas (ver WeaponPreviewController).
 	local weaponSpawn = lockerFolder:FindFirstChild("WeaponSpawn")
 	if not weaponSpawn then
@@ -240,7 +240,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end,
 	})
 	janitor:Add(weaponRotate, "Destroy")
-	-- Fundido a negro para los cambios de cámara entre pestañas (como el BattlePass):
+	-- Fundido a negro para los cambios de cámara entre pestañas:
 	-- la cámara salta tapada en vez de cruzar la escena. Singleton por playerGui: no
 	-- va al janitor.
 	local fade = ScreenFade.new(playerGui)
@@ -521,21 +521,29 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		canInteract = function(): boolean
 			return not shopRequests:isBusy()
 		end,
+		isItemOwned = function(item: LockerCatalogItem): boolean
+			return item.id == ItemDefaults.ITEM_ID or inventory:isItemOwned(item)
+		end,
 		isItemEquipped = function(item: LockerCatalogItem): boolean
 			return getShownBannerId() == item.id
 		end,
 		onActivated = function(item: LockerCatalogItem)
-			shopRequests:requestEquip(item)
+			if item.id == ItemDefaults.ITEM_ID or inventory:isItemOwned(item) then
+				shopRequests:requestEquip(item)
+			else
+				selectedCatalogItem = item
+				updateActionFrameForSelected()
+			end
 		end,
 	})
 	janitor:Add(bannersView, "Destroy")
 
-	-- Banners poseídos, Default primero y luego por rareza. Los del pase ya llegan
-	-- filtrados por el catálogo; el filtro de posesión cubre los no comprables.
+	-- Poseídos y comprables, Default primero y luego por rareza. Un no comprable solo
+	-- aparece si ya se posee.
 	local function getBannerItems(): { LockerCatalogItem }
 		local items = {} :: { LockerCatalogItem }
 		for _, item in catalog:GetItems(LockerMainCategory.EFFECTS, LockerCategory.BANNERS) do
-			if item.id == ItemDefaults.ITEM_ID or inventory:isItemOwned(item) then
+			if item.id == ItemDefaults.ITEM_ID or inventory:isItemOwned(item) or (item.CanPurchase and item.Price > 0) then
 				table.insert(items, item)
 			end
 		end

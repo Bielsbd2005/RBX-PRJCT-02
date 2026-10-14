@@ -42,7 +42,6 @@ ShoulderCamera.SpringService = SpringService
 local MatchService = nil
 local DataService = nil
 local DailyTasksService = nil
-local BattlePassService = nil
 local RewardService = nil
 
 local _AUTOLOAD_TIMEOUT = 5
@@ -90,11 +89,6 @@ local function _autoloadServices()
 	local dailyTasksFolder = featuresFolder and _safeWaitForChild(featuresFolder, "dailyTasks")
 	if dailyTasksFolder and not DailyTasksService then
 		DailyTasksService = _safeRequire(dailyTasksFolder:FindFirstChild("DailyTasksService"), "DailyTasksService")
-	end
-
-	local battlePassFolder = featuresFolder and _safeWaitForChild(featuresFolder, "battlepass")
-	if battlePassFolder and not BattlePassService then
-		BattlePassService = _safeRequire(battlePassFolder:FindFirstChild("BattlePassService"), "BattlePassService")
 	end
 end
 
@@ -280,7 +274,7 @@ WeaponsSystem.CurrentWeaponChanged = Instance.new("BindableEvent")
 --   weaponName, wasHeadshot) → { xpGained } para el payload de PlayerEliminated,
 --   que la UI del killer necesita en el mismo frame. Sin hook: ActionRewards.
 --   Killed.Event (asíncrono): se dispara tras aplicar daño + flush de asistencias;
---   Bootstrap conecta DailyTasks/BattlePass/etc.
+--   Bootstrap conecta DailyTasks/etc.
 WeaponsSystem.Killed = Instance.new("BindableEvent")
 WeaponsSystem.killHook = (nil :: any) :: ((killer: Player, victimHum: Humanoid, weaponName: string, wasHeadshot: boolean) -> { xpGained: number? })?
 
@@ -302,7 +296,6 @@ function WeaponsSystem.injectServices(services: {
 	DataService: any?,
 	MatchService: any?,
 	DailyTasksService: any?,
-	BattlePassService: any?,
 	RewardService: any?,
 })
 	if services.DataService ~= nil then
@@ -312,7 +305,6 @@ function WeaponsSystem.injectServices(services: {
 	end
 	if services.MatchService ~= nil then MatchService = services.MatchService end
 	if services.DailyTasksService ~= nil then DailyTasksService = services.DailyTasksService end
-	if services.BattlePassService ~= nil then BattlePassService = services.BattlePassService end
 	if services.RewardService ~= nil then RewardService = services.RewardService end
 end
 

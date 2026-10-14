@@ -540,12 +540,6 @@ function MatchHud:playLevelUpAnimation(newLevel: number)
 	end
 end
 
-function MatchHud:playBattlePassLevelUpAnimation(newLevel: number)
-	if self._notificationsQueue then
-		self._notificationsQueue:playBattlePassLevelUpAnimation(newLevel)
-	end
-end
-
 function MatchHud:playMasteryAnimation(progress: MasteryProgress)
 	if self._notificationsQueue then
 		self._notificationsQueue:playMasteryAnimation(progress)

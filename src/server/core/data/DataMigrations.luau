@@ -30,6 +30,19 @@ local MASTERY_WRAP_RENAMES_V4: { [string]: string | false } = {
 	Mastery_Void = false,
 }
 
+-- Wraps que solo daba el Battle Pass: se retiran (los equipados vuelven a Default).
+local BATTLE_PASS_WRAPS_RETIRED_V5: { [string]: string | false } = {
+	Wrap_Pink = false,
+	Wrap_RPG_Blue = false,
+	Wrap_S1_Ember = false,
+	Wrap_S1_Tide = false,
+	Wrap_S1_Magma = false,
+	Wrap_S1_Volt = false,
+	Wrap_S1_Frost = false,
+	Wrap_S1_Shadow = false,
+	Wrap_S1_Prism = false,
+}
+
 -- Copia nueva y no in-place: añadir claves a una tabla mientras se recorre no es seguro.
 local function renamedKeys(map: any, renames: { [string]: string | false }): any
 	if type(map) ~= "table" then
@@ -43,6 +56,35 @@ local function renamedKeys(map: any, renames: { [string]: string | false }): any
 		end
 	end
 	return result
+end
+
+-- Aplica `renames` a los wraps poseídos, a su metadata y a los equipados.
+local function renameWraps(data: any, renames: { [string]: string | false })
+	local wrapsByWeapon = if type(data.Inventory) == "table" then data.Inventory.WeaponWrapsByWeapon else nil
+	if type(wrapsByWeapon) == "table" then
+		for _, weapons in wrapsByWeapon do
+			if type(weapons) == "table" then
+				for weaponId, owned in weapons do
+					weapons[weaponId] = renamedKeys(owned, renames)
+				end
+			end
+		end
+	end
+	if type(data.InventoryMeta) == "table" then
+		data.InventoryMeta.WeaponWraps = renamedKeys(data.InventoryMeta.WeaponWraps, renames)
+	end
+	if type(data.Loadout) == "table" then
+		for _, slotsKey in { "MainWeaponWraps", "SpecialWeaponWraps" } do
+			local equippedByWeapon = data.Loadout[slotsKey]
+			if type(equippedByWeapon) == "table" then
+				for weaponId, wrapId in equippedByWeapon do
+					local renamed = renames[wrapId]
+					-- Un wrap retirado equipado vuelve al de por defecto.
+					equippedByWeapon[weaponId] = if renamed == false then "Default" else renamed or wrapId
+				end
+			end
+		end
+	end
 end
 
 local MIGRATIONS: { [number]: (any) -> () } = {
@@ -59,32 +101,11 @@ local MIGRATIONS: { [number]: (any) -> () } = {
 		end
 	end,
 	[4] = function(data)
-		local renames = MASTERY_WRAP_RENAMES_V4
-		local wrapsByWeapon = if type(data.Inventory) == "table" then data.Inventory.WeaponWrapsByWeapon else nil
-		if type(wrapsByWeapon) == "table" then
-			for _, weapons in wrapsByWeapon do
-				if type(weapons) == "table" then
-					for weaponId, owned in weapons do
-						weapons[weaponId] = renamedKeys(owned, renames)
-					end
-				end
-			end
-		end
-		if type(data.InventoryMeta) == "table" then
-			data.InventoryMeta.WeaponWraps = renamedKeys(data.InventoryMeta.WeaponWraps, renames)
-		end
-		if type(data.Loadout) == "table" then
-			for _, slotsKey in { "MainWeaponWraps", "SpecialWeaponWraps" } do
-				local equippedByWeapon = data.Loadout[slotsKey]
-				if type(equippedByWeapon) == "table" then
-					for weaponId, wrapId in equippedByWeapon do
-						local renamed = renames[wrapId]
-						-- Un wrap retirado equipado vuelve al de por defecto.
-						equippedByWeapon[weaponId] = if renamed == false then "Default" else renamed or wrapId
-					end
-				end
-			end
-		end
+		renameWraps(data, MASTERY_WRAP_RENAMES_V4)
+	end,
+	[5] = function(data)
+		data.BattlePass = nil
+		renameWraps(data, BATTLE_PASS_WRAPS_RETIRED_V5)
 	end,
 }
 

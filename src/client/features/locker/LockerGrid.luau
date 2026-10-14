@@ -737,7 +737,7 @@ function LockerGrid:_applyCatalogItemToCard(card: GuiObject, item: LockerCatalog
 	self:_applyRarityVisuals(card, item.Rarity)
 	self:_syncWrapPreviewVisibility(card, item)
 
-	local seasonText = item.SeasonLabel or item.Season
+	local seasonText = item.SeasonLabel
 	if refs.seasonNode then
 		refs.seasonNode.Visible = seasonText ~= nil
 	end

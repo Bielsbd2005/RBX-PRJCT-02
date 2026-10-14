@@ -110,7 +110,6 @@ local ROLES = {
 	{ folder = "UI",       name = "Purchase",     role = 0.55 },
 	{ folder = "UI",       name = "Coin",         role = 0.22 },
 	{ folder = "UI",       name = "LevelUp",      role = 0.55 },
-	{ folder = "UI",       name = "FamePassUp",   role = 0.55 },
 	{ folder = "Gameplay", name = "Hit",         role = 0.30 },
 	{ folder = "Gameplay", name = "Headshot",    role = 0.45 },
 	{ folder = "Gameplay", name = "Elimination", role = 0.60 },

@@ -24,8 +24,7 @@ SoundService
 │   │   ├─ Notification
 │   │   ├─ Purchase
 │   │   ├─ Coin
-│   │   ├─ LevelUp
-│   │   └─ FamePassUp
+│   │   └─ LevelUp
 │   ├─ Gameplay/
 │   │   ├─ Hit
 │   │   ├─ Headshot
@@ -69,7 +68,6 @@ aplicando y hay que ajustar los tres buses por separado.
 | `UI/Purchase` | El server confirma una compra del Locker | `features/locker` |
 | `UI/Coin` | Cada moneda que aterriza en el frame de Stats | `StatsCoinsPopup` |
 | `UI/LevelUp` | Subes de nivel de cuenta en partida | `MatchNotificationsQueue` |
-| `UI/FamePassUp` | Subes de nivel del FamePass en partida | `MatchNotificationsQueue` |
 | `Gameplay/Hit` | Impacto de bala a un jugador | `DamageBillboardHandler` |
 | `Gameplay/Headshot` | Impacto a la cabeza | `DamageBillboardHandler` |
 | `Gameplay/Elimination` | Matas o asistes a un jugador | `NetworkingCallbacks` |

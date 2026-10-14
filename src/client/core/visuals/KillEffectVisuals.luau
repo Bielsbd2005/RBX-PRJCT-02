@@ -3,8 +3,8 @@
 	Arranca la parte visual de los kill effects en cada cliente. KillEffectsRegistry
 	marca todo cadáver con su TAG, el id del efecto y la hora de la muerte; aquí se
 	busca el handler de ese id en HANDLERS y se le llama con un contexto que se limpia
-	solo. Sirve igual para partida (tag replicado) que para los previews del Locker y
-	del pase (allí el registry corre en el cliente y el tag es local).
+	solo. Sirve igual para partida (tag replicado) que para el preview del Locker
+	(allí el registry corre en el cliente y el tag es local).
 
 	Un handler (visuals/killEffects/<id>) exporta cualquiera de:
 	  play(char, ctx)  por cada cadáver con ese efecto (una vez por cadáver).

@@ -70,8 +70,7 @@ end
 -- Una sola regla para partida, bots y previews. El hat se coloca a mano: alineando
 -- su Attachment con el gemelo de la cabeza (normalmente Head.HatAttachment) o, si
 -- el rig no lo trae, encima de la cabeza. Solo se suelda si al parentearlo Roblox no
--- lo ha soldado ya (lo hace un Humanoid cuando hay gemelo); sin Humanoid, como en la
--- cabeza del pase, nunca lo hace.
+-- lo ha soldado ya (lo hace un Humanoid cuando hay gemelo); sin Humanoid nunca lo hace.
 function CosmeticsTemplates.attachHatToCharacter(character: Model, accessory: Accessory)
 	local handleNode = accessory:FindFirstChild("Handle")
 	local headNode = character:FindFirstChild("Head")

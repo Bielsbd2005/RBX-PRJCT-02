@@ -33,7 +33,6 @@ local InventoryRepository = require(Shared.data.InventoryRepository)
 local ItemsConfig = require(Shared.constants.ItemsConfig)
 local Currency = require(Shared.constants.Currency)
 local LockerConfig = require(Shared.constants.LockerConfig)
-local BattlePassConfig = require(Shared.constants.BattlePassConfig)
 local WeaponCategory = require(Shared.constants.WeaponCategory)
 local ItemDefaults = require(Shared.constants.ItemDefaults)
 local LockerCategory = require(Shared.constants.LockerCategory)
@@ -153,14 +152,6 @@ local function _onBuyItem(data: Network.ShopItemPayload, player: Player): ()
 		Network.Shop.Response.SendTo({
 			success = false,
 			message = "That item isn't available for purchase.",
-		}, player)
-		return
-	end
-
-	if itemConfig.isBPExclusive == true or BattlePassConfig.IsBPExclusive(data.category, data.itemId) then
-		Network.Shop.Response.SendTo({
-			success = false,
-			message = "That item is only available in the Battle Pass.",
 		}, player)
 		return
 	end

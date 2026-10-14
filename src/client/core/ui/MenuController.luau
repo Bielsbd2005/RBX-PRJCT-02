@@ -15,7 +15,6 @@ local InteractiveScaleTween = require(script.Parent.animators.InteractiveScaleTw
 local UITheme = require(script.Parent.UITheme)
 local UIUtils = require(script.Parent.UIUtils)
 local DataController = require(script.Parent.Parent.data.DataController)
-local BattlePassConfig = require(Shared.constants.BattlePassConfig)
 local DailyTasks = require(Shared.constants.DailyTasks)
 local ActionRewards = require(Shared.constants.ActionRewards)
 
@@ -43,10 +42,6 @@ type HudRefs = {
 	levelCurrent: TextLabel?,
 	levelNext: TextLabel?,
 	barFill: Frame?,
-	famePassSeason: TextLabel?,
-	famePassTimer: TextLabel?,
-	famePassLevel: TextLabel?,
-	famePassBarFill: Frame?,
 }
 
 export type MenuController = {
@@ -93,7 +88,6 @@ end
 local function resolveHudRefs(menuGui: ScreenGui, statsNode: Instance?): HudRefs
 	local container = menuGui:FindFirstChild("Container")
 	local topFrame = container and container:FindFirstChild("TopFrame")
-	local famePassNode = container and container:FindFirstChild("FamePass")
 
 	local cashFrame = statsNode and statsNode:FindFirstChild("CoinsFrame")
 	local cashValue = asTextLabel(cashFrame and cashFrame:FindFirstChild("Value"))
@@ -107,22 +101,12 @@ local function resolveHudRefs(menuGui: ScreenGui, statsNode: Instance?): HudRefs
 	local barNode = levelNode and levelNode:FindFirstChild("Bar")
 	local barFill = asFrame(barNode and barNode:FindFirstChild("Fill"))
 
-	local famePassSeason = asTextLabel(famePassNode and famePassNode:FindFirstChild("Season"))
-	local famePassTimer = asTextLabel(famePassNode and famePassNode:FindFirstChild("Timer"))
-	local famePassLevel = asTextLabel(famePassNode and famePassNode:FindFirstChild("Level"))
-	local famePassBar = famePassNode and famePassNode:FindFirstChild("Bar")
-	local famePassBarFill = asFrame(famePassBar and famePassBar:FindFirstChild("Fill"))
-
 	return {
 		cashValue = cashValue,
 		gemsValue = gemsValue,
 		levelCurrent = levelCurrent,
 		levelNext = levelNext,
 		barFill = barFill,
-		famePassSeason = famePassSeason,
-		famePassTimer = famePassTimer,
-		famePassLevel = famePassLevel,
-		famePassBarFill = famePassBarFill,
 	}
 end
 
@@ -140,51 +124,6 @@ local function updateTopHud(hudRefs: HudRefs, stats: StatsData): ()
 
 	setText(hudRefs.levelCurrent, tostring(stats.Level))
 	setText(hudRefs.levelNext, tostring(stats.Level + 1))
-end
-
--- Oculto si la season no caduca (EndsAt <= 0) o ya no queda tiempo.
-local function updateFamePassTimer(hudRefs: HudRefs, endsAt: number): ()
-	if hudRefs.famePassTimer then
-		if endsAt <= 0 then
-			hudRefs.famePassTimer.Visible = false
-		else
-			local remaining = endsAt - os.time()
-			local text = UIUtils.formatTimeLeft(remaining)
-			if text == "" then
-				hudRefs.famePassTimer.Visible = false
-			else
-				hudRefs.famePassTimer.Visible = true
-				hudRefs.famePassTimer.Text = text
-			end
-		end
-	end
-end
-
-local function updateFamePassHud(hudRefs: HudRefs, bpState: any): ()
-	local season = BattlePassConfig.GetActiveSeason()
-	local maxTier = BattlePassConfig.GetMaxTier(season)
-
-	setText(hudRefs.famePassSeason, season.Name)
-
-	updateFamePassTimer(hudRefs, season.EndsAt)
-
-	local currentTier = if bpState and type(bpState.CurrentTier) == "number"
-		then math.floor(bpState.CurrentTier)
-		else 1
-	local displayTier = math.clamp(currentTier, 1, maxTier)
-	setText(hudRefs.famePassLevel, "Lv. " .. tostring(displayTier))
-
-	if hudRefs.famePassBarFill then
-		if currentTier > maxTier then
-			hudRefs.famePassBarFill.Size = UDim2.new(1, 0, 1, 0)
-		else
-			local tierDef = BattlePassConfig.GetTier(season, displayTier)
-			local xpRequired = if tierDef then tierDef.XPRequired else 0
-			local currentXP = if bpState and type(bpState.XP) == "number" then bpState.XP else 0
-			local ratio = if xpRequired > 0 then math.clamp(currentXP / xpRequired, 0, 1) else 0
-			hudRefs.famePassBarFill.Size = UDim2.new(ratio, 0, 1, 0)
-		end
-	end
 end
 
 -- Slot de DailyTasks → hijo de Menu.Container.Missions. La tarea de cada slot la
@@ -267,7 +206,6 @@ local MENU_BUTTON_HOVER_BINDINGS: { { path: { string } } } = {
 	{ path = { "Container", "PlayBtn" } },
 	{ path = { "Container", "Store" } },
 	{ path = { "Container", "Locker" } },
-	{ path = { "Container", "FamePass" } },
 }
 
 local function resolveMenuButton(menuGui: ScreenGui, path: { string }): Instance?
@@ -350,16 +288,8 @@ function MenuController.new(): MenuController
 			updateTopHud(self._hudRefs, stats)
 		end
 
-		local function updateBpHudFromState()
-			local bpState = Fusion.peek(DataController.BattlePass)
-			updateFamePassHud(self._hudRefs, bpState)
-		end
-
 		local statsObserver = self._fusionScope:Observer(DataController.Stats)
 		self._janitor:Add(statsObserver:onBind(updateHudFromState), true)
-
-		local bpObserver = self._fusionScope:Observer(DataController.BattlePass)
-		self._janitor:Add(bpObserver:onBind(updateBpHudFromState), true)
 
 		if #self._missionSlots > 0 then
 			local function updateMissionsFromState()
@@ -370,27 +300,6 @@ function MenuController.new(): MenuController
 			local missionsObserver = self._fusionScope:Observer(DataController.DailyTasks)
 			self._janitor:Add(missionsObserver:onBind(updateMissionsFromState), true)
 			updateMissionsFromState()
-		end
-
-		if self._hudRefs.famePassTimer then
-			local timerRunning = true
-			task.spawn(function()
-				while timerRunning do
-					local season = BattlePassConfig.GetActiveSeason()
-					updateFamePassTimer(self._hudRefs, season.EndsAt)
-					if season.EndsAt <= 0 then
-						task.wait(3600)
-					else
-						local remaining = season.EndsAt - os.time()
-						-- Con menos de un día el texto muestra minutos (UIUtils.formatTimeLeft).
-						local pollInterval = if remaining > 86400 then 3600 else 60
-						task.wait(pollInterval)
-					end
-				end
-			end)
-			self._janitor:Add(function()
-				timerRunning = false
-			end, true)
 		end
 	end)
 

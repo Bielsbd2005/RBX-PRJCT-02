@@ -125,9 +125,6 @@ local LAYOUT = {
 			{ name = "LevelUp",     role = 0.55, gain = 1.00,
 				legacy = { "Audio/UI/Reward_LevelUP", "Audio/UI/Reward_LevelUp" },
 				players = { "Reward_LevelUP", "Reward_LevelUp" } },
-			{ name = "FamePassUp",  role = 0.55, gain = 1.00,
-				legacy = { "Audio/UI/Reward_FamePassUP", "Audio/UI/Reward_FamePassUp" },
-				players = { "Reward_FamePassUP", "Reward_FamePassUp" } },
 		},
 	},
 	{

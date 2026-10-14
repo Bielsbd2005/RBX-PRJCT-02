@@ -42,7 +42,7 @@ export type Stats = {
 	-- recibidos). La telemetría lo resta para medir Cash por hora jugada.
 	-- Perfiles antiguos lo tienen a 0 aunque hubieran comprado.
 	TotalCashPurchased: number,
-	-- Moneda premium: solo Battle Pass o packs con Robux. Un faucet de Gems en
+	-- Moneda premium: solo packs con Robux. Un faucet de Gems en
 	-- ActionRewards sería un bug de diseño.
 	Gems: number,
 	TotalGemsEarned: number,
@@ -234,25 +234,6 @@ export type DailyTasksState = {
 	},
 }
 
---[[
-	Config en shared/constants/BattlePassConfig.luau.
-	  • CurrentTier = N: tiers 1..N-1 completados. MaxTier+1 = pase completado (XP = 0).
-	  • XP es el progreso DENTRO del tier actual.
-	  • TotalXPEarned no baja al subir de tier; cada claim valida CurrentTier contra él.
-	  • PremiumOwned se resetea al cambiar de season.
-	  • Claimed usa tostring(level) como key (ProfileStore prohíbe huecos numéricos).
-	  • SeasonId distinto de la season activa al cargar ⇒ reset.
-]]
-export type BattlePassState = {
-	SeasonId: string,
-	CurrentTier: number,
-	XP: number,
-	TotalXPEarned: number,
-	PremiumOwned: boolean,
-	Claimed: { [string]: boolean },
-	GrantedSkips: { [string]: boolean }, -- PurchaseId → true (idempotencia del Skip)
-}
-
 export type PlayerProfile = {
 	Stats: Stats,
 	Inventory: Inventory,
@@ -265,7 +246,6 @@ export type PlayerProfile = {
 	LoginStreak: LoginStreak,
 	PlayedCash: PlayedCash,
 	DailyTasks: DailyTasksState,
-	BattlePass: BattlePassState,
 	Metadata: Metadata,
 	ProcessedReceipts: ProcessedReceipts,
 	PendingGifts: PendingGifts,
@@ -408,22 +388,12 @@ local DEFAULT: PlayerProfile = {
 		},
 	},
 
-	BattlePass = {
-		SeasonId = "",
-		CurrentTier = 1,
-		XP = 0,
-		TotalXPEarned = 0,
-		PremiumOwned = false,
-		Claimed = {},
-		GrantedSkips = {},
-	},
-
 	Metadata = {
 		CreatedAt = 0,
 		LastSeen = 0,
 		-- Bumpear CURRENT_VERSION en DataMigrations solo para migraciones destructivas;
 		-- los campos nuevos los rellena Reconcile.
-		Version = 4,
+		Version = 5,
 		JoinCount = 0,
 		FirstSessionVersion = "",
 		LastClientVersion = "",

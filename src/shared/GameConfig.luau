@@ -70,8 +70,6 @@ local GameConfig: GameConfigType = {
 	-- kills puras): si se cambia uno, recalcular el otro con ActionRewards. Son el tope de una ronda COMPLETA (MaxRoundDuration):
 	-- KillRewardsService los devenga con el reloj de CADA JUGADOR (desde su primera entrada a la
 	-- ronda), para que ni la ronda corta ni entrar tarde den el cupo entero.
-	-- MatchXPCap mide también el cupo del XP de pase, que lleva contador aparte
-	-- (KillRewardsService, _tryConsumeBattlePassXP).
 	MatchCashCap = 500,
 	MatchXPCap = 1000,
 	-- Fracción del cap disponible en el segundo 0: sin colchón, las primeras kills
@@ -96,7 +94,7 @@ local GameConfig: GameConfigType = {
 	-- sobre MaxRoundDuration: la ronda corta no rinde más por hora.
 	MatchEndMinSeconds = 120,
 	MatchEndMinContribution = 3,
-	-- Techo diario del Cash JUGADO (combate + bonus de fin de partida; diarias, pase,
+	-- Techo diario del Cash JUGADO (combate + bonus de fin de partida; diarias,
 	-- códigos y packs no cuentan). Tramos sobre lo ya cobrado hoy (día UTC), en orden:
 	-- el primero cubre una sesión larga de tryhard; el resto frena macros y maratones.
 	DailyPlayedCashTiers = {

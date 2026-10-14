@@ -244,36 +244,6 @@ local MatchNamespace = ByteNet.DefineNamespace("Match", function()
 	}
 end)
 
--- Los skips de nivel no tienen packet: el cliente lanza PromptProductPurchase y el
--- servidor concede en ProcessReceipt (el resultado llega por Response).
-local BattlePassNamespace = ByteNet.DefineNamespace("BattlePass", function()
-	return {
-		-- C → S. El servidor deduce free/pass del config y valida tier, Premium y doble claim.
-		ClaimTier = ByteNet.DefinePacket({
-			Value = ByteNet.Struct({
-				tier = ByteNet.Int32,
-			}),
-			ReliabilityType = "Reliable",
-		}),
-
-		-- C → S. Premium se compra con Gems (BattlePassService:PromptPremium).
-		BuyPremium = ByteNet.DefinePacket({
-			Value = ByteNet.Struct({}),
-			ReliabilityType = "Reliable",
-		}),
-
-		-- S → C. tier = 0 cuando no aplica.
-		Response = ByteNet.DefinePacket({
-			Value = ByteNet.Struct({
-				success = ByteNet.Bool,
-				message = ByteNet.String,
-				tier    = ByteNet.Int32,
-			}),
-			ReliabilityType = "Reliable",
-		}),
-	}
-end)
-
 -- Los bundles limitados se piden al servidor en vez de promptear desde el cliente: él
 -- comprueba stock y posesión antes, porque un developer product cobrado no se devuelve.
 local StoreNamespace = ByteNet.DefineNamespace("Store", function()
@@ -405,7 +375,6 @@ export type ShopItemPayload = { itemId: string, category: string, weaponCategory
 export type RedeemCodePayload = { code: string }
 export type CastVotePayload = { mapName: string }
 export type RequestPickupPayload = { kind: string }
-export type ClaimTierPayload = { tier: number }
 export type SendGiftPayload = { receiverUserId: string, productId: number }
 export type ClaimGiftPayload = { giftId: string }
 export type BuyBundlePayload = { bundleName: string }
@@ -427,7 +396,6 @@ return {
 	Combat      = CombatNamespace,
 	Rewards     = RewardsNamespace,
 	Match       = MatchNamespace,
-	BattlePass  = BattlePassNamespace,
 	Store       = StoreNamespace,
 	Gifting     = GiftingNamespace,
 	Weapons     = WeaponsNamespace,

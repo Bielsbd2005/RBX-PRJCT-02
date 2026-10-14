@@ -11,7 +11,6 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
-local BattlePassConfig = require(Shared.constants.BattlePassConfig)
 local ResultsRewards = require(Shared.constants.ResultsRewards)
 local StoreProducts = require(Shared.constants.StoreProducts)
 local RewardService = require(script.Parent.Parent.Parent.core.RewardService)
@@ -28,8 +27,8 @@ local BONUS_STEP = 5
 export type MatchContext = ResultsRewards.MatchContext
 
 export type ResultItem = {
-	source: string, -- "Locker" | "Pass"
-	title: string, -- "UNLOCKED" | "PASS"
+	source: string, -- "Locker"
+	title: string, -- "UNLOCKED"
 	category: string,
 	itemId: string,
 	image: string,
@@ -57,7 +56,7 @@ local _started = false
 local _dataService: DataService = nil :: any
 
 -- Set-if-absent: un re-join en la misma ronda no pisa el snapshot.
-local _startSnapshotByUserId: { [number]: { level: number, bpTier: number } } = {}
+local _startSnapshotByUserId: { [number]: { level: number } } = {}
 
 -- false si el prefetch de GamePassService aún no resolvió (síncrono para no
 -- bloquear RoundEnded).
@@ -76,9 +75,7 @@ function MatchResultsService:CaptureMatchStart(player: Player)
 	local level = if profile.Data.Stats and type(profile.Data.Stats.Level) == "number"
 		then math.floor(profile.Data.Stats.Level)
 		else 0
-	local bp = profile.Data.BattlePass
-	local bpTier = if bp and type(bp.CurrentTier) == "number" then math.floor(bp.CurrentTier) else 1
-	_startSnapshotByUserId[player.UserId] = { level = level, bpTier = bpTier }
+	_startSnapshotByUserId[player.UserId] = { level = level }
 
 	-- Resultado descartado a propósito: si el prefetch de PlayerAdded falló, relanza la consulta.
 	MatchResultsService:IsVIPCached(player)
@@ -121,37 +118,6 @@ local function _lockerItemsForLevel(level: number, out: { ResultItem })
 	end
 end
 
-local function _battlePassItemsBetweenTiers(startCompleted: number, endCompleted: number, out: { ResultItem })
-	if endCompleted <= startCompleted then
-		return
-	end
-	local season = BattlePassConfig.GetActiveSeason()
-	for level = startCompleted + 1, endCompleted do
-		local tier = BattlePassConfig.GetTier(season, level)
-		if tier and tier.Reward and tier.Reward.Kind == "Item" then
-			local reward = tier.Reward
-			local category = tostring(reward.Category)
-			local itemId = tostring(reward.ItemId)
-			local categoryConfig = ItemsConfig[category]
-			local def = if type(categoryConfig) == "table" then categoryConfig[itemId] else nil
-			local name = if def and type(def.Name) == "string" and def.Name ~= "" then def.Name else itemId
-			local image = reward.Icon
-				or (if def and type(def.Image) == "string" then def.Image else "")
-			table.insert(out, {
-				source = "Pass",
-				title = "PASS",
-				category = category,
-				itemId = itemId,
-				image = image,
-				name = name,
-			})
-			if #out >= MAX_ITEMS then
-				return
-			end
-		end
-	end
-end
-
 function MatchResultsService:_computeItemUnlocks(player: Player): { ResultItem }
 	local out: { ResultItem } = {}
 	local snapshot = _startSnapshotByUserId[player.UserId]
@@ -172,11 +138,6 @@ function MatchResultsService:_computeItemUnlocks(player: Player): { ResultItem }
 			return out
 		end
 	end
-
-	-- CurrentTier es el tier hacia el que progresa: completados = CurrentTier - 1.
-	local bp = profile.Data.BattlePass
-	local endTier = if bp and type(bp.CurrentTier) == "number" then math.floor(bp.CurrentTier) else snapshot.bpTier
-	_battlePassItemsBetweenTiers(math.max(0, snapshot.bpTier - 1), math.max(0, endTier - 1), out)
 
 	return out
 end

@@ -2,7 +2,7 @@
 --[[
 	Tarjeta de banner en el mundo: <escena>.Banner.Part.BillboardGui.Card, con la
 	misma estructura que la tarjeta de la pantalla de muerte (ver BannerCard).
-	Escenas: Workspace.Locker.Banner y Workspace.BattlePass.Banner.
+	Escena: Workspace.Locker.Banner.
 ]]
 
 local Players = game:GetService("Players")

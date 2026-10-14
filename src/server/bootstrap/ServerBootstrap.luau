@@ -86,7 +86,6 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	local VIPItemsService = require(serverRoot.features.rewards.VIPItemsService)
 	local MatchService = require(serverRoot.features.match.MatchService)
 	local DailyTasksService = require(serverRoot.features.dailyTasks.DailyTasksService)
-	local BattlePassService = require(serverRoot.features.battlepass.BattlePassService)
 	local GiftingService = require(serverRoot.features.gifting.GiftingService)
 	local LimitedBundleService = require(serverRoot.features.store.LimitedBundleService)
 	local EmoteAssetService = require(serverRoot.features.locker.EmoteAssetService)
@@ -137,7 +136,6 @@ function ServerBootstrap.start(serverRoot: Script): ()
 	SettingsService:Start(DataService)
 	RewardsService:Start(DataService)
 	VIPItemsService:Start(DataService)
-	BattlePassService:Start(DataService)
 	LimitedBundleService.Start(DataService)
 	GiftingService:Start(DataService)
 	DailyTasksService:Start(DataService)
@@ -232,18 +230,13 @@ function ServerBootstrap.start(serverRoot: Script): ()
 		end
 	end
 
-	-- Dispatcher central de ProcessReceipt: BattlePass, regalos, packs y bundles.
+	-- Dispatcher central de ProcessReceipt: regalos, packs y bundles.
 	-- Vive aquí (cross-cutting) para no acoplarlo a una sola feature.
 	MarketplaceService.ProcessReceipt = function(receiptInfo: any): Enum.ProductPurchaseDecision
 		-- Aquí y no en cada handler: sin perfil, Gifting devuelve nil y el regalo caería
 		-- al grant de pack normal.
 		if not waitForBuyerProfile(receiptInfo.PlayerId) then
 			return Enum.ProductPurchaseDecision.NotProcessedYet
-		end
-
-		local bpDecision = BattlePassService:ProcessReceipt(receiptInfo)
-		if bpDecision ~= nil then
-			return bpDecision
 		end
 
 		-- Gifting intercepta receipts de store products cuando el comprador tiene
@@ -282,7 +275,6 @@ function ServerBootstrap.start(serverRoot: Script): ()
 				DataService = DataService,
 				MatchService = MatchService,
 				DailyTasksService = DailyTasksService,
-				BattlePassService = BattlePassService,
 				RewardService = RewardService,
 			})
 		else

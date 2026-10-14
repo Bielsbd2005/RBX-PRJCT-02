@@ -166,9 +166,6 @@ type Round = {
 	-- los borra: salir y volver a entrar reiniciaría el cap.
 	cashEarnedByUserId: { [number]: number },
 	xpEarnedByUserId: { [number]: number },
-	-- XP de PASE concedido esta ronda. Cupo aparte del de cuenta: headshots y asistencias
-	-- llenan el de cuenta antes y, compartido, recortarían el pase a quien mejor apunta.
-	bpXpEarnedByUserId: { [number]: number },
 	-- os.time() de la PRIMERA entrada de cada jugador a esta ronda (set-if-absent): de
 	-- aquí arranca su cap, para que quien entra tarde no herede el cupo acumulado.
 	-- Tampoco se borra en PlayerRemoving.
@@ -222,7 +219,6 @@ local function _newRound(): Round
 		statsByUserId = {},
 		cashEarnedByUserId = {},
 		xpEarnedByUserId = {},
-		bpXpEarnedByUserId = {},
 		firstJoinAtByUserId = {},
 		inMatchSecondsByUserId = {},
 		inMatchSinceByUserId = {},
@@ -1304,7 +1300,7 @@ function _enterResults(winnerTeam: string)
 	-- Dedupe del broadcast de stats vive en KillAttributionService.
 	KillAttributionService:Clear()
 	DailyTasksService:ResetAllStreaks()
-	-- Snapshots de inicio de partida (nivel/tier BP) para los items de Resultados.
+	-- Snapshots de inicio de partida (nivel) para los items de Resultados.
 	MatchResultsService:ClearSnapshots()
 	_lastBotRosterJsonBroadcast = nil
 
@@ -1645,7 +1641,7 @@ local function _onRequestJoinMatch(_: Network.Empty, player: Player)
 			-- compañeros y los compañeros se actualizan para incluirlo a él.
 			_refreshTeamCosmetics(session.team)
 
-			-- Snapshot de nivel/tier de BP al entrar (set-if-absent) para computar
+			-- Snapshot de nivel al entrar (set-if-absent) para computar
 			-- los items desbloqueados durante la partida en la pantalla de Resultados.
 			MatchResultsService:CaptureMatchStart(player)
 
