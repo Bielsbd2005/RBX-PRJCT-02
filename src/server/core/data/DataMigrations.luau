@@ -43,6 +43,9 @@ local BATTLE_PASS_WRAPS_RETIRED_V5: { [string]: string | false } = {
 	Wrap_S1_Prism = false,
 }
 
+-- Hats que ya no existen. `Adventure` lo daba el pase sin estar en el catálogo.
+local RETIRED_HATS_V6 = { "Adventure", "Adventure2" }
+
 -- Copia nueva y no in-place: añadir claves a una tabla mientras se recorre no es seguro.
 local function renamedKeys(map: any, renames: { [string]: string | false }): any
 	if type(map) ~= "table" then
@@ -106,6 +109,19 @@ local MIGRATIONS: { [number]: (any) -> () } = {
 	[5] = function(data)
 		data.BattlePass = nil
 		renameWraps(data, BATTLE_PASS_WRAPS_RETIRED_V5)
+	end,
+	[6] = function(data)
+		for _, hatId in RETIRED_HATS_V6 do
+			if type(data.Inventory) == "table" and type(data.Inventory.Hats) == "table" then
+				data.Inventory.Hats[hatId] = nil
+			end
+			if type(data.InventoryMeta) == "table" and type(data.InventoryMeta.Hats) == "table" then
+				data.InventoryMeta.Hats[hatId] = nil
+			end
+			if type(data.Loadout) == "table" and data.Loadout.Hat == hatId then
+				data.Loadout.Hat = nil
+			end
+		end
 	end,
 }
 

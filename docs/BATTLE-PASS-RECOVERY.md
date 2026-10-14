@@ -103,7 +103,7 @@ Sin el pase, estos ítems se compran en el Locker (precios provisionales en
 | --- | --- |
 | KillEffects | `Gravity`, `Abduction` |
 | Faces | `Blep`, `Derp`, `Scream` |
-| Hats | `Snorkel`, `Adventure2` |
+| Hats | `Snorkel` |
 | Outfits | `Ducky` (Gems) |
 | Banners | `Banner1`, `Banner2` |
 

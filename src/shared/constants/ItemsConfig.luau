@@ -355,7 +355,6 @@ Special = {
 		Indiana  = { Name = "Indiana",   Price = 20000,  LevelRequired = 25,  Rarity = "Epic",      Image = "rbxassetid://128435788752887", CanPurchase = true },
 		Beret  = { Name = "Beret",   Price = 25000,  LevelRequired = 28,  Rarity = "Epic",      Image = "rbxassetid://117481727483221", CanPurchase = true },
 		Captain  = { Name = "Captain",  Price = 40000, LevelRequired = 36, Rarity = "Epic",      Image = "rbxassetid://130137968102712", CanPurchase = true },
-		Adventure2 = { Name = "Adventure2", Price = 20000, LevelRequired = 25, Rarity = "Epic",      Image = "rbxassetid://128435788752887", CanPurchase = true },
 		----------- Legendary -----------
 		Bunny  = { Name = "Bunny",   Price = 65000,  LevelRequired = 46,  Rarity = "Legendary", Image = "rbxassetid://134209005674999", CanPurchase = true },
 		Shark  = { Name = "Shark",   Price = 100000, LevelRequired = 58, Rarity = "Legendary", Image = "rbxassetid://134534862804519", CanPurchase = true },
