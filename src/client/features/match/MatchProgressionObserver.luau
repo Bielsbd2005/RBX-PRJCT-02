@@ -22,12 +22,6 @@ local DataController = require(script.Parent.Parent.Parent.core.data.DataControl
 -- solo notifican al completarse.
 local MASTERY_MILESTONE_MIN_TARGET = 50
 local MASTERY_STATS: { WrapMastery.Stat } = { "Kills", "Precision", "Streaks" }
--- Qué cuenta el aviso, según el Precision de la clase del arma.
-local PRECISION_LABELS = {
-	Headshots = "Headshots",
-	CloseKills = "Close kills",
-	LongKills = "Long shots",
-}
 
 local MatchProgressionObserver = {}
 
@@ -52,11 +46,9 @@ local function _milestoneMark(stat: WrapMastery.Stat, n: number, target: number)
 	return math.clamp(math.floor((n / target) / 0.25), 0, 3)
 end
 
-local function _statLabel(category: string, weaponId: string, stat: WrapMastery.Stat): string
-	if stat == "Precision" then
-		return PRECISION_LABELS[WrapMastery.classOf(category, weaponId).Precision]
-	end
-	return stat
+-- Precision solo llega aquí por headshots: en rachas WrapMastery lo da como "Streaks".
+local function _statLabel(stat: WrapMastery.Stat): string
+	return if stat == "Precision" then "Headshots" else stat
 end
 
 local function _eachWeaponKill(weaponKills: any, fn: (category: string, weaponId: string, kills: number) -> ())
@@ -219,7 +211,7 @@ function MatchProgressionObserver.attach(deps: AttachDeps)
 					end
 					if milestoneSeeded and mark > prev.mark and matchHudGui and matchHudGui.Enabled then
 						local fields = _masteryRewardFields(tier.wrapId)
-						fields.name ..= ": " .. _statLabel(category, weaponId, stat)
+						fields.name ..= ": " .. _statLabel(stat)
 						fields.current = value
 						fields.target = tier.goal
 						fields.isComplete = false

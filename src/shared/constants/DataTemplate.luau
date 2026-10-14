@@ -416,7 +416,7 @@ local DEFAULT: PlayerProfile = {
 		LastSeen = 0,
 		-- Bumpear CURRENT_VERSION en DataMigrations solo para migraciones destructivas;
 		-- los campos nuevos los rellena Reconcile.
-		Version = 3,
+		Version = 4,
 		JoinCount = 0,
 		FirstSessionVersion = "",
 		LastClientVersion = "",

@@ -18,6 +18,33 @@ local DataMigrations = {}
 
 DataMigrations.CURRENT_VERSION = DataTemplate.Metadata.Version
 
+-- Ids de wraps de maestría anteriores a v4 → id actual (Mastery_<Name>); false = retirado.
+local MASTERY_WRAP_RENAMES_V4: { [string]: string | false } = {
+	Mastery_Carbon = "Mastery_Graphite",
+	Mastery_Bronze = "Mastery_Copper",
+	Mastery_Silver = "Mastery_Jade",
+	Mastery_Obsidian = "Mastery_Cobalt",
+	Mastery_Titanium = "Mastery_Amethyst",
+	Mastery_Ruby = "Mastery_Garnet",
+	Mastery_Inferno = false,
+	Mastery_Void = false,
+}
+
+-- Copia nueva y no in-place: añadir claves a una tabla mientras se recorre no es seguro.
+local function renamedKeys(map: any, renames: { [string]: string | false }): any
+	if type(map) ~= "table" then
+		return map
+	end
+	local result = {}
+	for key, value in map do
+		local renamed = renames[key]
+		if renamed ~= false then
+			result[renamed or key] = value
+		end
+	end
+	return result
+end
+
 local MIGRATIONS: { [number]: (any) -> () } = {
 	-- v2 es la baseline.
 	[3] = function(data)
@@ -29,6 +56,34 @@ local MIGRATIONS: { [number]: (any) -> () } = {
 		end
 		if type(data.Rewards) == "table" then
 			data.Rewards.NotificationsClaimed = nil
+		end
+	end,
+	[4] = function(data)
+		local renames = MASTERY_WRAP_RENAMES_V4
+		local wrapsByWeapon = if type(data.Inventory) == "table" then data.Inventory.WeaponWrapsByWeapon else nil
+		if type(wrapsByWeapon) == "table" then
+			for _, weapons in wrapsByWeapon do
+				if type(weapons) == "table" then
+					for weaponId, owned in weapons do
+						weapons[weaponId] = renamedKeys(owned, renames)
+					end
+				end
+			end
+		end
+		if type(data.InventoryMeta) == "table" then
+			data.InventoryMeta.WeaponWraps = renamedKeys(data.InventoryMeta.WeaponWraps, renames)
+		end
+		if type(data.Loadout) == "table" then
+			for _, slotsKey in { "MainWeaponWraps", "SpecialWeaponWraps" } do
+				local equippedByWeapon = data.Loadout[slotsKey]
+				if type(equippedByWeapon) == "table" then
+					for weaponId, wrapId in equippedByWeapon do
+						local renamed = renames[wrapId]
+						-- Un wrap retirado equipado vuelve al de por defecto.
+						equippedByWeapon[weaponId] = if renamed == false then "Default" else renamed or wrapId
+					end
+				end
+			end
 		end
 	end,
 }

@@ -10,7 +10,6 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ItemsConfig = require(Shared.constants.ItemsConfig) :: any
-local WeaponMasteryClasses = require(Shared.constants.WeaponMasteryClasses)
 local WrapMastery = require(Shared.data.WrapMastery)
 local Retween = require(Shared.utils.Retween)
 local UIUtils = require(script.Parent.Parent.Parent.core.ui.UIUtils)
@@ -76,13 +75,9 @@ local function describeChallenge(challenge: WrapMastery.Challenge, weaponCategor
 	if challenge.stat == "Kills" then
 		return `Get {goal} kills with the {weaponName}`
 	end
-	local class = WrapMastery.classOf(weaponCategory, weaponId)
 	if challenge.stat == "Streaks" then
+		local class = WrapMastery.classOf(weaponCategory, weaponId)
 		return `Get {class.StreakLength} kills in a single life with the {weaponName}, {goal} times`
-	elseif class.Precision == "CloseKills" then
-		return `Get {goal} kills within {WeaponMasteryClasses.CloseRange} studs with the {weaponName}`
-	elseif class.Precision == "LongKills" then
-		return `Get {goal} kills from {WeaponMasteryClasses.LongRange}+ studs away with the {weaponName}`
 	end
 	return `Get {goal} headshot kills with the {weaponName}`
 end

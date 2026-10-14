@@ -17,7 +17,6 @@ local GameConfig = require(Shared:WaitForChild("GameConfig"))
 local Network = require(Shared.networking.Network)
 local ItemsConfig = require(Shared.constants.ItemsConfig)
 local WeaponCategory = require(Shared.constants.WeaponCategory)
-local WeaponMasteryClasses = require(Shared.constants.WeaponMasteryClasses)
 local InventoryRepository = require(Shared.data.InventoryRepository)
 local WrapMastery = require(Shared.data.WrapMastery)
 local BattlePassConfig = require(Shared.constants.BattlePassConfig)
@@ -287,17 +286,6 @@ local function _grantMasteryWrapsIfEligible(player: Player, weaponCategory: stri
 	end
 end
 
-local function _isPrecisionKill(kind: WeaponMasteryClasses.PrecisionKind, wasHeadshot: boolean, killDistance: number?): boolean
-	if kind == "Headshots" then
-		return wasHeadshot
-	elseif not killDistance then
-		return false
-	elseif kind == "CloseKills" then
-		return killDistance <= WeaponMasteryClasses.CloseRange
-	end
-	return killDistance >= WeaponMasteryClasses.LongRange
-end
-
 -- Suma una baja al arma en esta vida y devuelve si completa una racha: cada
 -- `streakLength` bajas cuentan una, así que el doble en la misma vida son dos.
 local function _advanceWeaponStreak(userId: number, weaponCategory: string, weaponId: string, streakLength: number): boolean
@@ -328,8 +316,7 @@ local function _registerWeaponKillForAttacker(
 	attackerUserId: number?,
 	weaponId: string?,
 	weaponCategory: string?,
-	wasHeadshot: boolean,
-	killDistance: number?
+	wasHeadshot: boolean
 )
 	if not _dataService or not attackerUserId or attackerUserId <= 0 then
 		return
@@ -342,7 +329,7 @@ local function _registerWeaponKillForAttacker(
 
 	if not _hasProfile(attackerPlayer) then
 		_deps.deferUntilProfile(attackerPlayer, function()
-			_registerWeaponKillForAttacker(attackerUserId, weaponId, weaponCategory, wasHeadshot, killDistance)
+			_registerWeaponKillForAttacker(attackerUserId, weaponId, weaponCategory, wasHeadshot)
 		end)
 		return
 	end
@@ -366,7 +353,7 @@ local function _registerWeaponKillForAttacker(
 	local function countStat(stat: WrapMastery.Stat)
 		table.insert(challengeUpdates, { path = { "WeaponChallenges", resolvedCategory, resolvedWeaponId, stat }, delta = 1 })
 	end
-	if _isPrecisionKill(class.Precision, wasHeadshot, killDistance) then
+	if class.Precision == "Headshots" and wasHeadshot then
 		countStat("Precision")
 	end
 	if _advanceWeaponStreak(attackerUserId, resolvedCategory, resolvedWeaponId, class.StreakLength) then
@@ -410,25 +397,13 @@ local function _persistAttackerKillStats(attacker: Player, wasHeadshot: boolean)
 	end)
 end
 
--- Studs entre el atacante humano y la víctima; nil si alguno ya no tiene personaje.
-local function _killDistance(attackerUserId: number?, victim: Humanoid): number?
-	local attacker = if attackerUserId and attackerUserId > 0 then Players:GetPlayerByUserId(attackerUserId) else nil
-	local attackerRoot = if attacker and attacker.Character then attacker.Character.PrimaryPart else nil
-	local victimRoot = victim.RootPart
-	if not attackerRoot or not victimRoot then
-		return nil
-	end
-	return (attackerRoot.Position - victimRoot.Position).Magnitude
-end
-
 -- Quién se lleva una muerte: el último que dañó a la víctima, si fue dentro de
 -- KillAttributionWindow y, si es humano, sigue en partida (la misma condición que
 -- IsMatchKill pone a las asistencias). Única regla para víctimas jugador y bot.
--- El último valor es la distancia de la baja (_killDistance).
-function KillRewardsService:ResolveKillAttacker(victim: Humanoid): (number?, string, boolean, string?, number?)
+function KillRewardsService:ResolveKillAttacker(victim: Humanoid): (number?, string, boolean, string?)
 	local lastAttacker = LastAttackerStore.get(victim)
 	if not lastAttacker then
-		return nil, "", false, nil, nil
+		return nil, "", false, nil
 	end
 	local attackerUserId: number? = lastAttacker.UserId
 	if lastAttacker.At > 0 and time() - lastAttacker.At > GameConfig.KillAttributionWindow then
@@ -437,11 +412,7 @@ function KillRewardsService:ResolveKillAttacker(victim: Humanoid): (number?, str
 	if attackerUserId and attackerUserId > 0 and _deps.isPlayerInMenu(attackerUserId) then
 		attackerUserId = nil
 	end
-	return attackerUserId,
-		lastAttacker.WeaponId or "",
-		lastAttacker.Headshot == true,
-		lastAttacker.WeaponCategory,
-		_killDistance(attackerUserId, victim)
+	return attackerUserId, lastAttacker.WeaponId or "", lastAttacker.Headshot == true, lastAttacker.WeaponCategory
 end
 
 --[[
@@ -461,8 +432,7 @@ function KillRewardsService:CreditKill(
 	weaponId: string?,
 	wasHeadshot: boolean,
 	victimIsBot: boolean,
-	weaponCategory: string?,
-	killDistance: number?
+	weaponCategory: string?
 )
 	if attackerUserId < 0 then
 		local botStats = _deps.roundStats(attackerUserId)
@@ -489,7 +459,7 @@ function KillRewardsService:CreditKill(
 	end
 
 	KillAttributionService:SendStreakBroadcast(attackerUserId)
-	_registerWeaponKillForAttacker(attackerUserId, weaponId, weaponCategory, wasHeadshot, killDistance)
+	_registerWeaponKillForAttacker(attackerUserId, weaponId, weaponCategory, wasHeadshot)
 
 	-- Telemetría de combate aquí y no en RewardService: las recompensas se cortan en
 	-- MatchCashCap/MatchXPCap y truncarían las kills de quien más mata.
@@ -554,8 +524,7 @@ function KillRewardsService:RegisterPlayerDeath(
 	attackerUserId: number?,
 	attackerWeaponId: string?,
 	attackerWasHeadshot: boolean?,
-	attackerWeaponCategory: string?,
-	killDistance: number?
+	attackerWeaponCategory: string?
 )
 	local killerName = _deps.resolveKillerName(attackerUserId)
 	pcall(function()
@@ -598,7 +567,7 @@ function KillRewardsService:RegisterPlayerDeath(
 	end
 
 	-- Víctima jugador: PvP.
-	self:CreditKill(attackerUserId, attackerWeaponId, attackerWasHeadshot == true, false, attackerWeaponCategory, killDistance)
+	self:CreditKill(attackerUserId, attackerWeaponId, attackerWasHeadshot == true, false, attackerWeaponCategory)
 end
 
 -- Recompensa de las asistencias (WeaponsSystem vía MatchService:GrantCombatReward), con

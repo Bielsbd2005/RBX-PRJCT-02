@@ -29,16 +29,14 @@ local STATS: { Stat } = { "Kills", "Precision", "Streaks" }
 -- final los de ámbito. Son claves de ItemsConfig.WeaponWraps; un wrap de maestría
 -- que falte aquí va al final.
 local DIFFICULTY_ORDER = {
-	"Mastery_Carbon",
-	"Mastery_Bronze",
-	"Mastery_Silver",
-	"Mastery_Obsidian",
-	"Mastery_Titanium",
-	"Mastery_Ruby",
-	"Mastery_Inferno",
+	"Mastery_Graphite",
+	"Mastery_Copper",
+	"Mastery_Jade",
+	"Mastery_Cobalt",
+	"Mastery_Amethyst",
+	"Mastery_Garnet",
 	"Mastery_Gold",
 	"Mastery_Damascus",
-	"Mastery_Void",
 	"Mastery_Galaxy",
 }
 
@@ -153,15 +151,19 @@ function WrapMastery.classOf(category: string, weaponId: string): WeaponMasteryC
 	return WeaponMasteryClasses.Classes[classId] or WeaponMasteryClasses.Classes[WeaponMasteryClasses.DEFAULT]
 end
 
--- Desafío del wrap para esa arma, con el objetivo ya escalado por su clase.
+-- Desafío del wrap para esa arma, con el contador y el objetivo ya adaptados a su clase.
 function WrapMastery.challengeOf(wrapId: string, category: string, weaponId: string): Challenge?
 	local base = baseChallenges[wrapId]
 	if not base then
 		return nil
 	end
+	local class = WrapMastery.classOf(category, weaponId)
+	if base.stat == "Precision" and class.Precision == "Streaks" then
+		return { stat = "Streaks", goal = WeaponMasteryClasses.StreakGoal, requires = base.requires }
+	end
 	local goal = base.goal
 	if base.stat ~= "Streaks" then
-		goal = math.max(1, math.floor(goal * WrapMastery.classOf(category, weaponId).GoalScale + 0.5))
+		goal = math.max(1, math.floor(goal * class.GoalScale + 0.5))
 	end
 	return { stat = base.stat, goal = goal, requires = base.requires }
 end
@@ -170,9 +172,9 @@ end
 -- que piden otro wrap.
 function WrapMastery.tiersOf(category: string, weaponId: string, stat: Stat): { { wrapId: string, goal: number } }
 	local tiers = {}
-	for wrapId, base in baseChallenges do
-		if base.stat == stat then
-			local challenge = WrapMastery.challengeOf(wrapId, category, weaponId) :: Challenge
+	for wrapId in baseChallenges do
+		local challenge = WrapMastery.challengeOf(wrapId, category, weaponId) :: Challenge
+		if challenge.stat == stat then
 			table.insert(tiers, { wrapId = wrapId, goal = challenge.goal })
 		end
 	end

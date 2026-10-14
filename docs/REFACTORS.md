@@ -37,6 +37,8 @@ type DataService = DataServiceMod.DataServiceModule
 - `TeamUtils` acepta cinco atributos de equipo (`Team`, `TeamSide`, `BotTeam`, `Side`,
   `TeamAffinity`): unificar en uno.
 - `KillEffectsRegistry` registra los efectos a mano; podría descubrirlos por los hijos de la carpeta.
+- Maestría de wraps: ningún wrap usa ya `Requires`. Siguen vivos los `gatedWraps` de
+  `WrapMastery` y su texto en `LockerWrapInfo`: borrarlos si no vuelve un wrap encadenado.
 
 ## Anti-cheat de WeaponsSystem — diferido a propósito
 

@@ -653,7 +653,7 @@ local function _scoreInRoundDeath(
 			round.recentDeathBySpawn[nearestSpawn] = time()
 		end
 	end
-	local attackerUserId, attackerWeaponId, attackerWasHeadshot, attackerWeaponCategory, killDistance =
+	local attackerUserId, attackerWeaponId, attackerWasHeadshot, attackerWeaponCategory =
 		KillRewardsService:ResolveKillAttacker(humanoid)
 	local attackerPlayer = if attackerUserId then Players:GetPlayerByUserId(attackerUserId) else nil
 	local killerName: string
@@ -664,7 +664,7 @@ local function _scoreInRoundDeath(
 	else
 		killerName = ""
 	end
-	KillRewardsService:RegisterPlayerDeath(player, attackerUserId, attackerWeaponId, attackerWasHeadshot, attackerWeaponCategory, killDistance)
+	KillRewardsService:RegisterPlayerDeath(player, attackerUserId, attackerWeaponId, attackerWasHeadshot, attackerWeaponCategory)
 
 	-- Ragdoll visible para todos.
 	if withKillEffect then
@@ -1329,7 +1329,7 @@ local function _handleBotDied(botTeam: string, _botName: string, botHumanoid: Hu
 		return
 	end
 
-	local attackerUserId, attackerWeaponId, attackerWasHeadshot, attackerWeaponCategory, killDistance =
+	local attackerUserId, attackerWeaponId, attackerWasHeadshot, attackerWeaponCategory =
 		KillRewardsService:ResolveKillAttacker(botHumanoid)
 
 	local killerName = _resolveKillerName(attackerUserId)
@@ -1349,7 +1349,7 @@ local function _handleBotDied(botTeam: string, _botName: string, botHumanoid: Hu
 
 	if attackerUserId and attackerUserId ~= botFakeUserId then
 		-- Víctima bot: PvE.
-		KillRewardsService:CreditKill(attackerUserId, attackerWeaponId, attackerWasHeadshot, true, attackerWeaponCategory, killDistance)
+		KillRewardsService:CreditKill(attackerUserId, attackerWeaponId, attackerWasHeadshot, true, attackerWeaponCategory)
 	end
 
 	-- Los bots no usan streak: solo contabilizar kills/deaths para HUD.
