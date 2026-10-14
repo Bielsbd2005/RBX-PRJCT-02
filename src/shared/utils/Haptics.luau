@@ -120,14 +120,12 @@ local _activePriority = 0
 local _lastPlayedAt: { [string]: number } = {}
 local _burstUntil = 0
 local _burstPriority = 0
-local _warnedUnavailable = false
 
 -- El caché se invalida al (des)conectar un mando para no dejar mudo al que
 -- enchufa el pad a mitad de partida.
 if not IS_SERVER then
 	UserInputService.GamepadConnected:Connect(function()
 		_targets = nil
-		_warnedUnavailable = false
 	end)
 	UserInputService.GamepadDisconnected:Connect(function()
 		local active = _activeTargets
@@ -240,12 +238,6 @@ function Haptics.play(patternName: string, options: PlayOptions?)
 
 	local available, reason = availability()
 	if not available then
-		-- Un único warn por sesión: en un móvil real no hay consola delante,
-		-- pero el log del cliente sí queda.
-		if not _warnedUnavailable then
-			_warnedUnavailable = true
-			warn(`[Haptics] Vibración no disponible: {reason}`)
-		end
 		trace(`{patternName} descartado — {reason}`)
 		return
 	end
