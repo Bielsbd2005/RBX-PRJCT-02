@@ -36,7 +36,8 @@ origen…): se busca a cualquier profundidad y solo cuenta el nombre.
 - Solo actúa sobre `MeshPart`. Una pieza que no lo sea (el bloque genérico
   `ReplicatedStorage.Templates.Wrap` si es un `Part`) se queda con `BaseColor` y
   `Material` del catálogo: decláralos como aproximación del wrap.
-- `TextureID` del catálogo se sigue pintando por encima, así que un wrap puede
-  combinar base PBR y textura animada.
+- Una `TextureID` animada (`isAnimated`) del catálogo se sigue pintando por
+  encima, así que un wrap puede combinar base PBR y textura animada. Una fija va
+  en `MeshPart.TextureID` y el SurfaceAppearance la tapa: no declares las dos.
 - Si el arma trae su propio SurfaceAppearance, el painter lo aparta mientras
   dure el wrap y lo devuelve al quitarlo.

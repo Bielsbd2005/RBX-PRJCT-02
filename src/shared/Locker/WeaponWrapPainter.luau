@@ -4,8 +4,9 @@
 	preview 3D del Locker (WeaponPreviewController) y las cards y escenas
 	(WeaponWrapPreviewer) pasan por aquí para que el mismo wrap se vea igual en todas.
 
-	Las texturas animadas solo se taguean con ANIMATED_TEXTURE_TAG y sus velocidades
-	van en atributos: las anima WeaponWrapAnimator en el cliente, también dentro de
+	TextureID fija va en MeshPart.TextureID (UV de la malla). Solo la animada usa las
+	Texture por cara: se taguean con ANIMATED_TEXTURE_TAG y sus velocidades van en
+	atributos; las anima WeaponWrapAnimator en el cliente, también dentro de
 	ViewportFrames. Pintado en el server, tag y atributos replican.
 
 	Un wrap lleva además SurfaceAppearance si en Shared.Locker.wraps hay uno con su id
@@ -55,6 +56,7 @@ local TEXTURE_FACES: { { name: string, face: Enum.NormalId } } = {
 -- define color o material (el preview del Locker repinta la misma instancia).
 local ORIGINAL_MATERIAL_ATTR = "WrapOriginalMaterial"
 local ORIGINAL_COLOR_ATTR = "WrapOriginalColor"
+local ORIGINAL_TEXTURE_ATTR = "WrapOriginalTextureId"
 
 -- Deben coincidir con tools/weapons/StudioMigration.luau, que los limpia del display.
 local WRAP_SURFACE_NAME = "WrapSurfaceAppearance"
@@ -176,17 +178,30 @@ local function applyMaterial(part: BasePart, material: Enum.Material?)
 	end
 end
 
+local function applyMeshTexture(part: MeshPart, textureId: string?)
+	local original = part:GetAttribute(ORIGINAL_TEXTURE_ATTR)
+	if textureId then
+		if original == nil then
+			part:SetAttribute(ORIGINAL_TEXTURE_ATTR, part.TextureID)
+		end
+		part.TextureID = textureId
+	elseif type(original) == "string" then
+		part.TextureID = original
+	end
+end
+
 -- Un SurfaceAppearance solo actúa como hijo directo de un MeshPart: el propio del arma
 -- se aparca en un Folder dentro de la pieza (sobrevive a Clone y replica) mientras
 -- manda el del wrap, y vuelve cuando el siguiente wrap no trae ninguno.
-local function applySurface(part: BasePart, template: SurfaceAppearance?)
+-- hideOriginals: el wrap pinta MeshPart.TextureID, que un SurfaceAppearance taparía.
+local function applySurface(part: BasePart, template: SurfaceAppearance?, hideOriginals: boolean)
 	local current = part:FindFirstChild(WRAP_SURFACE_NAME)
 	if current then
 		current:Destroy()
 	end
 	local stash: Instance? = part:FindFirstChild(ORIGINAL_SURFACES_STASH_NAME)
 
-	if not (template and part:IsA("MeshPart")) then
+	if not (part:IsA("MeshPart") and (template or hideOriginals)) then
 		if stash then
 			for _, original in stash:GetChildren() do
 				original.Parent = part
@@ -208,9 +223,11 @@ local function applySurface(part: BasePart, template: SurfaceAppearance?)
 		end
 	end
 
-	local surface = template:Clone()
-	surface.Name = WRAP_SURFACE_NAME
-	surface.Parent = part
+	if template then
+		local surface = template:Clone()
+		surface.Name = WRAP_SURFACE_NAME
+		surface.Parent = part
+	end
 end
 
 -- studsPerTileScale: para modelos escalados (el pase escala el arma de su escena),
@@ -227,12 +244,19 @@ function WeaponWrapPainter.paintParts(parts: { BasePart }, definition: WrapDefin
 	local scrollSpeedV = tonumber(definition and definition.ScrollSpeedV) or DEFAULT_SCROLL_SPEED_V
 
 	for _, part in parts do
-		-- También con textura: el color se ve a través de sus zonas transparentes.
+		-- Una pieza que no es MeshPart no tiene TextureID: su textura fija va por caras.
+		local meshTextureId = if not animated and part:IsA("MeshPart") then textureId else nil
+		local faceTextureId = if meshTextureId then nil else textureId
+
+		-- También con textura: el color tiñe la de malla y asoma por las zonas transparentes.
 		applyColor(part, baseColor)
 		applyMaterial(part, material)
-		applySurface(part, surfaceTemplate)
+		applySurface(part, surfaceTemplate, meshTextureId ~= nil)
+		if part:IsA("MeshPart") then
+			applyMeshTexture(part, meshTextureId)
+		end
 
-		if not textureId then
+		if not faceTextureId then
 			for _, child in part:GetChildren() do
 				if child:IsA("Texture") and string.sub(child.Name, 1, #TEXTURE_PREFIX) == TEXTURE_PREFIX then
 					child:Destroy()
@@ -252,7 +276,7 @@ function WeaponWrapPainter.paintParts(parts: { BasePart }, definition: WrapDefin
 				texture.Face = entry.face
 				texture.Parent = part
 			end
-			texture.Texture = textureId
+			texture.Texture = faceTextureId
 			texture.Transparency = 0
 			texture.StudsPerTileU = studsPerTile
 			texture.StudsPerTileV = studsPerTile

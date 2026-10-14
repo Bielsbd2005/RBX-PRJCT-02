@@ -11,11 +11,11 @@ export type ItemConfig = {
 	CanPurchase: boolean?,
 	isBPExclusive: boolean?,  -- Sólo vía Battle Pass: oculto en Locker hasta poseerse y rechazado por Shop.
 	isVIPExclusive: boolean?, -- Lo concede el gamepass VIP (VIPItemsService); oculto en Locker hasta poseerse.
-	TextureID: string?,
+	TextureID: string?,       -- Wraps: fija va en MeshPart.TextureID; con isAnimated, por caras con scroll (WeaponWrapPainter).
 	BaseColor: Color3?,
 	Material: Enum.Material?,  -- De la parte principal del arma; nil conserva el original.
 	isAnimated: boolean?,
-	StudsPerTile: number?,
+	StudsPerTile: number?,    -- Sólo texturas por caras.
 	ScrollSpeedU: number?,
 	ScrollSpeedV: number?,
 	-- Maestría de wraps (Shared.data.WrapMastery). En WeaponWraps: Challenge
