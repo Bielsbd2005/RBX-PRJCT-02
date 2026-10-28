@@ -126,6 +126,9 @@ function HitFeedback:_playLocalHitHighlight(humanoidHit: Humanoid)
 		return
 	end
 
+	-- Con armas automáticas llega un golpe por bala: se reutiliza el Highlight vivo y solo
+	-- se reinician sus tweens, en vez de destruir y crear uno por impacto.
+	local reused: Highlight? = nil
 	local existingState = self._activeHitHighlights[targetModel]
 	if existingState then
 		if existingState.colorTween then
@@ -134,26 +137,33 @@ function HitFeedback:_playLocalHitHighlight(humanoidHit: Humanoid)
 		if existingState.fadeTween then
 			existingState.fadeTween:Cancel()
 		end
-		if existingState.highlight and existingState.highlight.Parent then
+		if existingState.highlight and existingState.highlight.Parent == targetModel then
+			reused = existingState.highlight
+		elseif existingState.highlight then
 			existingState.highlight:Destroy()
 		end
 		self._activeHitHighlights[targetModel] = nil
 	end
 
-	local oldHighlight = targetModel:FindFirstChild(HIT_HIGHLIGHT_NAME)
-	if oldHighlight and oldHighlight:IsA("Highlight") then
-		oldHighlight:Destroy()
-	end
+	local highlight: Highlight
+	if reused then
+		highlight = reused
+	else
+		local oldHighlight = targetModel:FindFirstChild(HIT_HIGHLIGHT_NAME)
+		if oldHighlight and oldHighlight:IsA("Highlight") then
+			oldHighlight:Destroy()
+		end
 
-	local highlight = Instance.new("Highlight")
-	highlight.Name = HIT_HIGHLIGHT_NAME
-	highlight.Adornee = targetModel
-	highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+		highlight = Instance.new("Highlight")
+		highlight.Name = HIT_HIGHLIGHT_NAME
+		highlight.Adornee = targetModel
+		highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+		highlight.OutlineColor = HIT_HIGHLIGHT_OUTLINE_COLOR
+		highlight.Parent = targetModel
+	end
 	highlight.FillColor = Color3.fromRGB(255, 255, 255)
-	highlight.OutlineColor = HIT_HIGHLIGHT_OUTLINE_COLOR
 	highlight.FillTransparency = 0
 	highlight.OutlineTransparency = 0
-	highlight.Parent = targetModel
 
 	self._hitHighlightSerial += 1
 	local serial = self._hitHighlightSerial
@@ -185,7 +195,11 @@ function HitFeedback:_playLocalHitHighlight(humanoidHit: Humanoid)
 		})
 		state.fadeTween = fadeTween
 
-		fadeTween.Completed:Once(function()
+		-- Un fade cancelado es un golpe nuevo que reutiliza este Highlight: no destruirlo.
+		fadeTween.Completed:Once(function(fadeState)
+			if fadeState ~= Enum.PlaybackState.Completed then
+				return
+			end
 			local currentState = self._activeHitHighlights[targetModel]
 			if currentState and currentState.serial == serial then
 				self._activeHitHighlights[targetModel] = nil
