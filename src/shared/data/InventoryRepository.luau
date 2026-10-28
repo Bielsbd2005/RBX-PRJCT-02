@@ -10,6 +10,8 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local WeaponCategoryMod = require(Shared:WaitForChild("constants"):WaitForChild("WeaponCategory"))
 local ItemDefaults = require(Shared:WaitForChild("constants"):WaitForChild("ItemDefaults"))
 local LockerConfig = require(Shared:WaitForChild("constants"):WaitForChild("LockerConfig"))
+local LockerCategory = require(Shared:WaitForChild("constants"):WaitForChild("LockerCategory"))
+local BorderLevels = require(script.Parent.BorderLevels)
 
 local InventoryRepository = {}
 
@@ -61,6 +63,11 @@ function InventoryRepository.ownsItem(
 ): boolean
 	if LockerConfig.isUnlockAllActive(playerOrUserId) then
 		return true
+	end
+	if category == LockerCategory.BORDERS then
+		local stats = profileData.Stats
+		local level = if type(stats) == "table" then tonumber(stats.Level) else nil
+		return BorderLevels.isUnlocked(itemId, level or 0)
 	end
 	return InventoryRepository.rawOwnsItem(profileData, category, itemId)
 end

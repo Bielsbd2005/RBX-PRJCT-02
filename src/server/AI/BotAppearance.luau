@@ -1,7 +1,6 @@
 --!strict
 --[[
-	Apariencia de un bot (outfit + hat + face + weapon + wrap) y el banner de su
-	tarjeta de muerte (no se aplica al rig).
+	Apariencia de un bot (outfit + hat + face + weapon + wrap).
 
 	- `roll()` se llama una vez por identidad (_assignIdentity de AIService) y se
 	  cachea en la BotIdentity: el mismo bot mantiene su apariencia todo el match.
@@ -17,7 +16,6 @@ local ServerStorage = game:GetService("ServerStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ItemsConfig = require(Shared.constants.ItemsConfig)
-local ItemDefaults = require(Shared.constants.ItemDefaults)
 local StoreProducts = require(Shared.constants.StoreProducts)
 local CosmeticsTemplates = require(Shared.Locker.CosmeticsTemplates)
 local BotPersonality = require(script.Parent:WaitForChild("BotPersonality"))
@@ -30,9 +28,6 @@ export type BotAppearance = {
 	faceId: string?,
 	wrapId: string?,
 	weaponId: string?,
-	-- Id en ItemsConfig.Banners. Siempre definido: Default si no hay ninguno de
-	-- las rarezas de su personalidad.
-	bannerId: string,
 }
 
 local BODIES_ROOT_NAME = "Bodies"
@@ -158,21 +153,6 @@ local function _pickRandom(pool: { string }): string?
 	return pool[math.random(1, n)]
 end
 
--- Banner según el poder adquisitivo de la personalidad: casi todos llevan el
--- Default y solo `bannerProbability` saca uno de `bannerRarities`.
-local function _rollBannerId(personality: BotPersonality.Personality): string
-	if math.random() >= personality.bannerProbability then
-		return ItemDefaults.ITEM_ID
-	end
-	local pool: { string } = {}
-	for bannerId, definition in ItemsConfig.Banners do
-		if bannerId ~= ItemDefaults.ITEM_ID and personality.bannerRarities[definition.Rarity] then
-			table.insert(pool, bannerId)
-		end
-	end
-	return _pickRandom(pool) or ItemDefaults.ITEM_ID
-end
-
 -- ── API ───────────────────────────────────────────────────────────
 
 function BotAppearance.roll(personality: BotPersonality.Personality): BotAppearance
@@ -201,7 +181,6 @@ function BotAppearance.roll(personality: BotPersonality.Personality): BotAppeara
 		faceId = _pickRandom(facePool),
 		wrapId = _pickRandom(wrapPool),
 		weaponId = _pickRandom(weaponPool),
-		bannerId = _rollBannerId(personality),
 	}
 end
 

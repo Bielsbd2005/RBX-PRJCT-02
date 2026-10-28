@@ -105,14 +105,14 @@ Sin el pase, estos ítems se compran en el Locker (precios provisionales en
 | Faces | `Blep`, `Derp`, `Scream` |
 | Hats | `Snorkel` |
 | Outfits | `Ducky` (Gems) |
-| Banners | `Banner1`, `Banner2` |
 
 Si un pase nuevo quiere alguno como exclusivo, hay que volver a ponerle
 `CanPurchase = false` y decidir qué pasa con quien ya lo compró.
 
-Los banners eran solo del pase: la vista de banners del Locker
-(`LockerBanners`) ahora muestra también los comprables y se compran desde el
-ActionFrame.
+Los banners del pase (`Banner1`, `Banner2`) ya no existen: la categoría Banners
+entera se retiró (la sustituyen los Borders, que van por nivel) y la migración v7
+la quitó de los perfiles. Sus entradas y la vista `LockerBanners` siguen en el tag
+`battle-pass-final`.
 
 ## Studio
 

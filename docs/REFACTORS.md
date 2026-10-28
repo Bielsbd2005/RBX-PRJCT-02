@@ -6,7 +6,7 @@ comprobar en el código que sigue aplicando.
 ## MatchService: subsistemas separables
 
 El pago de las kills ya vive en `KillRewardsService`. Quedan en `MatchService`: la tarjeta
-de muerte (`_registerDeathListener`, `_resolveEquippedBanner`, `_applyKillEffect`), el reparto
+de muerte (`_registerDeathListener`, `_resolveEquippedBorder`, `_applyKillEffect`), el reparto
 de resultados (el bloque de `_enterResults` que calcula MVP y persiste partidas; encaja en
 `MatchResultsService`) y el puente de roster con AI (`_broadcastBotRoster`, `_doRebalanceNow`).
 

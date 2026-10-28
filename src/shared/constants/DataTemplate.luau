@@ -63,7 +63,6 @@ export type Inventory = {
 	Faces: { [string]: boolean },
 	Hats: { [string]: boolean },
 	Outfits: { [string]: boolean },
-	Banners: { [string]: boolean },
 }
 
 --[[
@@ -86,10 +85,11 @@ export type Loadout = {
 	KillEffect: string,
 	Emote: string, -- Se reproduce en partida con la tecla E (ver EmoteController)
 	Face: string,
-	Hat: string?,
+	Hat: string,
 	Outfit: string,
-	-- Banner de la tarjeta de muerte: lo ve quien muere a manos de este jugador.
-	Banner: string,
+	-- Borde de la foto de perfil en la tarjeta de muerte: lo ve quien muere a manos
+	-- de este jugador. Opcional; se posee por nivel (BorderLevels).
+	Border: string?,
 }
 
 -- Kills por arma, para la maestría de wraps.
@@ -307,9 +307,8 @@ local DEFAULT: PlayerProfile = {
 		KillEffects = { Default = true },
 		Emotes = { Default = true },
 		Faces = { Default = true },
-		Hats = {},
+		Hats = { Default = true },
 		Outfits = { Default = true },
-		Banners = { Default = true },
 	},
 
 	InventoryMeta = {},
@@ -326,9 +325,9 @@ local DEFAULT: PlayerProfile = {
 		KillEffect = "Default",
 		Emote = "Default",
 		Face = "Default",
-		-- Hat omitido a propósito: es opcional.
+		Hat = "Default",
+		-- Border omitido a propósito: es opcional.
 		Outfit = "Default",
-		Banner = "Default",
 	},
 
 	WeaponKills = {
@@ -393,7 +392,7 @@ local DEFAULT: PlayerProfile = {
 		LastSeen = 0,
 		-- Bumpear CURRENT_VERSION en DataMigrations solo para migraciones destructivas;
 		-- los campos nuevos los rellena Reconcile.
-		Version = 6,
+		Version = 7,
 		JoinCount = 0,
 		FirstSessionVersion = "",
 		LastClientVersion = "",

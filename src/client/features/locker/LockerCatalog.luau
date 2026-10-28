@@ -188,6 +188,11 @@ function LockerCatalog:GetItems(categoryKey: LockerCategoryKey, navKey: string):
 			return a.Price < b.Price
 		end
 
+		-- Los borders van todos a precio 0: sin esto "Border 10" saldría antes que "Border 2".
+		if a.LevelRequired ~= b.LevelRequired then
+			return a.LevelRequired < b.LevelRequired
+		end
+
 		return a.Name < b.Name
 	end)
 

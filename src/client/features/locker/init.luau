@@ -17,8 +17,7 @@ local ScenePresetController = require(Client.core.lighting.ScenePresetController
 local LobbyCharacterPreview = require(Client.core.character.LobbyCharacterPreview)
 local LockerCatalog = require(script:WaitForChild("LockerCatalog"))
 local LockerGrid = require(script:WaitForChild("LockerGrid"))
-local LockerBanners = require(script:WaitForChild("LockerBanners"))
-local BannerPreviewer = require(script:WaitForChild("Previewers"):WaitForChild("BannerPreviewer"))
+local PlayerCardPreviewer = require(script:WaitForChild("Previewers"):WaitForChild("PlayerCardPreviewer"))
 local WeaponPreviewController = require(script:WaitForChild("WeaponPreviewController"))
 local LockerWeaponStats = require(script:WaitForChild("LockerWeaponStats"))
 local LockerWrapsView = require(script:WaitForChild("LockerWrapsView"))
@@ -34,7 +33,6 @@ local NavStaggerController = require(Client.core.ui.NavStaggerController)
 local ItemsConfig = require(Shared.constants.ItemsConfig)
 local LockerConfig = require(Shared.constants.LockerConfig)
 local WeaponCategoryMod = require(Shared.constants.WeaponCategory)
-local ItemDefaults = require(Shared.constants.ItemDefaults)
 local LockerCategory = require(Shared.constants.LockerCategory)
 local LockerMainCategory = require(Shared.constants.LockerMainCategory)
 local DataController = require(Client.core.data.DataController)
@@ -122,10 +120,10 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	end
 	-- Stats del arma: SurfaceGui del mundo bajo Workspace.Locker.Stats.
 	local weaponStatsAnchor = lockerFolder:WaitForChild("Stats", 10)
-	-- Tarjeta de banner en el mundo (Workspace.Locker.Banner.Part.Card): solo se
-	-- enciende en Effects → Banners.
-	local bannerPreview = BannerPreviewer.new(lockerFolder:WaitForChild("Banner", 10))
-	janitor:Add(bannerPreview, "Destroy")
+	-- Tarjeta de jugador en el mundo (Workspace.Locker.Banner.Part.BillboardGui.Card):
+	-- solo se enciende en Effects → Borders.
+	local cardPreview = PlayerCardPreviewer.new(lockerFolder:WaitForChild("Banner", 10))
+	janitor:Add(cardPreview, "Destroy")
 	if not weaponStatsAnchor then
 		warn("[Locker] Panel de stats no encontrado: Workspace.Locker.Stats")
 	end
@@ -184,10 +182,6 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	-- Única plantilla del grid, también en la vista de wraps (trae ViewportFrame para
 	-- el preview 3D; el progreso de desafío va como texto en Status.Value).
 	local itemGridTemplate = expectNode(itemGrid, "ItemTemplate") :: GuiObject
-	-- Vista de banners (Effects → Banners): ScrollingFrame hermano de la grid
-	-- (Locker.Content.Banners) que la sustituye mientras esa nav está activa.
-	local bannersFrame = expectNode(if itemGrid then itemGrid.Parent else nil, "Banners") :: ScrollingFrame
-	local bannersTemplate = expectNode(bannersFrame, "Template") :: ImageButton
 	local actionFrameNode = expectNode(lockerFrame, "ActionFrame")
 	-- Botón separado del ActionFrame para personalizar los wraps del arma poseída.
 	local wrapsButton = expectNode(lockerFrame, "Wraps") :: GuiButton
@@ -444,19 +438,20 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local populateMainContentForNavItem: (LockerCategoryKey, string, string?, boolean?) -> ()
 	local clearItemGrid: () -> ()
 	local syncWeaponPreviewsFromLoadout: () -> ()
-	local bannersView: any = nil
 
-	-- Un perfil sin Loadout.Banner lleva el Default.
-	local function getShownBannerId(): string
-		return inventory:getEquipped(LockerCategory.BANNERS) or ItemDefaults.ITEM_ID
+	-- En Borders la tarjeta enseña el seleccionado (aunque esté bloqueado); si no, el equipado.
+	local function getShownBorderId(): string?
+		local item = selectedCatalogItem
+		if item and item.Category == LockerCategory.BORDERS then
+			return item.id
+		end
+		return inventory:getEquipped(LockerCategory.BORDERS)
 	end
 
-	local function refreshBanners()
-		if not bannersView:IsVisible() then
-			return
+	local function refreshCardPreview()
+		if cardPreview:isVisible() then
+			cardPreview:setContent(getCurrentLevel(), getShownBorderId())
 		end
-		bannersView:Refresh()
-		bannerPreview:setContent(player.Name, getCurrentLevel(), getShownBannerId())
 	end
 
 	local shopRequests = LockerShopRequests.new({
@@ -469,7 +464,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		end,
 		refreshSelection = function()
 			grid:RefreshVisibleState()
-			refreshBanners()
+			refreshCardPreview()
 		end,
 		onPurchased = function()
 			GameSounds.play(GameSounds.Purchase)
@@ -509,6 +504,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			elseif item and item.Category == LockerCategory.EMOTES then
 				killEffectPreview:previewEmote(item.id, byUser)
 			end
+			refreshCardPreview()
 			updateActionFrameForSelected()
 		end,
 		onOwnedItemActivated = function(item: LockerCatalogItem)
@@ -517,67 +513,14 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	})
 	janitor:Add(grid, "Destroy")
 
-	bannersView = LockerBanners.new(bannersFrame, bannersTemplate, itemGrid, {
-		canInteract = function(): boolean
-			return not shopRequests:isBusy()
-		end,
-		isItemOwned = function(item: LockerCatalogItem): boolean
-			return item.id == ItemDefaults.ITEM_ID or inventory:isItemOwned(item)
-		end,
-		isItemEquipped = function(item: LockerCatalogItem): boolean
-			return getShownBannerId() == item.id
-		end,
-		onActivated = function(item: LockerCatalogItem)
-			if item.id == ItemDefaults.ITEM_ID or inventory:isItemOwned(item) then
-				shopRequests:requestEquip(item)
-			else
-				selectedCatalogItem = item
-				updateActionFrameForSelected()
-			end
-		end,
-	})
-	janitor:Add(bannersView, "Destroy")
-
-	-- Poseídos y comprables, Default primero y luego por rareza. Un no comprable solo
-	-- aparece si ya se posee.
-	local function getBannerItems(): { LockerCatalogItem }
-		local items = {} :: { LockerCatalogItem }
-		for _, item in catalog:GetItems(LockerMainCategory.EFFECTS, LockerCategory.BANNERS) do
-			if item.id == ItemDefaults.ITEM_ID or inventory:isItemOwned(item) or (item.CanPurchase and item.Price > 0) then
-				table.insert(items, item)
-			end
+	-- Borders se previsualiza en la tarjeta en escena, que oculta al personaje del lobby
+	-- hasta salir (el preview de kill effects también lo oculta mientras corre su doble).
+	local function setCardPreviewActive(active: boolean)
+		if active ~= cardPreview:isVisible() then
+			cardPreview:setVisible(active)
+			lobbyCharacter:setHiddenByOwner(active)
 		end
-		table.sort(items, function(a, b)
-			local aDefault = a.id == ItemDefaults.ITEM_ID
-			local bDefault = b.id == ItemDefaults.ITEM_ID
-			if aDefault ~= bDefault then
-				return aDefault
-			end
-			local rarityA = getRarityRank(a.Rarity)
-			local rarityB = getRarityRank(b.Rarity)
-			if rarityA ~= rarityB then
-				return rarityA > rarityB
-			end
-			return a.Name < b.Name
-		end)
-		return items
-	end
-
-	-- La grid de ítems y la de banners ocupan el mismo hueco. Con la tarjeta de banner
-	-- en escena el personaje del lobby se oculta, y solo se muestra al SALIR de
-	-- banners (el preview de kill effects también lo oculta mientras corre su doble).
-	local function setBannersViewActive(active: boolean, stagger: boolean?)
-		itemGrid.Visible = not active
-		if active then
-			bannerPreview:setVisible(true)
-			lobbyCharacter:setHiddenByOwner(true)
-			bannersView:Show(getBannerItems(), stagger)
-			refreshBanners()
-		elseif bannersView:IsVisible() then
-			bannersView:Hide()
-			bannerPreview:setVisible(false)
-			lobbyCharacter:setHiddenByOwner(false)
-		end
+		refreshCardPreview()
 	end
 
 	local function getPreferredSelectedQualifiedId(categoryKey: LockerCategoryKey, navKey: string, selectedQualifiedId: string?): string?
@@ -628,22 +571,16 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			restoreEquippedWeaponPreviews()
 		end
 
-		if categoryKey == LockerMainCategory.EFFECTS and navKey == LockerCategory.BANNERS then
-			-- Sin selección en la grid: vuelven los previews de lo equipado y se
-			-- ocultan ActionFrame y botón Wraps (onSelectionChanged(nil)).
-			clearItemGrid()
-			setBannersViewActive(true, stagger)
-			return
-		end
-		-- Antes de crear el doble de emotes: salir de banners vuelve a mostrar el
-		-- personaje del lobby, y si el doble ya estaba creado quedaban los dos.
-		setBannersViewActive(false)
-
-		if navKey == LockerCategory.KILL_EFFECTS and previousNavKey ~= LockerCategory.KILL_EFFECTS then
-			-- En reposo el preview es el propio personaje del lobby: solo asegurar que
-			-- no queda un doble de antes.
+		if (navKey == LockerCategory.KILL_EFFECTS or navKey == LockerCategory.BORDERS) and previousNavKey ~= navKey then
+			-- En reposo el preview es el propio personaje del lobby (en Borders, la
+			-- tarjeta): solo asegurar que no queda un doble de antes.
 			killEffectPreview:destroyDummy()
-		elseif navKey == LockerCategory.EMOTES and previousNavKey ~= LockerCategory.EMOTES then
+		end
+		-- destroyDummy vuelve a mostrar el personaje del lobby y el doble de emotes lo
+		-- oculta: la tarjeta va entre los dos o el personaje se quedaría visible con ella
+		-- (o junto al doble al salir de Borders).
+		setCardPreviewActive(categoryKey == LockerMainCategory.EFFECTS and navKey == LockerCategory.BORDERS)
+		if navKey == LockerCategory.EMOTES and previousNavKey ~= LockerCategory.EMOTES then
 			killEffectPreview:spawnEmoteDummy()
 		end
 
@@ -655,9 +592,9 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			items = LockerWrapsView.build(items, inventory, wrapsView, getRarityRank)
 		end
 
-		-- Hat es el único slot opcional: sin hat equipado no se preselecciona ninguno,
+		-- Slots opcionales (Border): sin nada equipado no se preselecciona ninguno,
 		-- o se previsualizaría el primero de la grid como si estuviera puesto.
-		local allowEmptySelection = navKey == LockerCategory.HATS
+		local allowEmptySelection = LockerCategory.isOptionalSlot(navKey)
 		grid:Populate(items, preferredSelectedQualifiedId, if isWrapsView then "wraps" else "default", allowEmptySelection)
 		if stagger then
 			grid:PlayStagger()
@@ -686,10 +623,11 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 			end
 			actionPanel:hide()
 		elseif selectedItem.IsMasteryWrap
+			or selectedItem.Category == LockerCategory.BORDERS
 			or (selectedItem.Category == LockerCategory.WEAPON_WRAPS
 				and not (selectedItem.CanPurchase and selectedItem.Price > 0)) then
-			-- No comprables con cash: wraps de desafío (se desbloquean por progreso) y
-			-- wraps sin precio.
+			-- No comprables: wraps de desafío (se desbloquean por progreso), wraps sin
+			-- precio y borders (por nivel; la card ya enseña cuál).
 			wrapsButton.Visible = false
 			actionPanel:hide()
 		else
@@ -700,7 +638,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 
 	local function refreshGridSelectionState()
 		grid:RefreshVisibleState()
-		refreshBanners()
+		refreshCardPreview()
 	end
 
 	syncWeaponPreviewsFromLoadout = function()
@@ -899,13 +837,24 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 		restoreEquippedWeaponPreviews()
 
 		local statsObserver = fusionScope:Observer(DataController.Stats)
+		-- Los borders se poseen por nivel: subir de nivel cambia la posesión sin tocar Inventory.
+		local lastLevel = getCurrentLevel()
 		janitor:Add(statsObserver:onBind(function()
 			if not isOpen then
 				dirtyWhileClosed = true
 				return
 			end
+			local level = getCurrentLevel()
+			if level ~= lastLevel then
+				lastLevel = level
+				catalog:InvalidateSorted()
+				if selectedMainCategory and selectedNavKey == LockerCategory.BORDERS then
+					local selectedQualifiedId = if selectedCatalogItem then selectedCatalogItem.qualifiedId else nil
+					populateMainContentForNavItem(selectedMainCategory, selectedNavKey, selectedQualifiedId)
+				end
+			end
 			updateActionFrameForSelected()
-			refreshBanners()
+			refreshCardPreview()
 		end), true)
 
 		local function onMasteryStatsChanged()
@@ -978,7 +927,7 @@ function LockerFeature.start(menuController: any, options: { autoOpen: boolean? 
 	local function restoreLockerSceneState(animateCamera: boolean?, cameraTweenInfo: TweenInfo?)
 		shopRequests:flushEquips()
 		-- Antes de endPreview: devuelve el personaje del lobby si estaba oculto.
-		setBannersViewActive(false)
+		setCardPreviewActive(false)
 		-- Todas las salidas pasan por aquí, incluidas las que no llaman a setWrapsMode:
 		-- soltar el HUD compartido sin condiciones o se quedaría forzado en el lobby.
 		menuController:setStatsHudOverride(nil)

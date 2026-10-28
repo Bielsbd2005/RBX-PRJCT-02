@@ -34,10 +34,10 @@ local ARSENAL_NAV_ITEMS = table.freeze({
 
 local EFFECTS_NAV_ITEMS = table.freeze({
 	{ key = "KillEffects", title = "Kill Effects", thumbnail = "rbxassetid://130437553674754" },
-	-- Thumbnail PROVISIONAL (el de Kill Effects) hasta que haya icono propio.
-	{ key = "Banners", title = "Banners", thumbnail = "rbxassetid://130437553674754" },
 	-- Thumbnail provisional (el de Kill Effects): subir un icono propio de emotes.
 	{ key = "Emotes", title = "Emotes", thumbnail = "rbxassetid://130437553674754" },
+	-- Thumbnail PROVISIONAL (el de Kill Effects) hasta que haya icono propio.
+	{ key = "Borders", title = "Borders", thumbnail = "rbxassetid://130437553674754" },
 })
 
 local NAV_ITEMS = table.freeze({
@@ -60,8 +60,8 @@ local ITEMS_CONFIG_BY_NAV = table.freeze({
 	}),
 	Effects = table.freeze({
 		KillEffects = "KillEffects",
-		Banners = "Banners",
 		Emotes = "Emotes",
+		Borders = "Borders",
 	}),
 })
 
@@ -75,7 +75,7 @@ local CATEGORY_TO_LOADOUT_SLOT = table.freeze({
 	Faces = "Face",
 	Hats = "Hat",
 	Outfits = "Outfit",
-	Banners = "Banner",
+	Borders = "Border",
 })
 
 local RARITY_RANK = table.freeze({

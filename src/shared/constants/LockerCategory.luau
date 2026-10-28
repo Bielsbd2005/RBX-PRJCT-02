@@ -11,7 +11,7 @@ LockerCategory.EMOTES = "Emotes"
 LockerCategory.FACES = "Faces"
 LockerCategory.HATS = "Hats"
 LockerCategory.OUTFITS = "Outfits"
-LockerCategory.BANNERS = "Banners"
+LockerCategory.BORDERS = "Borders"
 
 LockerCategory.ALL = {
 	LockerCategory.WEAPON_WRAPS,
@@ -20,7 +20,7 @@ LockerCategory.ALL = {
 	LockerCategory.FACES,
 	LockerCategory.HATS,
 	LockerCategory.OUTFITS,
-	LockerCategory.BANNERS,
+	LockerCategory.BORDERS,
 }
 
 export type LockerCategory =
@@ -30,7 +30,14 @@ export type LockerCategory =
 	| "Faces"
 	| "Hats"
 	| "Outfits"
-	| "Banners"
+	| "Borders"
+
+-- Slots que pueden ir vacíos en el Loadout: sin equipar no caen al Default.
+local OPTIONAL_SLOTS = { [LockerCategory.BORDERS] = true }
+
+function LockerCategory.isOptionalSlot(category: string): boolean
+	return OPTIONAL_SLOTS[category] == true
+end
 
 function LockerCategory.isValid(value: any): boolean
 	for _, c in LockerCategory.ALL do

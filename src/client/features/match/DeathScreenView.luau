@@ -5,7 +5,7 @@ local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 
 local AssetIds = require(ReplicatedStorage:WaitForChild("Shared").constants.AssetIds)
-local BannerCard = require(script.Parent.Parent.Parent.core.ui.BannerCard)
+local PlayerCard = require(script.Parent.Parent.Parent.core.ui.PlayerCard)
 
 local DeathScreenView = {}
 DeathScreenView.__index = DeathScreenView
@@ -25,16 +25,18 @@ type Refs = {
 	menuPcLabel: TextLabel?,
 	respawnPcLabel: TextLabel?,
 	barFill: GuiObject?,
-	-- Tarjeta del asesino (ImageLabel con el banner + Name + Level).
-	card: BannerCard.Refs?,
+	-- Tarjeta del asesino: Name, Level, Profile (su foto) y Border.
+	card: PlayerCard.Refs?,
 	viewportFrame: ViewportFrame?,
 }
 
 export type KillerInfo = {
 	name: string,
 	level: number,
-	-- Id en ItemsConfig.Banners; nil/"Default" → banner por defecto.
-	bannerId: string?,
+	-- Para la foto de perfil; nil o negativo (bot) → la imagen de Studio.
+	userId: number?,
+	-- Id en ItemsConfig.Borders; nil → sin border.
+	borderId: string?,
 	character: Model?,
 	isVIP: boolean?,
 }
@@ -95,7 +97,7 @@ local function _resolveRefs(gui: GuiObject): Refs?
 		menuPcLabel = _resolvePcLabel(menuNode),
 		respawnPcLabel = _resolvePcLabel(respawnNode),
 		barFill = _resolveBarFill(respawnNode),
-		card = if cardNode then BannerCard.resolve(cardNode) else nil,
+		card = if cardNode then PlayerCard.resolve(cardNode) else nil,
 		viewportFrame = if viewportNode and viewportNode:IsA("ViewportFrame") then viewportNode else nil,
 	}
 end
@@ -123,9 +125,15 @@ local function _populateCard(refs: Refs, killer: KillerInfo?)
 		return
 	end
 	if killer then
-		BannerCard.populate(refs.card, killer.name, killer.level, killer.bannerId, killer.isVIP)
+		PlayerCard.populate(refs.card, {
+			name = killer.name,
+			level = killer.level,
+			userId = killer.userId,
+			isVIP = killer.isVIP,
+			borderId = killer.borderId,
+		})
 	else
-		BannerCard.populate(refs.card, "", 0, nil)
+		PlayerCard.populate(refs.card, { name = "", level = 0 })
 	end
 end
 

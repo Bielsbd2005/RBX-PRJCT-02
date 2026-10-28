@@ -142,11 +142,10 @@ function MatchResultsService:_computeItemUnlocks(player: Player): { ResultItem }
 	return out
 end
 
--- Síncrono (sin yields): se envía en el mismo frame que RoundEnded.
 -- `bonusScale` (0..1) lo calcula MatchService: 0 = sin participación mínima (no hay
 -- bonus, ni el upsell VIP); si no, tiempo en partida sobre ronda completa × techo diario. El
 -- importe escalado es el que se pinta Y el que se concede; lo que redondea a 0 se cae.
-function MatchResultsService:BuildResults(player: Player, ctx: MatchContext, bonusScale: number): MatchResults
+function MatchResultsService:ScaledCash(ctx: MatchContext, bonusScale: number): { ResultsRewards.ResolvedCashReward }
 	local cash: { ResultsRewards.ResolvedCashReward } = {}
 	for _, entry in ResultsRewards.resolveCash(ctx) do
 		-- Hacia abajo: redondeando al más cercano, la ronda corta cobraría de más por hora.
@@ -155,6 +154,12 @@ function MatchResultsService:BuildResults(player: Player, ctx: MatchContext, bon
 			table.insert(cash, { id = entry.id, title = entry.title, cash = scaled, locked = entry.locked })
 		end
 	end
+	return cash
+end
+
+-- Síncrono (sin yields): se envía en el mismo frame que RoundEnded.
+function MatchResultsService:BuildResults(player: Player, ctx: MatchContext, bonusScale: number): MatchResults
+	local cash = self:ScaledCash(ctx, bonusScale)
 	local items = self:_computeItemUnlocks(player)
 
 	local rewards: { DisplayReward } = {}

@@ -17,6 +17,7 @@ local WeaponCategoryMod = require(Shared.constants.WeaponCategory)
 local ItemDefaults = require(Shared.constants.ItemDefaults)
 local LoadoutWraps = require(Shared.data.LoadoutWraps)
 local LimitedBundles = require(Shared.data.LimitedBundles)
+local BorderLevels = require(Shared.data.BorderLevels)
 local LockerCatalog = require(script.Parent.LockerCatalog)
 
 type WeaponCategory = WeaponCategoryMod.WeaponCategory
@@ -147,7 +148,7 @@ function LockerInventoryState.rebuildEquipped(self: Internal)
 		local equippedItem = optionalString(loadout[slot])
 		if equippedItem and self:isOwned(category, equippedItem) then
 			nextEquipped[category] = equippedItem
-		elseif category ~= LockerCategory.HATS then
+		elseif not LockerCategory.isOptionalSlot(category) then
 			nextEquipped[category] = ItemDefaults.ITEM_ID
 		end
 	end
@@ -157,6 +158,9 @@ end
 function LockerInventoryState.isOwned(self: Internal, category: string, itemId: string): boolean
 	if LockerConfig.isUnlockAllActive() then
 		return true
+	end
+	if category == LockerCategory.BORDERS then
+		return BorderLevels.isUnlocked(itemId, self:getLevel())
 	end
 	local categoryLookup = self._owned[category]
 	return categoryLookup ~= nil and categoryLookup[itemId] == true
@@ -201,7 +205,7 @@ function LockerInventoryState.getEquipped(self: Internal, category: string): str
 	if loadoutItem and self:isOwned(category, loadoutItem) then
 		return loadoutItem
 	end
-	return if category == LockerCategory.HATS then nil else ItemDefaults.ITEM_ID
+	return if LockerCategory.isOptionalSlot(category) then nil else ItemDefaults.ITEM_ID
 end
 
 function LockerInventoryState.getEquippedWeapon(self: Internal, category: WeaponCategory): string

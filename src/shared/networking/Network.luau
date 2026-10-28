@@ -184,9 +184,9 @@ local MatchNamespace = ByteNet.DefineNamespace("Match", function()
 				killerUserId = ByteNet.String,
 				killerName = ByteNet.String,
 				killerLevel = ByteNet.Int32,
-				-- ItemsConfig.Banners: el equipado (jugador) o el de su personalidad (bot).
-				-- "Default" sin asesino o si no posee el equipado.
-				killerBanner = ByteNet.String,
+				-- ItemsConfig.Borders: el equipado (jugador) o el más alto de su nivel (bot).
+				-- "" si no lleva.
+				killerBorder = ByteNet.String,
 				weaponId = ByteNet.String,
 			}),
 			ReliabilityType = "Reliable",

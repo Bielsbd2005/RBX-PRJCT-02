@@ -1,5 +1,6 @@
 --!strict
 
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 
@@ -12,6 +13,7 @@ local WeaponWrapPreviewer = require(script.Parent.Previewers.WeaponWrapPreviewer
 local LockerCatalog = require(script.Parent.LockerCatalog)
 local UITheme = require(script.Parent.Parent.Parent.core.ui.UITheme)
 local UIUtils = require(script.Parent.Parent.Parent.core.ui.UIUtils)
+local PlayerCard = require(script.Parent.Parent.Parent.core.ui.PlayerCard)
 local WeaponCategoryMod = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("WeaponCategory"))
 local ItemDefaults = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("ItemDefaults"))
 local LockerCategory = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("constants"):WaitForChild("LockerCategory"))
@@ -38,6 +40,9 @@ type ItemGridCardRefs = {
 	itemHairNode: GuiObject?,
 	itemFaceNode: GuiObject?,
 	itemBodyNode: GuiObject?,
+	-- Borders: Profile lleva la foto del jugador local y su hijo Border, el ítem.
+	itemProfileNode: GuiObject?,
+	itemBorderNode: GuiObject?,
 	nameNode: TextLabel?,
 	viewportNode: ViewportFrame?,
 	viewportDefaultAmbient: Color3?,
@@ -288,6 +293,11 @@ function LockerGrid:_buildGridCardRefs(card: GuiObject, templateKey: TemplateKey
 	local itemBodyNode = if button then button:FindFirstChild("ItemBody") else nil
 	local resolvedItemBodyNode = if itemBodyNode and (itemBodyNode:IsA("ImageLabel") or itemBodyNode:IsA("ImageButton")) then itemBodyNode else nil
 
+	local itemProfileNode = if button then button:FindFirstChild("Profile", true) else nil
+	local resolvedItemProfileNode = if itemProfileNode and (itemProfileNode:IsA("ImageLabel") or itemProfileNode:IsA("ImageButton")) then itemProfileNode else nil
+	local itemBorderNode = if resolvedItemProfileNode then resolvedItemProfileNode:FindFirstChild("Border", true) else nil
+	local resolvedItemBorderNode = if itemBorderNode and (itemBorderNode:IsA("ImageLabel") or itemBorderNode:IsA("ImageButton")) then itemBorderNode else nil
+
 	local nameNode = if button then button:FindFirstChild("Name") else nil
 	local resolvedNameNode = if nameNode and nameNode:IsA("TextLabel") then nameNode else nil
 
@@ -323,6 +333,8 @@ function LockerGrid:_buildGridCardRefs(card: GuiObject, templateKey: TemplateKey
 		itemHairNode = resolvedItemHairNode,
 		itemFaceNode = resolvedItemFaceNode,
 		itemBodyNode = resolvedItemBodyNode,
+		itemProfileNode = resolvedItemProfileNode,
+		itemBorderNode = resolvedItemBorderNode,
 		nameNode = resolvedNameNode,
 		viewportNode = viewport,
 		viewportDefaultAmbient = if viewport then viewport.Ambient else nil,
@@ -409,6 +421,9 @@ local function resolveItemImageNode(refs: ItemGridCardRefs, item: LockerCatalogI
 	end
 	if item.Category == LockerCategory.OUTFITS and refs.itemBodyNode then
 		return refs.itemBodyNode
+	end
+	if item.Category == LockerCategory.BORDERS and refs.itemBorderNode then
+		return refs.itemBorderNode
 	end
 	if item.Category == LockerCategory.HATS then
 		if refs.itemHairNode and string.sub(item.id, 1, 4) == "Hair" then
@@ -566,8 +581,12 @@ function LockerGrid:_updateGridCardVisual(button: GuiButton)
 	local isLevelLocked = not isOwned and currentLevel < item.LevelRequired
 
 	local imageNode = resolveItemImageNode(refs, item) :: any
+	local imageColor = if isLevelLocked then GRID_ITEM_LOCKED_COLOR else GRID_ITEM_DEFAULT_COLOR
 	if imageNode then
-		imageNode.ImageColor3 = if isLevelLocked then GRID_ITEM_LOCKED_COLOR else GRID_ITEM_DEFAULT_COLOR
+		imageNode.ImageColor3 = imageColor
+	end
+	if imageNode and imageNode == refs.itemBorderNode and refs.itemProfileNode then
+		(refs.itemProfileNode :: any).ImageColor3 = imageColor
 	end
 
 	if refs.statusValueNode then
@@ -713,6 +732,14 @@ function LockerGrid:_syncWrapPreviewVisibility(card: GuiObject, item: LockerCata
 	if refs.itemNode and refs.itemNode ~= imageNode then
 		refs.itemNode.Visible = false
 	end
+	local profileNode = refs.itemProfileNode :: any
+	if profileNode then
+		local showProfile = imageNode ~= nil and imageNode == refs.itemBorderNode
+		profileNode.Visible = showProfile
+		if showProfile then
+			profileNode.Image = PlayerCard.headshotFor(Players.LocalPlayer.UserId) or ""
+		end
+	end
 
 	if imageNode then
 		local image = imageNode :: any
@@ -746,7 +773,7 @@ function LockerGrid:_applyCatalogItemToCard(card: GuiObject, item: LockerCatalog
 	end
 
 	if refs.nameNode then
-		local showName = item.Category ~= LockerCategory.FACES
+		local showName = item.Category ~= LockerCategory.FACES and item.Category ~= LockerCategory.BORDERS
 		refs.nameNode.Visible = showName
 		refs.nameNode.Text = if showName then item.Name else ""
 	end

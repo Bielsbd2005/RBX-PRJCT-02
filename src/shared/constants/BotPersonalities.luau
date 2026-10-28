@@ -27,11 +27,6 @@ export type Personality = {
 	weight: number,
 	levelRange: LevelRange,
 	allowedRarities: RaritySet,
-	-- Banner de la tarjeta de muerte: no-Default con probabilidad bannerProbability
-	-- y de las rarezas de bannerRarities (exacto: vacío no significa "todas"; si no
-	-- hay banner de esas rarezas, Default).
-	bannerProbability: number,
-	bannerRarities: RaritySet,
 	hatProbability: number,
 	combat: CombatOverrides?,
 }
@@ -42,8 +37,6 @@ local BotPersonalities: { [string]: Personality } = {
 		weight = 50,
 		levelRange = { min = 1, max = 5 },
 		allowedRarities = { Common = true },
-		bannerProbability = 0,
-		bannerRarities = {},
 		hatProbability = 0.1,
 		combat = {
 			Precision = 25,
@@ -58,8 +51,6 @@ local BotPersonalities: { [string]: Personality } = {
 		weight = 30,
 		levelRange = { min = 5, max = 15 },
 		allowedRarities = { Common = true },
-		bannerProbability = 0,
-		bannerRarities = {},
 		hatProbability = 0.4,
 		combat = {
 			Precision = 35,
@@ -73,8 +64,6 @@ local BotPersonalities: { [string]: Personality } = {
 		weight = 15,
 		levelRange = { min = 15, max = 30 },
 		allowedRarities = { Common = true, Rare = true, Epic = true },
-		bannerProbability = 0.15,
-		bannerRarities = { Rare = true, Epic = true },
 		hatProbability = 0.75,
 		combat = {
 			Precision = 50,
@@ -91,8 +80,6 @@ local BotPersonalities: { [string]: Personality } = {
 		weight = 5,
 		levelRange = { min = 30, max = 50 },
 		allowedRarities = { Common = true, Rare = true, Epic = true, Legendary = true },
-		bannerProbability = 0.4,
-		bannerRarities = { Epic = true, Legendary = true },
 		hatProbability = 1.0,
 		combat = {
 			Precision = 60,

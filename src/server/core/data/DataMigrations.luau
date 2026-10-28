@@ -123,6 +123,18 @@ local MIGRATIONS: { [number]: (any) -> () } = {
 			end
 		end
 	end,
+	-- Banners retirados (los sustituyen los Borders): fuera la categoría entera.
+	[7] = function(data)
+		if type(data.Inventory) == "table" then
+			data.Inventory.Banners = nil
+		end
+		if type(data.InventoryMeta) == "table" then
+			data.InventoryMeta.Banners = nil
+		end
+		if type(data.Loadout) == "table" then
+			data.Loadout.Banner = nil
+		end
+	end,
 }
 
 DataMigrations.migrations = MIGRATIONS

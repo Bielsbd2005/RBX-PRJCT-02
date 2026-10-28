@@ -23,9 +23,9 @@ local KillRewardsService = require(script.Parent:WaitForChild("KillRewardsServic
 local MatchResultsService = require(script.Parent:WaitForChild("MatchResultsService"))
 local KillEffectsRegistry = require(Shared.Locker.killEffects.KillEffectsRegistry)
 local CollisionGroups = require(Shared.CollisionGroups)
-local ItemsConfig = require(Shared.constants.ItemsConfig)
 local ItemDefaults = require(Shared.constants.ItemDefaults)
 local InventoryRepository = require(Shared.data.InventoryRepository)
+local BorderLevels = require(Shared.data.BorderLevels)
 local ClientBootStage = require(Shared.constants.ClientBootStage)
 local DailyTasksService = require(script.Parent.Parent.dailyTasks.DailyTasksService)
 
@@ -262,13 +262,6 @@ local function _markEnteredMatch(userId: number)
 	end
 end
 
--- Contrato con MatchHud (cliente): atributo de Player "MatchSide" = bando mientras el
--- jugador está EN PARTIDA, aunque esté muerto y con Team=nil (SpawnAtLobby). No usar
--- "TeamName": TeamUtils.getSide lo lee y los bots apuntarían al cuerpo del lobby.
-local function _setMatchSide(player: Player, side: ("A" | "B")?)
-	player:SetAttribute("MatchSide", side)
-end
-
 -- Salida de la partida (vuelta al menú o desconexión): cierra el tramo abierto.
 local function _markLeftMatch(userId: number)
 	local round = _round
@@ -287,6 +280,113 @@ local function _inMatchSeconds(round: Round, userId: number): number
 	local since = round.inMatchSinceByUserId[userId]
 	local open = if since then math.max(0, os.time() - since) else 0
 	return (round.inMatchSecondsByUserId[userId] or 0) + open
+end
+
+-- Máximo de kills por bando entre `userIds` (el MVP de cada equipo).
+local function _teamMaxKills(round: Round, userIds: { [number]: true }): { A: number, B: number }
+	local teamMaxKills = { A = 0, B = 0 }
+	for userId in userIds do
+		local session = _sessions[userId]
+		local side = if userId > 0 and session then session.team else nil
+		local stats = round.statsByUserId[userId]
+		if side and stats and stats.kills > teamMaxKills[side] then
+			teamMaxKills[side] = stats.kills
+		end
+	end
+	return teamMaxKills
+end
+
+-- Entradas del bonus de fin de partida. Las usan el reparto (_enterResults) y la
+-- proyección de MatchBonusAtStake: lo prometido sale del mismo cálculo que lo cobrado.
+-- Participación: tiempo mínimo EN PARTIDA y kills + asistencias; estar dentro al sonar
+-- el final no basta.
+local function _matchEndRewardInputs(
+	round: Round,
+	player: Player,
+	secondsInMatch: number,
+	won: boolean,
+	teamMaxKills: { A: number, B: number }
+): (MatchResultsService.MatchContext, number, boolean)
+	local userId = player.UserId
+	local stats = round.statsByUserId[userId]
+	local kills = if stats then stats.kills else 0
+	local contribution = if stats then stats.kills + stats.assists else 0
+	local participated = secondsInMatch >= GameConfig.MatchEndMinSeconds
+		and contribution >= GameConfig.MatchEndMinContribution
+	-- Proporcional al tiempo en partida, igual que devenga el cap de combate.
+	-- El techo diario entra aquí y no al conceder: lo pintado debe ser lo cobrado.
+	local bonusScale = if participated
+		then math.clamp(secondsInMatch / math.max(1, GameConfig.MaxRoundDuration), 0, 1)
+			* RewardService.PlayedCashFactor(player)
+		else 0
+	local session = _sessions[userId]
+	local side = if session then session.team else nil
+	local maxForSide = if side then teamMaxKills[side] else 0
+	local context = {
+		won = won,
+		lost = not won, -- perder o empatar cuentan como "Defeat"
+		isMVP = maxForSide > 0 and kills == maxForSide,
+		isVIP = MatchResultsService:IsVIPCached(player),
+	}
+	return context, bonusScale, participated
+end
+
+-- Contrato con features/options (cliente): atributo de Player "MatchBonusAtStake" = Cash
+-- de bonus que cobraría quedándose hasta el final con el marcador de ahora (gana si su
+-- bando va por delante). Solo existe mientras tiene "MatchSide".
+local BONUS_AT_STAKE_ATTRIBUTE = "MatchBonusAtStake"
+
+local function _publishBonusAtStake()
+	local round = _round
+	local inMatch: { [number]: true } = {}
+	for _, player in Players:GetPlayers() do
+		local session = _sessions[player.UserId]
+		if round and session and not session.inMenu and not session.pendingSpawn then
+			inMatch[player.UserId] = true
+		end
+	end
+
+	-- Quedarse hasta el final suma el tiempo que le queda a la ronda.
+	local timeLeft = math.max(0, MatchSnapshot.getNumber("PhaseEndsAt") - MatchSnapshot.now())
+	local teamMaxKills = if round then _teamMaxKills(round, inMatch) else nil
+	local leader: ("A" | "B")? = nil
+	if round and round.scoreA ~= round.scoreB then
+		leader = if round.scoreA > round.scoreB then "A" else "B"
+	end
+
+	for _, player in Players:GetPlayers() do
+		local session = _sessions[player.UserId]
+		local atStake: number? = nil
+		if round and teamMaxKills and session and inMatch[player.UserId] then
+			local secondsAtEnd = _inMatchSeconds(round, player.UserId) + timeLeft
+			local context, bonusScale = _matchEndRewardInputs(
+				round,
+				player,
+				secondsAtEnd,
+				leader ~= nil and session.team == leader,
+				teamMaxKills
+			)
+			atStake = 0
+			for _, entry in MatchResultsService:ScaledCash(context, bonusScale) do
+				if not entry.locked then
+					atStake += entry.cash
+				end
+			end
+		end
+		player:SetAttribute(BONUS_AT_STAKE_ATTRIBUTE, atStake)
+	end
+end
+
+-- Contrato con MatchHud (cliente): atributo de Player "MatchSide" = bando mientras el
+-- jugador está EN PARTIDA, aunque esté muerto y con Team=nil (SpawnAtLobby). No usar
+-- "TeamName": TeamUtils.getSide lo lee y los bots apuntarían al cuerpo del lobby.
+local function _setMatchSide(player: Player, side: ("A" | "B")?)
+	player:SetAttribute("MatchSide", side)
+	if side then
+		_publishBonusAtStake()
+	else
+		player:SetAttribute(BONUS_AT_STAKE_ATTRIBUTE, nil)
+	end
 end
 
 -- Máquina de fases, única fuente de verdad del flujo de partida:
@@ -360,6 +460,8 @@ local function _publishScore()
 		return
 	end
 	MatchSnapshot.set({ ScoreA = round.scoreA, ScoreB = round.scoreB })
+	-- Cada punto es una kill: cambian marcador, MVP y techo diario del bonus en juego.
+	_publishBonusAtStake()
 end
 
 -- Delegan en KillAttributionService (broadcast de stats de combate con dedupe). El
@@ -585,24 +687,19 @@ local function _getKillEffectIdForAttacker(attackerUserId: number?): string
 	return ItemDefaults.ITEM_ID
 end
 
--- Banner que pinta la tarjeta de muerte de quien cae a manos de este perfil. Se
--- revalida catálogo y posesión: un Loadout.Banner que ya no existe (ítem retirado)
--- o que no se posee cae al Default en vez de mandar un id que el cliente no sabe
--- pintar.
-local function _resolveEquippedBanner(profileData: any, playerOrUserId: (Player | number)?): string
+-- Border de la foto de perfil en la tarjeta de muerte de quien cae a manos de este
+-- perfil. Se revalida posesión: "" si no lleva o el Loadout apunta a uno que ya no
+-- tiene (o que no existe).
+local function _resolveEquippedBorder(profileData: any, playerOrUserId: (Player | number)?): string
 	local loadout = if type(profileData) == "table" then profileData.Loadout else nil
-	local bannerId = if type(loadout) == "table" then loadout.Banner else nil
-	if type(bannerId) ~= "string" or bannerId == "" or bannerId == ItemDefaults.ITEM_ID then
-		return ItemDefaults.ITEM_ID
+	local borderId = if type(loadout) == "table" then loadout.Border else nil
+	if type(borderId) ~= "string" or borderId == "" then
+		return ""
 	end
-	local banners = ItemsConfig.Banners
-	if type(banners) ~= "table" or banners[bannerId] == nil then
-		return ItemDefaults.ITEM_ID
+	if not InventoryRepository.ownsItem(profileData, "Borders", borderId, playerOrUserId) then
+		return ""
 	end
-	if not InventoryRepository.ownsItem(profileData, "Banners", bannerId, playerOrUserId) then
-		return ItemDefaults.ITEM_ID
-	end
-	return bannerId
+	return borderId
 end
 
 local function _applyKillEffect(attackerUserId: number?, character: Model)
@@ -775,9 +872,9 @@ local function _registerDeathListener(player: Player, character: Model)
 		end
 
 		if player.Parent == Players then
-			-- La tarjeta de muerte enseña quién mató, su nivel y su banner equipado.
+			-- La tarjeta de muerte enseña quién mató, su nivel y su border equipado.
 			local killerLevel = 0
-			local killerBanner = ItemDefaults.ITEM_ID
+			local killerBorder = ""
 			if attackerPlayer and _dataService and _dataService.GetProfile then
 				local killerProfile = _dataService:GetProfile(attackerPlayer)
 				if killerProfile and killerProfile.Data then
@@ -786,18 +883,17 @@ local function _registerDeathListener(player: Player, character: Model)
 					if type(lvl) == "number" then
 						killerLevel = math.floor(lvl)
 					end
-					killerBanner = _resolveEquippedBanner(killerProfile.Data, attackerPlayer)
+					killerBorder = _resolveEquippedBorder(killerProfile.Data, attackerPlayer)
 				end
 			end
 
-			-- Killer bot: nivel y banner salen de su identidad (los bots no tienen perfil).
+			-- Killer bot: el nivel sale de su identidad (los bots no tienen perfil) y el
+			-- border es el más alto de ese nivel.
 			if attackerUserId and attackerUserId < 0 and _AIService and _AIService.GetBotIdentity then
 				local botIdentity = _AIService:GetBotIdentity(attackerUserId)
 				if botIdentity then
 					killerLevel = botIdentity.level
-					if botIdentity.appearance then
-						killerBanner = botIdentity.appearance.bannerId
-					end
+					killerBorder = BorderLevels.highestUnlocked(killerLevel) or ""
 				end
 			end
 
@@ -806,7 +902,7 @@ local function _registerDeathListener(player: Player, character: Model)
 				killerUserId = if attackerUserId then tostring(attackerUserId) else "",
 				killerName = killerName,
 				killerLevel = killerLevel,
-				killerBanner = killerBanner,
+				killerBorder = killerBorder,
 				weaponId = attackerWeaponId,
 			}, player)
 		end
@@ -1118,36 +1214,20 @@ function _enterResults(winnerTeam: string)
 
 	Network.Match.DeathScreenHide.SendToAll({})
 
-	-- MVP = jugador(es) con más kills de SU equipo (kills > 0). Solo players reales.
-	local function killsOf(userId: number): number
-		local stats = round.statsByUserId[userId]
-		return if stats then stats.kills else 0
-	end
 	local function teamOf(userId: number): ("A" | "B")?
 		local session = _sessions[userId]
 		return if session then session.team else nil
 	end
 
-	local teamMaxKills = { A = 0, B = 0 }
-	for userId in eligibleByUserId do
-		if userId > 0 then
-			local side = teamOf(userId)
-			if side then
-				local kills = killsOf(userId)
-				if kills > teamMaxKills[side] then
-					teamMaxKills[side] = kills
-				end
-			end
-		end
-	end
+	-- MVP = jugador(es) con más kills de SU equipo (kills > 0). Solo players reales.
+	local teamMaxKills = _teamMaxKills(round, eligibleByUserId)
 
 	-- Enviar recompensas antes de RoundEnded NO garantiza que lleguen antes: van por la
 	-- cola POR-JUGADOR de ByteNet y RoundEnded por la de BROADCAST, que se vacía antes.
 	-- El cliente las pinta al llegar (ResultsView:applyRewards). El cash se concede
 	-- abajo (task.defer), server-authoritative.
 	local resultsByUserId: { [number]: any } = {}
-	-- Participación: los bonus (y la daily de victorias) piden un mínimo de tiempo EN
-	-- PARTIDA y de kills + asistencias; estar dentro al sonar el final no basta.
+	-- La daily de victorias pide la misma participación que los bonus.
 	local participatedByUserId: { [number]: boolean } = {}
 	local winnerIsTeam = winnerTeam == "A" or winnerTeam == "B"
 	for userId in eligibleByUserId do
@@ -1155,27 +1235,10 @@ function _enterResults(winnerTeam: string)
 		if not player then
 			continue
 		end
-		local stats = round.statsByUserId[userId]
-		local contribution = if stats then stats.kills + stats.assists else 0
-		local secondsInMatch = _inMatchSeconds(round, userId)
-		local participated = secondsInMatch >= GameConfig.MatchEndMinSeconds
-			and contribution >= GameConfig.MatchEndMinContribution
+		local won = winnerIsTeam and teamOf(userId) == winnerTeam
+		local context, bonusScale, participated =
+			_matchEndRewardInputs(round, player, _inMatchSeconds(round, userId), won, teamMaxKills)
 		participatedByUserId[userId] = participated
-		-- Proporcional al tiempo en partida, igual que devenga el cap de combate.
-		-- El techo diario entra aquí y no al conceder: lo pintado debe ser lo cobrado.
-		local bonusScale = if participated
-			then math.clamp(secondsInMatch / math.max(1, GameConfig.MaxRoundDuration), 0, 1)
-				* RewardService.PlayedCashFactor(player)
-			else 0
-		local side = teamOf(userId)
-		local won = winnerIsTeam and side == winnerTeam
-		local maxForSide = if side then teamMaxKills[side] else 0
-		local context = {
-			won = won,
-			lost = not won, -- perder o empatar cuentan como "Defeat"
-			isMVP = maxForSide > 0 and killsOf(userId) == maxForSide,
-			isVIP = MatchResultsService:IsVIPCached(player),
-		}
 		local results = MatchResultsService:BuildResults(player, context, bonusScale)
 		resultsByUserId[userId] = results
 		-- Solo el payload de display viaja al cliente (no `cash`, que lleva id interno).
@@ -1990,6 +2053,11 @@ function MatchService:Start(dataService: DataService): ()
 			return if _round then _round.scoreB else 0
 		end,
 		teamSizeTarget = GameConfig.TeamSizeTarget,
+		getStats = function(player)
+			local profile = if _dataService then _dataService:GetProfile(player) else nil
+			local stats = profile and profile.Data and profile.Data.Stats
+			return if type(stats) == "table" then stats else nil
+		end,
 	})
 
 	-- Wiring de jugadores DESPUÉS de los Start de services: la creación de

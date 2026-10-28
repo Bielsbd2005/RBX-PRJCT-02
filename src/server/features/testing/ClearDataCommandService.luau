@@ -8,7 +8,6 @@ type DataService = DataServiceMod.DataServiceModule
 
 local TelemetryService = require(script.Parent.Parent.Parent.core.TelemetryService)
 local LimitedBundleService = require(script.Parent.Parent.store.LimitedBundleService)
-local ItemsConfig = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared").constants.ItemsConfig)
 
 local ClearDataCommandService = {}
 ClearDataCommandService.__index = ClearDataCommandService
@@ -20,8 +19,6 @@ local ENABLE_CLEAR_COMMAND = RunService:IsStudio()
 -- Deja el juego como recién lanzado: el perfil de quien lo escribe y los contadores
 -- globales (bundles limitados). Los perfiles de otros jugadores no se tocan.
 local COMMAND = "/resetdata"
--- Concede todos los banners de ItemsConfig.
-local GRANT_BANNERS_COMMAND = "/banners"
 
 -- Opt-in explícito (una lista vacía no abre a todos), para que copiar este servicio
 -- fuera de Studio no lo deje abierto.
@@ -67,18 +64,11 @@ local function _onPlayerChatted(player: Player, message: string): ()
 	end
 
 	local normalized = _normalizeMessage(message)
-	if normalized ~= COMMAND and normalized ~= GRANT_BANNERS_COMMAND then
+	if normalized ~= COMMAND then
 		return
 	end
 
 	if not _isAuthorized(player) then
-		return
-	end
-
-	if normalized == GRANT_BANNERS_COMMAND then
-		for bannerId in ItemsConfig.Banners do
-			_dataService:GrantItem(player, "Banners", bannerId, "AdminCommand")
-		end
 		return
 	end
 
