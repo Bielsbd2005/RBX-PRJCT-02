@@ -1,8 +1,9 @@
 --!strict
 -- Validación server-side barata (sin raycasts): WeaponFired → registerShot,
 -- WeaponHit → validateHit (cono + rango + sid/pid registrados).
--- DELIBERADAMENTE sin raycast canónico ni lag compensation: añaden fricción de
--- gameplay sin un threat model real. Ver docs/REFACTORS.md "Anti-cheat de WeaponsSystem".
+-- DELIBERADAMENTE sin raycast canónico ni rewind de posiciones: añaden fricción de
+-- gameplay sin un threat model real; los márgenes solo escalan con el ping.
+-- Ver docs/REFACTORS.md "Anti-cheat de WeaponsSystem".
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -20,7 +21,16 @@ local RANGE_TOLERANCE = 50
 local MIN_DIR_DOT = 0.5
 local MIN_DIR_CHECK_DIST = 5
 local ROF_TOLERANCE = 0.8
-local SHOT_BANK = 0.1
+-- Lo que se puede "bancar" escala con el ping: tras un parón el canal fiable entrega
+-- de golpe los disparos retenidos y con un banco fijo de 0.1 s se perdían balas legítimas.
+local SHOT_BANK_MIN = 0.1
+local SHOT_BANK_MAX = 0.5
+local SHOT_BANK_PING_FACTOR = 1.5
+-- Ventana de desfase entre lo que vio el tirador y la posición actual en el server
+-- (RTT + interpolación del cliente).
+local HIT_LAG_WINDOW_MIN = 0.25
+local HIT_LAG_WINDOW_MAX = 0.6
+local HIT_LAG_INTERP = 0.1
 local MAX_BROADCAST_ORIGIN_OFFSET = 12
 
 type ShotData = {
@@ -48,6 +58,23 @@ local WEAK_KEYS = { __mode = "k" }
 -- la ráfaga en curso (solo FireMode "Burst").
 type ShotSchedule = { nextAt: number, jitter: number, burstCount: number, lastAt: number }
 local nextShotAllowedAt: { [number]: { [Instance]: ShotSchedule } } = {}
+
+local function getPing(player: Player): number
+	local ok, ping = pcall(player.GetNetworkPing, player)
+	return if ok and typeof(ping) == "number" then ping else 0
+end
+
+-- Velocidad tope del objetivo: la actual no basta, si frena en seco para cubrirse
+-- sería ~0 aunque el tirador lo viera aún corriendo.
+local function getTargetSpeed(part: BasePart): number
+	local speed = part.AssemblyLinearVelocity.Magnitude
+	local model = part:FindFirstAncestorOfClass("Model")
+	local humanoid = model and model:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		speed = math.max(speed, humanoid.WalkSpeed)
+	end
+	return speed
+end
 
 local function getOrCreateBucket(userId: number): ShotBucket
 	local bucket = pendingShots[userId]
@@ -229,8 +256,9 @@ function WeaponSecurity.registerShot(player: Player, weapon: any, fireInfo: any)
 
 		-- Anchor en max(slot, now - SHOT_BANK): anclar en now haría que un paquete tardío
 		-- adelante el calendario y el siguiente, llegado a su hora, se rechace (con la UZI
-		-- el margen es menor que un frame). SHOT_BANK acota lo que se puede "bancar".
-		local base = if schedule then math.max(schedule.nextAt, now - SHOT_BANK) else now
+		-- el margen es menor que un frame). El banco acota lo que se puede "bancar".
+		local bank = math.clamp(getPing(player) * SHOT_BANK_PING_FACTOR, SHOT_BANK_MIN, SHOT_BANK_MAX)
+		local base = if schedule then math.max(schedule.nextAt, now - bank) else now
 		byWeapon[weapon.instance] = {
 			nextAt = base + cooldown,
 			jitter = cooldown * (1 - ROF_TOLERANCE),
@@ -337,8 +365,8 @@ function WeaponSecurity.validateHit(player: Player, weapon: any, hitInfo: any): 
 	if typeof(hitInfo.part) ~= "Instance" or not hitInfo.part:IsA("BasePart") then
 		return false, "bad part"
 	end
-	-- Margen por latencia escalado por la velocidad real del part (~250 ms de ping).
-	local latencyTolerance = hitInfo.part.AssemblyLinearVelocity.Magnitude * 0.25 + 2
+	local lagWindow = math.clamp(getPing(player) + HIT_LAG_INTERP, HIT_LAG_WINDOW_MIN, HIT_LAG_WINDOW_MAX)
+	local latencyTolerance = getTargetSpeed(hitInfo.part) * lagWindow + 2
 	if (hitInfo.part.Position - hitInfo.p).Magnitude > hitInfo.part.Size.Magnitude + latencyTolerance then
 		return false, "part/point mismatch"
 	end
