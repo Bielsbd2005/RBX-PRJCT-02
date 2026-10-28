@@ -211,6 +211,7 @@ export type LobbyCharacterPreview = {
 	applyHatItem: (self: LobbyCharacterPreview, itemData: any) -> (),
 	applyHatId: (self: LobbyCharacterPreview, hatId: string?) -> (),
 	buildLookClone: (self: LobbyCharacterPreview) -> Model?,
+	addLookHighlight: (self: LobbyCharacterPreview, model: Model) -> () -> (),
 	setHiddenByOwner: (self: LobbyCharacterPreview, hidden: boolean) -> (),
 	setYaw: (self: LobbyCharacterPreview, yaw: number) -> (),
 }
@@ -556,6 +557,23 @@ local function relativePath(instance: Instance, root: Instance): string
 		current = current.Parent
 	end
 	return table.concat(names, "/")
+end
+
+--- El contorno del preview (sin estado de bloqueo) sobre un doble de buildLookClone,
+--- que lo quita. Se apaga con los mismos paneles; devuelve la función que deja de
+--- observarlos (el Highlight se va con el modelo).
+function LobbyCharacterPreview:addLookHighlight(model: Model): () -> ()
+	local highlight = Instance.new("Highlight")
+	highlight.Name = "PreviewHighlight"
+	highlight.DepthMode = Enum.HighlightDepthMode.Occluded
+	highlight.FillColor = HIGHLIGHT_COLOR
+	highlight.FillTransparency = 1
+	highlight.OutlineColor = HIGHLIGHT_COLOR
+	highlight.OutlineTransparency = HIGHLIGHT_OUTLINE_ALPHA
+	highlight.Parent = model
+	return PreviewHighlightPanels.observe(self._uiGui, function(hidden: boolean)
+		highlight.Enabled = not hidden
+	end)
 end
 
 --- Doble para recibir un kill effect: el look actual construido limpio desde las

@@ -133,6 +133,8 @@ function LockerKillEffectPreview.spawnEmoteDummy(self: Internal)
 	local idleJanitor = Janitor.new()
 	idleJanitor:LinkToInstance(dummy)
 	LockerUtils.playPreviewIdleAnimation(dummy, idleJanitor, AssetIds.Animations.CharacterIdle)
+	-- Solo en emotes: en los kill effects el contorno estropea el efecto.
+	idleJanitor:Add(self._deps.lobbyCharacter:addLookHighlight(dummy), true)
 end
 
 -- Si el dummy está a medio kill effect (o no existe), se respawnea antes. Sin clic
