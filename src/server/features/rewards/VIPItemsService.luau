@@ -16,6 +16,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 
 local ItemsConfig = require(Shared.constants.ItemsConfig)
+local ItemDefaults = require(Shared.constants.ItemDefaults)
+local LockerCategory = require(Shared.constants.LockerCategory)
 local LockerConfig = require(Shared.constants.LockerConfig)
 local StoreProducts = require(Shared.constants.StoreProducts)
 local InventoryRepository = require(Shared.data.InventoryRepository)
@@ -61,7 +63,9 @@ local function _revoke(player: Player, profileData: any, item: VIPItem)
 
 	local slot = LockerConfig.CategoryToLoadoutSlot[item.category]
 	if slot and profileData.Loadout and profileData.Loadout[slot] == item.itemId then
-		_dataService:SetValue(player, { "Loadout", slot }, nil)
+		-- Un slot no opcional (el Crown es un Hat) vuelve a su Default, no queda vacío.
+		local fallback = if LockerCategory.isOptionalSlot(item.category) then nil else ItemDefaults.ITEM_ID
+		_dataService:SetValue(player, { "Loadout", slot }, fallback)
 	end
 	_dataService:SetValue(player, { "Inventory", item.category, item.itemId }, nil)
 	_dataService:SetValue(player, { "InventoryMeta", item.category, item.itemId }, nil)
