@@ -25,9 +25,7 @@ export type GameConfigType = {
 	RespawnCooldown: number,
 	SpawnProtectionDuration: number,
 	MinPlayersToStart: number,
-	RealPlayerCapPerServer: number,
 	TeamSizeTarget: number,
-	TotalParticipantsTarget: number,
 	MaxRoundDuration: number,
 	WinScoreLimit: number,
 	KillAttributionWindow: number,
@@ -47,21 +45,23 @@ export type GameConfigType = {
 }
 
 local GameConfig: GameConfigType = {
-	VoteDuration = 3,
+	-- Margen para leer 3 mapas en móvil y votar; la espera total entre rondas es
+	-- esto más EndResultsDuration.
+	VoteDuration = 10,
 	RandomVoteKey = "__RANDOM__",
 	EndResultsDuration = 10,
 	RespawnCooldown = 1,
 	-- Segundos de ForceField tras spawn (jugadores y bots); no se rompe al disparar.
 	SpawnProtectionDuration = 2,
 	MinPlayersToStart = 1,
-	RealPlayerCapPerServer = 6,
 	TeamSizeTarget = 4,
-	TotalParticipantsTarget = 8,
-	MaxRoundDuration = 480,
+	-- Ronda corta para sesiones casuales de Roblox. Los caps de abajo y los Cash de
+	-- ResultsRewards escalan con ella: al cambiarla, reescalarlos para no mover el Cash/h.
+	MaxRoundDuration = 300,
 	-- 1 punto = 1 muerte rival (jugador o bot). Pensado para que solo el equipo que
 	-- domina corte la ronda; la ronda pareja acaba por reloj.
 	-- TODO: recalibrar con el p95 real de puntos por ronda de la telemetría.
-	WinScoreLimit = 75,
+	WinScoreLimit = 50,
 	-- Segundos máximos entre el último daño y la muerte para acreditar el kill.
 	-- La usan MatchService y AIService.
 	KillAttributionWindow = 2,
@@ -70,8 +70,8 @@ local GameConfig: GameConfigType = {
 	-- kills puras): si se cambia uno, recalcular el otro con ActionRewards. Son el tope de una ronda COMPLETA (MaxRoundDuration):
 	-- KillRewardsService los devenga con el reloj de CADA JUGADOR (desde su primera entrada a la
 	-- ronda), para que ni la ronda corta ni entrar tarde den el cupo entero.
-	MatchCashCap = 500,
-	MatchXPCap = 1000,
+	MatchCashCap = 330,
+	MatchXPCap = 665,
 	-- Fracción del cap disponible en el segundo 0: sin colchón, las primeras kills
 	-- de un buen arranque no pagarían. Acotada por arriba por el farmeo (se cobra
 	-- entera en cada ronda): no subirla sin simular el XP/h del caso peor (solo
@@ -92,7 +92,7 @@ local GameConfig: GameConfigType = {
 	-- Bonus de fin de partida (ResultsRewards): segundos EN PARTIDA (el lobby no cuenta) y
 	-- kills + asistencias mínimos para cobrarlos. Se pagan escalados por esos segundos
 	-- sobre MaxRoundDuration: la ronda corta no rinde más por hora.
-	MatchEndMinSeconds = 120,
+	MatchEndMinSeconds = 75,
 	MatchEndMinContribution = 3,
 	-- Techo diario del Cash JUGADO (combate + bonus de fin de partida; diarias,
 	-- códigos y packs no cuentan). Tramos sobre lo ya cobrado hoy (día UTC), en orden:

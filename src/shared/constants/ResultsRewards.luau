@@ -43,9 +43,9 @@ ResultsRewards.CashIcon = AssetIds.Images.CashReward
 -- por ganar o ser el mejor, nunca por participar. Una entry con Cash = 0 el server
 -- la ignora pero el cliente la pintaría.
 ResultsRewards.CashRewards = {
-	{ Id = "Victory", Title = "VICTORY", Condition = "Victory", Cash = 30 },
-	{ Id = "MVP", Title = "MVP", Condition = "MVP", Cash = 20 },
-	{ Id = "VIP", Title = "VIP PASS", Condition = "Always", Cash = 25, RequiresVIP = true },
+	{ Id = "Victory", Title = "VICTORY", Condition = "Victory", Cash = 20 },
+	{ Id = "MVP", Title = "MVP", Condition = "MVP", Cash = 12 },
+	{ Id = "VIP", Title = "VIP PASS", Condition = "Always", Cash = 15, RequiresVIP = true },
 } :: { CashRewardDef }
 
 local function _conditionMet(condition: RewardCondition, ctx: MatchContext): boolean

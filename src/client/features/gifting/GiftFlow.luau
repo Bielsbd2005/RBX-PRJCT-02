@@ -68,8 +68,7 @@ local NPC_ICON = AssetIds.Images.GiftNpc
 local NPC_LABEL_TEXT = "Not Eligible"
 
 -- La lista representa los huecos de una partida, rellenos con NPCs igual que
--- MatchService al rebalancear. TotalParticipantsTarget no se usa porque el server
--- no lo lee y puede desincronizarse.
+-- MatchService al rebalancear.
 local LIST_TARGET_ROWS = GameConfig.TeamSizeTarget * 2
 
 local ROW_REVEAL_STAGGER = 0.03
