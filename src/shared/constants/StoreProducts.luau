@@ -141,25 +141,24 @@ export type Catalog<T> = {
 }
 
 local CASH_PACKS = {
-	{ ButtonName = "Cash1", ProductId = 3567132597, RobuxPrice = 49, CashAmount = 800 },
-	{ ButtonName = "Cash2", ProductId = 3567132599, RobuxPrice = 99, CashAmount = 2000 },
-	{ ButtonName = "Cash3", ProductId = 3567132598, RobuxPrice = 199, CashAmount = 5000 },
-	{ ButtonName = "Cash4", ProductId = 3567132596, RobuxPrice = 399, CashAmount = 11000 },
-	{ ButtonName = "Cash5", ProductId = 3567132595, RobuxPrice = 799, CashAmount = 24000 },
+	{ ButtonName = "Cash1", ProductId = 3718725551, RobuxPrice = 49, CashAmount = 800 },
+	{ ButtonName = "Cash2", ProductId = 3718725584, RobuxPrice = 99, CashAmount = 2000 },
+	{ ButtonName = "Cash3", ProductId = 3718725617, RobuxPrice = 199, CashAmount = 5000 },
+	{ ButtonName = "Cash4", ProductId = 3718725653, RobuxPrice = 399, CashAmount = 11000 },
+	{ ButtonName = "Cash5", ProductId = 3718725697, RobuxPrice = 799, CashAmount = 23950 },
 }
 
 -- ProductId = 0 → pendientes de crear en el panel de Roblox.
 local GEM_PACKS = {
-	{ ButtonName = "Gems1", ProductId = 3713310604, RobuxPrice = 49, GemAmount = 100 },
-	{ ButtonName = "Gems2", ProductId = 3713310633, RobuxPrice = 99, GemAmount = 250 },
-	{ ButtonName = "Gems3", ProductId = 3713310658, RobuxPrice = 199, GemAmount = 600 },
-	{ ButtonName = "Gems4", ProductId = 3713310686, RobuxPrice = 399, GemAmount = 1400 },
-	{ ButtonName = "Gems5", ProductId = 3713310707, RobuxPrice = 799, GemAmount = 3000 },
+	{ ButtonName = "Gems1", ProductId = 3718725730, RobuxPrice = 49, GemAmount = 100 },
+	{ ButtonName = "Gems2", ProductId = 3718725751, RobuxPrice = 99, GemAmount = 250 },
+	{ ButtonName = "Gems3", ProductId = 3718725775, RobuxPrice = 199, GemAmount = 600 },
+	{ ButtonName = "Gems4", ProductId = 3718725811, RobuxPrice = 399, GemAmount = 1400 },
+	{ ButtonName = "Gems5", ProductId = 3718725848, RobuxPrice = 799, GemAmount = 3000 },
 }
 
 -- En el orden en que se pintan. `RobuxPrice` debe coincidir con el precio del panel
 -- de Roblox (el del pass y el de su developer product de regalo) o el botón mentirá.
--- TODO: crear los developer products de regalo en el panel de Roblox y poner su id.
 local GAME_PASS_LIST = {
 	-- Bonus "VIP" de ResultsRewards, ítems isVIPExclusive, Gems de bienvenida y tag VIP (VIPItemsService).
 	{
@@ -167,7 +166,7 @@ local GAME_PASS_LIST = {
 		DisplayName = "VIP",
 		ButtonName = "VIP",
 		PassId = 1962133164,
-		GiftProductId = 0,
+		GiftProductId = 3718726019,
 		RobuxPrice = 299,
 		WelcomeGems = 100,
 	},
@@ -177,7 +176,7 @@ local GAME_PASS_LIST = {
 		DisplayName = "Back Weapon",
 		ButtonName = "BackWeapon",
 		PassId = 1964587184,
-		GiftProductId = 0,
+		GiftProductId = 3718726060,
 		RobuxPrice = 200,
 	},
 }
