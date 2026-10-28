@@ -14,6 +14,7 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Janitor = require(Packages.janitor) :: any
 local Fusion = require(Packages.fusion)
 local GameConfig = require(Shared.GameConfig)
+local GuiSuppression = require(Shared.utils.GuiSuppression)
 local MatchSnapshot = require(Shared.MatchSnapshot)
 local Network = require(Shared.networking.Network)
 local VipTag = require(Shared.utils.VipTag)
@@ -375,6 +376,9 @@ function MatchFeature.start(menuController: any): any
 	local latestMatchResults: any = nil
 	-- Solo quien viene de ver Results entra solo a la votación; a los del lobby no se les fuerza.
 	local pendingAutoVote = false
+	-- Quien tenía la votación abierta al cerrarse entra solo a la partida en cuanto hay
+	-- ronda; quien la cerró (Locker, tienda…) se queda en el menú.
+	local pendingAutoJoin = false
 
 	local function setPlayEnabled(enabled: boolean)
 		playEnabled = enabled
@@ -444,6 +448,19 @@ function MatchFeature.start(menuController: any): any
 				end)
 			end
 		end)
+	end
+
+	-- Se llama al acabar la animación del ganador y al llegar InRound: entra con lo
+	-- último que pase (la carga del mapa puede ir antes o después de la animación).
+	local function tryAutoJoinAfterVote()
+		if not pendingAutoJoin or not playEnabled or votingPanelOpen then
+			return
+		end
+		pendingAutoJoin = false
+		-- Si en la espera abrió otro panel (Locker, tienda…), eligió quedarse en el menú.
+		if not menuController:hasOpenPanel(votingFrame) then
+			tryJoinMatchFromLobby()
+		end
 	end
 
 	local function notInActiveMatch(): boolean
@@ -642,12 +659,14 @@ function MatchFeature.start(menuController: any): any
 		elseif wasVoting and not isVoting then
 			selectedVoteKey = ""
 			pendingAutoVote = false
+			pendingAutoJoin = votingPanelOpen
 			local function finishVote()
 				matchMenu:setPhaseLabel("DEPLOY")
 				view:hide()
 				if votingPanel then
 					votingPanel:close(true)
 				end
+				tryAutoJoinAfterVote()
 			end
 			local winnerMapName = MatchSnapshot.getString("WinnerMapName")
 			if votingPanelOpen and winnerMapName ~= "" then
@@ -657,6 +676,12 @@ function MatchFeature.start(menuController: any): any
 			end
 		else
 			matchMenu:setPhaseLabel(if isVoting then "VOTING" else "DEPLOY")
+		end
+
+		if phase == "InRound" then
+			tryAutoJoinAfterVote()
+		elseif phase ~= "Loading" then
+			pendingAutoJoin = false
 		end
 
 		updateRoundHud()
@@ -693,7 +718,7 @@ function MatchFeature.start(menuController: any): any
 			child.ResetOnSpawn = false
 			matchMenu:applyPhaseLabelToNewGui(child)
 			if matchMenu:shouldKeepHidden() then
-				child.Enabled = false
+				GuiSuppression.setEnabled(child, false)
 			end
 		end
 	end), "Disconnect")
@@ -789,6 +814,7 @@ function MatchFeature.start(menuController: any): any
 		end
 		resultsView:hide()
 		pendingAutoVote = false
+		pendingAutoJoin = false
 		latestMatchResults = nil
 		hud:setScores(0, 0, GameConfig.MaxRoundDuration)
 		hud:setEnabled(true)
@@ -877,7 +903,7 @@ function MatchFeature.start(menuController: any): any
 		killerUserId: string,
 		killerName: string,
 		killerLevel: number,
-		killerBanner: string,
+		killerBorder: string,
 		weaponId: string,
 	})
 		hud:incrementLocalDeaths()
@@ -915,7 +941,8 @@ function MatchFeature.start(menuController: any): any
 			then {
 				name = data.killerName,
 				level = data.killerLevel,
-				bannerId = data.killerBanner,
+				userId = tonumber(data.killerUserId),
+				borderId = if data.killerBorder ~= "" then data.killerBorder else nil,
 				character = _resolveKillerCharacter(data.killerUserId),
 				isVIP = VipTag.isVIP(Players:GetPlayerByUserId(tonumber(data.killerUserId) or 0)),
 			}
