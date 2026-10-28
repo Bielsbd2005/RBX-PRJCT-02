@@ -18,6 +18,7 @@ local WeaponsConfig = require(Shared.constants.WeaponsConfig)
 local WeaponsSystemFolder = script.Parent.Parent.Parent
 local WeaponData = WeaponsSystemFolder:WaitForChild("WeaponData")
 local Libraries = WeaponsSystemFolder:WaitForChild("Libraries")
+local WeaponAmmo = require(Libraries:WaitForChild("WeaponAmmo"))
 
 -- Selección de slot: el seleccionado se ensancha (el Back da el "pop") y cambia
 -- de fondo.
@@ -303,7 +304,7 @@ function Hotbar:_renderSlotAmmo(slotNode, tool)
 		return
 	end
 
-	local currentAmmo = if tool then tool:GetAttribute("CurrentAmmo") else nil
+	local currentAmmo = if tool then WeaponAmmo.read(tool) else nil
 	local hasAmmo = type(currentAmmo) == "number"
 	local roundedAmmo = if hasAmmo then math.max(0, math.floor(currentAmmo + 0.5)) else 0
 
@@ -377,21 +378,19 @@ function Hotbar:_connectAmmoConns(mainTool, specialTool)
 	self._lastMainTool = mainTool
 	self._lastSpecialTool = specialTool
 	self:_disconnectAmmoConns()
+	local function markDirty()
+		self.weaponsGui._hotbarDirty = true
+	end
+	local function watch(tool: Instance)
+		for _, attr in { WeaponAmmo.SERVER_ATTR, WeaponAmmo.LOCAL_ATTR } do
+			table.insert(self._ammoConns, tool:GetAttributeChangedSignal(attr):Connect(markDirty))
+		end
+	end
 	if mainTool then
-		table.insert(
-			self._ammoConns,
-			mainTool:GetAttributeChangedSignal("CurrentAmmo"):Connect(function()
-				self.weaponsGui._hotbarDirty = true
-			end)
-		)
+		watch(mainTool)
 	end
 	if specialTool and specialTool ~= mainTool then
-		table.insert(
-			self._ammoConns,
-			specialTool:GetAttributeChangedSignal("CurrentAmmo"):Connect(function()
-				self.weaponsGui._hotbarDirty = true
-			end)
-		)
+		watch(specialTool)
 	end
 end
 

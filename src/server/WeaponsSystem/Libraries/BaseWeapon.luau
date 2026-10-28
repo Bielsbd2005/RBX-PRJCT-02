@@ -12,6 +12,7 @@ local AnimationsFolder = WeaponsSystemFolder:WaitForChild("Assets"):WaitForChild
 local AutoAimSystem = require(script.Parent:WaitForChild("AutoAimSystem"))
 local WeaponsNetwork = require(script.Parent:WaitForChild("WeaponsNetwork"))
 local PewEffect = require(script.Parent:WaitForChild("PewEffect"))
+local WeaponAmmo = require(script.Parent:WaitForChild("WeaponAmmo"))
 local SharedConstants = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("constants")
 local WeaponsConfig = require(SharedConstants:WaitForChild("WeaponsConfig"))
 local DebugFlags = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("utils"):WaitForChild("DebugFlags"))
@@ -30,6 +31,8 @@ local localRandom = Random.new()
 
 -- Throttle de la detección de target del autoshoot (findBestTarget + raycasts).
 local AUTO_AIM_TICK_INTERVAL = 0.05
+-- Segundos sin disparar para que la munición predicha adopte la del servidor.
+local AMMO_RESYNC_IDLE = 0.5
 
 local BaseWeapon = {}
 BaseWeapon.__index = BaseWeapon
@@ -96,7 +99,21 @@ function BaseWeapon:doInitialSetup()
 	-- Cargador lleno al entrar en juego: lo escribe el SERVIDOR desde la definición
 	-- y replica. El Tool de Studio no debe traer CurrentAmmo autorado.
 	if selfClass.CanBeReloaded and IsServer then
-		self.instance:SetAttribute("CurrentAmmo", self:getConfigValue("AmmoCapacity"))
+		self.instance:SetAttribute(WeaponAmmo.SERVER_ATTR, self:getConfigValue("AmmoCapacity"))
+	end
+
+	-- La cuenta predicha solo adopta la del servidor en reposo: a mitad de ráfaga el valor
+	-- replicado es viejo. Corrige la deriva (disparos rechazados, recarga del servidor).
+	if not IsServer then
+		self.connections.ammoResync = self.instance:GetAttributeChangedSignal(WeaponAmmo.SERVER_ATTR):Connect(function()
+			if self.instance:GetAttribute(WeaponAmmo.LOCAL_ATTR) == nil or self.reloading then
+				return
+			end
+			if os.clock() - (self.lastFireTime or 0) < AMMO_RESYNC_IDLE then
+				return
+			end
+			self.instance:SetAttribute(WeaponAmmo.LOCAL_ATTR, self.instance:GetAttribute(WeaponAmmo.SERVER_ATTR))
+		end)
 	end
 
 	self.connections.ancestryChanged = self.instance.AncestryChanged:Connect(function() self:onAncestryChanged() end)
@@ -976,7 +993,7 @@ function BaseWeapon:onReloaded(player, fromNetwork)
 end
 
 function BaseWeapon:_finishReload()
-	self.instance:SetAttribute("CurrentAmmo", self:getConfigValue("AmmoCapacity"))
+	self:_setAmmo(self:getConfigValue("AmmoCapacity"))
 	self.reloading = false
 	self.instance:SetAttribute("IsReloading", false)
 	-- Reponer canReload: si no, un arma a tope que nunca disparó no podría
@@ -1040,13 +1057,20 @@ function BaseWeapon:cancelReload(player, fromNetwork)
 end
 
 function BaseWeapon:getAmmoInWeapon()
-	return self.instance:GetAttribute("CurrentAmmo") or 0
+	return WeaponAmmo.read(self.instance) or 0
+end
+
+-- En el cliente solo se predice el arma propia: las recargas replicadas de otros también
+-- pasan por _finishReload y una cuenta local en su Tool se quedaría congelada.
+function BaseWeapon:_setAmmo(value: number)
+	local predicts = not IsServer and self.player == Players.LocalPlayer
+	self.instance:SetAttribute(if predicts then WeaponAmmo.LOCAL_ATTR else WeaponAmmo.SERVER_ATTR, value)
 end
 
 function BaseWeapon:useAmmo(amount)
-	local currentAmmo = self.instance:GetAttribute("CurrentAmmo") or 0
+	local currentAmmo = self:getAmmoInWeapon()
 	local ammoUsed = math.min(amount, currentAmmo)
-	self.instance:SetAttribute("CurrentAmmo", currentAmmo - ammoUsed)
+	self:_setAmmo(currentAmmo - ammoUsed)
 	self.canReload = true
 	return ammoUsed
 end

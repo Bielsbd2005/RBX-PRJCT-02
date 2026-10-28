@@ -38,8 +38,9 @@ arma: WeaponsSystem avisa y la ignora.
   del esquema o para un Tool sin definición. **No repitas el default del
   esquema en el call-site.**
 - El servidor arranca el arma con el cargador lleno (`CurrentAmmo` =
-  `AmmoCapacity` de la definición) y replica el atributo al cliente para el
-  hotbar.
+  `AmmoCapacity` de la definición) y replica el atributo. El dueño predice su
+  munición en `LocalAmmo` (atributo solo de cliente) y solo adopta `CurrentAmmo`
+  en reposo; el HUD lee con `WeaponAmmo.read` (ver `WeaponAmmo.luau`).
 - Los Tools que viven en un almacén (`ServerStorage`, `ReplicatedStorage`) son
   templates: `WeaponsSystem.onWeaponAdded` los ignora aunque lleven el tag.
 - `WeaponsSystem.createWeaponForInstance` toma `WeaponType` de la definición;
