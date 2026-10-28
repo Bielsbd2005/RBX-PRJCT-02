@@ -20,7 +20,7 @@ local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
 -- Segundos. Mínimo en pantalla para que no parpadee en joins calientes.
-local MIN_LOAD_TIME = 4
+local MIN_LOAD_TIME = 1.5
 local HARD_TIMEOUT = 20
 local TEMPLATE_WAIT_SECONDS = 15
 
@@ -170,38 +170,47 @@ local hardTimeoutThread = task.delay(HARD_TIMEOUT, function()
 	hardTimeoutReached = true
 end)
 
-local assets = {}
-
-local lobby = workspace:WaitForChild("Lobby", 10)
-if lobby then
-	for _, descendant in lobby:GetDescendants() do
-		if descendant:IsA("MeshPart") or descendant:IsA("Decal") or descendant:IsA("Texture") then
-			table.insert(assets, descendant)
+-- Una llamada por grupo: PreloadAsync descarga la lista en paralelo; asset a asset
+-- el tiempo total es la suma de latencias y en móvil se comía el HARD_TIMEOUT.
+local function preloadDescendants(root: Instance, classNames: { string })
+	local assets = {}
+	for _, descendant in root:GetDescendants() do
+		for _, className in classNames do
+			if descendant:IsA(className) then
+				table.insert(assets, descendant)
+				break
+			end
 		end
+	end
+	local ok, err = pcall(function()
+		ContentProvider:PreloadAsync(assets, function(contentId: string, status: Enum.AssetFetchStatus)
+			if status == Enum.AssetFetchStatus.Failure then
+				warn("[LoadingScreen] Failed to preload:", contentId)
+			end
+		end)
+	end)
+	if not ok then
+		warn("[LoadingScreen] PreloadAsync failed:", root:GetFullName(), err)
 	end
 end
 
-local menuGui = playerGui:WaitForChild("Menu", 5)
-if menuGui then
-	for _, descendant in menuGui:GetDescendants() do
-		if descendant:IsA("ImageLabel") or descendant:IsA("ImageButton") then
-			table.insert(assets, descendant)
-		end
-	end
-end
+local pendingGroups = 2
 
-local assetsReady = false
+-- Lobby y Menu en paralelo: sus esperas de replicación no se suman.
+task.spawn(function()
+	local lobby = workspace:WaitForChild("Lobby", 10)
+	if lobby then
+		preloadDescendants(lobby, { "MeshPart", "Decal", "Texture" })
+	end
+	pendingGroups -= 1
+end)
 
 task.spawn(function()
-	for _, asset in assets do
-		local ok, err = pcall(function()
-			ContentProvider:PreloadAsync({ asset })
-		end)
-		if not ok then
-			warn("[LoadingScreen] Failed to preload:", asset:GetFullName(), err)
-		end
+	local menuGui = playerGui:WaitForChild("Menu", 5)
+	if menuGui then
+		preloadDescendants(menuGui, { "ImageLabel", "ImageButton" })
 	end
-	assetsReady = true
+	pendingGroups -= 1
 end)
 
 local function isClientReady(): boolean
@@ -210,7 +219,7 @@ end
 
 while
 	not hardTimeoutReached
-	and (not assetsReady or (os.clock() - startTime) < MIN_LOAD_TIME or not isClientReady())
+	and (pendingGroups > 0 or (os.clock() - startTime) < MIN_LOAD_TIME or not isClientReady())
 do
 	RunService.Heartbeat:Wait()
 end
