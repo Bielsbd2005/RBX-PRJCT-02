@@ -58,6 +58,7 @@ local StaggerReveal = require(Client.core.ui.animators.StaggerReveal)
 local UIUtils = require(Client.core.ui.UIUtils)
 local UITheme = require(Client.core.ui.UITheme)
 local GiftFlow = require(Client.features.gifting.GiftFlow)
+local StoreLayout = require(Client.features.store.StoreLayout)
 local Notify = require(Client.core.ui.NotificationController)
 local Network = require(Shared.networking.Network)
 local LimitedBundles = require(Shared.data.LimitedBundles)
@@ -117,6 +118,7 @@ function StoreFeature.start(menuController: any): any
 	local uiGui = playerGui:WaitForChild("UserInterface") :: ScreenGui
 	local storeFrame = uiGui:WaitForChild("Store") :: Frame
 	local closeBtn = storeFrame:WaitForChild("CloseBtn") :: GuiButton
+	janitor:Add(StoreLayout.attach(storeFrame), true)
 
 	local canUseHoverAnimations = UserInputService.MouseEnabled and not UserInputService.TouchEnabled
 
