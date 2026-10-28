@@ -9,6 +9,7 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 
 local Janitor = require(Packages.janitor) :: any
 local Fusion = require(Packages.fusion) :: any
+local GuiSuppression = require(Shared.utils.GuiSuppression)
 
 local MenuHover = require(script.Parent.MenuHover)
 local InteractiveScaleTween = require(script.Parent.animators.InteractiveScaleTween)
@@ -319,7 +320,7 @@ function MenuController:_syncStatsHud(): ()
 		return
 	end
 	local override = self._statsHudOverride
-	gui.Enabled = if override ~= nil then override else self._gui.Enabled
+	GuiSuppression.setEnabled(gui, if override ~= nil then override else GuiSuppression.getEnabled(self._gui))
 end
 
 --- Fuerza la visibilidad del HUD compartido. `nil` devuelve el control al Menu.
@@ -357,13 +358,13 @@ end
 
 function MenuController:hide(): ()
 	self._isHidden = true
-	self._gui.Enabled = false
+	GuiSuppression.setEnabled(self._gui, false)
 	self:_fireStateChanged()
 end
 
 function MenuController:show(): ()
 	self._isHidden = false
-	self._gui.Enabled = true
+	GuiSuppression.setEnabled(self._gui, true)
 	self:_fireStateChanged()
 end
 

@@ -25,7 +25,9 @@ local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
 local Packages = ReplicatedStorage:WaitForChild("Packages")
+local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Janitor = require(Packages.janitor) :: any
+local GuiSuppression = require(Shared.utils.GuiSuppression)
 
 local DEFAULT_NAME = "LockerCharacterRotate"
 
@@ -261,7 +263,7 @@ function CharacterRotateController:setEnabled(enabled: boolean)
 		return
 	end
 	self._enabled = enabled
-	self._gui.Enabled = enabled
+	GuiSuppression.setEnabled(self._gui, enabled)
 
 	if enabled then
 		self:_stopReturn()
@@ -277,7 +279,7 @@ end
 function CharacterRotateController:reset()
 	self:_stopReturn()
 	self._enabled = false
-	self._gui.Enabled = false
+	GuiSuppression.setEnabled(self._gui, false)
 	self._activeInput = nil
 	if self._yaw ~= 0 then
 		self._yaw = 0

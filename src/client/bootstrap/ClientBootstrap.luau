@@ -79,8 +79,11 @@ local function disableDefaultCoreGui(): ()
 			local healthOk = pcall(function()
 				StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Health, false)
 			end)
+			local emotesOk = pcall(function()
+				StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.EmotesMenu, false)
+			end)
 
-			if playerListOk and healthOk then
+			if playerListOk and healthOk and emotesOk then
 				return
 			end
 
@@ -128,6 +131,7 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 	local MatchState = require(clientRoot.features.match.MatchState)
 	local MatchCamera = require(clientRoot.features.match.MatchCamera)
 	local GiftingFeature = require(clientRoot.features.gifting)
+	local OptionsFeature = require(clientRoot.features.options)
 
 	-- El motor re-engancha la cámara al Humanoid en cada spawn y el personaje puede
 	-- llegar antes o después del bootstrap: se re-afirma ahora y en cada CharacterAdded.
@@ -189,6 +193,7 @@ function ClientBootstrap.start(clientRoot: LocalScript): ()
 		{ label = "music", start = LobbyMusicFeature.start },
 		{ label = "match", start = MatchFeature.start },
 		{ label = "gifting", start = GiftingFeature.start },
+		{ label = "options", start = OptionsFeature.start },
 	} :: { DeferredFeatureEntry }
 
 	for _, feature in deferredFeatures do

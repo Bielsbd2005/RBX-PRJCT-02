@@ -10,6 +10,7 @@ local TweenService = game:GetService("TweenService")
 local LocalPlayer = Players.LocalPlayer
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local ItemsConfig = require(Shared.constants.ItemsConfig)
+local GuiSuppression = require(Shared.utils.GuiSuppression)
 
 local WeaponsSystemFolder = script.Parent.Parent
 local WeaponData = WeaponsSystemFolder:WaitForChild("WeaponData")
@@ -21,6 +22,7 @@ local WeaponsSystemGuiTemplate = AssetsFolder:WaitForChild("WeaponsSystemGui")
 -- se buscan en WeaponsSystemGui.
 local WeaponSystemInsetsTemplate = AssetsFolder:FindFirstChild("WeaponSystemInsets")
 
+local WeaponAmmo = require(Libraries:WaitForChild("WeaponAmmo"))
 local GuiFolder = Libraries:WaitForChild("Gui")
 local Crosshair = require(GuiFolder:WaitForChild("Crosshair"))
 local Hotbar = require(GuiFolder:WaitForChild("Hotbar"))
@@ -172,7 +174,7 @@ function WeaponsGui.new(weaponsSystem: any)
 			-- Quien apague/encienda WeaponsSystemGui desde fuera (MatchWeapons.clearGui)
 			-- arrastra también a la GUI de insets.
 			if self.insetsGui then
-				self.insetsGui.Enabled = self.gui.Enabled
+				GuiSuppression.setEnabled(self.insetsGui, GuiSuppression.getEnabled(self.gui))
 			end
 			if self.gui.Enabled then
 				self:onScreenSizeChanged()
@@ -283,10 +285,10 @@ end
 
 function WeaponsGui:_setGuisEnabled(enabled: boolean)
 	if self.insetsGui then
-		self.insetsGui.Enabled = enabled
+		GuiSuppression.setEnabled(self.insetsGui, enabled)
 	end
 	if self.gui then
-		self.gui.Enabled = enabled
+		GuiSuppression.setEnabled(self.gui, enabled)
 	end
 end
 
@@ -427,7 +429,7 @@ function WeaponsGui:_updateAmmoDisplay()
 	local ammoText = ""
 
 	if weapon and weapon.instance then
-		local currentAmmo = weapon.instance:GetAttribute("CurrentAmmo")
+		local currentAmmo = WeaponAmmo.read(weapon.instance)
 		if type(currentAmmo) == "number" then
 			ammoText = tostring(math.max(0, math.floor(currentAmmo + 0.5)))
 		end

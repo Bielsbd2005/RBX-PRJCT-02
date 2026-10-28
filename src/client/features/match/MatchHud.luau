@@ -19,6 +19,7 @@ local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
+local GuiSuppression = require(Shared.utils.GuiSuppression)
 local TeamUtils = require(Shared.utils.TeamUtils)
 local GameConfig = require(Shared.GameConfig)
 local UIUtils = require(script.Parent.Parent.Parent.core.ui.UIUtils)
@@ -339,10 +340,10 @@ function MatchHud.new(matchHudGui: ScreenGui?, matchStatsGui: ScreenGui?): any
 	self._timerScale = nil :: UIScale?
 
 	if matchHudGui then
-		matchHudGui.Enabled = false
+		GuiSuppression.setEnabled(matchHudGui, false)
 	end
 	if matchStatsGui then
-		matchStatsGui.Enabled = false
+		GuiSuppression.setEnabled(matchStatsGui, false)
 	end
 
 	self:resetMatchState()
@@ -353,10 +354,10 @@ end
 function MatchHud:setEnabled(enabled: boolean)
 	self._hudEnabled = enabled
 	if self._gui then
-		self._gui.Enabled = enabled
+		GuiSuppression.setEnabled(self._gui, enabled)
 	end
 	if self._statsGui then
-		self._statsGui.Enabled = enabled
+		GuiSuppression.setEnabled(self._statsGui, enabled)
 	end
 	if not enabled then
 		self:_clearTimerEffects()

@@ -3,6 +3,9 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local GuiSuppression = require(Shared.utils.GuiSuppression)
+
 local MatchWeapons = {}
 
 local _cachedModule: any = nil
@@ -81,7 +84,7 @@ function MatchWeapons.clearGui(playerGui: PlayerGui)
 		end
 
 		if isWeaponsGui then
-			node.Enabled = false
+			GuiSuppression.setEnabled(node, false)
 		end
 	end
 end

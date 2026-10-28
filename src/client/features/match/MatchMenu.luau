@@ -1,7 +1,11 @@
 --!strict
 -- Menú principal y label de fase del botón Play. Instancia por feature (no singleton).
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local GuiSuppression = require(Shared.utils.GuiSuppression)
 
 local MatchMenu = {}
 MatchMenu.__index = MatchMenu
@@ -116,22 +120,22 @@ function MatchMenu:enforceHidden()
 	if not currentGui then return end
 
 	currentGui.ResetOnSpawn = false
-	if self:shouldKeepHidden() and currentGui.Enabled then
-		currentGui.Enabled = false
+	if self:shouldKeepHidden() and GuiSuppression.getEnabled(currentGui) then
+		GuiSuppression.setEnabled(currentGui, false)
 	end
 end
 
 function MatchMenu:forceShow()
 	local currentGui = self:getCurrentGui() or self._menuGui
 	currentGui.ResetOnSpawn = false
-	currentGui.Enabled = true
+	GuiSuppression.setEnabled(currentGui, true)
 	self._menuController:show()
 
 	task.delay(0.2, function()
 		if self:shouldKeepHidden() then return end
 		local lateMenu = self:getCurrentGui()
 		if lateMenu then
-			lateMenu.Enabled = true
+			GuiSuppression.setEnabled(lateMenu, true)
 		end
 	end)
 end
